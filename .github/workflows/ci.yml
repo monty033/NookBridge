@@ -43,7 +43,7 @@ permissions:
 jobs:
   format-and-lint:
     name: Prettier + ESLint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
 
   typecheck:
     name: TypeScript typecheck
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
 
   unit-and-native:
     name: Vitest (unit + native-runtime)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     # `services` is intentionally empty. Stage 0 tests must not depend on
     # any external service. Stage 1 may add a mocked sync-server container
