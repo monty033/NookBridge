@@ -6,15 +6,23 @@ import {
   PINNED_NOTESNOOK_MONOREPO_SHA,
   PINNED_NIXPKGS_REV,
   STAGE_0_VERSION,
+  STAGE_1_VERSION,
 } from "../src/index.js";
 
-describe("NookBridge Stage 0 baseline", () => {
-  it("exports the Stage 0 stage identifier", () => {
-    expect(NOOKBRIDGE_STAGE).toBe("stage-0-baseline");
+describe("NookBridge Stage 0/1 additive baseline surface", () => {
+  it("exports the Stage 1 stage identifier (Stage 0 was superseded by Stage 1)", () => {
+    // Stage 1 layered on top of the frozen Stage 0 baseline.  The
+    // current `NOOKBRIDGE_STAGE` reflects the highest-numbered stage
+    // this build ships; Stage 1 supersedes Stage 0 here.
+    expect(NOOKBRIDGE_STAGE).toBe("stage-1-persistent-storage");
   });
 
-  it("pins the documented Stage 0 version", () => {
+  it("pins the documented Stage 0 version (kept for downward compatibility)", () => {
     expect(STAGE_0_VERSION).toBe("0.0.0-stage.0");
+  });
+
+  it("pins the Stage 1 version added additively alongside Stage 0", () => {
+    expect(STAGE_1_VERSION).toBe("0.1.0-stage.1");
   });
 
   it("pins the Notesnook monorepo SHA the Stage -1 spike validated against", () => {
@@ -36,7 +44,11 @@ describe("NookBridge Stage 0 baseline", () => {
   it("exposes a frozen baseline object that aggregates the pins", () => {
     expect(Object.isFrozen(baseline)).toBe(true);
     expect(baseline.stage).toBe(NOOKBRIDGE_STAGE);
-    expect(baseline.version).toBe(STAGE_0_VERSION);
+    // Stage 1 split the single `baseline.version` field into per-stage
+    // keys so downstream tooling can pin a specific stage without
+    // ambiguity.  Both keys are part of the additive surface.
+    expect(baseline.stage0Version).toBe(STAGE_0_VERSION);
+    expect(baseline.stage1Version).toBe(STAGE_1_VERSION);
     expect(baseline.notesnookMonorepoSha).toBe(PINNED_NOTESNOOK_MONOREPO_SHA);
     expect(baseline.notesnookCoreVersion).toBe(PINNED_NOTESNOOK_CORE_VERSION);
     expect(baseline.nixpkgsRev).toBe(PINNED_NIXPKGS_REV);
