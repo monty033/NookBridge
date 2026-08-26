@@ -21,6 +21,7 @@
  */
 
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -375,6 +376,55 @@ describe("Stage 1 Gate 1 — config loading and state directory", () => {
         dbPath: "/etc/passwd",
       }),
     ).toThrow(/state directory/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate 1.5 — Database file permissions (regression for S1 security checkpoint)
+//
+// The encrypted SQLite file MUST be locked down to mode 0600 the moment
+// better-sqlite3 finishes creating it, AND must be re-tightened when an
+// existing database is opened (defence in depth against an operator who
+// manually loosened permissions on a legacy file).  Without this guard
+// better-sqlite3 honours the process umask and leaves new DBs at 0644,
+// exposing the encrypted-at-rest header to any local account.
+
+describe("Stage 1 Gate 1 — encrypted database file permissions (mode 0600)", () => {
+  it("creates a brand-new encrypted database with mode 0600", () => {
+    const dir = join(workspaceRoot, "dbmode-new");
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "fresh.db");
+    const sq = new SqliteStorage({ dbPath, key: "stage-1-test-key" });
+    try {
+      const stats = lstatSync(dbPath);
+      expect(stats.isFile()).toBe(true);
+      expect((stats.mode & 0o777).toString(8)).toBe("600");
+    } finally {
+      sq.close();
+    }
+  });
+
+  it("tightens an existing database whose permissions were loosened by an operator", () => {
+    const dir = join(workspaceRoot, "dbmode-loose");
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "loose.db");
+    // First open creates the file at 0600 via the fix above, then we
+    // artificially loosen it (simulating `chmod 0644` by an operator or
+    // a buggy installer) and reopen to confirm the constructor tightens
+    // back to 0600 — without otherwise weakening behaviour.
+    {
+      const sq = new SqliteStorage({ dbPath, key: "stage-1-test-key" });
+      sq.close();
+    }
+    chmodSync(dbPath, 0o644);
+    expect((lstatSync(dbPath).mode & 0o777).toString(8)).toBe("644");
+
+    const sq = new SqliteStorage({ dbPath, key: "stage-1-test-key" });
+    try {
+      expect((lstatSync(dbPath).mode & 0o777).toString(8)).toBe("600");
+    } finally {
+      sq.close();
+    }
   });
 });
 

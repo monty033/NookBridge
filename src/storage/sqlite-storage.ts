@@ -16,6 +16,7 @@
  * upstream's job once `@notesnook/core` is a runtime dependency.
  */
 
+import { chmodSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import Database, { type Database as DatabaseType } from "better-sqlite3-multiple-ciphers";
 
@@ -60,7 +61,37 @@ export class SqliteStorage {
     // The default export IS the Database constructor
     // (`module.exports = require('./database')`); `DatabaseType` is the
     // matching class type so callers get strong typing on `db`.
+    // Check before opening: Database creates a missing path as a side effect.
+    const existedBefore = existsSync(opts.dbPath);
     this.db = new Database(opts.dbPath);
+
+    // The encrypted SQLite file MUST NOT be world-readable.  better-sqlite3
+    // creates new files honouring the process umask, which leaves them at
+    // mode 0644 on a typical user umask of 022 — that would expose the
+    // encrypted-at-rest header to any local account.  Tighten only the main
+    // DB path to 0600 right after open.  We also re-tighten it on every open
+    // so an operator who manually loosened permissions on a legacy database
+    // cannot keep it that way indefinitely.  SQLite sidecars are deferred
+    // hardening and are intentionally not handled in Stage 1.  chmod can
+    // fail on some FS drivers; we swallow the error because the DB is still
+    // usable — the on-disk bytes are still encrypted, the file just may
+    // not be locked down — but if the file didn't exist we propagate so a
+    // configuration error doesn't pass silently.
+    try {
+      chmodSync(opts.dbPath, 0o600);
+    } catch (err) {
+      if (!existedBefore) {
+        // The DB was just created by better-sqlite3 and we failed to lock
+        // it down; that is a configuration/FS error worth surfacing so
+        // the caller doesn't ship an 0644 file to production by mistake.
+        try {
+          this.db.close();
+        } catch {
+          /* best-effort */
+        }
+        throw err;
+      }
+    }
 
     // Apply the cipher pragmas in the EXACT order used by Stage -1.
     // sqlcipher is the only cipher supported at this pin; an
