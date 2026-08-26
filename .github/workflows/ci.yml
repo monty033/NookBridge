@@ -1,0 +1,100 @@
+name: ci
+
+# Stage 0 CI. Three explicit jobs:
+#   1. format-and-lint — Prettier check + ESLint.
+#   2. unit-and-native — Vitest (unit tests + native-runtime smoke).
+#   3. typecheck       — `tsc --noEmit` so type errors never ship.
+#
+# Network policy:
+#   - All jobs run with explicit `npm ci` install (which requires network
+#     for the first install but is cached afterwards). After install, the
+#     test stage itself makes NO outbound network calls. The Notesnook
+#     core init test is a placeholder contract (Stage 1 swaps it for a
+#     real `Database.setup(...).init()` with upstream's platform adapter
+#     mocks, which is also network-free).
+#
+# Concurrency policy:
+#   - `concurrency.cancel-in-progress: true` so a force-push cancels the
+#     older in-flight run on the same ref.
+#
+# Triggers:
+#   - Pull requests targeting main / stage-0-baseline.
+#   - Pushes to main / stage-0-baseline.
+#
+# What this CI does NOT do:
+#   - It does not run the Nix flake check (that requires a NixOS host
+#     runner and is out of scope for Stage 0). The flake is validated by
+#     Stage -1's NixOS-native harness; the pinned `flake.lock` plus
+#     `docs/pins.md` make the contract human-auditable.
+
+on:
+  push:
+    branches: [main, stage-0-baseline]
+  pull_request:
+    branches: [main, stage-0-baseline]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  format-and-lint:
+    name: Prettier + ESLint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.0"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run format:check
+      - run: npm run lint
+
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.0"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+
+  unit-and-native:
+    name: Vitest (unit + native-runtime)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # `services` is intentionally empty. Stage 0 tests must not depend on
+    # any external service. Stage 1 may add a mocked sync-server container
+    # only if the test continues to be network-free.
+    services: {}
+    env:
+      # Force any rogue DNS lookups to fail loudly. If a test tries to
+      # open a socket, the resolver will return REFUSED / NOTFOUND.
+      NOOKBRIDGE_CI_NETWORK_OFF: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.0"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      # If vitest emits a junit report, upload it. We don't enable it by
+      # default to keep noise down, but the hook is here for Stage 1.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-logs
+          path: |
+            coverage/
+            *.log
+          if-no-files-found: ignore

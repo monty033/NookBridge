@@ -1,0 +1,28 @@
+# Node / TypeScript build outputs
+node_modules/
+dist/
+coverage/
+.npm/
+.eslintcache
+.cache/
+*.tsbuildinfo
+
+# Nix
+result/
+result-*
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local override scratch and Stage -1 disposable artifacts (NOT committed)
+*.log
+/tmp-harness/
+
+# Build-time native artifacts
+*.node
+
+# Test scratch directories
+/tmp-tests/

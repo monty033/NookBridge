@@ -1,0 +1,17 @@
+dist/
+coverage/
+node_modules/
+flake.lock
+LICENSE
+README.md
+package-lock.json
+.github/
+docs/
+# Generated Nix outputs and CI caches
+result/
+result-*
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
