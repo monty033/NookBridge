@@ -3,23 +3,19 @@
  *
  * Scope of this slice:
  *
- *   - Parse `nookctl auth <login|status|logout|reset-local-client>` plus
+ *   - Parse `nookctl auth <login|live-login|status|logout|reset-local-client>` plus
  *     its flags into a typed result.
  *   - Reject any attempt to supply a password, MFA/TOTP code, or other
  *     credential via argv, ordinary environment variables, or any
  *     other non-secret channel.  The Stage 2 plan requires interactive
  *     secret input through an echo-disabled TTY seam — that input is
  *     collected by `secret-input.ts`, not by this module.
- *   - Provide a runner that, given a parsed command, returns a stable
- *     "deferred" outcome with NO credential handling.  Real account
- *     login (Notesnook core login API, MFA verification, token
- *     persistence) is deliberately deferred to a later reviewed task
- *     that wires in the upstream reconnaissance.
+ *   - Provide a runner whose ordinary commands remain deferred and whose
+ *     explicitly gated `live-login` path delegates to the runtime-only
+ *     prompt/core seams.
  *
- * The runner deliberately fails closed: even `login` (the command that
- * a future slice will implement) returns a `DeferredAuthOutcome` so the
- * CLI surface exists today, can be documented, and can be tested for
- * credential hygiene, but never pretends to authenticate.
+ * The ordinary runner deliberately fails closed: `login` remains deferred,
+ * while `live-login` is the sole explicitly enabled production exception.
  *
  * Stage 1 / Stage 2A behaviour, exports, and CLI shape remain
  * backward-compatible: `doctor` still works exactly as before, and
@@ -45,12 +41,22 @@ import type { AuthSession } from "./types.js";
  * implementation plan) but every entry currently resolves to the same
  * deferred outcome — the upstream login API is not wired in yet.
  */
-export type AuthSubcommand = "login" | "status" | "logout" | "reset-local-client" | "help";
+export type AuthSubcommand =
+  | "login"
+  | "live-login"
+  | "status"
+  | "logout"
+  | "reset-local-client"
+  | "help";
 
 export type ParsedAuthCommand =
   | Readonly<{
       kind: "login";
       subcommand: "login";
+    }>
+  | Readonly<{
+      kind: "live-login";
+      subcommand: "live-login";
     }>
   | Readonly<{
       kind: "status";
@@ -111,6 +117,8 @@ export type ParseAuthCommandResult =
   | Readonly<{ kind: "error"; message: string; exitCode: 2 }>;
 
 const FORBIDDEN_ARG_FLAGS: readonly string[] = [
+  "--email",
+  "--username",
   "--password",
   "--passwd",
   "--mfa",
@@ -118,17 +126,29 @@ const FORBIDDEN_ARG_FLAGS: readonly string[] = [
   "--secret",
   "--stdin-secret",
   "--token",
+  "--access-token",
+  "--refresh-token",
 ];
 
 const FORBIDDEN_ENV_VARS: readonly string[] = [
+  "NOOKBRIDGE_EMAIL",
+  "NOOKBRIDGE_USERNAME",
   "NOOKBRIDGE_PASSWORD",
   "NOOKBRIDGE_PASSWD",
   "NOOKBRIDGE_MFA",
   "NOOKBRIDGE_TOTP",
   "NOOKBRIDGE_SECRET",
+  "NOOKBRIDGE_TOKEN",
+  "NOOKBRIDGE_ACCESS_TOKEN",
+  "NOOKBRIDGE_REFRESH_TOKEN",
+  "NOOKCTL_EMAIL",
+  "NOOKCTL_USERNAME",
   "NOOKCTL_PASSWORD",
   "NOOKCTL_MFA",
+  "NOOKCTL_TOKEN",
 ];
+
+export const LIVE_AUTH_ENABLE_ENV = "NOOKBRIDGE_ENABLE_LIVE_AUTH" as const;
 
 export function parseAuthCommand(
   argv: readonly string[],
@@ -203,6 +223,12 @@ export function parseAuthCommand(
     switch (subcommand) {
       case "login":
         return { kind: "parsed", command: { kind: "login", subcommand: "login" } };
+      case "live-login":
+        if (stringArgv.length !== 1) return invalidParseInput();
+        return {
+          kind: "parsed",
+          command: { kind: "live-login", subcommand: "live-login" },
+        };
       case "status":
         return {
           kind: "parsed",
@@ -256,6 +282,7 @@ export function formatAuthHelp(): string {
     "",
     "Usage:",
     "  nookctl auth login           collect credentials interactively (deferred)",
+    "  nookctl auth live-login      gated live account login via an echo-disabled TTY",
     "  nookctl auth status          show local auth state (deferred)",
     "  nookctl auth logout          clear local auth state (deferred)",
     "  nookctl auth reset-local-client  wipe local auth state (deferred)",
@@ -329,6 +356,19 @@ export type RunAuthCommandOptions = Readonly<{
    * supplier closures and its buffers.
    */
   liveProviderFactory?: LiveProviderFactory;
+  /** Runtime-only production wiring for the explicitly gated live-login command. */
+  liveLogin?: LiveLoginRuntimeOptions;
+}>;
+
+export type LiveLoginRuntime = Readonly<{
+  providerFactory: LiveProviderFactory;
+  cleanup: () => void | Promise<void>;
+}>;
+
+export type LiveLoginRuntimeOptions = Readonly<{
+  stateDir: string;
+  createPrompt: () => SecretPrompt;
+  createRuntime: (options: { stateDir: string }) => Promise<LiveLoginRuntime>;
 }>;
 
 export type RunAuthCommandResult =
@@ -358,7 +398,11 @@ export type RunAuthCommandResult =
        * buffer by the time this branch returns.
        */
       kind: "live-login";
-      outcome: DeferredAuthOutcome;
+      outcome: Readonly<{
+        subcommand: "live-login";
+        status: "authenticated";
+        message: string;
+      }>;
       session: AuthSession;
     }>
   | Readonly<{
@@ -368,17 +412,18 @@ export type RunAuthCommandResult =
   | Readonly<{
       kind: "error";
       message: string;
-      exitCode: 2;
+      exitCode: 2 | 3;
     }>;
 
 type NormalizedRunAuthOptions = Readonly<{
-  argv: unknown;
-  env: unknown;
+  argv: readonly string[];
+  env: Readonly<Record<string, string | undefined>>;
   prompt: unknown;
   maxAttempts: unknown;
   exerciseLoginPipeline: unknown;
   exerciseLiveLogin: unknown;
   liveProviderFactory: unknown;
+  liveLogin: unknown;
 }>;
 
 function normalizeRunAuthOptions(options: unknown): NormalizedRunAuthOptions {
@@ -387,14 +432,56 @@ function normalizeRunAuthOptions(options: unknown): NormalizedRunAuthOptions {
   }
   const candidate = options as Record<string, unknown>;
   return {
-    argv: candidate.argv,
-    env: candidate.env,
+    argv: snapshotAuthArgv(candidate.argv),
+    env: snapshotAuthEnv(candidate.env),
     prompt: candidate.prompt,
     maxAttempts: candidate.maxAttempts,
     exerciseLoginPipeline: candidate.exerciseLoginPipeline,
     exerciseLiveLogin: candidate.exerciseLiveLogin,
     liveProviderFactory: candidate.liveProviderFactory,
+    liveLogin: candidate.liveLogin,
   };
+}
+
+function snapshotAuthArgv(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) throw new Error("invalid auth argv");
+  const argv = Array.from(value as readonly unknown[]);
+  if (!argv.every((argument): argument is string => typeof argument === "string")) {
+    throw new Error("invalid auth argv");
+  }
+  return Object.freeze(argv);
+}
+
+function snapshotAuthEnv(value: unknown): Readonly<Record<string, string | undefined>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid auth environment");
+  }
+  const source = value as Record<string, unknown>;
+  const out = Object.create(null) as Record<string, string | undefined>;
+  for (const name of Object.getOwnPropertyNames(source)) {
+    const entry = source[name];
+    if (entry !== undefined && typeof entry !== "string") {
+      throw new Error("invalid auth environment");
+    }
+    Object.defineProperty(out, name, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: entry,
+    });
+  }
+  // Preserve inherited forbidden-carrier presence without reading inherited
+  // values. Only an own, snapshotted property can enable live-login.
+  for (const name of FORBIDDEN_ENV_VARS) {
+    if (!(name in source) || Object.prototype.hasOwnProperty.call(out, name)) continue;
+    Object.defineProperty(out, name, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: undefined,
+    });
+  }
+  return Object.freeze(out);
 }
 
 function invalidRunAuthInput(): RunAuthCommandResult {
@@ -404,12 +491,9 @@ function invalidRunAuthInput(): RunAuthCommandResult {
 /**
  * Run the `nookctl auth <subcommand>` plumbing.
  *
- * In this slice every command resolves to either a structured
- * "deferred" outcome (no work performed) or, when the caller opts in
- * with `exerciseLoginPipeline: true`, to a fully-collected
- * email + password + optional MFA triplet that is then zeroized.
- * The runner never calls into a provider, never opens
- * PersistentStorage, and never talks to the network.
+ * Ordinary commands resolve to structured deferred outcomes. The explicit
+ * `live-login` command is enabled only by its exact non-secret gate and uses
+ * the supplied prompt/runtime seams; no other command opens local state.
  */
 export async function runAuthCommand(
   options: RunAuthCommandOptions,
@@ -424,14 +508,15 @@ export async function runAuthCommand(
     return invalidRunAuthInput();
   }
 
-  const parsed = parseAuthCommand(
-    normalized.argv as readonly string[],
-    normalized.env as Readonly<Record<string, string | undefined>>,
-  );
+  const parsed = parseAuthCommand(normalized.argv, normalized.env);
   if (parsed.kind === "error") {
     return { kind: "error", exitCode: 2, message: parsed.message };
   }
   const command = parsed.command;
+
+  if (command.kind === "live-login") {
+    return runOperatorLiveLogin(normalized);
+  }
 
   if (command.kind === "help") {
     return { kind: "help", text: formatAuthHelp() };
@@ -492,10 +577,9 @@ export async function runAuthCommand(
         return {
           kind: "live-login",
           outcome: {
-            subcommand: "login",
-            status: "deferred",
-            message:
-              "live notesnook login pipeline exercised; no real account session was committed to persistent storage",
+            subcommand: "live-login",
+            status: "authenticated",
+            message: "live Notesnook login pipeline exercised; credentials were not retained",
           },
           session: live.session,
         };
@@ -556,6 +640,134 @@ export async function runAuthCommand(
   };
 }
 
+function runOperatorLiveLogin(options: NormalizedRunAuthOptions): Promise<RunAuthCommandResult> {
+  return runOperatorLiveLoginAsync(options);
+}
+
+async function runOperatorLiveLoginAsync(
+  options: NormalizedRunAuthOptions,
+): Promise<RunAuthCommandResult> {
+  let enabled = false;
+  try {
+    const env = options.env;
+    enabled =
+      Object.prototype.hasOwnProperty.call(env, LIVE_AUTH_ENABLE_ENV) &&
+      env[LIVE_AUTH_ENABLE_ENV] === "1";
+  } catch {
+    return { kind: "error", exitCode: 2, message: "nookctl auth: invalid command input" };
+  }
+  if (!enabled) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth live-login is disabled; set NOOKBRIDGE_ENABLE_LIVE_AUTH=1",
+    };
+  }
+
+  let runtimeOptions: LiveLoginRuntimeOptions;
+  try {
+    const candidate = options.liveLogin;
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl auth live-login runtime is unavailable",
+      };
+    }
+    const record = candidate as Record<string, unknown>;
+    if (
+      typeof record.stateDir !== "string" ||
+      typeof record.createPrompt !== "function" ||
+      typeof record.createRuntime !== "function"
+    ) {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl auth live-login runtime is unavailable",
+      };
+    }
+    runtimeOptions = {
+      stateDir: record.stateDir,
+      createPrompt: record.createPrompt as () => SecretPrompt,
+      createRuntime: record.createRuntime as LiveLoginRuntimeOptions["createRuntime"],
+    };
+  } catch {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth live-login runtime is unavailable",
+    };
+  }
+
+  let prompt: SecretPrompt;
+  try {
+    prompt = runtimeOptions.createPrompt();
+  } catch {
+    return {
+      kind: "error",
+      exitCode: 3,
+      message: "nookctl auth live-login requires an interactive TTY",
+    };
+  }
+
+  let runtime: LiveLoginRuntime;
+  try {
+    runtime = await runtimeOptions.createRuntime({ stateDir: runtimeOptions.stateDir });
+  } catch {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth live-login could not initialize local state",
+    };
+  }
+
+  let result: RunAuthCommandResult;
+  try {
+    const live = await runLiveAuthCommand({
+      command: "login",
+      prompt,
+      providerFactory: runtime.providerFactory,
+      ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts as number }),
+    });
+    if (live.kind !== "authenticated") {
+      result = {
+        kind: "error",
+        exitCode: live.kind === "error" ? 2 : 3,
+        message: live.kind === "error" ? live.message : "live notesnook login did not authenticate",
+      };
+    } else {
+      result = {
+        kind: "live-login",
+        outcome: {
+          subcommand: "live-login",
+          status: "authenticated",
+          message: "live Notesnook login authenticated; credentials were not retained",
+        },
+        session: live.session,
+      };
+    }
+  } catch {
+    result = {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth live-login failed",
+    };
+  }
+
+  try {
+    await runtime.cleanup();
+  } catch {
+    if (result.kind === "live-login") {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl auth live-login local cleanup failed",
+      };
+    }
+  }
+  return result;
+}
+
 function deferredMessageFor(subcommand: AuthSubcommand): string {
   switch (subcommand) {
     case "status":
@@ -565,6 +777,7 @@ function deferredMessageFor(subcommand: AuthSubcommand): string {
     case "reset-local-client":
       return "reset-local-client is deferred until PersistentStorage-backed session records are wired in";
     case "login":
+    case "live-login":
     case "help":
       // Both are handled above; reaching here is a programmer error.
       throw new Error(`deferredMessageFor called for non-deferred subcommand ${subcommand}`);

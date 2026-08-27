@@ -807,19 +807,22 @@ function readOneLineFromStream(stdin: CapturedStdin): Promise<Buffer | null> {
     );
   }
   return new Promise((resolve, reject) => {
-    const buffer: Buffer[] = [];
+    const staging: Buffer[] = [];
     let settled = false;
+    const zeroStaging = (): void => {
+      for (const chunk of staging) chunk.fill(0);
+      staging.length = 0;
+    };
     const cleanup = (): void => {
       try {
         stdin.off("data", onData);
         stdin.off("end", onEnd);
         stdin.off("error", onError);
       } catch {
-        // Cleanup is best-effort; the result remains categorical.
+        // Listener cleanup is best-effort; staging bytes are still wiped.
+      } finally {
+        zeroStaging();
       }
-    };
-    const rejectRead = (): void => {
-      settleOnce(() => reject(promptBoundaryError("secret input stream read failed")));
     };
     const settleOnce = (action: () => void): void => {
       if (settled) return;
@@ -827,39 +830,43 @@ function readOneLineFromStream(stdin: CapturedStdin): Promise<Buffer | null> {
       cleanup();
       action();
     };
+    const rejectRead = (): void => {
+      settleOnce(() => reject(promptBoundaryError("secret input stream read failed")));
+    };
     const onData = (chunk: Buffer | string): void => {
+      let bytes: Buffer | undefined;
       try {
-        const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+        bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
         const newlineAt = bytes.indexOf(0x0a);
         if (newlineAt === -1) {
-          buffer.push(bytes);
+          staging.push(bytes);
           return;
         }
         const head = bytes.subarray(0, newlineAt);
-        const combined =
-          buffer.length === 0
-            ? head
-            : Buffer.concat(
-                [...buffer, head],
-                buffer.reduce((n, b) => n + b.length, 0) + head.length,
-              );
-        const trimmed = stripTrailingCarriage(combined);
-        settleOnce(() => resolve(trimmed));
+        const combined = Buffer.concat(
+          [...staging, head],
+          staging.reduce((n, b) => n + b.length, 0) + head.length,
+        );
+        // Copy the returned line before wiping both the accumulated chunks
+        // and the current chunk (including any unread tail after the newline).
+        const result = Buffer.from(stripTrailingCarriage(combined));
+        combined.fill(0);
+        bytes.fill(0);
+        settleOnce(() => resolve(result));
       } catch {
+        bytes?.fill(0);
         rejectRead();
       }
     };
     const onEnd = (): void => {
       try {
-        const combined =
-          buffer.length === 0
-            ? Buffer.alloc(0)
-            : Buffer.concat(
-                buffer,
-                buffer.reduce((n, b) => n + b.length, 0),
-              );
-        const trimmed = stripTrailingCarriage(combined);
-        settleOnce(() => resolve(trimmed.length === 0 ? null : trimmed));
+        const combined = Buffer.concat(
+          staging,
+          staging.reduce((n, b) => n + b.length, 0),
+        );
+        const result = Buffer.from(stripTrailingCarriage(combined));
+        combined.fill(0);
+        settleOnce(() => resolve(result.length === 0 ? null : result));
       } catch {
         rejectRead();
       }

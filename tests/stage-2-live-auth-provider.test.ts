@@ -14,7 +14,7 @@
  *   2. Refresh — `_refreshToken(true)` followed by `token.getToken`;
  *      refresh-after-logout rejection; concurrent-refresh rejection.
  *   3. Logout — `user.logout(true)` is forwarded by the narrow
- *      handle; only `kv.token` is deleted; the cleanup hook is
+ *      handle; only `token` is deleted; the cleanup hook is
  *      always invoked; failure independence between steps.
  *   4. Public `AuthSession` never exposes `refresh_token`, password,
  *      or MFA code; no credential cache on the provider instance.
@@ -729,7 +729,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
   // -------------------------------------------------------------------------
 
   describe("logout", () => {
-    it("forwards true to user.logout via the narrow handle, deletes only kv.token, and invokes the cleanup hook", async () => {
+    it("forwards true to user.logout via the narrow handle, deletes only token, and invokes the cleanup hook", async () => {
       const logoutArgCapture: boolean[] = [];
       const kvDeleteArgsCapture: string[] = [];
       const harnessLocal = buildHarness(
@@ -763,11 +763,11 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
 
       // 1. user.logout(true) was forwarded through the narrow handle.
       expect(logoutArgCapture).toEqual([true]);
-      // 2. kv.delete was called ONLY for the literal "kv.token" key
+      // 2. kv.delete was called ONLY for the literal "token" key
       //    — no other key, no other call site.
       expect(kvDeleteArgsCapture).toEqual([NOTESNOOK_LIVE_KV_TOKEN_KEY]);
       expect(kvDeleteArgsCapture[0]).toBe(LIVE_NOTESNOOK_KV_TOKEN_KEY);
-      expect(kvDeleteArgsCapture[0]).toBe("kv.token");
+      expect(kvDeleteArgsCapture[0]).toBe("token");
       // 3. The cleanup hook was invoked.
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
       // 4. The cleanup hook is the ONLY path through which a generic

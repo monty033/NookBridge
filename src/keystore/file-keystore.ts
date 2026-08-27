@@ -51,6 +51,12 @@ export function createDevelopmentFileKeyStore(
 ): SecureKeyStore {
   const { keyPath, generateIfMissing = false } = options;
 
+  // The key directory is part of the secret boundary too. mkdir's mode is
+  // only applied on creation, so tighten existing directories as well and
+  // fail closed if the filesystem cannot enforce the boundary.
+  mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(keyPath), 0o700);
+
   if (!existsSync(keyPath)) {
     if (!generateIfMissing) {
       // No key, no fabrication.  The caller decides what to do.
@@ -64,19 +70,13 @@ export function createDevelopmentFileKeyStore(
     // material is sourced from Node's CSPRNG, NOT from secrets
     // available to the agent.
     const generated = generateRandomKey();
-    mkdirSync(dirname(keyPath), { recursive: true });
     writeFileSync(keyPath, generated, { mode: 0o600 });
     chmodSync(keyPath, 0o600);
   }
 
   // Even if the file exists, tighten permissions defensively in case
   // a previous bug or an operator set them loosely.
-  try {
-    chmodSync(keyPath, 0o600);
-  } catch {
-    // chmod can fail on some FS drivers; the bytes returned will
-    // still be the configured key.
-  }
+  chmodSync(keyPath, 0o600);
 
   // Read the file ONCE at construction time.  Stage 1 has no key
   // rotation; the dev backend does not hot-reload.

@@ -42,6 +42,7 @@
  */
 
 import {
+  isNotesnookAdapterError,
   markRealCoreModule,
   validateDatabaseSetupOptions,
   type NotesnookDatabaseSetupOptions,
@@ -83,15 +84,15 @@ export interface NotesnookLiveUser {
  * Stage 2B-live `NotesnookAuthProvider` already uses so that the
  * auth runner can read what the factory can write.
  */
-export const NOTESNOOK_LIVE_KV_TOKEN_KEY = "kv.token" as const;
+export const NOTESNOOK_LIVE_KV_TOKEN_KEY = "token" as const;
 
 /**
  * The key shape the upstream `KVStorage` accepts on its
  * `read` / `write` / `delete` methods.  Only the literal
- * `"kv.token"` key is allowed through the narrow handle so the
+ * `"token"` key is allowed through the narrow handle so the
  * factory cannot be used as a generic database handle.
  */
-export type NotesnookLiveKvKey = "kv.token";
+export type NotesnookLiveKvKey = "token";
 
 /**
  * The closed narrow surface the factory returns.  Every member is
@@ -158,7 +159,15 @@ export type NotesnookLiveFactoryOptions = Readonly<{
    * so the factory takes the dynamic-import path.
    */
   injectedModule?: NotesnookRealCoreModule;
+  /** Shared closed state owned by the production runtime. */
+  lifecycle?: NotesnookLiveCoreLifecycle;
 }>;
+
+/** Shared lifecycle across the runtime, narrow handle, and providers. */
+export interface NotesnookLiveCoreLifecycle {
+  isClosed(): boolean;
+  close(): void;
+}
 
 /**
  * Public, exported factory shape.  Tests and production code call
@@ -203,24 +212,23 @@ export type NotesnookLiveCoreFactory = (
 export async function createNotesnookLiveCoreFactory(
   options: NotesnookLiveFactoryOptions,
 ): Promise<NotesnookLiveCoreHandle> {
-  // Step 1 — validate options up front.  Doing this BEFORE any
-  // dynamic import means a malformed call costs nothing in terms
-  // of loading the real-core package.
-  validateDatabaseSetupOptions(options.setup);
-
-  if (typeof options.onCleanup !== "function") {
-    throw factoryError("onCleanup hook is required");
-  }
+  // Step 1 — normalize and validate options inside one protected boundary.
+  // In particular, do not read `options.setup` before a hostile getter has
+  // been converted into a categorical error.
+  const normalized = normalizeFactoryOptions(options);
+  const ensureOpen = () => ensureLifecycleOpen(normalized.lifecycle);
+  ensureOpen();
 
   // Step 2 — resolve the real-core module.  Production path is a
   // lazy dynamic import; offline tests pass an injected seam.
-  const coreModule = options.injectedModule ?? (await loadRealCoreModule());
+  const coreModule = normalized.injectedModule ?? (await loadRealCoreModule());
 
   // Step 3 — construct, set up, initialise.  Every throwable step
   // is wrapped so a hostile value never leaks its cause / context.
   const db = safeConstructDatabase(coreModule);
-  safeSetupDatabase(db, options.setup);
+  safeSetupDatabase(db, normalized.setup);
   await safeInitDatabase(db);
+  ensureOpen();
 
   // Step 4 — validate the live handle exposes the slots downstream
   // needs.  Missing slots fail with a categorical error.  Per the
@@ -240,33 +248,103 @@ export async function createNotesnookLiveCoreFactory(
   );
   const kvAccessor = readDbKvAccessor(db);
 
-  const kv = normalizeKvAccessor(kvAccessor);
+  const kv = normalizeKvAccessor(kvAccessor, ensureOpen);
 
   // Step 5 — wrap each user / token / kv method.  Wrapping happens
   // once at construction so a hostile getter that flips after the
   // factory returns cannot poison the handle.
-  const user = wrapUserManager(userManager);
-  const token = wrapTokenManager(tokenManager);
+  const user = wrapUserManager(userManager, ensureOpen);
+  const token = wrapTokenManager(tokenManager, ensureOpen);
 
   // Step 6 — assemble the frozen handle.
-  let initialized = true;
   let cleanupInvoked = false;
+  const cleanup = async () => {
+    if (cleanupInvoked) return;
+    cleanupInvoked = true;
+    try {
+      normalized.lifecycle.close();
+    } catch {
+      throw factoryError("Notesnook live runtime lifecycle close failed");
+    }
+    await normalizeAsyncVoid(normalized.onCleanup());
+  };
 
   const handle: NotesnookLiveCoreHandle = Object.freeze({
     user,
     token,
     kv,
-    initialized,
-    get cleanup() {
-      return async () => {
-        if (cleanupInvoked) return;
-        cleanupInvoked = true;
-        await normalizeAsyncVoid(options.onCleanup());
-      };
-    },
+    initialized: true,
+    cleanup,
   });
 
   return handle;
+}
+
+type NormalizedFactoryOptions = Readonly<{
+  setup: NotesnookDatabaseSetupOptions;
+  onCleanup: () => void | Promise<void>;
+  injectedModule?: NotesnookRealCoreModule;
+  lifecycle: NotesnookLiveCoreLifecycle;
+}>;
+
+function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
+  try {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw factoryError("invalid Notesnook live factory options");
+    }
+    const candidate = options as Record<string, unknown>;
+    const setup = candidate.setup;
+    const onCleanup = candidate.onCleanup;
+    const injectedModule = candidate.injectedModule;
+    const lifecycle = candidate.lifecycle;
+    const validatedSetup = validateDatabaseSetupOptions(setup);
+    if (typeof onCleanup !== "function") {
+      throw factoryError("onCleanup hook is required");
+    }
+    if (lifecycle !== undefined) {
+      if (typeof lifecycle !== "object" || lifecycle === null || Array.isArray(lifecycle)) {
+        throw factoryError("invalid Notesnook live runtime lifecycle");
+      }
+      const lifecycleRecord = lifecycle as Record<string, unknown>;
+      if (
+        typeof lifecycleRecord.isClosed !== "function" ||
+        typeof lifecycleRecord.close !== "function"
+      ) {
+        throw factoryError("invalid Notesnook live runtime lifecycle");
+      }
+    }
+    return {
+      setup: validatedSetup,
+      onCleanup: onCleanup as () => void | Promise<void>,
+      ...(injectedModule === undefined
+        ? {}
+        : { injectedModule: injectedModule as NotesnookRealCoreModule }),
+      lifecycle:
+        lifecycle === undefined ? createLifecycle() : (lifecycle as NotesnookLiveCoreLifecycle),
+    };
+  } catch (error) {
+    if (isFactoryError(error) || isNotesnookAdapterError(error)) throw error;
+    throw factoryError("invalid Notesnook live factory options");
+  }
+}
+
+function ensureLifecycleOpen(lifecycle: NotesnookLiveCoreLifecycle): void {
+  try {
+    if (lifecycle.isClosed()) throw factoryError("live-login runtime is closed");
+  } catch (error) {
+    if (isFactoryError(error)) throw error;
+    throw factoryError("live-login runtime lifecycle is unavailable");
+  }
+}
+
+function createLifecycle(): NotesnookLiveCoreLifecycle {
+  let closed = false;
+  return Object.freeze({
+    isClosed: () => closed,
+    close: () => {
+      closed = true;
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -282,29 +360,27 @@ const REAL_CORE_PACKAGE_NAME = "@notesnook/core";
  * this module never load it.
  */
 async function loadRealCoreModule(): Promise<NotesnookRealCoreModule> {
-  // `import(...)` returns `unknown`.  We reject any value that is
-  // not shaped like `NotesnookRealCoreModule` (structural surface
-  // check); the runtime type of the import is whatever upstream
-  // shipped at the pinned version.
-  const imported: unknown = await import(REAL_CORE_PACKAGE_NAME).catch(() => {
+  try {
+    // `import(...)` returns `unknown`.  We reject any value that is
+    // not shaped like `NotesnookRealCoreModule` (structural surface
+    // check); the runtime type of the import is whatever upstream
+    // shipped at the pinned version.
+    const imported: unknown = await import(REAL_CORE_PACKAGE_NAME);
+
+    // Per the pinned `@notesnook/core@8.1.3` d.ts the shape is
+    // `declare class Database { ... setup(options): void; init(): Promise<void>; ... }`.
+    if (
+      !imported ||
+      typeof imported !== "object" ||
+      typeof (imported as { Database?: unknown }).Database !== "function"
+    ) {
+      throw factoryError("Notesnook real-core module is missing a constructable Database");
+    }
+    return markRealCoreModule(imported as NotesnookRealCoreModule);
+  } catch (error) {
+    if (isFactoryError(error)) throw error;
     throw factoryError("failed to load Notesnook real-core module");
-  });
-
-  // Per the pinned `@notesnook/core@8.1.3` d.ts the shape is
-  // `declare class Database { ... setup(options): void; init(): Promise<void>; ... }`.
-  // So `Database` is a CONSTRUCTABLE class — accept any callable
-  // `Database` value.  Stage 2A's `{ Database: { setup } }` static
-  // shape is rejected here.
-  if (
-    !imported ||
-    typeof imported !== "object" ||
-    typeof (imported as { Database?: unknown }).Database !== "function"
-  ) {
-    throw factoryError("Notesnook real-core module is missing a constructable Database");
   }
-
-  const module_ = imported as NotesnookRealCoreModule;
-  return markRealCoreModule(module_);
 }
 
 /**
@@ -353,7 +429,12 @@ function safeSetupDatabase(
   database: NotesnookLiveDatabase,
   setupOptions: NotesnookDatabaseSetupOptions,
 ): void {
-  const setupFn = (database as { setup?: unknown }).setup;
+  let setupFn: unknown;
+  try {
+    setupFn = (database as { setup?: unknown }).setup;
+  } catch {
+    throw factoryError("Notesnook Database.setup is not accessible");
+  }
   if (typeof setupFn !== "function") {
     throw factoryError("Notesnook Database.setup is not a function");
   }
@@ -372,7 +453,12 @@ function safeSetupDatabase(
  * categorical error whose message carries no upstream detail.
  */
 async function safeInitDatabase(database: NotesnookLiveDatabase): Promise<void> {
-  const initFn = (database as { init?: unknown }).init;
+  let initFn: unknown;
+  try {
+    initFn = (database as { init?: unknown }).init;
+  } catch {
+    throw factoryError("Notesnook Database.init is not accessible");
+  }
   if (typeof initFn !== "function") {
     throw factoryError("Notesnook Database.init is not a function");
   }
@@ -436,7 +522,7 @@ function readDbKvAccessor(database: NotesnookLiveDatabase): unknown {
 /**
  * Normalize the live `Database.kv` accessor into the narrow
  * `read` / `write` / `delete` triple the narrow handle exposes.
- * The literal key `"kv.token"` is the only one accepted.
+ * The literal key `"token"` is the only one accepted.
  *
  * Every property read against the live storage snapshot — and the
  * call to the storage method itself — runs inside the SAME protected
@@ -444,7 +530,10 @@ function readDbKvAccessor(database: NotesnookLiveDatabase): unknown {
  * (or `.write` / `.delete`) maps to a categorical error rather than
  * leaking the raw getter throw.
  */
-function normalizeKvAccessor(kvAccessor: unknown): NotesnookLiveCoreHandle["kv"] {
+function normalizeKvAccessor(
+  kvAccessor: unknown,
+  ensureOpen: () => void,
+): NotesnookLiveCoreHandle["kv"] {
   // Invoke the live accessor; any hostile getter or non-storage
   // return maps to a categorical error without leaking the raw
   // detail.  `enforceStorageShape` (declared below) folds the
@@ -507,11 +596,12 @@ function normalizeKvAccessor(kvAccessor: unknown): NotesnookLiveCoreHandle["kv"]
   };
 
   const read = async (key: NotesnookLiveKvKey) => {
+    ensureOpen();
     enforceKvKey(key);
     const storage = callAccessor();
     const fn = readStorage(storage) as (k: NotesnookLiveKvKey) => Promise<unknown>;
     try {
-      return await fn(key);
+      return await fn.call(storage, key);
     } catch (error) {
       if (isFactoryError(error)) throw error;
       throw factoryError("Notesnook kv read failed");
@@ -519,11 +609,12 @@ function normalizeKvAccessor(kvAccessor: unknown): NotesnookLiveCoreHandle["kv"]
   };
 
   const write = async (key: NotesnookLiveKvKey, value: unknown) => {
+    ensureOpen();
     enforceKvKey(key);
     const storage = callAccessor();
     const fn = writeStorage(storage) as (k: NotesnookLiveKvKey, v: unknown) => Promise<void>;
     try {
-      await fn(key, value);
+      await fn.call(storage, key, value);
     } catch (error) {
       if (isFactoryError(error)) throw error;
       throw factoryError("Notesnook kv write failed");
@@ -531,11 +622,12 @@ function normalizeKvAccessor(kvAccessor: unknown): NotesnookLiveCoreHandle["kv"]
   };
 
   const del = async (key: NotesnookLiveKvKey) => {
+    ensureOpen();
     enforceKvKey(key);
     const storage = callAccessor();
     const fn = deleteStorage(storage) as (k: NotesnookLiveKvKey) => Promise<void>;
     try {
-      await fn(key);
+      await fn.call(storage, key);
     } catch (error) {
       if (isFactoryError(error)) throw error;
       throw factoryError("Notesnook kv delete failed");
@@ -576,7 +668,10 @@ function enforceKvKey(key: unknown): asserts key is NotesnookLiveKvKey {
  * time so a later flip on the upstream object cannot poison the
  * handle.
  */
-function wrapUserManager(userManager: unknown): NotesnookLiveCoreHandle["user"] {
+function wrapUserManager(
+  userManager: unknown,
+  ensureOpen: () => void,
+): NotesnookLiveCoreHandle["user"] {
   if (!userManager || typeof userManager !== "object") {
     throw factoryError("Notesnook user manager is not an object");
   }
@@ -590,11 +685,23 @@ function wrapUserManager(userManager: unknown): NotesnookLiveCoreHandle["user"] 
   const slotLogout = readUserFn(userManager, "logout");
 
   return Object.freeze({
-    authenticateEmail: wrapAsyncSingleArg(slotAuthEmail, "user.authenticateEmail failed"),
-    authenticateMultiFactorCode: wrapAsyncMfa(slotMfa, "user.authenticateMultiFactorCode failed"),
-    authenticatePassword: wrapAsyncPassword(slotPassword, "user.authenticatePassword failed"),
-    getUser: wrapGetUser(slotGetUser),
-    logout: wrapAsyncLogout(slotLogout, "user.logout failed"),
+    authenticateEmail: wrapAsyncSingleArg(
+      slotAuthEmail,
+      "user.authenticateEmail failed",
+      ensureOpen,
+    ),
+    authenticateMultiFactorCode: wrapAsyncMfa(
+      slotMfa,
+      "user.authenticateMultiFactorCode failed",
+      ensureOpen,
+    ),
+    authenticatePassword: wrapAsyncPassword(
+      slotPassword,
+      "user.authenticatePassword failed",
+      ensureOpen,
+    ),
+    getUser: wrapGetUser(slotGetUser, ensureOpen),
+    logout: wrapAsyncLogout(slotLogout, "user.logout failed", ensureOpen),
   });
 }
 
@@ -606,7 +713,12 @@ function wrapUserManager(userManager: unknown): NotesnookLiveCoreHandle["user"] 
  * hostile proxy swap on the live handle cannot unbind the call.
  */
 function readUserFn(userManager: unknown, slot: string): (...args: unknown[]) => unknown {
-  const fn = (userManager as Record<string, unknown>)[slot];
+  let fn: unknown;
+  try {
+    fn = (userManager as Record<string, unknown>)[slot];
+  } catch {
+    throw factoryError(`Notesnook user manager is missing ${slot}`);
+  }
   if (typeof fn !== "function") {
     throw factoryError(`Notesnook user manager is missing ${slot}`);
   }
@@ -622,8 +734,10 @@ function readUserFn(userManager: unknown, slot: string): (...args: unknown[]) =>
 function wrapAsyncSingleArg(
   fn: (...args: unknown[]) => unknown,
   message: string,
+  ensureOpen: () => void,
 ): (arg: string) => Promise<unknown> {
   return async (arg: string) => {
+    ensureOpen();
     if (typeof arg !== "string") {
       throw factoryError("Notesnook authenticateEmail requires a string email");
     }
@@ -639,8 +753,10 @@ function wrapAsyncSingleArg(
 function wrapAsyncMfa(
   fn: (...args: unknown[]) => unknown,
   message: string,
+  ensureOpen: () => void,
 ): (code: string, type: "app") => Promise<unknown> {
   return async (code: string, type: "app") => {
+    ensureOpen();
     if (typeof code !== "string") {
       throw factoryError("Notesnook authenticateMultiFactorCode requires a string code");
     }
@@ -659,8 +775,10 @@ function wrapAsyncMfa(
 function wrapAsyncPassword(
   fn: (...args: unknown[]) => unknown,
   message: string,
+  ensureOpen: () => void,
 ): (email: string, password: string) => Promise<unknown> {
   return async (email: string, password: string) => {
+    ensureOpen();
     if (typeof email !== "string") {
       throw factoryError("Notesnook authenticatePassword requires a string email");
     }
@@ -678,8 +796,10 @@ function wrapAsyncPassword(
 
 function wrapGetUser(
   fn: (...args: unknown[]) => unknown,
+  ensureOpen: () => void,
 ): () => Promise<NotesnookLiveUser | undefined> {
   return async () => {
+    ensureOpen();
     try {
       const raw: unknown = fn();
       const awaited: unknown = await (raw as unknown);
@@ -702,8 +822,10 @@ function wrapGetUser(
 function wrapAsyncLogout(
   fn: (...args: unknown[]) => unknown,
   message: string,
+  ensureOpen: () => void,
 ): (clearLocal: boolean) => Promise<void> {
   return async (clearLocal: boolean) => {
+    ensureOpen();
     if (typeof clearLocal !== "boolean") {
       throw factoryError("Notesnook logout requires a boolean clearLocal");
     }
@@ -751,7 +873,10 @@ function normalizeUser(raw: unknown): NotesnookLiveUser | undefined {
  * into the closed {@link NotesnookLiveTokenEnvelope} shape (or
  * undefined).
  */
-function wrapTokenManager(tokenManager: unknown): NotesnookLiveCoreHandle["token"] {
+function wrapTokenManager(
+  tokenManager: unknown,
+  ensureOpen: () => void,
+): NotesnookLiveCoreHandle["token"] {
   if (!tokenManager || typeof tokenManager !== "object") {
     throw factoryError("Notesnook token manager is not an object");
   }
@@ -763,6 +888,7 @@ function wrapTokenManager(tokenManager: unknown): NotesnookLiveCoreHandle["token
 
   return Object.freeze({
     getToken: async () => {
+      ensureOpen();
       try {
         const raw: unknown = await slots.getToken();
         return normalizeTokenEnvelope(raw);
@@ -777,6 +903,7 @@ function wrapTokenManager(tokenManager: unknown): NotesnookLiveCoreHandle["token
       }
     },
     _refreshToken: async (forceRenew: boolean) => {
+      ensureOpen();
       if (typeof forceRenew !== "boolean") {
         throw factoryError("Notesnook _refreshToken requires a boolean forceRenew");
       }
@@ -791,7 +918,12 @@ function wrapTokenManager(tokenManager: unknown): NotesnookLiveCoreHandle["token
 }
 
 function readTokenSlot(tokenManager: unknown, slot: string): (...args: unknown[]) => unknown {
-  const fn = (tokenManager as Record<string, unknown>)[slot];
+  let fn: unknown;
+  try {
+    fn = (tokenManager as Record<string, unknown>)[slot];
+  } catch {
+    throw factoryError(`Notesnook token manager is missing ${slot}`);
+  }
   if (typeof fn !== "function") {
     throw factoryError(`Notesnook token manager is missing ${slot}`);
   }
@@ -864,14 +996,14 @@ function normalizeTokenEnvelope(raw: unknown): NotesnookLiveTokenEnvelope | unde
  * we accept `void | PromiseLike<void>`.
  */
 async function normalizeAsyncVoid(value: unknown): Promise<void> {
-  if (value === undefined || value === null) return;
-  if (typeof value === "object" && typeof (value as { then?: unknown }).then === "function") {
-    try {
+  try {
+    if (value === undefined || value === null) return;
+    if (typeof value === "object" && typeof (value as { then?: unknown }).then === "function") {
       await (value as PromiseLike<void>);
       return;
-    } catch {
-      throw factoryError("Notesnook cleanup hook rejected");
     }
+  } catch {
+    throw factoryError("Notesnook cleanup hook rejected");
   }
   throw factoryError("Notesnook cleanup hook returned a non-thenable value");
 }
@@ -918,9 +1050,13 @@ function factoryError(message: string): Error {
  * the wrapped boundary's categorical message.
  */
 function isFactoryError(value: unknown): value is Error {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    (value as { [FACTORY_ERROR_MARKER]?: unknown })[FACTORY_ERROR_MARKER] === true
-  );
+  try {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      (value as { [FACTORY_ERROR_MARKER]?: unknown })[FACTORY_ERROR_MARKER] === true
+    );
+  } catch {
+    return false;
+  }
 }

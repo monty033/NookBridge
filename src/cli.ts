@@ -6,18 +6,17 @@
  * note access are Stage 2+.
  *
  * Stage 2B layers the `auth <subcommand>` plumbing on top of Stage 1.
- * The auth command's subcommands (login, status, logout,
- * reset-local-client) currently all resolve to a structured
- * "deferred" outcome — see `docs/stage-2b.md` for the deferred
- * surface and the credential boundary.
+ * Ordinary `auth login` remains deferred.  The separate operator-only
+ * `auth live-login` path is explicitly gated and uses an echo-disabled TTY.
  *
  * Usage:
  *
  *   nookctl doctor [--state-dir <path>] [--endpoint <url>]
- *   nookctl auth login|status|logout|reset-local-client|help
+ *   nookctl auth login|live-login|status|logout|reset-local-client|help
  *
  * Exit codes:
- *   0  doctor probe all `pass` (warnings allowed); auth deferred outcome
+ *   0  doctor probe all `pass` (warnings allowed); auth deferred or
+ *      explicitly gated live-login success
  *   1  doctor probe had any `fail`
  *   2  CLI invocation error (unknown subcommand, bad args)
  *   3  auth credential-collection failure (EOF, malformed, etc.)
@@ -32,6 +31,7 @@ import { ensureStateDir } from "./config/state-dir.js";
 import { createDevelopmentFileKeyStore } from "./keystore/file-keystore.js";
 import { loadConfig } from "./config/config.js";
 import { formatAuthHelp, parseAuthCommand, runAuthCommand } from "./auth/admin-command.js";
+import { createStdioPrompt } from "./auth/secret-input.js";
 
 type Args = {
   stateDir?: string;
@@ -143,26 +143,19 @@ export async function run(argv: string[]): Promise<number> {
 /**
  * Dispatch the `nookctl auth <subcommand>` plumbing.
  *
- * The runner is intentionally conservative: every subcommand resolves
- * to a "deferred" outcome that the operator can see but no real auth
- * state is mutated, no secret is logged, and no PersistentStorage
- * write happens.  See {@link runAuthCommand}.
+ * Ordinary `auth login` is intentionally conservative and resolves to a
+ * "deferred" outcome.  `auth live-login` is the sole production exception:
+ * it is enabled only by the explicit non-secret environment gate and the
+ * exact subcommand, then constructs the local runtime after TTY validation.
  *
- * The prompt seam is constructed lazily: only `auth login` with
- * `exerciseLoginPipeline: true` (a test-only opt-in) ever reaches
- * for it, and we never construct the production stdio prompt from
- * this function.  That keeps `auth help`, `auth status`, `auth
- * logout`, and `auth reset-local-client` usable in non-TTY contexts
- * (CI, scripts, containers) and prevents accidental stdin probing
- * on commands that don't need credentials.
+ * The prompt and runtime seams are constructed lazily.  This keeps `auth
+ * help`, `auth status`, `auth logout`, and ordinary `auth login` usable in
+ * non-TTY contexts and ensures forbidden credential carriers are rejected
+ * before prompt, state, or core initialization.
  */
 async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Promise<number> {
   const argv = args.authArgs ?? [];
   void logger; // logger retained for future slices that wire persistent state.
-  // Note: we deliberately do NOT pass a `prompt` here.  The deferred
-  // branches (status, logout, reset-local-client, the default login
-  // branch, and parse-error paths) must not touch stdin or stdout
-  // beyond the structured outcome message printed below.
   let environment: Record<string, string | undefined>;
   try {
     environment = readSafeEnvSnapshot();
@@ -170,9 +163,20 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
     process.stderr.write("nookctl: invalid command input\n");
     return 2;
   }
+  const stateDir = resolve(
+    args.stateDir ?? environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"),
+  );
   const result = await runAuthCommand({
     argv,
     env: environment,
+    liveLogin: {
+      stateDir,
+      createPrompt: () => createStdioPrompt(),
+      createRuntime: async ({ stateDir: runtimeStateDir }) => {
+        const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
+        return createProductionLiveLoginRuntime({ stateDir: runtimeStateDir, logger });
+      },
+    },
   });
 
   switch (result.kind) {
@@ -205,7 +209,6 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
         [
           `nookctl auth ${result.outcome.subcommand}: ${result.outcome.status}`,
           `  ${result.outcome.message}`,
-          `  userId=${result.session.userId}`,
           "",
         ].join("\n"),
       );
@@ -226,13 +229,21 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
  * variables remain available to future non-secret configuration paths.
  */
 const FORBIDDEN_ENV_CARRIERS = new Set([
+  "NOOKBRIDGE_EMAIL",
+  "NOOKBRIDGE_USERNAME",
   "NOOKBRIDGE_PASSWORD",
   "NOOKBRIDGE_PASSWD",
   "NOOKBRIDGE_MFA",
   "NOOKBRIDGE_TOTP",
   "NOOKBRIDGE_SECRET",
+  "NOOKBRIDGE_TOKEN",
+  "NOOKBRIDGE_ACCESS_TOKEN",
+  "NOOKBRIDGE_REFRESH_TOKEN",
+  "NOOKCTL_EMAIL",
+  "NOOKCTL_USERNAME",
   "NOOKCTL_PASSWORD",
   "NOOKCTL_MFA",
+  "NOOKCTL_TOKEN",
 ]);
 
 function readSafeEnvSnapshot(): Record<string, string | undefined> {
@@ -263,7 +274,7 @@ function printHelp(): void {
       "",
       "Usage:",
       "  nookctl doctor [--state-dir <path>] [--endpoint <url>]",
-      "  nookctl auth <login|status|logout|reset-local-client|help>",
+      "  nookctl auth <login|live-login|status|logout|reset-local-client|help>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -271,7 +282,7 @@ function printHelp(): void {
       "",
       "Subcommands:",
       "  doctor                run the Stage 1 diagnostics",
-      "  auth                  Stage 2B admin auth command (currently deferred)",
+      "  auth                  Stage 2B admin auth; live-login is explicitly gated",
       "  help                  show this help",
       "",
     ].join("\n"),

@@ -43,11 +43,8 @@ import {
   type SecretPrompt,
 } from "./secret-input.js";
 import type { AuthSession } from "./types.js";
-import type {
-  LiveMfaSupplier,
-  LiveNotesnookAuthProvider,
-  LivePasswordSupplier,
-} from "./live-notesnook-auth-provider.js";
+import type { LiveMfaSupplier, LivePasswordSupplier } from "./live-notesnook-auth-provider.js";
+import type { AuthProvider } from "./types.js";
 
 /**
  * The narrow public surface the runner exposes.  Each result kind
@@ -86,7 +83,7 @@ export type RunLiveAuthResult =
 export type LiveProviderFactory = (options: {
   passwordSupplier: LivePasswordSupplier;
   mfaSupplier: LiveMfaSupplier;
-}) => LiveNotesnookAuthProvider;
+}) => AuthProvider;
 
 /**
  * Options for {@link runLiveAuthCommand}.  The runner never reads
@@ -173,54 +170,59 @@ type NormalizedRunnerOptions = Readonly<{
 }>;
 
 function normalizeOptions(options: unknown): NormalizedRunnerOptions {
-  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+  try {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw runnerError("invalid runLiveAuthCommand options");
+    }
+    const candidate = options as Record<string, unknown>;
+    const command = candidate.command;
+    if (command !== "login" && command !== "logout" && command !== "status" && command !== "noop") {
+      throw runnerError("invalid runLiveAuthCommand command");
+    }
+    const prompt = candidate.prompt;
+    if (typeof prompt !== "object" || prompt === null) {
+      throw runnerError("runLiveAuthCommand prompt is required");
+    }
+    const promptRecord = prompt as Record<string, unknown>;
+    const readSecretLine = promptRecord.readSecretLine;
+    const writeLine = promptRecord.writeLine;
+    if (typeof readSecretLine !== "function" || typeof writeLine !== "function") {
+      throw runnerError("runLiveAuthCommand prompt is invalid");
+    }
+    const providerFactory = candidate.providerFactory;
+    if (typeof providerFactory !== "function") {
+      throw runnerError("runLiveAuthCommand providerFactory is required");
+    }
+    const rawMaxAttempts = candidate.maxAttempts ?? 3;
+    if (
+      typeof rawMaxAttempts !== "number" ||
+      !Number.isInteger(rawMaxAttempts) ||
+      rawMaxAttempts <= 0
+    ) {
+      throw runnerError("runLiveAuthCommand maxAttempts must be a positive integer");
+    }
+    // Bind the prompt methods once so a hostile proxy swap after this point
+    // cannot change the captured behavior.
+    const capturedPrompt = prompt as SecretPrompt;
+    const boundRead = readSecretLine as (arg: { prompt: string }) => Promise<Buffer | null>;
+    const boundWrite = writeLine as (text: string) => void;
+    return {
+      command,
+      prompt: {
+        readSecretLine(arg) {
+          return boundRead.call(capturedPrompt, arg);
+        },
+        writeLine(text) {
+          return boundWrite.call(capturedPrompt, text);
+        },
+      },
+      providerFactory: providerFactory as LiveProviderFactory,
+      maxAttempts: rawMaxAttempts,
+    };
+  } catch (error) {
+    if (isRunnerError(error)) throw error;
     throw runnerError("invalid runLiveAuthCommand options");
   }
-  const candidate = options as Record<string, unknown>;
-  const command = candidate.command;
-  if (command !== "login" && command !== "logout" && command !== "status" && command !== "noop") {
-    throw runnerError("invalid runLiveAuthCommand command");
-  }
-  const prompt = candidate.prompt;
-  if (typeof prompt !== "object" || prompt === null) {
-    throw runnerError("runLiveAuthCommand prompt is required");
-  }
-  const promptRecord = prompt as Record<string, unknown>;
-  const readSecretLine = promptRecord.readSecretLine as unknown;
-  const writeLine = promptRecord.writeLine as unknown;
-  if (typeof readSecretLine !== "function" || typeof writeLine !== "function") {
-    throw runnerError("runLiveAuthCommand prompt is invalid");
-  }
-  const providerFactory = candidate.providerFactory;
-  if (typeof providerFactory !== "function") {
-    throw runnerError("runLiveAuthCommand providerFactory is required");
-  }
-  const rawMaxAttempts = candidate.maxAttempts ?? 3;
-  if (
-    typeof rawMaxAttempts !== "number" ||
-    !Number.isInteger(rawMaxAttempts) ||
-    rawMaxAttempts <= 0
-  ) {
-    throw runnerError("runLiveAuthCommand maxAttempts must be a positive integer");
-  }
-  // Bind the prompt methods once so a hostile proxy swap after this point
-  // cannot change the captured behavior.
-  const capturedPrompt = prompt as SecretPrompt;
-  const boundRead = readSecretLine as (arg: { prompt: string }) => Promise<Buffer | null>;
-  const boundWrite = writeLine as (text: string) => void;
-  return {
-    command,
-    prompt: {
-      readSecretLine(arg) {
-        return boundRead.call(capturedPrompt, arg);
-      },
-      writeLine(text) {
-        return boundWrite.call(capturedPrompt, text);
-      },
-    },
-    providerFactory: providerFactory as LiveProviderFactory,
-    maxAttempts: rawMaxAttempts,
-  };
 }
 
 async function runLogin(options: NormalizedRunnerOptions): Promise<RunLiveAuthResult> {
@@ -341,9 +343,24 @@ async function runLogout(options: NormalizedRunnerOptions): Promise<RunLiveAuthR
  * Create a chain-free runner error.  Mirrors the categorical error
  * pattern used elsewhere in the auth boundary.
  */
+const RUNNER_ERROR_MARKER = Symbol("nookbridge.runnerError");
+
 function runnerError(message: string): Error {
   const error = new Error(message);
   Object.defineProperty(error, "cause", { configurable: true, value: undefined });
   Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  Object.defineProperty(error, RUNNER_ERROR_MARKER, { configurable: false, value: true });
   return error;
+}
+
+function isRunnerError(value: unknown): value is Error {
+  try {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { [RUNNER_ERROR_MARKER]?: unknown })[RUNNER_ERROR_MARKER] === true
+    );
+  } catch {
+    return false;
+  }
 }

@@ -29,7 +29,7 @@
  * row shape.
  */
 
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { dirname, resolve } from "node:path";
 
@@ -125,36 +125,38 @@ export class PersistentStorage implements IStorage {
     }
     this.ownLock = true;
 
-    const key = this.keys.getDatabaseKey();
-    if (!key || key.length === 0) {
-      this.releaseLockQuietly();
-      throw new Error("no database key configured (SecureKeyStore returned no key)");
-    }
-
-    // Ensure the directory exists *before* sqlite opens the file, so
-    // an operator with a missing dir gets a deterministic error.
-    ensureStateDir(this.stateDir);
-    mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
-
-    this.sq = new SqliteStorage({ dbPath: this.dbPath, key });
+    let sqlite: SqliteStorage | undefined;
     try {
-      this.sq.exec(SCHEMA_SQL);
-      this.upsertMeta(SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
-    } catch (err) {
-      // Reopen with the wrong key throws here on Stage -1's sqlcipher
-      // build; bubble a stable error type so callers can distinguish.
-      this.sq.close();
-      this.releaseLockQuietly();
-      throw new Error(
-        `failed to initialise encrypted SQLite at ${this.dbPath}: ${(err as Error).message}`,
-      );
-    }
+      const key = this.keys.getDatabaseKey();
+      if (!key || key.length === 0) {
+        throw new Error("no database key configured (SecureKeyStore returned no key)");
+      }
 
-    this.logger.info("persistent-storage.open", {
-      stateDir: this.stateDir,
-      dbPath: this.dbPath,
-      backend: this.keys.backend,
-    });
+      // Ensure the directory exists *before* sqlite opens the file, so
+      // an operator with a missing dir gets a deterministic error.
+      ensureStateDir(this.stateDir);
+      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+      chmodSync(dirname(this.dbPath), 0o700);
+
+      sqlite = new SqliteStorage({ dbPath: this.dbPath, key });
+      sqlite.exec(SCHEMA_SQL);
+      this.sq = sqlite;
+      this.upsertMeta(SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
+
+      this.logger.info("persistent-storage.open", {
+        stateDir: this.stateDir,
+        dbPath: this.dbPath,
+        backend: this.keys.backend,
+      });
+    } catch {
+      try {
+        sqlite?.close();
+      } catch {
+        /* best-effort */
+      }
+      this.releaseLockQuietly();
+      throw new Error("failed to initialise encrypted SQLite storage");
+    }
   }
 
   private releaseLockQuietly(): void {
@@ -198,6 +200,7 @@ export class PersistentStorage implements IStorage {
       defaultFormat(v),
     ]);
     tx(encoded);
+    this.sq.hardenPermissions();
   }
 
   async read<T>(key: string, _isArray?: boolean): Promise<T | undefined> {

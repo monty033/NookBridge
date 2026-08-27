@@ -8,7 +8,7 @@
  * 5+ — see docs/implementation-plan-v1.5.md.
  */
 
-import { existsSync, lstatSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 export function ensureStateDir(stateDir: string): boolean {
@@ -20,11 +20,7 @@ export function ensureStateDir(stateDir: string): boolean {
     try {
       const st = lstatSync(abs);
       if (st.isDirectory()) {
-        try {
-          mkdirSync(abs, { recursive: true, mode: 0o700 });
-        } catch {
-          /* mode-on-existing-directory is a noop on most platforms */
-        }
+        chmodSync(abs, 0o700);
         return false;
       }
     } catch {
@@ -32,6 +28,7 @@ export function ensureStateDir(stateDir: string): boolean {
     }
   }
   mkdirSync(abs, { recursive: true, mode: 0o700 });
+  chmodSync(abs, 0o700);
   return true;
 }
 

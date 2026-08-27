@@ -33,7 +33,7 @@ offline evidence:
   zero `fetch` calls, and returns only the four-field refresh-token-free
   `AuthSession` shape.
 - Direct refresh after logout is rejected before a fake token manager can issue
-  a replacement; `kv.token` remains absent.
+  a replacement; `token` remains absent.
 - Provider and outer `AuthCoordinator` logger failures do not leak their raw
   messages or undo a committed authenticated state.
 - A disposable persistent fixture creates state/key/database/lock files at
@@ -389,9 +389,9 @@ checkpoint remains explicitly deferred.
   - `docs/stage-2-live.md` is new. It documents the lazy
     `@notesnook/core` factory, the constructable `Database` with
     instance `setup(options)` then `init()`, the callable `db.kv`
-    accessor, canonical `kv.token` key, login order
+    accessor, canonical `token` key, login order
     (email -> optional MFA -> password), `_refreshToken(true)`
-    then `getToken()` refresh, `user.logout(true)` + `kv.token`
+    then `getToken()` refresh, `user.logout(true)` + `token`
     removal + cleanup hook ordering, narrow-handle / no generic
     transport boundary, prompt-only credentials and zeroization,
     opt-in / default CLI deferred boundary, and an explicit

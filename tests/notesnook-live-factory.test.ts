@@ -704,6 +704,48 @@ describe("Stage 2B-live — notesnook-live-factory", () => {
       expect(readError?.message).not.toContain(TRACE_SECRET);
     });
 
+    it("binds class-style kv methods to their storage receiver and preserves the token key", async () => {
+      const fakeDb = db;
+      if (!fakeDb) throw new Error("test setup missing fake database");
+
+      class ReceiverBoundKv {
+        readonly values = new Map<string, unknown>();
+        readonly calls: Array<[string, string]> = [];
+
+        async read(key: string): Promise<unknown> {
+          this.calls.push(["read", key]);
+          return this.values.get(key);
+        }
+
+        async write(key: string, value: unknown): Promise<void> {
+          this.calls.push(["write", key]);
+          this.values.set(key, value);
+        }
+
+        async delete(key: string): Promise<void> {
+          this.calls.push(["delete", key]);
+          this.values.delete(key);
+        }
+      }
+
+      const storage = new ReceiverBoundKv();
+      vi.mocked(fakeDb.kv).mockReturnValue(storage as unknown as FakeKv);
+      const handle = await createHandle();
+      const token = { access_token: "class-style-access-token" };
+
+      await handle.kv.write(NOTESNOOK_LIVE_KV_TOKEN_KEY, token);
+      await expect(handle.kv.read(NOTESNOOK_LIVE_KV_TOKEN_KEY)).resolves.toEqual(token);
+      await handle.kv.delete(NOTESNOOK_LIVE_KV_TOKEN_KEY);
+      await expect(handle.kv.read(NOTESNOOK_LIVE_KV_TOKEN_KEY)).resolves.toBeUndefined();
+
+      expect(storage.calls).toEqual([
+        ["write", NOTESNOOK_LIVE_KV_TOKEN_KEY],
+        ["read", NOTESNOOK_LIVE_KV_TOKEN_KEY],
+        ["delete", NOTESNOOK_LIVE_KV_TOKEN_KEY],
+        ["read", NOTESNOOK_LIVE_KV_TOKEN_KEY],
+      ]);
+    });
+
     it("rejects unknown kv keys", async () => {
       const handle = await createHandle();
       const writeError = await handle.kv
