@@ -33,6 +33,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@notesnook/core": "8.1.3",
     "better-sqlite3-multiple-ciphers": "11.5.0",
     "sqlite-better-trigram": "0.0.3",
     "sqlite-regex": "0.2.4-alpha.1",
@@ -44,6 +45,7 @@
     "@typescript-eslint/parser": "8.18.2",
     "eslint": "9.17.0",
     "eslint-config-prettier": "9.1.0",
+    "patch-package": "8.0.1",
     "prettier": "3.4.2",
     "typescript": "5.7.2",
     "vitest": "2.1.8"

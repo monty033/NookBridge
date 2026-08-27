@@ -36,6 +36,8 @@ import {
   type CollectedSecret,
   type SecretPrompt,
 } from "./secret-input.js";
+import { runLiveAuthCommand, type LiveProviderFactory } from "./live-auth-runner.js";
+import type { AuthSession } from "./types.js";
 
 /**
  * The `auth` subcommands we recognise in this slice.  The set is a
@@ -269,17 +271,19 @@ export function formatAuthHelp(): string {
 
 /**
  * Options accepted by {@link runAuthCommand}.  The injection seam is
- * narrow: an optional prompt, an env snapshot, and an argv snapshot.
+ * narrow: an optional prompt, an env snapshot, an argv snapshot,
+ * and (opt-in) a live provider factory.
  *
  * The prompt is OPTIONAL because the only subcommand that ever
- * reaches for it is `login` when `exerciseLoginPipeline` is true —
- * and even then only when the caller explicitly opts in (production
- * CLI runs never opt in).  `auth help`, `auth status`, `auth
- * logout`, `auth reset-local-client`, and the deferred `auth login`
- * branch must all run without ever constructing a real TTY prompt.
- * That keeps them usable in non-TTY contexts (CI, scripts,
- * containers) and prevents accidental stdin probing on commands
- * that don't need credentials.
+ * reaches for it is `login` when `exerciseLoginPipeline` or
+ * `exerciseLiveLogin` is true — and even then only when the caller
+ * explicitly opts in (production CLI runs never opt in).
+ * `auth help`, `auth status`, `auth logout`, `auth
+ * reset-local-client`, and the deferred `auth login` branch must
+ * all run without ever constructing a real TTY prompt.  That keeps
+ * them usable in non-TTY contexts (CI, scripts, containers) and
+ * prevents accidental stdin probing on commands that don't need
+ * credentials.
  *
  * The runner does not read `process.argv`/`process.env` on its own.
  */
@@ -296,7 +300,7 @@ export type RunAuthCommandOptions = Readonly<{
    * Maximum number of attempts for any single secret prompt.  Defaults
    * to 3.  Empty input is retried up to this many times; EOF or a
    * malformed stream raises immediately.  Only consulted when
-   * `exerciseLoginPipeline` is true.
+   * `exerciseLoginPipeline` or `exerciseLiveLogin` is true.
    */
   maxAttempts?: number;
   /**
@@ -309,6 +313,22 @@ export type RunAuthCommandOptions = Readonly<{
    * true and `prompt` is omitted the runner throws a clear error.
    */
   exerciseLoginPipeline?: boolean;
+  /**
+   * Opt-in flag for the explicit live runner.  When true AND
+   * `liveProviderFactory` is supplied, `login` delegates to
+   * {@link runLiveAuthCommand}, which collects credentials through
+   * the prompt, drives the {@link LiveNotesnookAuthProvider}, and
+   * zeroizes every captured buffer.  Defaults to false so the
+   * production CLI default (deferred) remains unchanged.
+   */
+  exerciseLiveLogin?: boolean;
+  /**
+   * Provider factory used by the explicit live runner.  Required
+   * when `exerciseLiveLogin` is true.  The runner constructs a
+   * fresh provider per invocation so each prompt cycle owns its
+   * supplier closures and its buffers.
+   */
+  liveProviderFactory?: LiveProviderFactory;
 }>;
 
 export type RunAuthCommandResult =
@@ -330,6 +350,18 @@ export type RunAuthCommandResult =
       captured: ReadonlyArray<CollectedSecret | string>;
     }>
   | Readonly<{
+      /**
+       * Live login result.  Returned when `exerciseLiveLogin` is
+       * true and `liveProviderFactory` is supplied.  The session is
+       * the refresh-token-free `AuthSession` returned by the live
+       * provider.  The runner has already zeroized every captured
+       * buffer by the time this branch returns.
+       */
+      kind: "live-login";
+      outcome: DeferredAuthOutcome;
+      session: AuthSession;
+    }>
+  | Readonly<{
       kind: "help";
       text: string;
     }>
@@ -345,6 +377,8 @@ type NormalizedRunAuthOptions = Readonly<{
   prompt: unknown;
   maxAttempts: unknown;
   exerciseLoginPipeline: unknown;
+  exerciseLiveLogin: unknown;
+  liveProviderFactory: unknown;
 }>;
 
 function normalizeRunAuthOptions(options: unknown): NormalizedRunAuthOptions {
@@ -358,6 +392,8 @@ function normalizeRunAuthOptions(options: unknown): NormalizedRunAuthOptions {
     prompt: candidate.prompt,
     maxAttempts: candidate.maxAttempts,
     exerciseLoginPipeline: candidate.exerciseLoginPipeline,
+    exerciseLiveLogin: candidate.exerciseLiveLogin,
+    liveProviderFactory: candidate.liveProviderFactory,
   };
 }
 
@@ -405,10 +441,71 @@ export async function runAuthCommand(
   // prompt in this slice.  When the operator opts in via
   // `exerciseLoginPipeline`, the runner collects a full email +
   // password + MFA triplet and zeroizes each secret before
-  // returning.  The default behaviour is the production one: refuse
-  // to do anything until the upstream Notesnook core login API is
-  // wired in by a future reviewed slice.
+  // returning.  When the operator opts in via `exerciseLiveLogin`,
+  // the runner delegates to {@link runLiveAuthCommand}, which
+  // drives the explicit live provider.  The default behaviour is
+  // the production one: refuse to do anything until the upstream
+  // Notesnook core login API is wired in by a future reviewed
+  // slice.
   if (command.kind === "login") {
+    if (normalized.exerciseLiveLogin === true) {
+      // exerciseLiveLogin is opt-in and requires both an injected
+      // prompt and an injected provider factory.  The production
+      // CLI never sets this flag, so a missing factory is a
+      // programmer error — fail loudly rather than silently
+      // reaching for `process.stdin` or building a real handle.
+      if (normalized.prompt === undefined) {
+        throw categoricalAuthError(
+          "runAuthCommand: exerciseLiveLogin=true requires an injected prompt; refusing to read secrets from a global stdin",
+        );
+      }
+      if (typeof normalized.liveProviderFactory !== "function") {
+        throw categoricalAuthError(
+          "runAuthCommand: exerciseLiveLogin=true requires an injected liveProviderFactory",
+        );
+      }
+      const liveOpts: {
+        command: "login" | "logout" | "status" | "noop";
+        prompt: SecretPrompt;
+        providerFactory: LiveProviderFactory;
+        maxAttempts?: number;
+      } = {
+        command: "login",
+        prompt: normalized.prompt as SecretPrompt,
+        providerFactory: normalized.liveProviderFactory as LiveProviderFactory,
+      };
+      if (normalized.maxAttempts !== undefined) {
+        liveOpts.maxAttempts = normalized.maxAttempts as number;
+      }
+      try {
+        const live = await runLiveAuthCommand(liveOpts);
+        if (live.kind !== "authenticated") {
+          return {
+            kind: "error",
+            exitCode: 2,
+            message:
+              live.kind === "error"
+                ? live.message
+                : "live notesnook runner did not produce an authenticated session",
+          };
+        }
+        return {
+          kind: "live-login",
+          outcome: {
+            subcommand: "login",
+            status: "deferred",
+            message:
+              "live notesnook login pipeline exercised; no real account session was committed to persistent storage",
+          },
+          session: live.session,
+        };
+      } catch (error) {
+        if (isSecretInputPromptFailure(error)) {
+          throw categoricalAuthError("nookctl auth: credential input failed");
+        }
+        throw error;
+      }
+    }
     if (normalized.exerciseLoginPipeline !== true) {
       return {
         kind: "deferred",

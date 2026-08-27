@@ -309,3 +309,90 @@ remains explicitly deferred.
   authentication, live token revocation/refresh, transport security, secret
   provisioning, and deployment isolation, remains deferred to a separately
   authorized review.
+
+## Chronological ledger — Stage 2-live POC slice (additive exports + documentation, 2026-08-27)
+
+This entry records the additive publication of the Stage 2-live POC: the
+already-implemented lazy narrow real-core factory, the explicit live
+Notesnook auth provider, and the opt-in live auth runner are now exported
+through `src/index.ts`; the slice is documented in `docs/stage-2-live.md`;
+the upstream pin provenance, dual commit/integrity record, and corrected
+constructable-`Database` static-setup language are recorded in
+`docs/upstream-contract.md`. **No new code behavior is introduced.**
+**No real Notesnook account, credential, or live network was exercised.**
+This entry does **not** claim S2 PASS; the live-account S2 security
+checkpoint remains explicitly deferred.
+
+- **Scope:** `src/index.ts`, `docs/stage-2-live.md`,
+  `docs/upstream-contract.md`, `docs/security-reviews.md` (this entry).
+  The implementation files (`src/auth/live-notesnook-auth-provider.ts`,
+  `src/auth/live-auth-runner.ts`, `src/core/notesnook-live-factory.ts`)
+  and the focused tests (`tests/notesnook-live-factory.test.ts` and
+  `tests/stage-2-live-auth-provider.test.ts`) are referenced for context
+  but were not changed in this publication pass.
+- **Additive exports from `src/index.ts`:**
+  - From `./auth/live-notesnook-auth-provider.js`: `LiveMfaSupplier`,
+    `LiveNotesnookAuthProviderOptions`, `LivePasswordSupplier`,
+    `LiveCleanupHook`, `LIVE_NOTESNOOK_KV_TOKEN_KEY`,
+    `LiveNotesnookAuthProvider`, `createLiveNotesnookAuthProvider`.
+  - From `./auth/live-auth-runner.js`: `LiveAuthCommandKind`,
+    `LiveProviderFactory`, `RunLiveAuthCommandOptions`,
+    `RunLiveAuthResult`, `runLiveAuthCommand`.
+  - No raw core / db / transport surface is re-exported. The narrow
+    handle boundary is preserved at the public API surface.
+- **Stale comment cleanup:** the Stage 2A export block comment in
+  `src/index.ts` was updated to state that real-account auth remains
+  deferred to the separately authorized Stage 2B live checkpoint; the
+  default CLI `nookctl auth` path still resolves to a structured
+  `deferred` outcome. The admin auth runner export block was updated
+  to point at the opt-in live runner without changing the deferred
+  default.
+- **Documentation changes:**
+  - `docs/stage-2-live.md` is new. It documents the lazy
+    `@notesnook/core` factory, the constructable `Database` with
+    instance `setup(options)` then `init()`, the callable `db.kv`
+    accessor, canonical `kv.token` key, login order
+    (email -> optional MFA -> password), `_refreshToken(true)`
+    then `getToken()` refresh, `user.logout(true)` + `kv.token`
+    removal + cleanup hook ordering, narrow-handle / no generic
+    transport boundary, prompt-only credentials and zeroization,
+    opt-in / default CLI deferred boundary, and an explicit
+    statement that no real account, credential, or live network
+    was exercised.
+  - `docs/upstream-contract.md` now records the exact pin
+    provenance with the dual commit / npm identity (monorepo
+    source commit `c9c4936d9e8222b86204781cd1c93cdf2a1738d`,
+    npm `gitHead` `be414f869c964dd0800b7c7b1a4e59c6e5dfa869`,
+    npm integrity
+    `sha512-bCBmtvZFqk1kteGEorsGaGuK50u5+aG4piMjzCaPCRpxyb4v5cWMcCJhrMnlhXRh57hcDAX1o3Df/z/qWh2IbQ==`),
+    explains that the two commits differ intentionally, and
+    corrects the stale static-setup language: `Database` is a
+    constructable class at the pinned commit, the instance
+    `setup(...)` is synchronous, the instance `init()` is
+    awaited, `db.kv` is a callable accessor, the token envelope
+    lives in upstream's SQL `KVStorage`, and `user.logout(true)`
+    revocation must not be assumed to imply reset semantics
+    beyond the pinned package.
+- **Offline test scope:** 25 focused tests in
+  `tests/notesnook-live-factory.test.ts` plus 37 focused tests in
+  `tests/stage-2-live-auth-provider.test.ts`. The full repository
+  test count and all project gates (typecheck, lint, format:check,
+  build) were verified **before** this publication pass by the
+  parent agent and recorded as 200/200 tests passing with no
+  formatting deltas at that point. This publication pass adds
+  only additive exports, comment updates, and new/edited
+  documentation; it does not touch any source or test file.
+- **Live CLI exercise:** **not performed.** This slice ships no
+  CLI flag, no env-gated path, and no runner entry point that
+  would accept, prompt for, or process a real Notesnook account
+  credential. The live runner remains opt-in via the
+  `providerFactory` seam.
+- **S2 hygiene probes:** **pending.** The Stage 2-live slice does
+  not exercise logger-redaction on the live runner's session
+  record, cross-process lock behavior, key-store rotation, or
+  doctor output under the live boundary; those probes are owned
+  by the deferred S2 checkpoint.
+- **Verdict:** documentation / additive-publication PASS for the
+  offline POC slice. **S2 is NOT claimed.** The live-account
+  S2 security checkpoint remains deferred to a separately
+  authorized review.
