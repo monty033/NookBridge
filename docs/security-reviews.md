@@ -267,3 +267,45 @@ Each of these will get its own checkpoint entry above when it ships.
   outputs; the historical reviews apply only to the identified two-file
   code/test snapshot, while the current three-file PR is identified by the
   PR verification receipt.
+
+## Chronological ledger — Stage 2B-live offline provider slice (2026-08-26)
+
+This entry covers the complete staged Stage 2B-live offline auth slice: the
+mocked Notesnook authentication provider, the administrative command and public
+CLI boundaries, additive exports, runtime-generated fake-core fixture, focused
+contract tests, Stage 2B regression tests, and both associated documentation
+files. It does not cover a live account, real `@notesnook/core` runtime,
+network transport, or deployment credentials. The live-account S2 checkpoint
+remains explicitly deferred.
+
+- **Scope:** `docs/security-reviews.md`, `docs/stage-2b-live.md`,
+  `src/auth/admin-command.ts`, `src/auth/coordinator.ts`,
+  `src/auth/notesnook-auth-provider.ts`, `src/auth/secret-input.ts`,
+  `src/auth/types.ts`, `src/cli.ts`, `src/index.ts`,
+  `tests/fixtures/notesnook-auth-fixture.ts`,
+  `tests/stage-2b-live-auth.test.ts`, `tests/stage-2b.test.ts`,
+  `tests/stage-2a.test.ts`.
+  The scope includes every affected file carrying this slice's behavior or
+  its hash-scoped security provenance; no live-account or network claim is
+  made.
+- **Contract tested:** pinned `@notesnook/core@8.1.3` shape at monorepo commit
+  `c9c4936d9e8222b86204781cd1c93cdf2a1738d3`; exact mocked login/MFA/password
+  order, `_refreshToken(true)` refresh seam, validate-before-persist, restart,
+  bounded retries, concurrency, deferred-write supersession, typed EOF versus
+  hostile prompt errors, logger failure normalization, logout cleanup, and
+  credential hygiene.
+- **Focused evidence:**
+  `nix develop --command npx vitest run tests/stage-2b-live-auth.test.ts` —
+  PASS, 50/50 tests.
+- **Full repository evidence and gates (final run after the
+  source/test/documentation edits):**
+  focused Vitest PASS (50/50); `npm test` PASS (138/138 across 7 files);
+  `npm run typecheck` PASS; `npm run lint` PASS;
+  `npm run format:check` PASS; `npm run build` PASS; and
+  `nix develop --command git diff --check` PASS.
+  Independent security review is **pending** for the new exact hash; this
+  ledger does not claim an independent review pass.
+- **Deferral:** live-account S2, including real core initialization, live
+  authentication, live token revocation/refresh, transport security, secret
+  provisioning, and deployment isolation, remains deferred to a separately
+  authorized review.
