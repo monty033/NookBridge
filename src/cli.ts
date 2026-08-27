@@ -39,6 +39,17 @@ type Args = {
   authArgs?: readonly string[];
 };
 
+function normalizeCliArgv(argv: unknown): string[] {
+  if (typeof argv !== "object" || argv === null || !Array.isArray(argv)) {
+    throw new Error("invalid CLI input");
+  }
+  const copied = Array.from(argv as readonly unknown[]);
+  if (!copied.every((argument): argument is string => typeof argument === "string")) {
+    throw new Error("invalid CLI input");
+  }
+  return copied;
+}
+
 function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   const [, , subcommand, ...rest] = argv;
   const args: Args = {};
@@ -65,7 +76,22 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
 }
 
 export async function run(argv: string[]): Promise<number> {
-  const { subcommand, args } = parseArgs(argv);
+  let safeArgv: string[];
+  try {
+    safeArgv = normalizeCliArgv(argv);
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+
+  let parsed: { subcommand: string; args: Args };
+  try {
+    parsed = parseArgs(safeArgv);
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+  const { subcommand, args } = parsed;
   const logger = createLogger({ level: "info", redactFields: DEFAULT_REDACT_FIELDS });
 
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
@@ -76,7 +102,7 @@ export async function run(argv: string[]): Promise<number> {
     return runAuth(args, logger);
   }
   if (subcommand !== "doctor") {
-    process.stderr.write(`nookctl: unknown subcommand "${subcommand}"\n`);
+    process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
     return 2;
   }
@@ -137,9 +163,16 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
   // branches (status, logout, reset-local-client, the default login
   // branch, and parse-error paths) must not touch stdin or stdout
   // beyond the structured outcome message printed below.
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
   const result = await runAuthCommand({
     argv,
-    env: readSafeEnvSnapshot(),
+    env: environment,
   });
 
   switch (result.kind) {
@@ -171,31 +204,46 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
 }
 
 /**
- * Snapshot the process environment, EXCLUDING any variable whose name
- * is recognised as a credential carrier.  This is the only path the
- * auth runner uses to read `process.env`; tests can pass their own
- * snapshot.
+ * Snapshot the process environment without interpreting or printing any
+ * values.  Credential-carrier presence must remain visible to the auth
+ * parser so the public CLI rejects it instead of silently dropping it.
+ * This is the only path the auth runner uses to read `process.env`; tests
+ * can pass their own snapshot.
  *
- * The list is duplicated from the auth parser's forbidden-env list
- * deliberately: the runner must NEVER read the forbidden values even
- * by accident.
+ * The parser owns the credential-carrier policy.  Keeping this snapshot
+ * lossless for names and presence is part of the public CLI boundary:
+ * forbidden carriers are rejected with exit code 2, while unrelated
+ * variables remain available to future non-secret configuration paths.
  */
+const FORBIDDEN_ENV_CARRIERS = new Set([
+  "NOOKBRIDGE_PASSWORD",
+  "NOOKBRIDGE_PASSWD",
+  "NOOKBRIDGE_MFA",
+  "NOOKBRIDGE_TOTP",
+  "NOOKBRIDGE_SECRET",
+  "NOOKCTL_PASSWORD",
+  "NOOKCTL_MFA",
+]);
+
 function readSafeEnvSnapshot(): Record<string, string | undefined> {
-  const forbidden = new Set([
-    "NOOKBRIDGE_PASSWORD",
-    "NOOKBRIDGE_PASSWD",
-    "NOOKBRIDGE_MFA",
-    "NOOKBRIDGE_TOTP",
-    "NOOKBRIDGE_SECRET",
-    "NOOKCTL_PASSWORD",
-    "NOOKCTL_MFA",
-  ]);
-  const out: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (forbidden.has(name)) continue;
-    out[name] = value;
+  try {
+    const environment = process.env;
+    const out: Record<string, string | undefined> = {};
+
+    // Probe presence before projecting own entries.  `in` intentionally
+    // includes inherited carriers; their values are never read or copied.
+    for (const name of FORBIDDEN_ENV_CARRIERS) {
+      if (name in environment) out[name] = undefined;
+    }
+    for (const [name, value] of Object.entries(environment)) {
+      if (!FORBIDDEN_ENV_CARRIERS.has(name)) out[name] = value;
+    }
+    return out;
+  } catch {
+    // The public CLI boundary must not expose process.env proxy/getter
+    // failures or their values/cause chains.
+    throw new Error("invalid command environment");
   }
-  return out;
 }
 
 function printHelp(): void {

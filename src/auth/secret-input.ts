@@ -131,6 +131,74 @@ export type CollectedSecret = Readonly<{
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 
+type SecretInputErrorCode = "eof" | "prompt-read" | "prompt-write" | "validation";
+const SECRET_INPUT_ERROR_CODE = Symbol("secret-input-error-code");
+
+type SecretInputBoundaryError = Error & {
+  [SECRET_INPUT_ERROR_CODE]?: SecretInputErrorCode;
+};
+
+function secretInputError(code: SecretInputErrorCode, message: string): Error {
+  const error = new Error(message) as SecretInputBoundaryError;
+  Object.defineProperty(error, SECRET_INPUT_ERROR_CODE, {
+    configurable: false,
+    enumerable: false,
+    value: code,
+  });
+  Object.defineProperty(error, "cause", { configurable: true, value: undefined });
+  Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  return error;
+}
+
+/** Identify the module-owned EOF control result; never match human text. */
+export function isSecretInputEof(error: unknown): boolean {
+  try {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as SecretInputBoundaryError)[SECRET_INPUT_ERROR_CODE] === "eof"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Identify prompt I/O failures for normalization at the command boundary. */
+export function isSecretInputPromptFailure(error: unknown): boolean {
+  try {
+    const code =
+      typeof error === "object" && error !== null
+        ? (error as SecretInputBoundaryError)[SECRET_INPUT_ERROR_CODE]
+        : undefined;
+    return code === "prompt-read" || code === "prompt-write";
+  } catch {
+    return false;
+  }
+}
+
+function writePrompt(prompt: SecretPrompt, text: string, kind: SecretKind | "email"): void {
+  try {
+    prompt.writeLine(text);
+  } catch {
+    throw secretInputError("prompt-write", `${kind} prompt write failed`);
+  }
+}
+
+async function readPrompt(
+  prompt: SecretPrompt,
+  field: SecretKind | "email",
+): Promise<Buffer | null> {
+  try {
+    const line = await prompt.readSecretLine({ prompt: field });
+    if (line !== null && !Buffer.isBuffer(line)) {
+      throw new Error("invalid prompt result");
+    }
+    return line;
+  } catch {
+    throw secretInputError("prompt-read", `${field} prompt read failed`);
+  }
+}
+
 /**
  * Collect a password interactively.
  *
@@ -141,7 +209,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
  * captured.
  */
 export async function collectPassword(options: CollectSecretOptions): Promise<CollectedSecret> {
-  return collectSecret({ ...options, kind: "password" });
+  return collectSecret({ ...normalizeCollectOptions(options), kind: "password" });
 }
 
 /**
@@ -152,7 +220,7 @@ export async function collectPassword(options: CollectSecretOptions): Promise<Co
  * source.
  */
 export async function collectMfaCode(options: CollectSecretOptions): Promise<CollectedSecret> {
-  return collectSecret({ ...options, kind: "mfa" });
+  return collectSecret({ ...normalizeCollectOptions(options), kind: "mfa" });
 }
 
 /**
@@ -171,15 +239,16 @@ export async function collectMfaCode(options: CollectSecretOptions): Promise<Col
  * friendlier prompt.
  */
 export async function collectEmail(options: CollectSecretOptions): Promise<string> {
-  const maxAttempts = resolveMaxAttempts(options);
-  const prompt = options.prompt;
+  const normalized = normalizeCollectOptions(options);
+  const maxAttempts = normalized.maxAttempts;
+  const prompt = normalized.prompt;
 
   let lastError: Error | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    prompt.writeLine("Notesnook email:");
-    const line = await prompt.readSecretLine({ prompt: "email" });
+    writePrompt(prompt, "Notesnook email:", "email");
+    const line = await readPrompt(prompt, "email");
     if (line === null) {
-      throw new Error("email input ended before a value was entered");
+      throw secretInputError("eof", "email input ended before a value was entered");
     }
     const trimmed = line.toString("utf8").trim();
     // Wipe the temporary buffer on every non-return path BEFORE we
@@ -187,17 +256,25 @@ export async function collectEmail(options: CollectSecretOptions): Promise<strin
     // iteration ends.
     line.fill(0);
     if (trimmed.length === 0) {
-      lastError = new Error(`email attempt ${attempt} of ${maxAttempts} was empty`);
+      lastError = secretInputError(
+        "validation",
+        `email attempt ${attempt} of ${maxAttempts} was empty`,
+      );
       continue;
     }
     if (!looksLikeEmail(trimmed)) {
-      lastError = new Error(`email attempt ${attempt} of ${maxAttempts} is malformed`);
+      lastError = secretInputError(
+        "validation",
+        `email attempt ${attempt} of ${maxAttempts} is malformed`,
+      );
       continue;
     }
     return trimmed;
   }
 
-  throw lastError ?? new Error(`email input failed after ${maxAttempts} attempts`);
+  throw (
+    lastError ?? secretInputError("validation", `email input failed after ${maxAttempts} attempts`)
+  );
 }
 
 /**
@@ -225,26 +302,89 @@ async function collectSecret(
 
   let lastError: Error | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    prompt.writeLine(label);
-    const line = await prompt.readSecretLine({ prompt: fieldLabel });
+    writePrompt(prompt, label, options.kind);
+    const line = await readPrompt(prompt, fieldLabel);
     if (line === null) {
       // EOF before any input.  Distinguish from "empty line".
-      throw new Error(`${options.kind} input ended before a value was entered`);
+      throw secretInputError("eof", `${options.kind} input ended before a value was entered`);
     }
     if (line.length === 0) {
-      lastError = new Error(`${options.kind} attempt ${attempt} of ${maxAttempts} was empty`);
+      line.fill(0);
+      lastError = secretInputError(
+        "validation",
+        `${options.kind} attempt ${attempt} of ${maxAttempts} was empty`,
+      );
       continue;
     }
     return wrap(options.kind, line);
   }
 
-  throw lastError ?? new Error(`${options.kind} input failed after ${maxAttempts} attempts`);
+  throw (
+    lastError ??
+    secretInputError("validation", `${options.kind} input failed after ${maxAttempts} attempts`)
+  );
+}
+
+type NormalizedCollectOptions = Readonly<{
+  prompt: SecretPrompt;
+  maxAttempts: number;
+}>;
+
+function isSecretInputBoundaryError(error: unknown): boolean {
+  try {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as SecretInputBoundaryError)[SECRET_INPUT_ERROR_CODE] !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCollectOptions(options: unknown): NormalizedCollectOptions {
+  try {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw new Error("invalid options");
+    }
+    const candidate = options as Record<string, unknown>;
+    const rawPrompt = candidate.prompt;
+    if (typeof rawPrompt !== "object" || rawPrompt === null || Array.isArray(rawPrompt)) {
+      throw new Error("invalid prompt");
+    }
+    const promptRecord = rawPrompt as Record<string, unknown>;
+    const readSecretLine = promptRecord.readSecretLine;
+    const writeLine = promptRecord.writeLine;
+    if (typeof readSecretLine !== "function" || typeof writeLine !== "function") {
+      throw new Error("invalid prompt");
+    }
+    const rawMaxAttempts = candidate.maxAttempts;
+    const maxAttempts = rawMaxAttempts === undefined ? DEFAULT_MAX_ATTEMPTS : rawMaxAttempts;
+    if (typeof maxAttempts !== "number" || !Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+      throw secretInputError("validation", "collectSecret maxAttempts must be a positive integer");
+    }
+
+    // Capture the prompt methods once. The adapter keeps the original
+    // receiver while preventing later hostile getters from being re-read.
+    const prompt: SecretPrompt = {
+      writeLine(text) {
+        return writeLine.call(rawPrompt, text);
+      },
+      readSecretLine(readOptions) {
+        return readSecretLine.call(rawPrompt, readOptions);
+      },
+    };
+    return { prompt, maxAttempts };
+  } catch (error) {
+    if (isSecretInputBoundaryError(error)) throw error;
+    throw secretInputError("validation", "secret input options are invalid");
+  }
 }
 
 function resolveMaxAttempts(options: CollectSecretOptions): number {
   const raw = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   if (!Number.isInteger(raw) || raw <= 0) {
-    throw new Error("collectSecret maxAttempts must be a positive integer");
+    throw secretInputError("validation", "collectSecret maxAttempts must be a positive integer");
   }
   return raw;
 }
@@ -363,42 +503,117 @@ export type CreateStdioPromptOptions = Readonly<{
  * `process.platform` again — the captured references and values are
  * the only legitimate source of state.  That is the seam.
  */
+const PROMPT_BOUNDARY_ERROR = Symbol("secret-input-prompt-boundary-error");
+
+type PromptBoundaryError = Error & {
+  [PROMPT_BOUNDARY_ERROR]?: true;
+};
+
+function promptBoundaryError(message: string): Error {
+  const error = new Error(message) as PromptBoundaryError;
+  Object.defineProperty(error, PROMPT_BOUNDARY_ERROR, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  Object.defineProperty(error, "cause", { configurable: true, value: undefined });
+  Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  return error;
+}
+
+function isPromptBoundaryError(error: unknown): boolean {
+  try {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as PromptBoundaryError)[PROMPT_BOUNDARY_ERROR] === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Construct a stdio prompt inside one categorical boundary.  The options,
+ * process globals, stream properties, and stdout method are all caller/runtime
+ * inputs at this point and may be proxies or throwing getters.
+ */
 export function createStdioPrompt(options: CreateStdioPromptOptions = {}): SecretPrompt {
-  const stdin = options.stdin ?? process.stdin;
-  const stdout = options.stdout ?? process.stdout;
-  const platform = options.platform ?? process.platform;
-  const spawn: SpawnSyncFn = options.spawn ?? resolveSpawnSync();
+  try {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw promptBoundaryError("createStdioPrompt received invalid options");
+    }
+    const candidate = options as Record<string, unknown>;
+    const stdinValue = candidate.stdin ?? process.stdin;
+    const stdoutValue = candidate.stdout ?? process.stdout;
+    const platformValue = candidate.platform ?? process.platform;
+    const spawnValue = candidate.spawn ?? resolveSpawnSync();
 
-  if (!stdin || !stdout) {
-    throw new Error(
-      "createStdioPrompt requires a Node-style process.stdin/stdout (or injected equivalents)",
-    );
+    if (
+      typeof stdinValue !== "object" ||
+      stdinValue === null ||
+      typeof stdoutValue !== "object" ||
+      stdoutValue === null
+    ) {
+      throw promptBoundaryError("createStdioPrompt requires secure stdio streams");
+    }
+    const stdin = stdinValue as CapturedStdin;
+    const stdout = stdoutValue as StdoutStream;
+    if (stdin.isTTY !== true) {
+      throw promptBoundaryError(
+        "secure secret input requires an interactive TTY on stdin; refusing to read secrets from a non-TTY stream",
+      );
+    }
+    const stdinFd = stdin.fd;
+    if (!Number.isInteger(stdinFd) || stdinFd < 0) {
+      throw promptBoundaryError("createStdioPrompt requires a valid stdin file descriptor");
+    }
+    if (typeof platformValue !== "string") {
+      throw promptBoundaryError("createStdioPrompt received an invalid platform");
+    }
+    if (typeof spawnValue !== "function") {
+      throw promptBoundaryError("createStdioPrompt received an invalid stty runner");
+    }
+    const stdoutWrite = stdout.write;
+    if (typeof stdoutWrite !== "function") {
+      throw promptBoundaryError("createStdioPrompt requires a writable stdout stream");
+    }
+    const platform = platformValue as PlatformLiteral;
+    const spawn = spawnValue as SpawnSyncFn;
+    const writeOut = (text: string): void => {
+      try {
+        if (typeof text !== "string") throw new Error("invalid prompt text");
+        stdoutWrite.call(stdout, `${text}\n`);
+      } catch {
+        throw promptBoundaryError("secret prompt output failed");
+      }
+    };
+
+    return {
+      writeLine(text) {
+        writeOut(text);
+      },
+      async readSecretLine(readOptions) {
+        try {
+          if (typeof readOptions !== "object" || readOptions === null) {
+            throw promptBoundaryError("secret prompt received invalid options");
+          }
+          const prompt = (readOptions as { prompt?: unknown }).prompt;
+          if (typeof prompt !== "string") {
+            throw promptBoundaryError("secret prompt received invalid options");
+          }
+          void prompt;
+          return await readLineWithEchoControl({ stdin, stdinFd, platform, spawn });
+        } catch (error) {
+          if (isPromptBoundaryError(error)) throw error;
+          throw promptBoundaryError("secret prompt read failed");
+        }
+      },
+    };
+  } catch (error) {
+    if (isPromptBoundaryError(error)) throw error;
+    throw promptBoundaryError("createStdioPrompt could not initialize secure secret input");
   }
-  if (stdin.isTTY !== true) {
-    throw new Error(
-      "secure secret input requires an interactive TTY on stdin; refusing to read secrets from a non-TTY stream",
-    );
-  }
-
-  // Capture every piece of process-global state the prompt needs so
-  // it never has to consult `process` again after construction.
-  const stdinFd = stdin.fd;
-  const writeOut: (text: string) => void = (text) => {
-    stdout.write(`${text}\n`);
-  };
-
-  return {
-    writeLine(text) {
-      writeOut(text);
-    },
-    async readSecretLine({ prompt: _prompt }) {
-      // _prompt is unused by the production implementation — it
-      // exists on the seam so tests can verify which label was
-      // requested without leaking the secret text into a thrown
-      // error.
-      return readLineWithEchoControl({ stdin, stdinFd, platform, spawn });
-    },
-  };
 }
 
 /**
@@ -479,23 +694,42 @@ function resolveSpawnSync(): SpawnSyncFn {
   };
 }
 
+type NormalizedSttyResult = Readonly<{
+  valid: boolean;
+  status: number | null;
+  stdout: string;
+}>;
+
+function invokeStty(
+  spawn: SpawnSyncFn,
+  args: readonly string[],
+  stdio: SttySpawnOptions["stdio"],
+): NormalizedSttyResult {
+  try {
+    const result: unknown = spawn("stty", args, { stdio });
+    if (typeof result !== "object" || result === null) {
+      return { valid: false, status: null, stdout: "" };
+    }
+    const candidate = result as Record<string, unknown>;
+    const status = candidate.status;
+    const stdout = candidate.stdout;
+    const error = candidate.error;
+    if (
+      (status !== null && (typeof status !== "number" || !Number.isInteger(status))) ||
+      typeof stdout !== "string" ||
+      error !== undefined
+    ) {
+      return { valid: false, status: null, stdout: "" };
+    }
+    return { valid: true, status, stdout };
+  } catch {
+    return { valid: false, status: null, stdout: "" };
+  }
+}
+
 /**
  * Capture the current echo state, disable echo, run the read, and
  * restore the original state on every exit path.
- *
- * Fail-closed invariants:
- *   - The captured restore token must be non-empty; if `stty -g`
- *     fails (e.g. the fd is detached) we throw immediately without
- *     attempting the read.
- *   - The `stty -echo` invocation must exit 0; a non-zero status
- *     throws immediately without attempting the read.
- *   - Restoration runs unconditionally in a finally block.
- *   - All three `stty` invocations receive an explicit `stdio`
- *     tuple that pins child stdin to the captured fd, so the
- *     shell-out operates on the controlling terminal.
- *
- * The helper is the only place in this file that performs POSIX
- * `stty` shell-outs.
  */
 async function readLineWithEchoControl(input: {
   stdin: CapturedStdin;
@@ -505,64 +739,43 @@ async function readLineWithEchoControl(input: {
 }): Promise<Buffer | null> {
   const { stdin, stdinFd, platform, spawn } = input;
   if (platform !== "linux" && platform !== "darwin" && platform !== "freebsd") {
-    throw new Error(
-      `secure secret input is only supported on POSIX terminals; refusing to run on platform "${platform}"`,
+    throw promptBoundaryError(
+      "secure secret input is only supported on POSIX terminals; refusing to run on this platform",
     );
   }
 
-  // Every stty invocation binds child stdin to the captured fd so the
-  // child operates on the same controlling terminal the helper reads
-  // from.  `stty` writes to stdout/stderr ("ioctl failed" et al.) —
-  // we capture them into the result so any leak would surface in
-  // tests, and we never re-emit them.
   const stdio: SttySpawnOptions["stdio"] = [stdinFd, "pipe", "pipe"];
-
-  // 1. Capture the current echo state as a restore token.  An empty
-  //    token means the terminal is detached or `stty` is unavailable;
-  //    either way we MUST NOT proceed to read a secret.
-  const captureResult = spawn("stty", ["-g"], { stdio });
-  if (captureResult.error) {
-    throw new Error(
-      "failed to capture terminal echo state (stty -g failed): refusing to read a secret",
-    );
-  }
-  if (captureResult.status !== 0) {
-    throw new Error(
-      `failed to capture terminal echo state (stty -g exited with status ${captureResult.status}): refusing to read a secret`,
-    );
+  const captureResult = invokeStty(spawn, ["-g"], stdio);
+  if (!captureResult.valid || captureResult.status !== 0) {
+    throw promptBoundaryError("failed to capture terminal echo state: refusing to read a secret");
   }
   const restoreToken = captureResult.stdout.trim();
   if (restoreToken.length === 0) {
-    throw new Error(
+    throw promptBoundaryError(
       "empty stty restore token: refusing to read a secret from a terminal whose state we cannot restore",
     );
   }
 
-  // 2. Disable echo.  Throw on failure — we MUST NOT read a secret
-  //    while echo is on.
-  const disableResult = spawn("stty", ["-echo"], { stdio });
-  if (disableResult.error || disableResult.status !== 0) {
-    throw new Error(
-      `failed to disable terminal echo (stty -echo exited with status ${disableResult.status ?? "spawn-error"}): refusing to read a secret`,
-    );
-  }
-
   try {
+    const disableResult = invokeStty(spawn, ["-echo"], stdio);
+    if (!disableResult.valid || disableResult.status !== 0) {
+      throw promptBoundaryError("failed to disable terminal echo: refusing to read a secret");
+    }
     return await readOneLineFromStream(stdin);
   } finally {
-    // 3. Restore the original state.  Failure is swallowed but
-    //    surfaced through the audit sink — we are already in a
-    //    finally and must not mask any original error.
-    try {
-      const restoreResult = spawn("stty", [restoreToken], { stdio });
-      if (restoreResult.error || restoreResult.status !== 0) {
-        echoAuditSink(
-          `echo restoration failed: stty exited with status ${restoreResult.status ?? "spawn-error"}`,
-        );
-      }
-    } catch {
-      echoAuditSink("echo restoration threw an unexpected error");
+    const restoreResult = invokeStty(spawn, [restoreToken], stdio);
+    if (!restoreResult.valid || restoreResult.status !== 0) {
+      reportEchoAuditFailure();
     }
+  }
+}
+
+function reportEchoAuditFailure(): void {
+  try {
+    echoAuditSink("echo restoration failed");
+  } catch {
+    // Auditing is deliberately best-effort and must never mask the
+    // original prompt, terminal, or stream result.
   }
 }
 
@@ -582,18 +795,31 @@ async function readLineWithEchoControl(input: {
  * between construction and the read.
  */
 function readOneLineFromStream(stdin: CapturedStdin): Promise<Buffer | null> {
-  if (stdin.isTTY !== true) {
-    // Belt-and-braces: the constructor already checked, but a later
-    // close() could leave us here.  Fail closed.
-    return Promise.reject(new Error("stdin is no longer a TTY; refusing to read a secret"));
+  let isTTY: unknown;
+  try {
+    isTTY = stdin.isTTY;
+  } catch {
+    return Promise.reject(promptBoundaryError("secret input stream could not be inspected"));
+  }
+  if (isTTY !== true) {
+    return Promise.reject(
+      promptBoundaryError("stdin is no longer a TTY; refusing to read a secret"),
+    );
   }
   return new Promise((resolve, reject) => {
     const buffer: Buffer[] = [];
     let settled = false;
     const cleanup = (): void => {
-      stdin.off("data", onData);
-      stdin.off("end", onEnd);
-      stdin.off("error", onError);
+      try {
+        stdin.off("data", onData);
+        stdin.off("end", onEnd);
+        stdin.off("error", onError);
+      } catch {
+        // Cleanup is best-effort; the result remains categorical.
+      }
+    };
+    const rejectRead = (): void => {
+      settleOnce(() => reject(promptBoundaryError("secret input stream read failed")));
     };
     const settleOnce = (action: () => void): void => {
       if (settled) return;
@@ -602,46 +828,52 @@ function readOneLineFromStream(stdin: CapturedStdin): Promise<Buffer | null> {
       action();
     };
     const onData = (chunk: Buffer | string): void => {
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
-      // Only act on the first newline-terminated chunk; the prompt
-      // contract is exactly one line per secret.
-      const newlineAt = bytes.indexOf(0x0a);
-      if (newlineAt === -1) {
-        buffer.push(bytes);
-        return;
+      try {
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+        const newlineAt = bytes.indexOf(0x0a);
+        if (newlineAt === -1) {
+          buffer.push(bytes);
+          return;
+        }
+        const head = bytes.subarray(0, newlineAt);
+        const combined =
+          buffer.length === 0
+            ? head
+            : Buffer.concat(
+                [...buffer, head],
+                buffer.reduce((n, b) => n + b.length, 0) + head.length,
+              );
+        const trimmed = stripTrailingCarriage(combined);
+        settleOnce(() => resolve(trimmed));
+      } catch {
+        rejectRead();
       }
-      const head = bytes.subarray(0, newlineAt);
-      const combined =
-        buffer.length === 0
-          ? head
-          : Buffer.concat(
-              [...buffer, head],
-              buffer.reduce((n, b) => n + b.length, 0) + head.length,
-            );
-      const trimmed = stripTrailingCarriage(combined);
-      settleOnce(() => resolve(trimmed));
     };
     const onEnd = (): void => {
-      const combined =
-        buffer.length === 0
-          ? Buffer.alloc(0)
-          : Buffer.concat(
-              buffer,
-              buffer.reduce((n, b) => n + b.length, 0),
-            );
-      const trimmed = stripTrailingCarriage(combined);
-      if (trimmed.length === 0) {
-        settleOnce(() => resolve(null));
-        return;
+      try {
+        const combined =
+          buffer.length === 0
+            ? Buffer.alloc(0)
+            : Buffer.concat(
+                buffer,
+                buffer.reduce((n, b) => n + b.length, 0),
+              );
+        const trimmed = stripTrailingCarriage(combined);
+        settleOnce(() => resolve(trimmed.length === 0 ? null : trimmed));
+      } catch {
+        rejectRead();
       }
-      settleOnce(() => resolve(trimmed));
     };
-    const onError = (err: Error): void => {
-      settleOnce(() => reject(err));
+    const onError = (): void => {
+      rejectRead();
     };
-    stdin.on("data", onData);
-    stdin.once("end", onEnd);
-    stdin.once("error", onError);
+    try {
+      stdin.on("data", onData);
+      stdin.once("end", onEnd);
+      stdin.once("error", onError);
+    } catch {
+      rejectRead();
+    }
   });
 }
 

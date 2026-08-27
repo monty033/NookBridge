@@ -7,6 +7,7 @@
  * to prove that authentication does not write credentials or sessions there.
  */
 
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,10 @@ import {
 } from "../src/index.js";
 import { releaseLock } from "../src/config/lock.js";
 import { createDevelopmentFileKeyStore } from "../src/keystore/file-keystore.js";
+
+function runtimeSecret(label: string): string {
+  return `stage-2a-${label}-${randomUUID()}`;
+}
 
 function createMemoryStorage(): IStorage {
   const values = new Map<string, unknown>();
@@ -139,7 +144,7 @@ describe("Stage 2A offline authentication", () => {
 
     const authenticated = await coordinator.login({
       username: "stage-2a-user",
-      password: "offline-test-password",
+      password: runtimeSecret("initial-auth"),
     });
     expect(authenticated.status).toBe("authenticated");
     if (authenticated.status !== "authenticated") throw new Error("expected authentication");
@@ -171,7 +176,7 @@ describe("Stage 2A offline authentication", () => {
     });
     const provider = new MockAuthProvider({ clock: () => 5_000, sessionTtlMs: 1_000 });
     const coordinator = new AuthCoordinator({ provider, logger, clock: () => 5_000 });
-    const password = "stage-2a-password-canary";
+    const password = runtimeSecret("storage-canary");
 
     try {
       const state = await coordinator.login({ username: "offline-user", password });
@@ -199,7 +204,10 @@ describe("Stage 2A offline authentication", () => {
       logout: vi.fn(async () => undefined),
     };
     const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
-    const pendingLogin = coordinator.login({ username: "offline-user", password: "test-password" });
+    const pendingLogin = coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
 
     await coordinator.logout();
     loginResult.resolve(createSession("late-login-token"));
@@ -207,6 +215,32 @@ describe("Stage 2A offline authentication", () => {
     await expect(pendingLogin).rejects.toThrow(/superseded/i);
     expect(coordinator.status()).toEqual({ status: "signed-out" });
     expect(provider.logout).not.toHaveBeenCalled();
+  });
+
+  it("cancels provider work when logout starts while the coordinator is signed out", async () => {
+    const loginResult = createDeferred<AuthSession>();
+    const provider: AuthProvider = {
+      login: vi.fn(() => loginResult.promise),
+      refresh: vi.fn(async (session) => session),
+      logout: vi.fn(async () => undefined),
+      cancelPending: vi.fn(),
+    };
+    const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
+    const pendingLogin = coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
+
+    await coordinator.logout();
+    expect(provider.cancelPending).toHaveBeenCalledTimes(1);
+    expect(provider.logout).not.toHaveBeenCalled();
+    loginResult.resolve(createSession("late-login-token"));
+
+    await expect(pendingLogin).rejects.toMatchObject({
+      message: "auth operation superseded by a newer transition",
+      cause: undefined,
+    });
+    expect(coordinator.status()).toEqual({ status: "signed-out" });
   });
 
   it("does not resurrect a pending refresh after logout", async () => {
@@ -217,7 +251,10 @@ describe("Stage 2A offline authentication", () => {
       logout: vi.fn(async () => undefined),
     };
     const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
-    await coordinator.login({ username: "offline-user", password: "test-password" });
+    await coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
     const pendingRefresh = coordinator.refresh();
 
     await coordinator.logout();
@@ -237,7 +274,10 @@ describe("Stage 2A offline authentication", () => {
       logout: vi.fn(async () => undefined),
     };
     const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
-    await coordinator.login({ username: "offline-user", password: "test-password" });
+    await coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
 
     const firstRefresh = coordinator.refresh();
     const secondRefresh = coordinator.refresh();
@@ -289,7 +329,7 @@ describe("Stage 2A offline authentication", () => {
 
     const authenticated = await coordinator.login({
       username: "offline-user",
-      password: "test-password",
+      password: runtimeSecret("coordinator-test"),
     });
     const mutableAuthenticated = authenticated as unknown as {
       session: { accessToken: string; expiresAt: number };
@@ -362,10 +402,73 @@ describe("Stage 2A offline authentication", () => {
       const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
 
       await expect(
-        coordinator.login({ username: "offline-user", password: "test-password" }),
+        coordinator.login({
+          username: "offline-user",
+          password: runtimeSecret("coordinator-test"),
+        }),
       ).rejects.toThrow("auth provider returned an invalid in-memory session");
       expect(coordinator.status()).toEqual({ status: "signed-out" });
     }
+  });
+
+  it("normalizes hostile coordinator options, session getters, and provider failures", async () => {
+    const canary = "coordinator-boundary-runtime-canary";
+    const hostileOptions = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(canary);
+        },
+      },
+    );
+    expect(() => new AuthCoordinator(hostileOptions as never)).toThrow(
+      "auth coordinator options are invalid",
+    );
+
+    const throwingSession = new Proxy(
+      {},
+      {
+        get(_target, property) {
+          if (property === "then") return undefined;
+          throw new Error(canary);
+        },
+      },
+    );
+    const provider: AuthProvider = {
+      login: vi.fn(async () => throwingSession as unknown as AuthSession),
+      refresh: vi.fn(async () => {
+        throw new Error(canary);
+      }),
+      logout: vi.fn(async () => {
+        throw new Error(canary);
+      }),
+    };
+    const coordinator = new AuthCoordinator({ provider, clock: () => 1_000 });
+
+    await expect(
+      coordinator.login({ username: "offline-user", password: runtimeSecret("coordinator-test") }),
+    ).rejects.toMatchObject({
+      message: "auth provider returned an invalid in-memory session",
+      cause: undefined,
+      __context__: undefined,
+    });
+
+    provider.login = vi.fn(async () => createSession("valid-token"));
+    await coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
+    await expect(coordinator.refresh()).rejects.toMatchObject({
+      message: "auth provider refresh failed",
+      cause: undefined,
+      __context__: undefined,
+    });
+    await expect(coordinator.logout()).rejects.toMatchObject({
+      message: "auth provider logout failed",
+      cause: undefined,
+      __context__: undefined,
+    });
+    expect(coordinator.status()).toEqual({ status: "signed-out" });
   });
 
   it("rejects provider sessions that are already expired at the coordinator clock", async () => {
@@ -377,12 +480,15 @@ describe("Stage 2A offline authentication", () => {
     const coordinator = new AuthCoordinator({ provider, clock: () => 5_000 });
 
     await expect(
-      coordinator.login({ username: "offline-user", password: "test-password" }),
+      coordinator.login({ username: "offline-user", password: runtimeSecret("coordinator-test") }),
     ).rejects.toThrow(/expired/i);
     expect(coordinator.status()).toEqual({ status: "signed-out" });
 
     provider.login = vi.fn(async () => createSession("valid-login-token", 6_000));
-    await coordinator.login({ username: "offline-user", password: "test-password" });
+    await coordinator.login({
+      username: "offline-user",
+      password: runtimeSecret("coordinator-test"),
+    });
     await expect(coordinator.refresh()).rejects.toThrow(/expired/i);
     expect(coordinator.status()).toMatchObject({
       status: "authenticated",

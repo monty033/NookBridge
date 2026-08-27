@@ -129,6 +129,25 @@ export type {
 export { AuthCoordinator, type AuthCoordinatorOptions } from "./auth/coordinator.js";
 export { MockAuthProvider, type MockAuthProviderOptions } from "./auth/mock-provider.js";
 
+// Stage 2B-live offline mocked Notesnook UserManager/TokenManager auth
+// provider. No @notesnook/core runtime import, no live transport, no signup,
+// no MFA enrollment, no SSE, no sync — the provider accepts only an
+// injected, structurally-typed Notesnook database handle.
+export type {
+  MfaSupplier,
+  NotesnookAuthProviderOptions,
+  NotesnookDatabaseHandle,
+  NotesnookTokenEnvelope,
+  NotesnookTokenManager,
+  NotesnookUserManager,
+  PasswordSupplier,
+} from "./auth/notesnook-auth-provider.js";
+export {
+  NOTESNOOK_TOKEN_KEY,
+  NotesnookAuthProvider,
+  createNotesnookAuthProvider,
+} from "./auth/notesnook-auth-provider.js";
+
 // Stage 2A injected upstream-core seam. No @notesnook/core import or live
 // service transport is exposed by this boundary.
 export type {

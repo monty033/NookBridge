@@ -53,16 +53,23 @@ import { runAuthCommand } from "../src/auth/admin-command.js";
  * they find is a clearly non-credential label.
  */
 function runtimePasswordLabel(suffix: string): string {
-  return `stage-2b-test-password-${suffix}`;
+  const value = `stage-2b-test-password-${suffix}-${randomUUID()}`;
+  generatedPasswordLabels.add(value);
+  return value;
 }
 
 function runtimeMfaLabel(suffix: string): string {
-  return `stage-2b-test-mfa-${suffix}`;
+  const value = `stage-2b-test-mfa-${suffix}-${randomUUID()}`;
+  generatedMfaLabels.add(value);
+  return value;
 }
 
 function runtimeEmail(suffix: string): string {
   return `stage-2b-user-${suffix}@example.test`;
 }
+
+const generatedPasswordLabels = new Set<string>();
+const generatedMfaLabels = new Set<string>();
 
 /**
  * A fake `SecretPrompt` with a queue of pre-canned lines and a
@@ -439,6 +446,142 @@ describe("Stage 2B echo control (production seam)", () => {
     expect(() => createStdioPrompt()).toThrow(/interactive TTY/i);
   });
 
+  it("normalizes hostile constructor option, stream, and platform getters", () => {
+    const canary = runtimePasswordLabel("hostile-prompt-options");
+    const stdout = { write: () => true } as unknown as typeof process.stdout;
+    const validStdin = makeFakeStdin(41);
+    const throwingOptions = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(canary);
+        },
+      },
+    );
+    const throwingStream = {
+      get isTTY(): boolean {
+        throw new Error(canary);
+      },
+      fd: 41,
+    } as unknown as CapturedStdin;
+    const throwingPlatform = {
+      stdin: validStdin,
+      stdout,
+      get platform(): string {
+        throw new Error(canary);
+      },
+    };
+
+    for (const options of [
+      throwingOptions,
+      { stdin: throwingStream, stdout, platform: "linux" },
+      throwingPlatform,
+    ]) {
+      let caught: unknown;
+      try {
+        createStdioPrompt(options as CreateStdioPromptOptions);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const error = caught as Error & { cause?: unknown; __context__?: unknown };
+      expect(error.message).not.toContain(canary);
+      expect(error.cause).toBeUndefined();
+      expect(error.__context__).toBeUndefined();
+    }
+  });
+
+  it("contains throwing stty results and still attempts restore after disable throws", async () => {
+    const canary = runtimePasswordLabel("throwing-stty");
+    const captured = makeFakeStdin(43);
+    const calls: string[] = [];
+    const spawn: NonNullable<CreateStdioPromptOptions["spawn"]> = (command, args) => {
+      void command;
+      calls.push(args[0] ?? "");
+      if (args[0] === "-g") {
+        return { status: 0, stdout: "TOKEN\n", stderr: "", error: undefined };
+      }
+      if (args[0] === "-echo") throw new Error(canary);
+      return { status: 0, stdout: "", stderr: "", error: undefined };
+    };
+    const prompt = createStdioPrompt({
+      stdin: captured,
+      stdout: { write: () => true } as unknown as typeof process.stdout,
+      platform: "linux",
+      spawn,
+    });
+
+    let caught: unknown;
+    try {
+      await prompt.readSecretLine({ prompt: "password" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & { cause?: unknown; __context__?: unknown };
+    expect(error.message).toMatch(/disable terminal echo/i);
+    expect(error.message).not.toContain(canary);
+    expect(error.cause).toBeUndefined();
+    expect(error.__context__).toBeUndefined();
+    expect(calls).toEqual(["-g", "-echo", "TOKEN"]);
+  });
+
+  it("contains malformed stty results without exposing their fields", async () => {
+    const canary = runtimePasswordLabel("malformed-stty-result");
+    const prompt = createStdioPrompt({
+      stdin: makeFakeStdin(45),
+      stdout: { write: () => true } as unknown as typeof process.stdout,
+      platform: "linux",
+      spawn: ((_command, args) => {
+        if (args[0] === "-g") {
+          return {
+            status: "not-a-status",
+            stdout: canary,
+            stderr: canary,
+            error: undefined,
+          } as unknown as ReturnType<NonNullable<CreateStdioPromptOptions["spawn"]>>;
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      }) as NonNullable<CreateStdioPromptOptions["spawn"]>,
+    });
+
+    let caught: unknown;
+    try {
+      await prompt.readSecretLine({ prompt: "password" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & { cause?: unknown; __context__?: unknown };
+    expect(error.message).toBe("failed to capture terminal echo state: refusing to read a secret");
+    expect(error.message).not.toContain(canary);
+    expect(error.cause).toBeUndefined();
+    expect(error.__context__).toBeUndefined();
+  });
+
+  it("swallows an audit-sink failure during restore", async () => {
+    const captured = makeFakeStdin(44);
+    setEchoAuditSink(() => {
+      throw new Error(runtimePasswordLabel("throwing-audit-sink"));
+    });
+    const spawn: NonNullable<CreateStdioPromptOptions["spawn"]> = (_command, args) => {
+      if (args[0] === "-g") {
+        return { status: 0, stdout: "TOKEN\n", stderr: "", error: undefined };
+      }
+      if (args[0] === "TOKEN") throw new Error(runtimePasswordLabel("throwing-restore"));
+      return { status: 0, stdout: "", stderr: "", error: undefined };
+    };
+    const prompt = createStdioPrompt({
+      stdin: captured,
+      stdout: { write: () => true } as unknown as typeof process.stdout,
+      platform: "linux",
+      spawn,
+    });
+    const pending = prompt.readSecretLine({ prompt: "password" });
+    process.nextTick(() => captured.emit("end"));
+    await expect(pending).resolves.toBeNull();
+  });
+
   it("refuses to run on non-POSIX platforms", async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
@@ -547,6 +690,33 @@ describe("Stage 2B secret collection (injected prompt)", () => {
       /maxAttempts must be a positive integer/,
     );
     expect(journal.calls).toBe(0);
+  });
+
+  it("normalizes hostile options getters for every exported collector", async () => {
+    const canary = runtimePasswordLabel("hostile-collector-options");
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(canary);
+        },
+      },
+    );
+
+    for (const collect of [collectEmail, collectPassword, collectMfaCode]) {
+      let caught: unknown;
+      try {
+        await collect(hostile as never);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const error = caught as Error & { __context__?: unknown };
+      expect(error.message).toBe("secret input options are invalid");
+      expect(error.message).not.toContain(canary);
+      expect(error.cause).toBeUndefined();
+      expect(error.__context__).toBeUndefined();
+    }
   });
 
   it("thrown messages do not include the captured buffer (only categorical text)", async () => {
@@ -693,6 +863,80 @@ describe("Stage 2B runAuthCommand (admin auth plumbing)", () => {
       stdout.restore();
       stderr.restore();
     }
+
+    // A hostile prompt can throw the same human-readable phrase used by the
+    // old EOF classifier.  That error is not EOF and must not be swallowed;
+    // the public command boundary must normalize it without retaining the
+    // hostile message, cause, or context, while still zeroizing the password.
+    const collisionCanary = runtimePasswordLabel("mfa-prompt-collision");
+    const collisionError = new Error("mfa input ended before a value was entered");
+    Object.defineProperty(collisionError, "cause", {
+      configurable: true,
+      value: new Error(collisionCanary),
+    });
+    Object.defineProperty(collisionError, "__context__", {
+      configurable: true,
+      value: new Error(collisionCanary),
+    });
+    let collisionPassword: Buffer | undefined;
+    const collidingPrompt: SecretPrompt = {
+      writeLine: () => {},
+      async readSecretLine({ prompt: field }) {
+        if (field === "email") return Buffer.from(runtimeEmail("mfa-prompt-collision"));
+        if (field === "password") {
+          collisionPassword = Buffer.from(runtimePasswordLabel("mfa-prompt-password"));
+          return collisionPassword;
+        }
+        throw collisionError;
+      },
+    };
+    let collisionCaught: unknown;
+    try {
+      await runAuthCommand({
+        argv: ["login"],
+        env: {},
+        prompt: collidingPrompt,
+        exerciseLoginPipeline: true,
+      });
+    } catch (error) {
+      collisionCaught = error;
+    }
+    expect(collisionCaught).toBeInstanceOf(Error);
+    const normalizedCollision = collisionCaught as Error & { __context__?: unknown };
+    expect(normalizedCollision.message).toBe("nookctl auth: credential input failed");
+    expect(normalizedCollision.message).not.toContain(collisionCanary);
+    expect(normalizedCollision.cause).toBeUndefined();
+    expect(normalizedCollision.__context__).toBeUndefined();
+    expect(collisionPassword).toBeDefined();
+    expect(collisionPassword?.every((byte) => byte === 0)).toBe(true);
+
+    // Synchronous prompt writes use the same categorical boundary.
+    const writeCanary = runtimePasswordLabel("mfa-write-failure");
+    const writeError = new Error(writeCanary);
+    const writePassword = Buffer.from(runtimePasswordLabel("mfa-write-password"));
+    const writeFailPrompt: SecretPrompt = {
+      writeLine(text) {
+        if (text === "Notesnook MFA code:") throw writeError;
+      },
+      async readSecretLine({ prompt: field }) {
+        if (field === "email") return Buffer.from(runtimeEmail("mfa-write-failure"));
+        if (field === "password") return writePassword;
+        return Buffer.from(runtimeMfaLabel("unreachable"));
+      },
+    };
+    await expect(
+      runAuthCommand({
+        argv: ["login"],
+        env: {},
+        prompt: writeFailPrompt,
+        exerciseLoginPipeline: true,
+      }),
+    ).rejects.toMatchObject({
+      message: "nookctl auth: credential input failed",
+      cause: undefined,
+      __context__: undefined,
+    });
+    expect(writePassword.every((byte) => byte === 0)).toBe(true);
   });
 
   it("exerciseLoginPipeline completes without MFA when the prompt returns null on the MFA step", async () => {
@@ -792,13 +1036,17 @@ describe("Stage 2B CLI (runNookCtl)", () => {
     }
   });
 
-  it("rejects an unknown auth subcommand via stderr with exit code 2", async () => {
+  it("rejects an unknown auth subcommand categorically via stderr with exit code 2", async () => {
     const stdout = captureStdout();
     const stderr = captureStderr();
     try {
       const exitCode = await runNookCtl(["node", "nookctl", "auth", "nuke"]);
       expect(exitCode).toBe(2);
-      expect(stderr.output()).toMatch(/unknown subcommand "nuke"/);
+      expect(stderr.output()).toBe(
+        "nookctl: nookctl auth: unknown subcommand; use `nookctl auth help`\n",
+      );
+      expect(stderr.output()).not.toContain("nuke");
+      expect(stdout.output()).toBe("");
     } finally {
       stdout.restore();
       stderr.restore();
@@ -843,6 +1091,28 @@ describe("Stage 2B CLI (runNookCtl)", () => {
       expect(subdirs).toEqual([]);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an inherited credential carrier at the public CLI boundary", async () => {
+    const stdout = captureStdout();
+    const stderr = captureStderr();
+    const environment = process.env as unknown as object;
+    const originalPrototype = Object.getPrototypeOf(environment);
+    const canary = runtimePasswordLabel("inherited-env");
+    try {
+      Object.setPrototypeOf(environment, { NOOKBRIDGE_PASSWORD: canary });
+      const exitCode = await runNookCtl(["node", "nookctl", "auth", "status"]);
+      expect(exitCode).toBe(2);
+      expect(stderr.output()).toBe(
+        "nookctl: refusing to read credentials from environment variable NOOKBRIDGE_PASSWORD; use an interactive TTY prompt\n",
+      );
+      expect(stderr.output()).not.toContain(canary);
+      expect(stdout.output()).toBe("");
+    } finally {
+      Object.setPrototypeOf(environment, originalPrototype);
+      stdout.restore();
+      stderr.restore();
     }
   });
 
@@ -932,6 +1202,7 @@ describe("Stage 2B captured-stream / fd / restore regression (constructor seam)"
     Object.defineProperty(process.stdin, "fd", { configurable: true, value: 99 });
     Object.defineProperty(swapped, "isTTY", { configurable: true, value: true });
 
+    const capturedLabel = runtimePasswordLabel("captured");
     const pending = prompt.readSecretLine({ prompt: "password" });
     // Emit the wrong payload on `process.stdin` (the swapped global).
     // Use nextTick so listeners are attached first.
@@ -941,15 +1212,14 @@ describe("Stage 2B captured-stream / fd / restore regression (constructor seam)"
     });
     // And the right payload on the captured stream.
     process.nextTick(() => {
-      const label = runtimePasswordLabel("captured");
-      captured.write(`${label}\n`);
+      captured.write(`${capturedLabel}\n`);
       captured.end();
     });
     const result = await pending;
     expect(result).not.toBeNull();
     if (result === null) throw new Error("expected captured bytes");
     const text = result.toString("utf8");
-    expect(text).toBe(runtimePasswordLabel("captured"));
+    expect(text).toBe(capturedLabel);
     expect(text).not.toContain("swapped");
   });
 
@@ -1003,10 +1273,10 @@ describe("Stage 2B captured-stream / fd / restore regression (constructor seam)"
     }
 
     // Subtest 2: restoration after a read-time error emitted on the
-    // captured stream.  The production helper must NOT swallow the
-    // error (the caller needs to see it), but the `finally` block MUST
-    // still invoke `stty` with the captured restore token to undo the
-    // `stty -echo` it just performed.
+    // captured stream.  The production helper must normalize the
+    // error (the caller still needs a failure), but the `finally` block
+    // MUST still invoke `stty` with the captured restore token to undo
+    // the `stty -echo` it just performed.
     {
       const capturedFd = 31;
       const stdin = makeFakeStdin(capturedFd);
@@ -1017,8 +1287,12 @@ describe("Stage 2B captured-stream / fd / restore regression (constructor seam)"
       process.nextTick(() => {
         stdin.destroy(syntheticError);
       });
-      const err = await pending;
-      expect(err).toBe(syntheticError);
+      const err = (await pending) as Error & { cause?: unknown; __context__?: unknown };
+      expect(err).toMatchObject({
+        message: "secret input stream read failed",
+        cause: undefined,
+        __context__: undefined,
+      });
       const restore = calls.find((c) => c.command === "stty" && c.args[0] === "RESTORE-TOKEN");
       expect(restore).toBeDefined();
       expect(restore?.stdio[0]).toBe(capturedFd);
@@ -1077,23 +1351,11 @@ describe("Stage 2B captured-stream / fd / restore regression (constructor seam)"
     //     appears in the audit so the audit stays categorical)
     expect(message).toMatch(/echo restoration failed/i);
     expect(message).not.toContain(secretLike);
-    for (const suffix of [
-      "captured",
-      "stdio",
-      "swapped",
-      "argv",
-      "cli-argv",
-      "pipeline",
-      "mfa-fail",
-      "noleak",
-      "retry",
-      "once",
-      "zeroize",
-      "no-mfa",
-    ]) {
-      expect(message).not.toContain(runtimePasswordLabel(suffix));
-      expect(message).not.toContain(runtimeMfaLabel(suffix));
-      expect(message).not.toContain(runtimeEmail(suffix));
+    for (const value of generatedPasswordLabels) {
+      expect(message).not.toContain(value);
+    }
+    for (const value of generatedMfaLabels) {
+      expect(message).not.toContain(value);
     }
     expect(message).not.toContain(`fd ${capturedFd}`);
     expect(message).not.toContain(String(capturedFd));

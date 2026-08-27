@@ -31,6 +31,8 @@ import {
   collectEmail,
   collectMfaCode,
   collectPassword,
+  isSecretInputEof,
+  isSecretInputPromptFailure,
   type CollectedSecret,
   type SecretPrompt,
 } from "./secret-input.js";
@@ -130,66 +132,114 @@ export function parseAuthCommand(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
 ): ParseAuthCommandResult {
-  // Env-var check first: a forbidden variable means a caller tried to
-  // hand us a secret, and we must not pretend the command is valid.
-  for (const name of FORBIDDEN_ENV_VARS) {
-    if (typeof env[name] === "string" && (env[name] ?? "").length > 0) {
-      return {
-        kind: "error",
-        exitCode: 2,
-        message: `refusing to read credentials from environment variable ${name}; use an interactive TTY prompt`,
-      };
+  try {
+    if (
+      typeof argv !== "object" ||
+      argv === null ||
+      !Array.isArray(argv) ||
+      typeof env !== "object" ||
+      env === null ||
+      Array.isArray(env)
+    ) {
+      return invalidParseInput();
     }
-  }
 
-  // Argv check: any forbidden flag is an error.
-  for (const flag of FORBIDDEN_ARG_FLAGS) {
-    if (argv.includes(flag)) {
-      return {
-        kind: "error",
-        exitCode: 2,
-        message: `refusing to read credentials from CLI flag ${flag}; use an interactive TTY prompt`,
-      };
+    // Copy both roots inside the protective boundary.  This validates array
+    // element types and also exercises hostile proxy iterators/getters without
+    // ever interpolating their values into a diagnostic.
+    const safeArgv = Array.from(argv as readonly unknown[]);
+    if (!safeArgv.every((argument): argument is string => typeof argument === "string")) {
+      return invalidParseInput();
     }
-  }
+    const stringArgv = safeArgv as string[];
 
-  const subcommand = argv[0] ?? "help";
+    // Read every own environment value inside the same boundary.  The parser
+    // does not use the values, but reading them makes hostile getters fail
+    // closed rather than silently converting a malformed snapshot to success.
+    for (const name of Object.keys(env)) {
+      const value = (env as Record<string, unknown>)[name];
+      if (value !== undefined && typeof value !== "string") return invalidParseInput();
+    }
 
-  switch (subcommand) {
-    case "login":
-      return { kind: "parsed", command: { kind: "login", subcommand: "login" } };
-    case "status":
-      return {
-        kind: "parsed",
-        command: { kind: "status", subcommand: "status" },
-      };
-    case "logout":
-      return {
-        kind: "parsed",
-        command: { kind: "logout", subcommand: "logout" },
-      };
-    case "reset-local-client":
-      return {
-        kind: "parsed",
-        command: {
-          kind: "reset-local-client",
-          subcommand: "reset-local-client",
-        },
-      };
-    case "help":
-    case "--help":
-    case "-h":
-      return {
-        kind: "parsed",
-        command: { kind: "help", subcommand: "help" },
-      };
-    default:
-      return {
-        kind: "error",
-        exitCode: 2,
-        message: `nookctl auth: unknown subcommand "${subcommand}"`,
-      };
+    // Env-var check first: a forbidden variable means a caller tried to
+    // hand us a secret, and we must not pretend the command is valid.  The
+    // `in` check deliberately keeps presence semantics (including undefined)
+    // and is protected against a hostile Proxy `has` trap.
+    for (const name of FORBIDDEN_ENV_VARS) {
+      // Read through the same protected boundary as ordinary environment
+      // values so hostile getters fail closed.  Presence is still checked
+      // separately with `in`, which includes inherited carriers and keeps
+      // undefined-valued carriers forbidden.
+      const value = (env as Record<string, unknown>)[name];
+      if (value !== undefined && typeof value !== "string") return invalidParseInput();
+      if (name in env) {
+        return {
+          kind: "error",
+          exitCode: 2,
+          message: `refusing to read credentials from environment variable ${name}; use an interactive TTY prompt`,
+        };
+      }
+    }
+
+    // Argv check: any forbidden flag, including an equals-form flag with an
+    // attached value, is an error. Report only the categorical flag name.
+    for (const argument of stringArgv) {
+      const flag = FORBIDDEN_ARG_FLAGS.find(
+        (candidate) => argument === candidate || argument.startsWith(`${candidate}=`),
+      );
+      if (flag !== undefined) {
+        return {
+          kind: "error",
+          exitCode: 2,
+          message: `refusing to read credentials from CLI flag ${flag}; use an interactive TTY prompt`,
+        };
+      }
+    }
+
+    const subcommand = stringArgv[0] ?? "help";
+
+    switch (subcommand) {
+      case "login":
+        return { kind: "parsed", command: { kind: "login", subcommand: "login" } };
+      case "status":
+        return {
+          kind: "parsed",
+          command: { kind: "status", subcommand: "status" },
+        };
+      case "logout":
+        return {
+          kind: "parsed",
+          command: { kind: "logout", subcommand: "logout" },
+        };
+      case "reset-local-client":
+        return {
+          kind: "parsed",
+          command: {
+            kind: "reset-local-client",
+            subcommand: "reset-local-client",
+          },
+        };
+      case "help":
+      case "--help":
+      case "-h":
+        return {
+          kind: "parsed",
+          command: { kind: "help", subcommand: "help" },
+        };
+      default:
+        return {
+          kind: "error",
+          exitCode: 2,
+          message: "nookctl auth: unknown subcommand; use `nookctl auth help`",
+        };
+    }
+  } catch {
+    return invalidParseInput();
   }
+}
+
+function invalidParseInput(): ParseAuthCommandResult {
+  return { kind: "error", exitCode: 2, message: "nookctl auth: invalid command input" };
 }
 
 /**
@@ -289,6 +339,32 @@ export type RunAuthCommandResult =
       exitCode: 2;
     }>;
 
+type NormalizedRunAuthOptions = Readonly<{
+  argv: unknown;
+  env: unknown;
+  prompt: unknown;
+  maxAttempts: unknown;
+  exerciseLoginPipeline: unknown;
+}>;
+
+function normalizeRunAuthOptions(options: unknown): NormalizedRunAuthOptions {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw new Error("invalid auth options");
+  }
+  const candidate = options as Record<string, unknown>;
+  return {
+    argv: candidate.argv,
+    env: candidate.env,
+    prompt: candidate.prompt,
+    maxAttempts: candidate.maxAttempts,
+    exerciseLoginPipeline: candidate.exerciseLoginPipeline,
+  };
+}
+
+function invalidRunAuthInput(): RunAuthCommandResult {
+  return { kind: "error", exitCode: 2, message: "nookctl auth: invalid command input" };
+}
+
 /**
  * Run the `nookctl auth <subcommand>` plumbing.
  *
@@ -302,7 +378,20 @@ export type RunAuthCommandResult =
 export async function runAuthCommand(
   options: RunAuthCommandOptions,
 ): Promise<RunAuthCommandResult> {
-  const parsed = parseAuthCommand(options.argv, options.env);
+  // Options are caller-controlled runtime data.  Normalize the root and all
+  // properties before any field access can escape the protective boundary.
+  // In particular, a Proxy/getter must not be able to expose its error text.
+  let normalized: NormalizedRunAuthOptions;
+  try {
+    normalized = normalizeRunAuthOptions(options);
+  } catch {
+    return invalidRunAuthInput();
+  }
+
+  const parsed = parseAuthCommand(
+    normalized.argv as readonly string[],
+    normalized.env as Readonly<Record<string, string | undefined>>,
+  );
   if (parsed.kind === "error") {
     return { kind: "error", exitCode: 2, message: parsed.message };
   }
@@ -320,7 +409,7 @@ export async function runAuthCommand(
   // to do anything until the upstream Notesnook core login API is
   // wired in by a future reviewed slice.
   if (command.kind === "login") {
-    if (options.exerciseLoginPipeline !== true) {
+    if (normalized.exerciseLoginPipeline !== true) {
       return {
         kind: "deferred",
         outcome: {
@@ -335,18 +424,25 @@ export async function runAuthCommand(
     // prompt.  The production CLI never sets this flag, so a missing
     // prompt here is a programmer error — fail loudly rather than
     // silently reaching for `process.stdin`.
-    if (options.prompt === undefined) {
-      throw new Error(
+    if (normalized.prompt === undefined) {
+      throw categoricalAuthError(
         "runAuthCommand: exerciseLoginPipeline=true requires an injected prompt; refusing to read secrets from a global stdin",
       );
     }
     const pipelineOpts: { prompt: SecretPrompt; maxAttempts?: number } = {
-      prompt: options.prompt,
+      prompt: normalized.prompt as SecretPrompt,
     };
-    if (options.maxAttempts !== undefined) {
-      pipelineOpts.maxAttempts = options.maxAttempts;
+    if (normalized.maxAttempts !== undefined) {
+      pipelineOpts.maxAttempts = normalized.maxAttempts as number;
     }
-    return exerciseLoginPipeline(pipelineOpts);
+    try {
+      return await exerciseLoginPipeline(pipelineOpts);
+    } catch (error) {
+      if (isSecretInputPromptFailure(error)) {
+        throw categoricalAuthError("nookctl auth: credential input failed");
+      }
+      throw error;
+    }
   }
 
   // `status`, `logout`, and `reset-local-client` all return the same
@@ -402,7 +498,7 @@ async function exerciseLoginPipeline(options: {
     // MFA is optional; if the prompt closes before a code is entered
     // we report the credential pipeline as completed without an MFA
     // step.  The error must not contain the password bytes.
-    if (!(error instanceof Error) || !/mfa input ended/i.test(error.message)) {
+    if (!isSecretInputEof(error)) {
       password.zero();
       throw error;
     }
@@ -426,4 +522,12 @@ async function exerciseLoginPipeline(options: {
     },
     captured,
   };
+}
+
+/** Create a public auth-command error with no injected chain or raw details. */
+function categoricalAuthError(message: string): Error {
+  const error = new Error(message);
+  Object.defineProperty(error, "cause", { configurable: true, value: undefined });
+  Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  return error;
 }
