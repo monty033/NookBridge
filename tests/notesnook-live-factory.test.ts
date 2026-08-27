@@ -61,6 +61,7 @@ interface FakeUserManager {
   authenticateEmail: ReturnType<typeof vi.fn>;
   authenticateMultiFactorCode: ReturnType<typeof vi.fn>;
   authenticatePassword: ReturnType<typeof vi.fn>;
+  _login: ReturnType<typeof vi.fn>;
   getUser: ReturnType<typeof vi.fn>;
   logout: ReturnType<typeof vi.fn>;
 }
@@ -97,6 +98,7 @@ function createFakeUserManager(): FakeUserManager {
     authenticateEmail: vi.fn(async () => ({ ok: true })),
     authenticateMultiFactorCode: vi.fn(async () => ({ ok: true })),
     authenticatePassword: vi.fn(async () => undefined),
+    _login: vi.fn(async () => undefined),
     getUser: vi.fn(async () => ({ id: "u-1", email: "alice@example.test" })),
     logout: vi.fn(async () => undefined),
   };

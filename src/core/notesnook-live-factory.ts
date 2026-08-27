@@ -105,6 +105,15 @@ export interface NotesnookLiveCoreHandle {
     authenticateEmail: (email: string) => Promise<unknown>;
     authenticateMultiFactorCode: (code: string, type: "app") => Promise<unknown>;
     authenticatePassword: (email: string, password: string) => Promise<unknown>;
+    /**
+     * Forward the narrow password-only subset of the pinned
+     * `@notesnook/core@8.1.3` `user._login(...)` contract.  The
+     * provider supplies both the SHA-256 `hashedPassword` for the auth
+     * grant and the plaintext `password` solely so upstream can derive
+     * the local crypto key after authentication.  MFA fields and all
+     * other upstream options remain intentionally unreachable.
+     */
+    _login: (args: { email: string; password: string; hashedPassword: string }) => Promise<void>;
     getUser: () => Promise<NotesnookLiveUser | undefined>;
     /**
      * Forward `clearLocal: boolean` to the pinned
@@ -223,61 +232,71 @@ export async function createNotesnookLiveCoreFactory(
   // lazy dynamic import; offline tests pass an injected seam.
   const coreModule = normalized.injectedModule ?? (await loadRealCoreModule());
 
-  // Step 3 — construct, set up, initialise.  Every throwable step
-  // is wrapped so a hostile value never leaks its cause / context.
-  const db = safeConstructDatabase(coreModule);
-  safeSetupDatabase(db, normalized.setup);
-  await safeInitDatabase(db);
-  ensureOpen();
+  // Step 3 onward is one resource-owned transaction.  Once Database has
+  // been constructed, every setup/init/shape failure gets the same teardown
+  // opportunity as an ordinary cleanup, even though no handle is returned.
+  try {
+    const db = safeConstructDatabase(coreModule);
+    safeSetupDatabase(db, normalized.setup);
+    await safeInitDatabase(db);
+    ensureOpen();
 
-  // Step 4 — validate the live handle exposes the slots downstream
-  // needs.  Missing slots fail with a categorical error.  Per the
-  // pinned `@notesnook/core@8.1.3` d.ts, `user` and `tokenManager`
-  // are pre-built object managers, while `kv` is a CALLABLE
-  // accessor (`() => KVStorage`), so each slot is read through its
-  // own normalizer.
-  const userManager = readDbObjectSlot(
-    db,
-    "user",
-    "Notesnook database handle is missing user slot",
-  );
-  const tokenManager = readDbObjectSlot(
-    db,
-    "tokenManager",
-    "Notesnook database handle is missing tokenManager slot",
-  );
-  const kvAccessor = readDbKvAccessor(db);
+    // Step 4 — validate the live handle exposes the slots downstream needs.
+    const userManager = readDbObjectSlot(
+      db,
+      "user",
+      "Notesnook database handle is missing user slot",
+    );
+    const tokenManager = readDbObjectSlot(
+      db,
+      "tokenManager",
+      "Notesnook database handle is missing tokenManager slot",
+    );
+    const kvAccessor = readDbKvAccessor(db);
+    const kv = normalizeKvAccessor(kvAccessor, ensureOpen);
 
-  const kv = normalizeKvAccessor(kvAccessor, ensureOpen);
+    // Step 5 — capture each method once behind narrow, lifecycle-checked
+    // wrappers.  No generic Database/storage object escapes this boundary.
+    const user = wrapUserManager(userManager, ensureOpen);
+    const token = wrapTokenManager(tokenManager, ensureOpen);
 
-  // Step 5 — wrap each user / token / kv method.  Wrapping happens
-  // once at construction so a hostile getter that flips after the
-  // factory returns cannot poison the handle.
-  const user = wrapUserManager(userManager, ensureOpen);
-  const token = wrapTokenManager(tokenManager, ensureOpen);
+    // Step 6 — assemble the frozen handle.  A cleanup attempt is published
+    // before its first await; concurrent callers therefore await the exact
+    // same attempt.  Failed attempts are not memoized, so callers can safely
+    // retry teardown while the lifecycle remains fail-closed at the boundary.
+    let cleanupInFlight: Promise<void> | undefined;
+    let cleanupCompleted = false;
+    const cleanup = (): Promise<void> => {
+      if (cleanupCompleted) return Promise.resolve();
+      if (cleanupInFlight) return cleanupInFlight;
+      const attempt = (async () => {
+        await teardownResources(normalized.lifecycle, normalized.onCleanup);
+        cleanupCompleted = true;
+      })();
+      const published = attempt.finally(() => {
+        if (cleanupInFlight === published) cleanupInFlight = undefined;
+      });
+      cleanupInFlight = published;
+      return published;
+    };
 
-  // Step 6 — assemble the frozen handle.
-  let cleanupInvoked = false;
-  const cleanup = async () => {
-    if (cleanupInvoked) return;
-    cleanupInvoked = true;
-    try {
-      normalized.lifecycle.close();
-    } catch {
-      throw factoryError("Notesnook live runtime lifecycle close failed");
-    }
-    await normalizeAsyncVoid(normalized.onCleanup());
-  };
+    const handle: NotesnookLiveCoreHandle = Object.freeze({
+      user,
+      token,
+      kv,
+      initialized: true,
+      cleanup,
+    });
 
-  const handle: NotesnookLiveCoreHandle = Object.freeze({
-    user,
-    token,
-    kv,
-    initialized: true,
-    cleanup,
-  });
-
-  return handle;
+    return handle;
+  } catch (error) {
+    // Teardown errors are deliberately suppressed here: the construction
+    // failure remains categorical, while the teardown helper still attempts
+    // both lifecycle close and the supplied cleanup hook.
+    await bestEffortTeardown(normalized.lifecycle, normalized.onCleanup);
+    if (isFactoryError(error) || isNotesnookAdapterError(error)) throw error;
+    throw factoryError("Notesnook live core setup failed");
+  }
 }
 
 type NormalizedFactoryOptions = Readonly<{
@@ -681,6 +700,7 @@ function wrapUserManager(
   const slotAuthEmail = readUserFn(userManager, "authenticateEmail");
   const slotMfa = readUserFn(userManager, "authenticateMultiFactorCode");
   const slotPassword = readUserFn(userManager, "authenticatePassword");
+  const slotLogin = readUserFn(userManager, "_login");
   const slotGetUser = readUserFn(userManager, "getUser");
   const slotLogout = readUserFn(userManager, "logout");
 
@@ -700,6 +720,7 @@ function wrapUserManager(
       "user.authenticatePassword failed",
       ensureOpen,
     ),
+    _login: wrapAsyncLogin(slotLogin, "user._login failed", ensureOpen),
     getUser: wrapGetUser(slotGetUser, ensureOpen),
     logout: wrapAsyncLogout(slotLogout, "user.logout failed", ensureOpen),
   });
@@ -788,6 +809,48 @@ function wrapAsyncPassword(
     try {
       const result: unknown = fn(email, password);
       return await (result as unknown);
+    } catch {
+      throw factoryError(message);
+    }
+  };
+}
+
+function wrapAsyncLogin(
+  fn: (...args: unknown[]) => unknown,
+  message: string,
+  ensureOpen: () => void,
+): NotesnookLiveCoreHandle["user"]["_login"] {
+  return async (args) => {
+    ensureOpen();
+
+    let email: unknown;
+    let password: unknown;
+    let hashedPassword: unknown;
+    try {
+      if (typeof args !== "object" || args === null || Array.isArray(args)) {
+        throw factoryError("Notesnook _login requires an arguments object");
+      }
+      const candidate = args as Record<string, unknown>;
+      email = candidate.email;
+      password = candidate.password;
+      hashedPassword = candidate.hashedPassword;
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook _login arguments could not be read");
+    }
+
+    if (typeof email !== "string" || email.length === 0) {
+      throw factoryError("Notesnook _login requires a non-empty string email");
+    }
+    if (typeof password !== "string" || password.length === 0) {
+      throw factoryError("Notesnook _login requires a non-empty string password");
+    }
+    if (typeof hashedPassword !== "string" || hashedPassword.length === 0) {
+      throw factoryError("Notesnook _login requires a non-empty string hashedPassword");
+    }
+
+    try {
+      await (fn({ email, password, hashedPassword }) as unknown);
     } catch {
       throw factoryError(message);
     }
@@ -984,6 +1047,50 @@ function normalizeTokenEnvelope(raw: unknown): NotesnookLiveTokenEnvelope | unde
     scope,
     t,
   });
+}
+
+/**
+ * Teardown is a hostile boundary too: lifecycle.close may throw
+ * synchronously and onCleanup may throw before returning a thenable.
+ * Attempt both actions, preserve only categorical errors, and never
+ * attach the hostile value as a cause/context.
+ */
+async function teardownResources(
+  lifecycle: NotesnookLiveCoreLifecycle,
+  onCleanup: () => void | Promise<void>,
+): Promise<void> {
+  let failure: Error | undefined;
+  try {
+    lifecycle.close();
+  } catch {
+    failure = factoryError("Notesnook live runtime lifecycle close failed");
+  }
+  try {
+    await invokeCleanupHook(onCleanup);
+  } catch (error) {
+    failure ??= isFactoryError(error) ? error : factoryError("Notesnook cleanup hook rejected");
+  }
+  if (failure) throw failure;
+}
+
+async function bestEffortTeardown(
+  lifecycle: NotesnookLiveCoreLifecycle,
+  onCleanup: () => void | Promise<void>,
+): Promise<void> {
+  try {
+    await teardownResources(lifecycle, onCleanup);
+  } catch {
+    // The construction/setup/init error is the caller-visible categorical
+    // failure.  Teardown was still attempted in both branches above.
+  }
+}
+
+function invokeCleanupHook(onCleanup: () => void | Promise<void>): Promise<void> {
+  try {
+    return normalizeAsyncVoid(onCleanup());
+  } catch {
+    return Promise.reject(factoryError("Notesnook cleanup hook rejected"));
+  }
 }
 
 // ---------------------------------------------------------------------------

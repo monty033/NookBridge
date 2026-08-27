@@ -106,6 +106,7 @@ function createCoreProbe(): CoreProbe {
     authenticateEmail: vi.fn(async () => ({ scope: "notes" })),
     authenticateMultiFactorCode: vi.fn(async () => undefined),
     authenticatePassword: vi.fn(async () => undefined),
+    _login: vi.fn(async () => undefined),
     getUser: vi.fn(async () => ({ id: "probe-user", email: "probe@example.test" })),
     logout: vi.fn(async () => undefined),
   };

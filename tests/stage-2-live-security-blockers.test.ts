@@ -45,6 +45,7 @@ function makeLiveModule(): NotesnookRealCoreModule {
     authenticateEmail: vi.fn(async () => ({ scope: "notes" })),
     authenticateMultiFactorCode: vi.fn(async () => undefined),
     authenticatePassword: vi.fn(async () => undefined),
+    _login: vi.fn(async () => undefined),
     getUser: vi.fn(async () => ({ id: "user-1", email: "user@example.test" })),
     logout: vi.fn(async () => undefined),
   };
@@ -54,7 +55,7 @@ function makeLiveModule(): NotesnookRealCoreModule {
       refresh_token: "refresh",
       expires_in: 3600,
       scope: "notes",
-      t: Math.floor(Date.now() / 1000),
+      t: Date.now(),
     })),
     _refreshToken: vi.fn(async () => undefined),
   };

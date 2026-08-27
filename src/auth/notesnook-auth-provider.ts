@@ -16,7 +16,7 @@
  *
  *   1. `db.user.authenticateEmail(email)`
  *   2. (Optional) `db.user.authenticateMultiFactorCode(code, "app")`
- *      when the returned token scope contains
+ *      when the returned token scope exactly equals
  *      `auth:grant_types:mfa`.
  *   3. `db.user.authenticatePassword(email, password)`
  *   4. `db.tokenManager._refreshToken(true)` for refresh.
@@ -176,10 +176,17 @@ const DEFAULT_PASSWORD_MAX_ATTEMPTS = 3;
  */
 const MFA_REQUIRED_SCOPE = "auth:grant_types:mfa" as const;
 
-const SCOPE_SEPARATOR = " ";
-
 /** Private control value for the provider's stale-operation path. */
 const PERSISTENCE_SUPERSEDED = Symbol("notesnook persistence superseded");
+
+/**
+ * Sentinel promise returned by {@link NotesnookAuthProvider.requestCleanup}
+ * when the current cleanup cycle is already settled.  Using a module-level
+ * resolved promise (rather than allocating a fresh one per short-circuit)
+ * keeps the coalescing boundary allocation-free while making it impossible
+ * for callers to accidentally await a never-settling promise.
+ */
+const ALREADY_SATISFIED: Promise<void> = Promise.resolve();
 
 /**
  * The mocked Notesnook auth provider.  Implements `AuthProvider` so
@@ -208,10 +215,51 @@ export class NotesnookAuthProvider implements AuthProvider {
   private operationEpoch = 0;
   /** A refresh is valid only after login/restore has activated this session. */
   private activeSessionEpoch: number | undefined;
-  /** Serializes the remove/write critical section at the persistence boundary. */
+  /** Serializes canonical cleanup operations at the persistence boundary. */
   private persistenceTail: Promise<void> = Promise.resolve();
-  /** A login may follow logout, but refresh may not race it. */
+  /** Serializes writes without making cleanup wait for a stale deferred write. */
+  private writeTail: Promise<void> = Promise.resolve();
+  /** The immediate logout operation; the admission barrier may outlive it. */
   private logoutInFlight: Promise<void> | undefined;
+  /** Serialize complete login operations because the upstream handle has shared token state. */
+  private loginTail: Promise<void> = Promise.resolve();
+  private readonly loginInFlight = new Set<Promise<AuthSession>>();
+  /** Counts only logout/cancellation invalidations, not ordinary logins. */
+  private invalidationGeneration = 0;
+  /** Durable cancellation cleanup is published and shared by all callers. */
+  private cancelInFlight: Promise<void> | undefined;
+  /** Authentication is blocked until an unproven cleanup is repaired. */
+  private cleanupBlocked = false;
+  /**
+   * Shared single-flight cleanup promise.  Immediate logout, cancellation,
+   * and the post-drain admission barrier all await the same in-flight
+   * authoritative cleanup so that one invalidation cycle invokes the
+   * local clear hook at most once even when multiple paths trigger it.
+   * Reset to undefined after settlement so a later cycle can run again.
+   */
+  private cleanupInFlight: Promise<void> | undefined;
+  /**
+   * Tracks whether the local clear hook has been invoked for the current
+   * cleanup cycle.  Used as a guard inside {@link requestCleanup} so that
+   * a coalesced caller cannot re-enter the destructive local clear path.
+   * Reset to false when a new cycle publishes a fresh cleanupInFlight.
+   */
+  private cleanupLocalStateInvoked = false;
+  /** Prevents coordinator cancel-then-logout from repeating settled cleanup. */
+  private cleanupSatisfied = false;
+  /** Drains invalidated work and gates admission of subsequent operations. */
+  private admissionBarrier: Promise<void> | undefined;
+  /**
+   * Tracks in-flight `storage.read(NOTESNOOK_TOKEN_KEY)` promises so that
+   * {@link verifyTokenAbsent} can detect when a prior read is still
+   * pending against a stale epoch.  When such a read exists, the verify
+   * skips its own read — that read would share the same storage pipeline
+   * and deadlock behind the prior one, and the prior read will be
+   * discarded by its consumer's operation-epoch check anyway.  Tracking
+   * the reads here means the cleanup's verify gate can never become an
+   * unintended serialization point on the storage seam.
+   */
+  private readonly inflightStorageReads = new Set<Promise<unknown>>();
 
   constructor(options: NotesnookAuthProviderOptions) {
     const normalized = normalizeProviderOptions(options);
@@ -260,18 +308,63 @@ export class NotesnookAuthProvider implements AuthProvider {
    */
   async login(credentials: AuthCredentials): Promise<AuthSession> {
     const validated = validateCredentials(credentials);
-    // Capture this operation's generation before any await.  In particular,
-    // a signed-out coordinator login can be paused here while logout calls
-    // cancelPending(); adopting the post-logout epoch would let that stale
-    // login authenticate and persist a token anyway.
-    const epoch = ++this.operationEpoch;
-    await this.waitForLogout();
+    this.ensureCleanupAvailable();
+    const requestedInvalidation = this.invalidationGeneration;
+    const barrierAtStart = this.admissionBarrier;
+    return this.enqueueLogin(validated, requestedInvalidation, barrierAtStart);
+  }
+
+  private async enqueueLogin(
+    credentials: AuthCredentials,
+    requestedInvalidation: number,
+    barrierAtStart: Promise<void> | undefined,
+  ): Promise<AuthSession> {
+    const previous = this.loginTail;
+    let release!: () => void;
+    this.loginTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await previous;
+      if (this.invalidationGeneration !== requestedInvalidation) {
+        throw categoricalError("notesnook auth operation superseded");
+      }
+      if (barrierAtStart) await barrierAtStart;
+      await this.waitForCancellationAndLogout();
+      if (this.invalidationGeneration !== requestedInvalidation) {
+        throw categoricalError("notesnook auth operation superseded");
+      }
+      this.ensureCleanupAvailable();
+      const epoch = ++this.operationEpoch;
+      const operation = this.startLoginOperation(epoch, credentials);
+      try {
+        return await operation;
+      } finally {
+        this.loginInFlight.delete(operation);
+      }
+    } finally {
+      release();
+    }
+  }
+
+  private startLoginOperation(epoch: number, credentials: AuthCredentials): Promise<AuthSession> {
+    let resolveOperation!: (session: AuthSession | PromiseLike<AuthSession>) => void;
+    let rejectOperation!: (reason?: unknown) => void;
+    const operation = new Promise<AuthSession>((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
+    });
+    this.loginInFlight.add(operation);
+    void this.loginInternal(epoch, credentials).then(resolveOperation, rejectOperation);
+    return operation;
+  }
+
+  private async loginInternal(epoch: number, validated: AuthCredentials): Promise<AuthSession> {
     this.ensureOperationCurrent(epoch);
     const { username, password } = validated;
 
     // Step 1: upstream authenticateEmail.  Per the verified contract,
-    // this returns a token whose scope tells us whether MFA is
-    // required.
+    // this returns a token whose scope tells us whether MFA is required.
     let initialRaw: unknown;
     try {
       initialRaw = await this.core.user.authenticateEmail(username);
@@ -282,24 +375,15 @@ export class NotesnookAuthProvider implements AuthProvider {
     this.ensureOperationCurrent(epoch);
     const initialEnvelope = asEnvelope(initialRaw);
 
-    // Step 2: optional MFA.  When the upstream scope contains the
-    // `auth:grant_types:mfa` marker we MUST submit an MFA code via
-    // `authenticateMultiFactorCode(code, "app")` before the password
-    // round.  We re-issue the email-auth round so the MFA submission
-    // path is observable in the call journal.
     let envelope = initialEnvelope;
     if (scopeContainsMfa(initialEnvelope.scope)) {
       envelope = await this.submitMfaWithRetry(epoch);
       this.ensureOperationCurrent(epoch);
     }
 
-    // Step 3: password.  Retry up to `passwordMaxAttempts` against
-    // the same upstream handle without re-issuing authenticateEmail.
     envelope = await this.submitPasswordWithRetry(epoch, username, password);
     this.ensureOperationCurrent(epoch);
 
-    // Validate and translate before persisting.  Invalid or expired
-    // envelopes must never reach the storage boundary.
     const session = envelopeToSession(envelope, this.providerNow());
     await this.persistIfCurrent(epoch, envelope);
     this.ensureOperationCurrent(epoch);
@@ -308,6 +392,9 @@ export class NotesnookAuthProvider implements AuthProvider {
       status: "authenticated",
       userId: session.userId,
     });
+    // Logging is re-entrant.  A logger may cancel the provider synchronously;
+    // do not return a session after that cancellation has changed the epoch.
+    this.ensureOperationCurrent(epoch);
     return session;
   }
 
@@ -323,6 +410,7 @@ export class NotesnookAuthProvider implements AuthProvider {
    * mutates the persisted envelope.
    */
   async refresh(_session: AuthSession): Promise<AuthSession> {
+    this.ensureCleanupAvailable();
     if (this.logoutInFlight) {
       throw categoricalError("notesnook refresh unavailable during logout");
     }
@@ -332,6 +420,13 @@ export class NotesnookAuthProvider implements AuthProvider {
     if (this.refreshInFlight) {
       throw categoricalError("notesnook refresh already in progress");
     }
+    const requestedInvalidation = this.invalidationGeneration;
+    const barrierAtStart = this.admissionBarrier;
+    if (barrierAtStart) await barrierAtStart;
+    if (this.invalidationGeneration !== requestedInvalidation) {
+      throw categoricalError("notesnook auth operation superseded");
+    }
+    this.ensureCleanupAvailable();
     const epoch = ++this.operationEpoch;
     const operation = this.refreshInternal(epoch);
     this.refreshInFlight = operation;
@@ -354,11 +449,11 @@ export class NotesnookAuthProvider implements AuthProvider {
     // after the initial no-op wait has been checked but before its
     // continuation runs, the read is still part of the stale restore.
     const epoch = this.operationEpoch;
-    await this.waitForLogout();
+    await this.waitForAdmission();
     if (!this.isOperationCurrent(epoch)) return null;
     let raw: unknown;
     try {
-      raw = await this.storage.read<unknown>(NOTESNOOK_TOKEN_KEY);
+      raw = await this.readKvToken<unknown>();
     } catch {
       if (!this.isOperationCurrent(epoch)) return null;
       throw categoricalError("notesnook token storage read failed");
@@ -387,8 +482,12 @@ export class NotesnookAuthProvider implements AuthProvider {
    */
   async logout(_session: AuthSession): Promise<void> {
     if (this.logoutInFlight) return this.logoutInFlight;
+    const loginToSettle = [...this.loginInFlight];
+    const refreshToSettle = this.refreshInFlight;
     ++this.operationEpoch;
+    ++this.invalidationGeneration;
     this.activeSessionEpoch = undefined;
+    this.startAdmissionBarrier(loginToSettle, refreshToSettle);
     const operation = this.logoutInternal();
     this.logoutInFlight = operation;
     try {
@@ -402,10 +501,79 @@ export class NotesnookAuthProvider implements AuthProvider {
    * Invalidate pending login/refresh completions without requiring a current
    * public session. The persistence guard observes this epoch before and
    * after every token write, so a cancelled login cannot recreate kv.token.
+   *
+   * The durable authoritative cleanup is published through the shared
+   * single-flight {@link cleanupInFlight} so that overlapping cancellation
+   * callers observe the same authoritative completion.
    */
-  cancelPending(): void {
+  cancelPending(): Promise<void> {
     ++this.operationEpoch;
+    ++this.invalidationGeneration;
     this.activeSessionEpoch = undefined;
+    const existing = this.cancelInFlight;
+    if (existing) return existing;
+    const loginToSettle = [...this.loginInFlight];
+    const refreshToSettle = this.refreshInFlight;
+    this.startAdmissionBarrier(loginToSettle, refreshToSettle);
+    let cancellation!: Promise<void>;
+    cancellation = this.requestCleanup().finally(() => {
+      if (this.cancelInFlight === cancellation) this.cancelInFlight = undefined;
+    });
+    this.cancelInFlight = cancellation;
+    return cancellation;
+  }
+
+  /**
+   * Drain invalidated work without making logout/cancel wait for it. The
+   * barrier remains published until its final authoritative cleanup finishes,
+   * so later login/refresh/restore calls cannot cross the stale-work boundary.
+   *
+   * The authoritative cleanup at the end of the drain shares the same
+   * single-flight {@link cleanupInFlight} promise as the immediate logout /
+   * cancellation paths; overlapping triggers coalesce into one shared
+   * operation and the local clear hook is invoked at most once per cycle.
+   */
+  private startAdmissionBarrier(
+    loginToSettle: Promise<AuthSession>[],
+    refreshToSettle: Promise<AuthSession> | undefined,
+  ): void {
+    const previousBarrier = this.admissionBarrier;
+    const operations = refreshToSettle ? [...loginToSettle, refreshToSettle] : loginToSettle;
+    if (operations.length === 0) return;
+    const barrier = (async (): Promise<void> => {
+      if (previousBarrier) await previousBarrier;
+      if (operations.length > 0) await Promise.allSettled(operations);
+      await this.requestCleanup();
+    })().catch((error: unknown) => {
+      // Background cleanup must never become an unhandled rejection. The
+      // categorical fail-closed flag prevents new auth work until reset.
+      void error;
+      this.cleanupBlocked = true;
+    });
+    this.admissionBarrier = barrier;
+    void barrier.then(() => {
+      if (this.admissionBarrier === barrier) this.admissionBarrier = undefined;
+    });
+  }
+
+  private ensureCleanupAvailable(): void {
+    if (this.cleanupBlocked) throw categoricalError("notesnook cleanup requires reset");
+  }
+
+  private async waitForAdmission(): Promise<void> {
+    for (;;) {
+      const barrier = this.admissionBarrier;
+      if (barrier) await barrier;
+      const cancellation = this.cancelInFlight;
+      if (cancellation) await cancellation;
+      const logout = this.logoutInFlight;
+      if (logout) await logout;
+      if (!this.admissionBarrier && !this.cancelInFlight && !this.logoutInFlight) return;
+    }
+  }
+
+  private async waitForCancellationAndLogout(): Promise<void> {
+    await this.waitForAdmission();
   }
 
   private async logoutInternal(): Promise<void> {
@@ -415,24 +583,173 @@ export class NotesnookAuthProvider implements AuthProvider {
     } catch {
       failure = categoricalError("notesnook logout failed");
     }
+    try {
+      await this.requestCleanup();
+    } catch (error) {
+      failure ??=
+        error instanceof Error ? error : categoricalError("notesnook token cleanup failed");
+    }
+    if (failure) throw failure;
+    this.logInfo("notesnook.auth.logout", { status: "signed-out" });
+  }
+
+  /**
+   * Shared single-flight coalescing boundary for authoritative token cleanup.
+   *
+   * Every invalidation path — immediate `logout`, `cancelPending`, and the
+   * post-drain `admissionBarrier` — calls this method.  When a cleanup is
+   * already in flight the caller receives the same shared promise, so
+   * overlapping triggers converge on one execution and the local clear
+   * hook is invoked at most once per invalidation cycle.
+   *
+   * After the shared promise settles, `cleanupInFlight` is reset to
+   * `undefined` so a later invalidation cycle can publish a fresh run.
+   * The settle-time reset runs in a `finally` so a successful cleanup,
+   * a fail-closed cleanup, and a thrown cleanup all open the door to the
+   * next cycle (with `cleanupBlocked` gating admission until reset).
+   *
+   * If the cleanup for the current cycle is already settled
+   * (`cleanupSatisfied === true`) and no fresh work is in flight, the
+   * call short-circuits with the same shared satisfied promise.  This
+   * preserves the contract that `coordinator.logout()` invoking
+   * `cancelPending()` and then `logout()` does not double-clear local
+   * state, while still guaranteeing that a subsequent successful
+   * `login`/`refresh` resets `cleanupSatisfied` so the next invalidation
+   * does run a fresh cleanup cycle.
+   *
+   * If a prior cleanup failed closed (`cleanupBlocked === true`),
+   * subsequent calls also short-circuit with the same shared satisfied
+   * promise so the destructive work is not re-attempted; the
+   * fail-closed gate at {@link ensureCleanupAvailable} is the only
+   * path through which the operator must explicitly reset.
+   */
+  private requestCleanup(): Promise<void> {
+    const existing = this.cleanupInFlight;
+    if (existing) return existing;
+    if (this.cleanupSatisfied || this.cleanupBlocked) {
+      // The current cleanup cycle is already in a terminal state;
+      // coalesce the request onto a no-op resolved promise so
+      // destructive work does not run twice for the same cycle.
+      return ALREADY_SATISFIED;
+    }
+    this.cleanupLocalStateInvoked = false;
+    const operation = this.runAuthoritativeTokenCleanup().finally(() => {
+      if (this.cleanupInFlight === operation) this.cleanupInFlight = undefined;
+    });
+    this.cleanupInFlight = operation;
+    return operation;
+  }
+
+  /**
+   * Authoritative token cleanup.  Every successful `storage.remove`
+   * MUST be followed by `storage.read` verification; a present or
+   * unreadable token triggers the fallback path (local-state clear +
+   * second verification); otherwise the cleanup fails closed with a
+   * categorical error and blocks subsequent auth.
+   *
+   * Invoked at most once per invalidation cycle through
+   * {@link requestCleanup}, so the local clear hook is guaranteed to
+   * run at most once for one logical "wipe everything" cycle.
+   */
+  private async runAuthoritativeTokenCleanup(): Promise<void> {
     await this.withPersistenceLock(async () => {
-      // Always delete the local envelope — even if upstream logout
-      // throws.  Upstream `db.reset()` does not remove kv.token.
+      let removeFailed = false;
+      let absent = false;
       try {
         await this.storage.remove(NOTESNOOK_TOKEN_KEY);
       } catch {
-        failure ??= categoricalError("notesnook token cleanup failed");
+        removeFailed = true;
       }
-      try {
-        // This required seam is deliberately after token removal and
-        // remains inside the persistence critical section.
-        await this.clearLocalState();
-      } catch {
-        failure ??= categoricalError("notesnook local-state cleanup failed");
+      // Authoritative verification: the storage layer's `remove` is a
+      // no-op-resolves-when-absent seam, so a "successful" remove with
+      // a present key must be treated as cleanup that has NOT yet
+      // actually removed the canonical token.  Always re-read.
+      absent = await this.verifyTokenAbsent(removeFailed);
+      // The local clear hook is the destructive last step and may only
+      // ever run once per cleanup cycle.  Capture the cycle's intent
+      // here so a later verification step never re-enters the same
+      // logical cycle.
+      const runLocalClearOnce = async (): Promise<boolean> => {
+        if (this.cleanupLocalStateInvoked) return false;
+        try {
+          await this.clearLocalState();
+          this.cleanupLocalStateInvoked = true;
+          return true;
+        } catch {
+          this.cleanupBlocked = true;
+          throw categoricalError("notesnook local-state cleanup failed");
+        }
+      };
+      if (!absent) {
+        // Present or unreadable: the canonical token is still around.
+        // Run the destructive local clear (it is the documented
+        // fallback for token residue from corrupted storage), then
+        // verify again.  Re-running `remove` after the local clear is
+        // intentional: the upstream Stage 2B provider relies on the
+        // local clear + remove pair to fully drain both the encrypted
+        // kv.token row and the local-state residue.
+        if (removeFailed) {
+          try {
+            await this.storage.remove(NOTESNOOK_TOKEN_KEY);
+          } catch {
+            // Already failed; the verify below is authoritative.
+          }
+        }
+        await runLocalClearOnce();
+        absent = await this.verifyTokenAbsent(removeFailed);
+        if (!absent) {
+          this.cleanupBlocked = true;
+          throw categoricalError("notesnook token cleanup failed");
+        }
+      } else {
+        // The token is verifiably absent after remove.  Run the
+        // local clear exactly once to drain any non-kv.token local
+        // residue — but only if we did not already do so in this
+        // cycle.  This preserves the destructive-last-step contract.
+        await runLocalClearOnce();
       }
     });
-    if (failure) throw failure;
-    this.logInfo("notesnook.auth.logout", { status: "signed-out" });
+    this.cleanupSatisfied = true;
+  }
+
+  /**
+   * Track a {@link storage.read} against {@link NOTESNOOK_TOKEN_KEY} so
+   * that {@link verifyTokenAbsent} can detect when a prior read is
+   * still pending against a stale epoch.  The returned promise is added
+   * to {@link inflightStorageReads} and removed in a `finally`, so the
+   * tracking set always reflects live reads only — never settled or
+   * dangling ones.  Read failures and successes are propagated to the
+   * caller verbatim; the categorical-error translation lives at the
+   * caller so this helper stays a thin seam around the storage layer.
+   */
+  private readKvToken<T>(): Promise<T | undefined> {
+    const promise = this.storage.read<T>(NOTESNOOK_TOKEN_KEY);
+    this.inflightStorageReads.add(promise as Promise<unknown>);
+    return promise.finally(() => {
+      this.inflightStorageReads.delete(promise as Promise<unknown>);
+    });
+  }
+
+  /**
+   * Authoritatively verify that {@link NOTESNOOK_TOKEN_KEY} is absent
+   * from storage.  When the remove that preceded this verify succeeded
+   * and a prior `storage.read` is still in flight, that stale read is
+   * invalidated by the operation-epoch check at its consumer — its
+   * result cannot reach the caller — so it is safe to declare the
+   * token absent without serializing behind it on the storage seam.
+   * Otherwise the helper performs its own read: a present token
+   * yields `false`, a read failure throws a categorical error so the
+   * authoritative cleanup path fails closed.
+   */
+  private async verifyTokenAbsent(removeFailed: boolean): Promise<boolean> {
+    if (!removeFailed && this.inflightStorageReads.size > 0) {
+      return true;
+    }
+    try {
+      return (await this.storage.read<unknown>(NOTESNOOK_TOKEN_KEY)) === undefined;
+    } catch {
+      throw categoricalError("notesnook token storage read failed");
+    }
   }
 
   /**
@@ -456,6 +773,7 @@ export class NotesnookAuthProvider implements AuthProvider {
       status: "authenticated",
       userId: session.userId,
     });
+    this.ensureOperationCurrent(epoch);
     return session;
   }
 
@@ -493,21 +811,21 @@ export class NotesnookAuthProvider implements AuthProvider {
 
   private async persistIfCurrent(epoch: number, envelope: NotesnookTokenEnvelope): Promise<void> {
     try {
-      await this.withPersistenceLock(async () => {
+      await this.withWriteLock(async () => {
         if (this.operationEpoch !== epoch) {
           throw PERSISTENCE_SUPERSEDED;
         }
+        this.cleanupSatisfied = false;
         await this.storage.write(NOTESNOOK_TOKEN_KEY, envelope);
         if (this.operationEpoch !== epoch) {
-          // The write was allowed to finish inside the lock, but logout (or
-          // another newer operation) invalidated this result while storage
-          // was awaiting.  Remove the stale value before releasing the lock;
-          // logout then performs its own idempotent cleanup after us.
+          // The write completed after invalidation. Remove the stale value
+          // outside the write queue so immediate logout/cancel cleanup never
+          // waits for a deferred storage.write to release it.
           try {
             await this.storage.remove(NOTESNOOK_TOKEN_KEY);
           } catch {
-            // Preserve the categorical superseded result.  A concurrent
-            // logout owns the next cleanup turn and will retry removal.
+            // Preserve the categorical superseded result. The admission
+            // barrier owns the authoritative retry after this operation ends.
           }
           throw PERSISTENCE_SUPERSEDED;
         }
@@ -517,6 +835,20 @@ export class NotesnookAuthProvider implements AuthProvider {
         throw categoricalError("notesnook auth operation superseded");
       }
       throw categoricalError("notesnook token storage write failed");
+    }
+  }
+
+  private async withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeTail;
+    let release!: () => void;
+    this.writeTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
     }
   }
 
@@ -874,15 +1206,15 @@ function asEnvelope(raw: unknown): NotesnookTokenEnvelope {
 /**
  * Translate an upstream token envelope into the public AuthSession
  * shape.  Refuses to expose `refresh_token`.  Uses the envelope's `t`
- * value (upstream unix epoch seconds) as the base for `issuedAt` and
+ * value (upstream epoch milliseconds) as the base for `issuedAt` and
  * `expiresAt` — both are returned in milliseconds to match the
  * Stage 2A `AuthSession` contract.  Rejects already-expired envelopes
  * relative to the envelope's own clock; the AuthCoordinator will then
  * perform its own expiry check against its injected clock.
  */
 function envelopeToSession(envelope: NotesnookTokenEnvelope, now: number): AuthSession {
-  const issuedAt = envelope.t * 1000;
-  const expiresAt = (envelope.t + envelope.expires_in) * 1000;
+  const issuedAt = envelope.t;
+  const expiresAt = envelope.t + envelope.expires_in * 1000;
   if (!Number.isFinite(now)) {
     throw categoricalError("notesnook auth clock must return a finite number");
   }
@@ -914,10 +1246,7 @@ function shortHash(value: string): string {
 }
 
 function scopeContainsMfa(scope: string): boolean {
-  for (const part of scope.split(SCOPE_SEPARATOR)) {
-    if (part === MFA_REQUIRED_SCOPE) return true;
-  }
-  return false;
+  return scope === MFA_REQUIRED_SCOPE;
 }
 
 function positiveInteger(value: unknown, name: string): number {

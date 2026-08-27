@@ -48,7 +48,9 @@ import type { SecureKeyStore } from "../keystore/keystore.js";
 // wraps libsodium).  Keeping the primitives local for now means
 // PersistentStorage is fully self-contained for Gate 1 testing.
 
-import { createHash, createCipheriv, createDecipheriv, randomBytes, pbkdf2Sync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, pbkdf2Sync } from "node:crypto";
+
+import { hashNotesnookPassword } from "../auth/notesnook-password-hash.js";
 
 // ---------------------------------------------------------------------------
 
@@ -305,8 +307,7 @@ export class PersistentStorage implements IStorage {
   }
 
   async hash(password: string, email: string): Promise<string> {
-    const APP_SALT = "oVzKtazBo7d8sb7TBvY9jw";
-    return createHash("sha256").update(`${APP_SALT}${email}${password}`, "utf8").digest("base64");
+    return hashNotesnookPassword(email, password);
   }
 
   async getCryptoKey(): Promise<string | undefined> {

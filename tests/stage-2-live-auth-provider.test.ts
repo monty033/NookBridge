@@ -31,7 +31,7 @@
  * the repo is a real secret.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import process from "node:process";
 
@@ -85,7 +85,7 @@ function syntheticSession(now: number): {
       refresh_token: syntheticSecret("refresh"),
       expires_in: 3600,
       scope: "notes",
-      t: Math.floor(now / 1000),
+      t: now,
     },
     user: {
       id: `user-${randomBytes(6).toString("hex")}`,
@@ -104,20 +104,31 @@ function syntheticSession(now: number): {
 interface FakeHandle {
   handle: NotesnookLiveCoreHandle;
   calls: Array<{ method: string; args: unknown[] }>;
+  tokenValue: { value: unknown };
 }
 
 type FakeHandleBehavior = {
   emailResponse?: unknown;
+  emailToken?: NotesnookLiveTokenEnvelope | undefined;
   emailRejects?: boolean;
   mfaRejects?: number;
   passwordRejects?: number;
+  loginRejects?: number;
+  loginPersistsToken?: unknown;
+  loginArgsCapture?: Array<Record<string, unknown>>;
   postPasswordToken?: NotesnookLiveTokenEnvelope | undefined;
   postRefreshToken?: NotesnookLiveTokenEnvelope | undefined;
   userRecord?: NotesnookLiveUser | undefined;
+  userRejects?: boolean;
   refreshRejects?: boolean;
+  refreshGate?: Promise<void>;
+  refreshPersistsToken?: unknown;
   logoutRejects?: boolean;
   logoutArgCapture?: boolean[];
   kvDeleteRejects?: boolean;
+  kvDeleteNoOp?: boolean;
+  kvDeleteGate?: Promise<void>;
+  kvReadRejects?: boolean;
   kvDeleteArgsCapture?: string[];
 };
 
@@ -125,6 +136,10 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const mfaRejectionsLeft = { value: behavior.mfaRejects ?? 0 };
   const passwordRejectionsLeft = { value: behavior.passwordRejects ?? 0 };
+  const loginRejectionsLeft = { value: behavior.loginRejects ?? 0 };
+  const tokenReadCount = { value: 0 };
+  const tokenValue = { value: undefined as unknown };
+  const loginArgsCapture = behavior.loginArgsCapture ?? [];
   const logoutArgCapture = behavior.logoutArgCapture ?? [];
   const kvDeleteArgsCapture = behavior.kvDeleteArgsCapture ?? [];
 
@@ -139,7 +154,7 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
             refresh_token: syntheticSecret("refresh"),
             expires_in: 3600,
             scope: "notes",
-            t: Math.floor(Date.now() / 1000),
+            t: Date.now(),
           }
         );
       }),
@@ -159,8 +174,28 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
         }
         return undefined;
       }),
+      _login: vi.fn(
+        async (args: {
+          email: string;
+          password?: string;
+          hashedPassword?: string;
+          code?: string;
+          method?: string;
+        }) => {
+          calls.push({ method: "user._login", args: [args] });
+          loginArgsCapture.push(args);
+          if (behavior.loginPersistsToken !== undefined) {
+            tokenValue.value = behavior.loginPersistsToken;
+          }
+          if (loginRejectionsLeft.value > 0) {
+            loginRejectionsLeft.value -= 1;
+            throw new Error("upstream password grant rejected");
+          }
+        },
+      ),
       getUser: vi.fn(async () => {
         calls.push({ method: "user.getUser", args: [] });
+        if (behavior.userRejects) throw new Error("upstream user read failed");
         return behavior.userRecord;
       }),
       logout: vi.fn(async (clearLocal?: unknown) => {
@@ -172,17 +207,28 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
     token: {
       getToken: vi.fn(async (): Promise<NotesnookLiveTokenEnvelope | undefined> => {
         calls.push({ method: "token.getToken", args: [] });
-        return behavior.postPasswordToken;
+        tokenReadCount.value += 1;
+        if (tokenReadCount.value === 1 && behavior.emailToken !== undefined) {
+          return behavior.emailToken;
+        }
+        return (behavior.postPasswordToken ?? tokenValue.value) as
+          | NotesnookLiveTokenEnvelope
+          | undefined;
       }),
       _refreshToken: vi.fn(async (forceRenew: boolean) => {
         calls.push({ method: "token._refreshToken", args: [forceRenew] });
+        if (behavior.refreshGate) await behavior.refreshGate;
+        if (behavior.refreshPersistsToken !== undefined) {
+          tokenValue.value = behavior.refreshPersistsToken;
+        }
         if (behavior.refreshRejects) throw new Error("upstream refresh rejected");
       }),
     },
     kv: {
       read: vi.fn(async (key: string) => {
         calls.push({ method: "kv.read", args: [key] });
-        return undefined;
+        if (behavior.kvReadRejects) throw new Error("upstream kv.read rejected");
+        return key === LIVE_NOTESNOOK_KV_TOKEN_KEY ? tokenValue.value : undefined;
       }),
       write: vi.fn(async (key: string, value: unknown) => {
         calls.push({ method: "kv.write", args: [key, value] });
@@ -190,7 +236,9 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
       delete: vi.fn(async (key: string) => {
         kvDeleteArgsCapture.push(key);
         calls.push({ method: "kv.delete", args: [key] });
+        if (behavior.kvDeleteGate) await behavior.kvDeleteGate;
         if (behavior.kvDeleteRejects) throw new Error("upstream kv.delete rejected");
+        if (!behavior.kvDeleteNoOp) tokenValue.value = undefined;
       }),
     },
     cleanup: vi.fn(async () => {
@@ -206,13 +254,13 @@ function makeFakeHandle(behavior: FakeHandleBehavior = {}): FakeHandle {
   expect(typeof fake.token._refreshToken).toBe("function");
   expect(typeof fake.kv.delete).toBe("function");
 
-  return { handle: fake, calls };
+  return { handle: fake, calls, tokenValue };
 }
 
 // ---------------------------------------------------------------------------
 // Test harness.  Builds a provider wired to a fake handle with
 // deterministic suppliers and a no-op cleanup hook.  The clock is
-// frozen to a stable unix-second boundary so envelope validation
+// frozen to a stable epoch-millisecond boundary so envelope validation
 // (issuedAt / expiresAt relative to the envelope's `t`) is
 // deterministic.
 // ---------------------------------------------------------------------------
@@ -227,6 +275,7 @@ interface Harness {
   mfaSupplier: ReturnType<typeof vi.fn> & LiveMfaSupplier;
   clock: () => number;
   cleanupHook: LiveCleanupHook;
+  tokenValue: { value: unknown };
   build(): LiveNotesnookAuthProvider;
   buildWithOptions(
     overrides?: Partial<LiveNotesnookAuthProviderOptions>,
@@ -280,10 +329,106 @@ function buildHarness(
     mfaSupplier,
     clock,
     cleanupHook,
+    tokenValue: fake.tokenValue,
     build: () => buildWithOptions(),
     buildWithOptions,
     sessionFixture: (now) => syntheticSession(now),
   };
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+};
+
+function makeDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(rounds = 12): Promise<void> {
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.resolve();
+  }
+}
+
+type RaceControls = {
+  blockLogin: boolean;
+  blockLogout: boolean;
+  releaseLogin: () => void;
+  releaseLogout: () => void;
+};
+
+function makeRaceHandle(
+  emailToken: NotesnookLiveTokenEnvelope,
+  passwordToken: NotesnookLiveTokenEnvelope,
+  user: NotesnookLiveUser,
+): {
+  handle: NotesnookLiveCoreHandle;
+  calls: Array<{ method: string; args: unknown[] }>;
+  tokenValue: { value: unknown };
+  controls: RaceControls;
+} {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const tokenValue = { value: undefined as unknown };
+  const loginGate = makeDeferred<void>();
+  const logoutGate = makeDeferred<void>();
+  const controls: RaceControls = {
+    blockLogin: false,
+    blockLogout: false,
+    releaseLogin: () => loginGate.resolve(),
+    releaseLogout: () => logoutGate.resolve(),
+  };
+  const handle: NotesnookLiveCoreHandle = {
+    user: {
+      authenticateEmail: vi.fn(async (email: string) => {
+        calls.push({ method: "user.authenticateEmail", args: [email] });
+        tokenValue.value = emailToken;
+      }),
+      authenticateMultiFactorCode: vi.fn(async () => {
+        calls.push({ method: "user.authenticateMultiFactorCode", args: [] });
+      }),
+      authenticatePassword: vi.fn(async () => {
+        calls.push({ method: "user.authenticatePassword", args: [] });
+      }),
+      _login: vi.fn(async (args: unknown) => {
+        calls.push({ method: "user._login", args: [args] });
+        if (controls.blockLogin) await loginGate.promise;
+        tokenValue.value = passwordToken;
+      }),
+      getUser: vi.fn(async () => {
+        calls.push({ method: "user.getUser", args: [] });
+        return user;
+      }),
+      logout: vi.fn(async (clearLocal: boolean) => {
+        calls.push({ method: "user.logout", args: [clearLocal] });
+        if (controls.blockLogout) await logoutGate.promise;
+      }),
+    },
+    token: {
+      getToken: vi.fn(async () => {
+        calls.push({ method: "token.getToken", args: [] });
+        return tokenValue.value as NotesnookLiveTokenEnvelope | undefined;
+      }),
+      _refreshToken: vi.fn(async () => {
+        calls.push({ method: "token._refreshToken", args: [] });
+      }),
+    },
+    kv: {
+      read: vi.fn(async () => undefined),
+      write: vi.fn(async () => undefined),
+      delete: vi.fn(async (key: string) => {
+        calls.push({ method: "kv.delete", args: [key] });
+        tokenValue.value = undefined;
+      }),
+    },
+    cleanup: vi.fn(async () => undefined),
+    initialized: true,
+  };
+  return { handle, calls, tokenValue, controls };
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +496,8 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       // authenticatePassword and BEFORE any token / user read.
       expect(harness.calls.map((entry) => entry.method)).toEqual([
         "user.authenticateEmail",
-        "user.authenticatePassword",
+        "token.getToken",
+        "user._login",
         "token.getToken",
         "user.getUser",
       ]);
@@ -377,13 +523,128 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       expect(session.accessToken).toBe(envelope.access_token);
     });
 
-    it("inserts the MFA round between email and password when the upstream scope contains auth:grant_types:mfa", async () => {
-      const mfaScopeEnvelope: NotesnookLiveTokenEnvelope = {
+    it("serializes concurrent logins in FIFO order so the later token cannot be overwritten", async () => {
+      const race = makeRaceHandle(envelope, envelope, user);
+      race.controls.blockLogin = true;
+      const provider = new LiveNotesnookAuthProvider({
+        handle: race.handle,
+        passwordSupplier: async () => null,
+        mfaSupplier: async () => null,
+        clock: () => FROZEN_NOW_MS,
+        cleanupHook: async () => undefined,
+      });
+      const firstEmail = syntheticEmail();
+      const secondEmail = syntheticEmail();
+      const first = provider.login({ username: firstEmail, password: syntheticSecret("password") });
+      const second = provider.login({
+        username: secondEmail,
+        password: syntheticSecret("password"),
+      });
+
+      await flushMicrotasks();
+      expect(race.calls.filter((entry) => entry.method === "user.authenticateEmail")).toHaveLength(
+        1,
+      );
+      expect(race.calls.filter((entry) => entry.method === "user._login")).toHaveLength(1);
+      expect(race.calls.find((entry) => entry.method === "user.authenticateEmail")?.args).toEqual([
+        firstEmail,
+      ]);
+
+      race.controls.releaseLogin();
+      const [firstSession, secondSession] = await Promise.all([first, second]);
+      expect(firstSession).toBeDefined();
+      expect(secondSession).toBeDefined();
+      const emailCalls = race.calls.filter((entry) => entry.method === "user.authenticateEmail");
+      expect(emailCalls.map((entry) => entry.args[0])).toEqual([firstEmail, secondEmail]);
+      const firstPasswordIndex = race.calls.findIndex((entry) => entry.method === "user._login");
+      const secondEmailIndex = race.calls.findIndex(
+        (entry, index) => entry.method === "user.authenticateEmail" && index > firstPasswordIndex,
+      );
+      expect(secondEmailIndex).toBeGreaterThan(firstPasswordIndex);
+    });
+
+    it("reads canonical getToken after email and uses hashed _login for password-only accounts", async () => {
+      const email = syntheticEmail().replace("@example.test", "@Example.Test");
+      const password = syntheticSecret("password");
+      const emailAdditionalData = { authorization_code: syntheticSecret("additional") };
+      const emailEnvelope: NotesnookLiveTokenEnvelope = { ...envelope, scope: "notes full" };
+      const loginArgsCapture: Array<Record<string, unknown>> = [];
+      harness = buildHarness(
+        {
+          emailResponse: emailAdditionalData,
+          emailToken: emailEnvelope,
+          postPasswordToken: emailEnvelope,
+          loginArgsCapture,
+          userRecord: user,
+        },
+        emailEnvelope,
+        user,
+      );
+      const provider = harness.build();
+
+      await provider.login({ username: email, password });
+
+      expect(harness.calls.map((entry) => entry.method)).toEqual([
+        "user.authenticateEmail",
+        "token.getToken",
+        "user._login",
+        "token.getToken",
+        "user.getUser",
+      ]);
+      expect(loginArgsCapture).toEqual([
+        {
+          email,
+          password,
+          hashedPassword: createHash("sha256")
+            .update(`oVzKtazBo7d8sb7TBvY9jw${email.toLowerCase()}${password}`, "utf8")
+            .digest("base64"),
+        },
+      ]);
+      expect(harness.mfaSupplier).not.toHaveBeenCalled();
+      expect(harness.passwordSupplier).not.toHaveBeenCalled();
+    });
+
+    it("compensates a token persisted by password-only _login when a later provider step fails", async () => {
+      const persistedToken: NotesnookLiveTokenEnvelope = {
         ...envelope,
-        scope: "auth:grant_types:mfa notes",
+        access_token: syntheticSecret("persisted-access"),
       };
       harness = buildHarness(
-        { userRecord: user, postPasswordToken: mfaScopeEnvelope, emailResponse: mfaScopeEnvelope },
+        {
+          loginPersistsToken: persistedToken,
+          postPasswordToken: persistedToken,
+          userRecord: user,
+          userRejects: true,
+        },
+        persistedToken,
+        user,
+      );
+      const provider = harness.build();
+
+      const error = await provider
+        .login({ username: syntheticEmail(), password: syntheticSecret("password") })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/user read failed/);
+      expect((error as Error).message).not.toContain("upstream");
+      expect((error as Error).cause).toBeUndefined();
+      expect(harness.tokenValue.value).toBeUndefined();
+      expect(harness.calls.filter((entry) => entry.method === "kv.delete")).toHaveLength(1);
+    });
+
+    it("inserts the MFA round between email and password when the upstream scope exactly equals auth:grant_types:mfa", async () => {
+      const mfaScopeEnvelope: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        scope: "auth:grant_types:mfa",
+      };
+      harness = buildHarness(
+        {
+          userRecord: user,
+          emailResponse: { additional_data: "email-round-metadata" },
+          emailToken: mfaScopeEnvelope,
+          postPasswordToken: mfaScopeEnvelope,
+        },
         mfaScopeEnvelope,
         user,
       );
@@ -396,6 +657,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
 
       expect(harness.calls.map((entry) => entry.method)).toEqual([
         "user.authenticateEmail",
+        "token.getToken",
         "user.authenticateMultiFactorCode",
         "user.authenticatePassword",
         "token.getToken",
@@ -412,8 +674,52 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       expect(session.userId).toBe(user.id);
     });
 
+    it("does not enter the MFA path for a composite scope", async () => {
+      const compositeScopeEnvelope: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        scope: "auth:grant_types:mfa notes",
+      };
+      harness = buildHarness(
+        {
+          userRecord: user,
+          emailToken: compositeScopeEnvelope,
+          postPasswordToken: compositeScopeEnvelope,
+        },
+        compositeScopeEnvelope,
+        user,
+      );
+      const provider = harness.build();
+
+      await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      expect(harness.mfaSupplier).not.toHaveBeenCalled();
+      expect(harness.calls.map((entry) => entry.method)).toEqual([
+        "user.authenticateEmail",
+        "token.getToken",
+        "user._login",
+        "token.getToken",
+        "user.getUser",
+      ]);
+    });
+
     it("retries through the password supplier after the initial password is rejected, never persisting the buffer", async () => {
-      harness = buildHarness({ passwordRejects: 1, userRecord: user }, envelope, user);
+      const mfaScopeEnvelope: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        scope: "auth:grant_types:mfa",
+      };
+      harness = buildHarness(
+        {
+          passwordRejects: 1,
+          userRecord: user,
+          emailToken: mfaScopeEnvelope,
+          postPasswordToken: mfaScopeEnvelope,
+        },
+        mfaScopeEnvelope,
+        user,
+      );
       const provider = harness.build();
 
       await provider.login({
@@ -442,8 +748,9 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
         {
           mfaRejects: 1,
           userRecord: user,
+          emailToken: mfaScopeEnvelope,
           postPasswordToken: mfaScopeEnvelope,
-          emailResponse: mfaScopeEnvelope,
+          emailResponse: { additional_data: "email-round-metadata" },
         },
         mfaScopeEnvelope,
         user,
@@ -476,7 +783,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       ).rejects.toThrow();
 
       const methods = harness.calls.map((entry) => entry.method);
-      expect(methods).toEqual(["user.authenticateEmail"]);
+      expect(methods).toEqual(["user.authenticateEmail", "kv.delete"]);
       expect(harness.passwordSupplier).not.toHaveBeenCalled();
       expect(harness.mfaSupplier).not.toHaveBeenCalled();
     });
@@ -627,7 +934,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
         username: syntheticEmail(),
         password: syntheticSecret("password"),
       });
-      provider.cancelPending();
+      await provider.cancelPending();
       await expect(provider.refresh(fakeSession)).rejects.toThrow(
         /refresh unavailable without an active session/,
       );
@@ -652,6 +959,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
         authenticateEmail: vi.fn(async () => envelope),
         authenticateMultiFactorCode: vi.fn(async () => undefined),
         authenticatePassword: vi.fn(async () => undefined),
+        _login: vi.fn(async () => undefined),
         getUser: vi.fn(async () => user),
         logout: vi.fn(async () => undefined),
       };
@@ -722,6 +1030,47 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       expect(err.cause).toBeUndefined();
       expect(isAuthProviderError(err)).toBe(true);
     });
+
+    it("drains a refresh before cancellation deletes the canonical token", async () => {
+      const refreshGate = makeDeferred<void>();
+      const refreshed: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("access-refreshed-after-cancel"),
+      };
+      harness = buildHarness(
+        {
+          userRecord: user,
+          postRefreshToken: refreshed,
+          refreshGate: refreshGate.promise,
+          refreshPersistsToken: refreshed,
+        },
+        envelope,
+        user,
+      );
+      const provider = harness.build();
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      const refreshOutcome = provider.refresh(session).catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      const cancellationOutcome = provider.cancelPending().catch((caught: unknown) => caught);
+      refreshGate.resolve();
+
+      const [refreshResult, cancellationResult] = await Promise.all([
+        refreshOutcome,
+        cancellationOutcome,
+      ]);
+      expect(refreshResult).toBeInstanceOf(Error);
+      expect((refreshResult as Error).message).toMatch(/superseded/);
+      expect(cancellationResult).toBeUndefined();
+      expect(harness.tokenValue.value).toBeUndefined();
+      const methods = harness.calls.map((entry) => entry.method);
+      expect(methods.lastIndexOf("kv.delete")).toBeGreaterThan(
+        methods.lastIndexOf("token._refreshToken"),
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -780,6 +1129,79 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       expect(writeCalls).toHaveLength(0);
     });
 
+    it("uses cleanupHook as a fallback when kv.delete resolves but leaves the token, then verifies removal", async () => {
+      const harnessLocal = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvDeleteNoOp: true,
+        },
+        envelope,
+        user,
+      );
+      const cleanupSpy = vi.fn(async () => {
+        harnessLocal.tokenValue.value = undefined;
+      });
+      const provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: cleanupSpy,
+      });
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await provider.logout(session);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(harnessLocal.tokenValue.value).toBeUndefined();
+      expect(harnessLocal.calls.filter((entry) => entry.method === "kv.read")).toHaveLength(2);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it("fails closed when delete and cleanup fallback leave the token present", async () => {
+      const harnessLocal = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvDeleteNoOp: true,
+        },
+        envelope,
+        user,
+      );
+      const cleanupSpy = vi.fn(async () => undefined);
+      const provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: cleanupSpy,
+      });
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await expect(provider.logout(session)).rejects.toThrow(/token cleanup failed/);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(harnessLocal.tokenValue.value).toBe(envelope);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/cleanup requires reset/);
+    });
     it("attempts every logout step independently when one step rejects", async () => {
       const cleanupSpy = vi.fn(async () => undefined);
       const harnessLocal = buildHarness(
@@ -817,6 +1239,384 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       expect(methods).toContain("user.logout");
       expect(methods).toContain("kv.delete");
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails closed when delete and cleanup fallback leave the token present", async () => {
+      const harnessLocal = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvDeleteNoOp: true,
+        },
+        envelope,
+        user,
+      );
+      const cleanupSpy = vi.fn(async () => undefined);
+      const provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: cleanupSpy,
+      });
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await expect(provider.logout(session)).rejects.toThrow(/token cleanup failed/);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(harnessLocal.tokenValue.value).toBe(envelope);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/cleanup requires reset/);
+    });
+
+    it("fails closed when token deletion verification cannot be read", async () => {
+      const harnessLocal = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvReadRejects: true,
+        },
+        envelope,
+        user,
+      );
+      const cleanupSpy = vi.fn(async () => undefined);
+      const provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: cleanupSpy,
+      });
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await expect(provider.logout(session)).rejects.toThrow(/token cleanup failed/);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/cleanup requires reset/);
+    });
+
+    it("waits for stale in-flight login auth before authoritative logout cleanup", async () => {
+      const emailToken: NotesnookLiveTokenEnvelope = { ...envelope, scope: "notes" };
+      const persistedToken: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("stale-access"),
+      };
+      const race = makeRaceHandle(emailToken, persistedToken, user);
+      race.controls.blockLogin = true;
+      const provider = new LiveNotesnookAuthProvider({
+        handle: race.handle,
+        passwordSupplier: async () => null,
+        mfaSupplier: async () => null,
+        clock: () => FROZEN_NOW_MS,
+        cleanupHook: async () => undefined,
+      });
+      const session: AuthSession = {
+        userId: user.id,
+        accessToken: persistedToken.access_token,
+        issuedAt: FROZEN_NOW_MS,
+        expiresAt: FROZEN_NOW_MS + 60 * 60 * 1000,
+      };
+
+      const loginPromise = provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      const loginOutcome = loginPromise.catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      expect(race.calls.some((entry) => entry.method === "user._login")).toBe(true);
+
+      const logoutPromise = provider.logout(session);
+      const logoutOutcome = logoutPromise.catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      expect(race.calls.some((entry) => entry.method === "user.logout")).toBe(false);
+
+      // The stale upstream auth resumes only after logout has claimed the
+      // operation.  Logout must then perform the final token deletion.
+      race.controls.releaseLogin();
+      const staleResult = await loginOutcome;
+      await logoutOutcome;
+      expect(staleResult).toBeInstanceOf(Error);
+      expect((staleResult as Error).message).toMatch(/superseded/);
+      expect(race.tokenValue.value).toBeUndefined();
+
+      const authIndex = race.calls.findIndex((entry) => entry.method === "user._login");
+      const logoutIndex = race.calls.findIndex((entry) => entry.method === "user.logout");
+      const deleteIndex = race.calls.findIndex((entry) => entry.method === "kv.delete");
+      expect(authIndex).toBeGreaterThanOrEqual(0);
+      expect(logoutIndex).toBeGreaterThan(authIndex);
+      expect(deleteIndex).toBeGreaterThan(logoutIndex);
+    });
+
+    it("drains a refresh before logout deletes the canonical token", async () => {
+      const refreshGate = makeDeferred<void>();
+      const refreshed: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("access-refreshed-before-logout"),
+      };
+      harness = buildHarness(
+        {
+          userRecord: user,
+          postRefreshToken: refreshed,
+          refreshGate: refreshGate.promise,
+          refreshPersistsToken: refreshed,
+        },
+        envelope,
+        user,
+      );
+      const provider = harness.build();
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      const refreshOutcome = provider.refresh(session).catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      const logoutOutcome = provider.logout(session).catch((caught: unknown) => caught);
+      refreshGate.resolve();
+
+      const [refreshResult, logoutResult] = await Promise.all([refreshOutcome, logoutOutcome]);
+      expect(refreshResult).toBeInstanceOf(Error);
+      expect((refreshResult as Error).message).toMatch(/superseded/);
+      expect(logoutResult).toBeUndefined();
+      expect(harness.tokenValue.value).toBeUndefined();
+      const methods = harness.calls.map((entry) => entry.method);
+      expect(methods.lastIndexOf("kv.delete")).toBeGreaterThan(
+        methods.lastIndexOf("token._refreshToken"),
+      );
+    });
+
+    it("authoritatively cleans a token persisted by a login cancelled while _login is blocked", async () => {
+      const emailToken: NotesnookLiveTokenEnvelope = { ...envelope, scope: "notes" };
+      const persistedToken: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("cancelled-access"),
+      };
+      const race = makeRaceHandle(emailToken, persistedToken, user);
+      race.controls.blockLogin = true;
+      const provider = new LiveNotesnookAuthProvider({
+        handle: race.handle,
+        passwordSupplier: async () => null,
+        mfaSupplier: async () => null,
+        clock: () => FROZEN_NOW_MS,
+        cleanupHook: async () => undefined,
+      });
+
+      const loginPromise = provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      const loginOutcome = loginPromise.catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      expect(race.calls.some((entry) => entry.method === "user._login")).toBe(true);
+
+      const cancellation = provider.cancelPending();
+      const cancellationOutcome = cancellation.catch((caught: unknown) => caught);
+      race.controls.releaseLogin();
+
+      const [loginResult, cancellationResult] = await Promise.all([
+        loginOutcome,
+        cancellationOutcome,
+      ]);
+      expect(loginResult).toBeInstanceOf(Error);
+      expect((loginResult as Error).message).toMatch(/superseded/);
+      expect(cancellationResult).toBeUndefined();
+      expect(race.tokenValue.value).toBeUndefined();
+      expect(race.calls.filter((entry) => entry.method === "kv.delete")).toHaveLength(1);
+      expect(race.calls.find((entry) => entry.method === "kv.delete")?.args).toEqual([
+        LIVE_NOTESNOOK_KV_TOKEN_KEY,
+      ]);
+    });
+
+    it("uses cleanupHook when cancellation observes a resolving no-op delete and verifies removal", async () => {
+      harness = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvDeleteNoOp: true,
+        },
+        envelope,
+        user,
+      );
+      const cleanupSpy = vi.fn(async () => {
+        // Model the injected destructive boundary clearing the durable token.
+        harness.tokenValue.value = undefined;
+      });
+      const provider = new LiveNotesnookAuthProvider({
+        handle: harness.handle,
+        passwordSupplier: harness.passwordSupplier,
+        mfaSupplier: harness.mfaSupplier,
+        clock: harness.clock,
+        cleanupHook: cleanupSpy,
+      });
+      const session = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      const error = await provider.cancelPending().catch((caught: unknown) => caught);
+      expect(error).toBeUndefined();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(harness.tokenValue.value).toBeUndefined();
+      await expect(provider.refresh(session)).rejects.toThrow(/without an active session/);
+    });
+
+    it("fails closed when cancellation cannot read back the canonical token", async () => {
+      harness = buildHarness(
+        {
+          userRecord: user,
+          kvReadRejects: true,
+        },
+        envelope,
+        user,
+      );
+      const provider = harness.buildWithOptions({ cleanupHook: async () => undefined });
+      await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await expect(provider.cancelPending()).rejects.toThrow(/token cleanup failed/);
+      expect(harness.calls.filter((entry) => entry.method === "kv.delete")).toHaveLength(1);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/cleanup requires reset/);
+    });
+
+    it("queues a login behind cancellation cleanup instead of crossing its delete", async () => {
+      const deleteGate = makeDeferred<void>();
+      harness = buildHarness(
+        {
+          userRecord: user,
+          kvDeleteGate: deleteGate.promise,
+        },
+        envelope,
+        user,
+      );
+      const provider = harness.build();
+      await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      const cancellation = provider.cancelPending();
+      const nextLogin = provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      await flushMicrotasks();
+      expect(
+        harness.calls.filter((entry) => entry.method === "user.authenticateEmail"),
+      ).toHaveLength(1);
+
+      deleteGate.resolve();
+      await cancellation;
+      await expect(nextLogin).resolves.toBeDefined();
+      expect(
+        harness.calls.filter((entry) => entry.method === "user.authenticateEmail"),
+      ).toHaveLength(2);
+      const deleteIndex = harness.calls.findIndex((entry) => entry.method === "kv.delete");
+      const nextEmailIndex = harness.calls.findIndex(
+        (entry, index) => entry.method === "user.authenticateEmail" && index > deleteIndex,
+      );
+      expect(nextEmailIndex).toBeGreaterThan(deleteIndex);
+    });
+
+    it("blocks a new login when cancellation cleanup cannot remove the durable token", async () => {
+      harness = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+          kvDeleteNoOp: true,
+        },
+        envelope,
+        user,
+      );
+      const provider = harness.buildWithOptions({ cleanupHook: async () => undefined });
+      await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+
+      await expect(provider.cancelPending()).rejects.toThrow(/token cleanup failed/);
+      expect(harness.tokenValue.value).toBe(envelope);
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/cleanup requires reset/);
+    });
+
+    it("waits for logout before starting a concurrent login and does not resurrect stale auth", async () => {
+      const emailToken: NotesnookLiveTokenEnvelope = { ...envelope, scope: "notes" };
+      const passwordToken: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("new-access"),
+      };
+      const race = makeRaceHandle(emailToken, passwordToken, user);
+      const provider = new LiveNotesnookAuthProvider({
+        handle: race.handle,
+        passwordSupplier: async () => null,
+        mfaSupplier: async () => null,
+        clock: () => FROZEN_NOW_MS,
+        cleanupHook: async () => undefined,
+      });
+      const firstSession = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      race.controls.blockLogout = true;
+
+      const logoutPromise = provider.logout(firstSession);
+      const logoutOutcome = logoutPromise.catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      expect(race.calls.filter((entry) => entry.method === "user.logout")).toHaveLength(1);
+
+      const secondLoginPromise = provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      const secondLoginOutcome = secondLoginPromise.catch((caught: unknown) => caught);
+      await flushMicrotasks();
+      expect(race.calls.filter((entry) => entry.method === "user.authenticateEmail")).toHaveLength(
+        1,
+      );
+
+      race.controls.releaseLogout();
+      await logoutOutcome;
+      const secondResult = await secondLoginOutcome;
+      expect(secondResult).not.toBeInstanceOf(Error);
+      expect(race.calls.filter((entry) => entry.method === "user.authenticateEmail")).toHaveLength(
+        2,
+      );
+      expect(race.tokenValue.value).toBe(passwordToken);
+
+      const deleteIndex = race.calls.findIndex((entry) => entry.method === "kv.delete");
+      const secondEmailIndex = race.calls.findIndex(
+        (entry, index) => entry.method === "user.authenticateEmail" && index > deleteIndex,
+      );
+      expect(deleteIndex).toBeGreaterThan(-1);
+      expect(secondEmailIndex).toBeGreaterThan(deleteIndex);
     });
 
     it("is idempotent under concurrent calls", async () => {
@@ -860,13 +1660,16 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
 
       // Inspect every own enumerable property of the provider for
       // the supplied credential bytes.  Nothing on the instance
-      // carries them.
+      // carries them; ordinary lifecycle labels are allowed.
       const ownKeys = Object.keys(provider);
       for (const key of ownKeys) {
         const value = (provider as unknown as Record<string, unknown>)[key];
-        expect(typeof value).not.toBe("string");
         expect(value).not.toBe(password);
         expect(value).not.toBe(email);
+        if (typeof value === "string") {
+          expect(value).not.toContain(password);
+          expect(value).not.toContain(email);
+        }
       }
     });
 
@@ -897,6 +1700,99 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
       });
       expect(session.userId).toBe(user.id);
       expect(logger.info).toHaveBeenCalled();
+    });
+
+    it("rejects a login cancelled re-entrantly by completion logging and authoritatively removes its token", async () => {
+      const harnessLocal = buildHarness(
+        {
+          loginPersistsToken: envelope,
+          postPasswordToken: envelope,
+          userRecord: user,
+        },
+        envelope,
+        user,
+      );
+      let provider!: LiveNotesnookAuthProvider;
+      let cancellation: Promise<void> | undefined;
+      const logger: Logger = {
+        debug: vi.fn(() => undefined),
+        info: vi.fn(() => {
+          cancellation = provider.cancelPending();
+        }),
+        warn: vi.fn(() => undefined),
+        error: vi.fn(() => undefined),
+        child: vi.fn(() => logger),
+        setSink: vi.fn(() => undefined),
+      };
+      provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: harnessLocal.cleanupHook,
+        logger,
+      });
+
+      await expect(
+        provider.login({
+          username: syntheticEmail(),
+          password: syntheticSecret("password"),
+        }),
+      ).rejects.toThrow(/superseded/);
+      await cancellation;
+      expect(harnessLocal.tokenValue.value).toBeUndefined();
+      expect(harnessLocal.calls.filter((entry) => entry.method === "kv.delete")).toHaveLength(1);
+    });
+
+    it("rejects a refresh cancelled re-entrantly by completion logging and cleans its token", async () => {
+      const refreshed: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        access_token: syntheticSecret("refresh-cancelled-access"),
+      };
+      const harnessLocal = buildHarness(
+        {
+          userRecord: user,
+          postRefreshToken: refreshed,
+          refreshPersistsToken: refreshed,
+        },
+        envelope,
+        user,
+      );
+      let provider!: LiveNotesnookAuthProvider;
+      let cancelRefresh = false;
+      let cancellation: Promise<void> | undefined;
+      const logger: Logger = {
+        debug: vi.fn(() => undefined),
+        info: vi.fn((message: string) => {
+          if (cancelRefresh && message === "live.notesnook.auth.refresh") {
+            cancellation = provider.cancelPending();
+          }
+        }),
+        warn: vi.fn(() => undefined),
+        error: vi.fn(() => undefined),
+        child: vi.fn(() => logger),
+        setSink: vi.fn(() => undefined),
+      };
+      provider = new LiveNotesnookAuthProvider({
+        handle: harnessLocal.handle,
+        passwordSupplier: harnessLocal.passwordSupplier,
+        mfaSupplier: harnessLocal.mfaSupplier,
+        clock: harnessLocal.clock,
+        cleanupHook: harnessLocal.cleanupHook,
+        logger,
+      });
+      const initial = await provider.login({
+        username: syntheticEmail(),
+        password: syntheticSecret("password"),
+      });
+      cancelRefresh = true;
+
+      const refreshResult = await provider.refresh(initial).catch((caught: unknown) => caught);
+      expect(refreshResult).toBeInstanceOf(Error);
+      expect((refreshResult as Error).message).toMatch(/superseded/);
+      await cancellation;
+      expect(harnessLocal.tokenValue.value).toBeUndefined();
+      expect(harnessLocal.calls.filter((entry) => entry.method === "kv.delete")).toHaveLength(1);
     });
   });
 
@@ -965,7 +1861,20 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
     });
 
     it("rejects a throwing password supplier without leaking upstream text", async () => {
-      const harnessLocal = buildHarness({ passwordRejects: 2, userRecord: user }, envelope, user);
+      const mfaScopeEnvelope: NotesnookLiveTokenEnvelope = {
+        ...envelope,
+        scope: "auth:grant_types:mfa",
+      };
+      const harnessLocal = buildHarness(
+        {
+          passwordRejects: 2,
+          emailToken: mfaScopeEnvelope,
+          postPasswordToken: mfaScopeEnvelope,
+          userRecord: user,
+        },
+        mfaScopeEnvelope,
+        user,
+      );
       const throwingSupplier: LivePasswordSupplier = vi.fn(async () => {
         throw new Error("supplier threw — internal debug trace marker");
       });
@@ -1051,12 +1960,12 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
     });
 
     const { factory } = makeLoginHarness({
-      emailResponse: {
+      emailToken: {
         access_token: syntheticSecret("access"),
         refresh_token: syntheticSecret("refresh"),
         expires_in: 3600,
-        scope: "auth:grant_types:mfa notes",
-        t: Math.floor(FROZEN_NOW_MS / 1000),
+        scope: "auth:grant_types:mfa",
+        t: FROZEN_NOW_MS,
       },
     });
 

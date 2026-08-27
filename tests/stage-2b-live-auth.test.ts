@@ -36,6 +36,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -169,7 +170,7 @@ describe("Stage 2B-live mocked NotesnookAuthProvider — contract", () => {
 
     // And the persisted envelope carries the auth:grant_types:mfa scope.
     const persisted = await storage.read<NotesnookTokenEnvelope>("kv.token");
-    expect(persisted?.scope).toContain("auth:grant_types:mfa");
+    expect(persisted?.scope).toBe("auth:grant_types:mfa");
 
     fixture.close();
   });
@@ -747,8 +748,8 @@ describe("Stage 2B-live mocked NotesnookAuthProvider — contract", () => {
       core: fixture.handle,
       storage,
       clearLocalState: async () => {},
-      // The upstream fixture issues at t=1s and expires at t=2s;
-      // this independent synthetic provider clock is already at 10s.
+      // The upstream fixture issues at t=1000ms and expires at t=2000ms;
+      // this independent synthetic provider clock is already at 10 seconds.
       clock: () => 10_000,
     });
     const coordinator = new AuthCoordinator({
@@ -883,6 +884,7 @@ describe("Stage 2B-live mocked NotesnookAuthProvider — contract", () => {
     const emailReleased = new Promise<void>((resolve) => {
       releaseEmail = resolve;
     });
+    let blockEmail = true;
     const envelope: NotesnookTokenEnvelope = {
       access_token: runtimeSecret("race-login-access"),
       t: 1,
@@ -891,7 +893,7 @@ describe("Stage 2B-live mocked NotesnookAuthProvider — contract", () => {
       refresh_token: runtimeSecret("race-login-refresh"),
     };
     fixture.handle.user.authenticateEmail = async () => {
-      await emailReleased;
+      if (blockEmail) await emailReleased;
       return envelope;
     };
     const provider = createNotesnookAuthProvider({
@@ -913,10 +915,28 @@ describe("Stage 2B-live mocked NotesnookAuthProvider — contract", () => {
       expiresAt: 60_000,
     });
     await logout;
+    expect(await fixture.storage.read<NotesnookTokenEnvelope>("kv.token")).toBeUndefined();
+    let laterLoginSettled = false;
+    const laterLogin = provider.login({
+      username: runtimeEmail("race-login-after-logout"),
+      password: runtimeSecret("race-login-after-logout-password"),
+    });
+    void laterLogin.then(
+      () => {
+        laterLoginSettled = true;
+      },
+      () => {
+        laterLoginSettled = true;
+      },
+    );
+    await delay(0);
+    expect(laterLoginSettled).toBe(false);
+    blockEmail = false;
     releaseEmail();
     await expect(login).rejects.toThrow(/superseded|storage/i);
-    expect(fixture.calls.filter((call) => call.method === "authenticatePassword")).toHaveLength(0);
-    expect(await fixture.storage.read<NotesnookTokenEnvelope>("kv.token")).toBeUndefined();
+    await expect(laterLogin).resolves.toMatchObject({ accessToken: expect.any(String) });
+    expect(fixture.calls.filter((call) => call.method === "authenticatePassword")).toHaveLength(1);
+    expect(await fixture.storage.read<NotesnookTokenEnvelope>("kv.token")).toBeDefined();
 
     // A read already in progress must not rehydrate the old authenticated
     // session after logout has advanced the provider epoch and removed the
