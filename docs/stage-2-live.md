@@ -8,9 +8,10 @@ drives the provider from a CLI boundary.
 This slice is **offline-only**. No real Notesnook account, no real
 credential, and no live network was exercised while building, testing, or
 documenting it. The defaults preserved from Stage 2B guard the boundary:
-the default `nookctl auth` path still resolves to a structured `deferred`
-outcome, and the live runner below is reached only when a caller wires in
-the `providerFactory` seam.
+ordinary `nookctl auth login` still resolves to a structured `deferred`
+outcome.  The explicit operator-only `nookctl auth live-login` command now
+exists, but is reached only with `NOOKBRIDGE_ENABLE_LIVE_AUTH=1`, an exact
+`live-login` subcommand, and a real echo-disabled TTY.
 
 The upstream compatibility tuple this slice is pinned against is the same
 one Stage 0 and Stage 2B recorded:
@@ -29,8 +30,12 @@ In scope for this slice:
 - the explicit live Notesnook auth provider at
   `src/auth/live-notesnook-auth-provider.ts`
 - the opt-in live auth runner at `src/auth/live-auth-runner.ts`
+- the gated operator CLI wiring at `src/auth/admin-command.ts` and
+  `src/auth/live-login-runtime.ts`
+- the production `createStdioPrompt` TTY boundary and local runtime cleanup
 - additive exports from `src/index.ts`
-- focused tests under `tests/notesnook-live-factory.test.ts` and
+- focused offline tests under `tests/stage-2-live-gate.test.ts`,
+  `tests/notesnook-live-factory.test.ts`, and
   `tests/stage-2-live-auth-provider.test.ts`
 
 Out of scope, and explicitly **not** exercised by this slice:
@@ -43,8 +48,7 @@ Out of scope, and explicitly **not** exercised by this slice:
   available);
 - a generic transport, a generic core passthrough, signup, sync, SSE,
   push, attachment, or any other unbounded upstream surface;
-- the S2 hygiene probes (logger-redaction, lock, key-store, doctor) and
-  the live CLI exercise that an independent S2 review would demand.
+- a real-account exercise or live-account S2 security review.
 
 ## Lazy `@notesnook/core` factory
 
@@ -81,8 +85,8 @@ The handle does **not** expose a raw `Database`, a generic request,
 transport, fetch, or mutation method. There is no method-passthrough and
 no signup / sync / SSE escape hatch.
 
-The canonical token persistence path is therefore **`db.kv.write("kv.token", envelope)`**
-followed by `db.kv.read("kv.token")` on restore and `db.kv.delete("kv.token")`
+The canonical token persistence path is therefore **`db.kv.write("token", envelope)`**
+followed by `db.kv.read("token")` on restore and `db.kv.delete("token")`
 on logout. The envelope lives in upstream's SQL `KVStorage`; NookBridge
 does not own a parallel token store.
 
@@ -132,7 +136,7 @@ The logout path is exactly:
    revokes the active session and tells upstream to clear local
    state. The `true` flag is forwarded by the narrow handle; the
    provider does not pass any additional argument.
-2. `core.kv.delete("kv.token")` — removes only the literal `kv.token`
+2. `core.kv.delete("token")` — removes only the literal `token`
    key through the canonical KV accessor. The provider does not call
    `db.reset()` or any other generic destructive operation; it does
    not touch sibling keys.
@@ -146,7 +150,7 @@ The logout path is exactly:
 The three steps are independent. A failure in any one does not skip
 the others. The provider's categorical errors carry no token bytes,
 no password bytes, no MFA code bytes, no email body, no upstream
-error body, and no raw `kv.token` value.
+error body, and no raw `token` value.
 
 ## Narrow handle, no generic transport
 
@@ -160,7 +164,7 @@ The factory handle is deliberately minimal:
 - no signup, password change, MFA enrollment, MFA reset, account
   recovery, or device-registration method is exposed;
 - the `db.kv` accessor is callable; the provider invokes it as
-  `db.kv.write("kv.token", envelope)` etc. There is no SQL passthrough
+  `db.kv.write("token", envelope)` etc. There is no SQL passthrough
   and no generic key-value escape hatch.
 
 The runner does not accept a real `NotesnookDatabase` either. It accepts
@@ -187,11 +191,17 @@ The runner is **opt-in**. The default CLI path:
 nookctl auth login
 ```
 
-still resolves to a structured `deferred` outcome. The runner is reached
-only when a caller wires in the `providerFactory` seam — for example,
-in a separately authorized integration test, a developer-driven
-investigation, or a future live CLI command whose entry point ships
-under its own gate.
+still resolves to a structured `deferred` outcome. The separate path:
+
+```text
+NOOKBRIDGE_ENABLE_LIVE_AUTH=1 nookctl auth live-login
+```
+
+is the only CLI entry point that constructs the TTY prompt, local
+PersistentStorage/key-store, and real-core factory. Forbidden argv/env
+credential carriers are rejected before any of those resources are
+initialized. The command prints only categorical, redacted status; it does
+not print an email, user ID, token, password, or MFA code.
 
 The factory is **opt-in** in the same sense. Ordinary
 `import { ... } from "nookbridge"` consumers do not load
@@ -204,8 +214,9 @@ without paying the cost — or the network surface — of the live module.
 ## Verification evidence
 
 This slice's verification evidence is the focused + full test runs
-that exercise the narrow factory and the live provider against an
-injected fake core. The required commands, run inside the pinned Nix
+that exercise the gated command, production runtime seams, narrow factory,
+and live provider against injected fakes. The required commands, run inside
+the pinned Nix
 development shell, are:
 
 ```text
@@ -224,26 +235,34 @@ The recorded outcomes for this slice are:
 - `tests/notesnook-live-factory.test.ts` — focused factory tests covering
   the lazy-import seam, the constructable `Database.setup(options)` then
   `await init()` order, the callable `db.kv` accessor, the canonical
-  `kv.token` key, the narrow-handle freeze, and hostile upstream
+  `token` key, the narrow-handle freeze, and hostile upstream
   normalization.
 - `tests/stage-2-live-auth-provider.test.ts` — focused provider tests
   covering the exact login/MFA/password order, refresh via
-  `_refreshToken(true)` then `getToken`, logout + `kv.token` removal +
+  `_refreshToken(true)` then `getToken`, logout + `token` removal +
   cleanup hook ordering, refresh/restore/logout race guarding,
   malformed-envelope rejection, public `refresh_token` absence, prompt
   zeroization, EOF vs. hostile prompt handling, and categorical-error
   hygiene.
+- `tests/stage-2-live-gate.test.ts` — focused gate-ordering tests covering
+  the explicit flag and subcommand, forbidden argv/env carriers, non-TTY
+  failure before runtime initialization, success/error cleanup, deferred
+  ordinary login, and an offline injected runtime construction seam.
 
 ## Explicit offline-only statement
 
 **No real Notesnook account, no real credential, and no live network
 call was exercised while building, testing, or documenting this slice.**
-The factory's dynamic `@notesnook/core` import was not executed against
-the real pinned package during this work; the factory tests substitute
-an injected module double. The provider tests substitute an injected
-fake core handle that records calls without contacting any service. The
-runner tests inject a fake `SecretPrompt` that yields pre-canned
+The factory's dynamic `@notesnook/core` import was not executed against the
+real pinned package during this work; the factory and runtime tests substitute
+an injected module double. The provider tests substitute an injected fake
+core handle that records calls without contacting any service. The runner
+tests inject a fake `SecretPrompt` that yields runtime-generated canary
 buffers.
+
+The command wiring exists and has been exercised only with fake providers,
+fake prompts, and local temporary state. **No real account has been exercised
+yet.**
 
 The live-account S2 security checkpoint — including real core
 initialization, live authentication, live token revocation/refresh,

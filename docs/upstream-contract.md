@@ -124,8 +124,8 @@ await database.init();          // awaited instance call
 
 The token envelope is persisted through the canonical SQL `KVStorage`
 that the upstream `Database` exposes via its callable `db.kv` accessor
-— `db.kv.write("kv.token", envelope)`, `db.kv.read("kv.token")`,
-`db.kv.delete("kv.token")`. The token is **not** stored in a parallel
+— `db.kv.write("token", envelope)`, `db.kv.read("token")`,
+`db.kv.delete("token")`. The token is **not** stored in a parallel
 NookBridge store, a sidecar file, or a generic `IStorage` instance;
 upstream owns its own SQL `KVStorage` and the provider only ever
 reaches it through the narrow `db.kv` accessor.

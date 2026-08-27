@@ -62,35 +62,23 @@ export class SqliteStorage {
     // (`module.exports = require('./database')`); `DatabaseType` is the
     // matching class type so callers get strong typing on `db`.
     // Check before opening: Database creates a missing path as a side effect.
-    const existedBefore = existsSync(opts.dbPath);
     this.db = new Database(opts.dbPath);
 
     // The encrypted SQLite file MUST NOT be world-readable.  better-sqlite3
     // creates new files honouring the process umask, which leaves them at
     // mode 0644 on a typical user umask of 022 — that would expose the
-    // encrypted-at-rest header to any local account.  Tighten only the main
-    // DB path to 0600 right after open.  We also re-tighten it on every open
-    // so an operator who manually loosened permissions on a legacy database
-    // cannot keep it that way indefinitely.  SQLite sidecars are deferred
-    // hardening and are intentionally not handled in Stage 1.  chmod can
-    // fail on some FS drivers; we swallow the error because the DB is still
-    // usable — the on-disk bytes are still encrypted, the file just may
-    // not be locked down — but if the file didn't exist we propagate so a
-    // configuration error doesn't pass silently.
+    // encrypted-at-rest header to any local account.  Tighten the main DB
+    // path and all SQLite sidecars on every open.  A permission failure is
+    // fatal: continuing with an unprotected state file violates the boundary.
     try {
-      chmodSync(opts.dbPath, 0o600);
-    } catch (err) {
-      if (!existedBefore) {
-        // The DB was just created by better-sqlite3 and we failed to lock
-        // it down; that is a configuration/FS error worth surfacing so
-        // the caller doesn't ship an 0644 file to production by mistake.
-        try {
-          this.db.close();
-        } catch {
-          /* best-effort */
-        }
-        throw err;
+      this.hardenPermissions();
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+        /* best-effort */
       }
+      throw error;
     }
 
     // Apply the cipher pragmas in the EXACT order used by Stage -1.
@@ -101,6 +89,7 @@ export class SqliteStorage {
     // simple `key=` form because all upstream tests use it.
     this.db.pragma(`cipher='sqlcipher'`);
     this.db.pragma(`key="${escapeKey(opts.key)}"`);
+    this.hardenPermissions();
 
     if (opts.withExtensions !== false) {
       // Load order: better-trigram, regex, html — exactly the order
@@ -128,7 +117,11 @@ export class SqliteStorage {
   }
 
   exec(sql: string): void {
-    this.db.exec(sql);
+    try {
+      this.db.exec(sql);
+    } finally {
+      this.hardenPermissions();
+    }
   }
 
   prepare<TParams extends unknown[] = unknown[], TRow = unknown>(
@@ -147,15 +140,35 @@ export class SqliteStorage {
   }
 
   run(sql: string, params: unknown[] = []): unknown {
-    return this.prepare(sql).run(...params);
+    try {
+      return this.prepare(sql).run(...params);
+    } finally {
+      this.hardenPermissions();
+    }
   }
 
   get<T>(sql: string, params: unknown[] = []): T | undefined {
-    return this.prepare(sql).get(...params) as T | undefined;
+    try {
+      return this.prepare(sql).get(...params) as T | undefined;
+    } finally {
+      this.hardenPermissions();
+    }
   }
 
   all<T>(sql: string, params: unknown[] = []): T[] {
-    return this.prepare(sql).all(...params) as T[];
+    try {
+      return this.prepare(sql).all(...params) as T[];
+    } finally {
+      this.hardenPermissions();
+    }
+  }
+
+  /** Re-apply restrictive permissions after SQLite creates a sidecar. */
+  hardenPermissions(): void {
+    enforcePrivateFile(`${this.db.name}`);
+    enforcePrivateFile(`${this.db.name}-wal`);
+    enforcePrivateFile(`${this.db.name}-shm`);
+    enforcePrivateFile(`${this.db.name}-journal`);
   }
 
   close(): void {
@@ -175,4 +188,13 @@ function escapeKey(key: string): string {
   // a file and we must not allow an operator-supplied key to inject
   // a pragma terminator.
   return key.replace(/["\\]/g, "");
+}
+
+function enforcePrivateFile(path: string): void {
+  try {
+    chmodSync(path, 0o600);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT" && !existsSync(path)) return;
+    throw error;
+  }
 }

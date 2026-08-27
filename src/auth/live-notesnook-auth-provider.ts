@@ -43,7 +43,7 @@
  *      envelope and normalizes it into a refresh-token-free
  *      `AuthSession`.  The session's `userId` is the upstream
  *      `user.getUser()` `id` (no token-derived hashes).  No raw
- *      `kv.token` write happens — the upstream owns persistence.
+ *      `token` write happens — the upstream owns persistence.
  *   5. Refresh calls `core.token._refreshToken(true)` then
  *      `core.token.getToken()`.  Refresh-after-logout and concurrent
  *      refresh races are guarded by an operation epoch so a stale
@@ -51,7 +51,7 @@
  *   6. Logout calls `core.user.logout(true)` (the factory narrow
  *      surface already forwards `true`; we verify that contract via
  *      the narrow handle rather than re-asserting it), then deletes
- *      only the literal `kv.token` key through the narrow KV
+ *      only the literal `token` key through the narrow KV
  *      accessor.  The provider then invokes the supplied cleanup
  *      hook.  All three steps are independent — a failure in any
  *      one does not skip the others.  The provider never calls
@@ -80,6 +80,7 @@ import type {
 } from "../core/notesnook-live-factory.js";
 import { NOTESNOOK_LIVE_KV_TOKEN_KEY } from "../core/notesnook-live-factory.js";
 import {
+  isAuthProviderError,
   markAuthProviderError,
   type AuthCredentials,
   type AuthProvider,
@@ -126,7 +127,7 @@ export type LivePasswordSupplier = () => Promise<string | null>;
 export type LiveMfaSupplier = () => Promise<string | null>;
 
 /**
- * Caller-supplied cleanup hook invoked AFTER `kv.token` removal
+ * Caller-supplied cleanup hook invoked AFTER `token` removal
  * completes (whether or not upstream logout succeeded).  The hook
  * is the ONLY path through which the provider can clear local
  * encrypted state.  Production code wires this to whatever
@@ -157,7 +158,7 @@ export type LiveNotesnookAuthProviderOptions = Readonly<{
   /** Clock used to reject envelopes that are already expired. */
   clock?: () => number;
   /**
-   * Cleanup hook invoked AFTER `kv.token` removal completes.  The
+   * Cleanup hook invoked AFTER `token` removal completes.  The
    * provider never invokes any generic reset or destructive
    * boundary directly; the hook is the only such path.
    */
@@ -366,7 +367,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
   }
 
   /**
-   * Logout: revoke the upstream token, delete the local `kv.token`
+   * Logout: revoke the upstream token, delete the local `token`
    * envelope through the narrow KV accessor, then invoke the
    * injected cleanup hook.  All three steps are independent — a
    * failure in any one is reported as a categorical error after
@@ -431,8 +432,8 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
     } catch {
       failure = categoricalError("live notesnook logout failed");
     }
-    // Step 2: delete the local kv.token envelope.  Idempotent —
-    // upstream `db.reset()` does NOT clear kv.token, so this is the
+    // Step 2: delete the local token envelope.  Idempotent —
+    // upstream `db.reset()` does NOT clear token, so this is the
     // explicit boundary for the local envelope.
     try {
       await this.handle.kv.delete(LIVE_NOTESNOOK_KV_TOKEN_KEY);
@@ -621,42 +622,50 @@ function normalizeProviderOptions(options: unknown): NormalizedProviderOptions {
 }
 
 function validateHandle(handle: unknown): asserts handle is NotesnookLiveCoreHandle {
-  if (typeof handle !== "object" || handle === null || Array.isArray(handle)) {
-    throw categoricalError("invalid live notesnook handle: expected a factory handle object");
-  }
-  const h = handle as Record<string, unknown>;
-  if (!h.user || typeof h.user !== "object") {
-    throw categoricalError("invalid live notesnook handle: user slot is required");
-  }
-  if (!h.token || typeof h.token !== "object") {
-    throw categoricalError("invalid live notesnook handle: token slot is required");
-  }
-  if (!h.kv || typeof h.kv !== "object") {
-    throw categoricalError("invalid live notesnook handle: kv slot is required");
-  }
-  const user = h.user as Record<string, unknown>;
-  for (const method of [
-    "authenticateEmail",
-    "authenticateMultiFactorCode",
-    "authenticatePassword",
-    "getUser",
-    "logout",
-  ]) {
-    if (typeof user[method] !== "function") {
-      throw categoricalError(`invalid live notesnook handle: user.${method} is required`);
+  try {
+    if (typeof handle !== "object" || handle === null || Array.isArray(handle)) {
+      throw categoricalError("invalid live notesnook handle: expected a factory handle object");
     }
-  }
-  const token = h.token as Record<string, unknown>;
-  for (const method of ["getToken", "_refreshToken"]) {
-    if (typeof token[method] !== "function") {
-      throw categoricalError(`invalid live notesnook handle: token.${method} is required`);
+    const h = handle as Record<string, unknown>;
+    const userSlot = h.user;
+    const tokenSlot = h.token;
+    const kvSlot = h.kv;
+    if (!userSlot || typeof userSlot !== "object") {
+      throw categoricalError("invalid live notesnook handle: user slot is required");
     }
-  }
-  const kv = h.kv as Record<string, unknown>;
-  for (const method of ["read", "write", "delete"]) {
-    if (typeof kv[method] !== "function") {
-      throw categoricalError(`invalid live notesnook handle: kv.${method} is required`);
+    if (!tokenSlot || typeof tokenSlot !== "object") {
+      throw categoricalError("invalid live notesnook handle: token slot is required");
     }
+    if (!kvSlot || typeof kvSlot !== "object") {
+      throw categoricalError("invalid live notesnook handle: kv slot is required");
+    }
+    const user = userSlot as Record<string, unknown>;
+    for (const method of [
+      "authenticateEmail",
+      "authenticateMultiFactorCode",
+      "authenticatePassword",
+      "getUser",
+      "logout",
+    ]) {
+      if (typeof user[method] !== "function") {
+        throw categoricalError(`invalid live notesnook handle: user.${method} is required`);
+      }
+    }
+    const token = tokenSlot as Record<string, unknown>;
+    for (const method of ["getToken", "_refreshToken"]) {
+      if (typeof token[method] !== "function") {
+        throw categoricalError(`invalid live notesnook handle: token.${method} is required`);
+      }
+    }
+    const kv = kvSlot as Record<string, unknown>;
+    for (const method of ["read", "write", "delete"]) {
+      if (typeof kv[method] !== "function") {
+        throw categoricalError(`invalid live notesnook handle: kv.${method} is required`);
+      }
+    }
+  } catch (error) {
+    if (isAuthProviderError(error)) throw error;
+    throw categoricalError("invalid live notesnook handle");
   }
 }
 

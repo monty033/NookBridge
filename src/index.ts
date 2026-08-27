@@ -204,8 +204,8 @@ export {
 // pinned login order (email -> optional MFA -> password), refreshes
 // via the canonical `_refreshToken(true)` then `getToken()` path,
 // persists the envelope only through the upstream `db.kv` accessor
-// under the canonical `kv.token` key, and cleans up via
-// `core.user.logout(true)` + `kv.token` removal + the injected
+// under the canonical `token` key, and cleans up via
+// `core.user.logout(true)` + `token` removal + the injected
 // cleanup hook. No password/MFA code is ever cached on the
 // provider; the public `AuthSession` never carries a `refresh_token`.
 export type {

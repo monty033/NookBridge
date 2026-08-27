@@ -530,7 +530,7 @@ export function validateSQLiteOptions(value: unknown): NotesnookSQLiteOptions {
   ]);
   for (const key of Object.keys(opts)) {
     if (!ALLOWED.has(key)) {
-      throw adapterError(`invalid Notesnook sqliteOptions: unknown option "${key}"`);
+      throw adapterError("invalid Notesnook sqliteOptions: unknown option");
     }
   }
   return opts as unknown as NotesnookSQLiteOptions;
@@ -579,7 +579,7 @@ export function validateDatabaseSetupOptions(value: unknown): NotesnookDatabaseS
   ]);
   for (const key of Object.keys(opts)) {
     if (!ALLOWED.has(key)) {
-      throw adapterError(`invalid Notesnook setup options: unknown option "${key}"`);
+      throw adapterError("invalid Notesnook setup options: unknown option");
     }
   }
   return opts as unknown as NotesnookDatabaseSetupOptions;
@@ -662,6 +662,14 @@ function buildFullSetupOptions(storage: IStorage): NotesnookDatabaseSetupOptions
 }
 
 /**
+ * Adapter-owned errors are recognized by identity rather than by their
+ * message.  The WeakSet is module-private, so callers cannot forge the
+ * trusted-adapter classification by supplying an object with a copied
+ * property or attacker-controlled message.
+ */
+const ADAPTER_ERRORS = new WeakSet<object>();
+
+/**
  * Construct a categorical, chain-free adapter error.  We do NOT carry
  * a `cause` from upstream: upstream exceptions may contain secret
  * material (passwords, MFA codes, token bytes), so the adapter treats
@@ -671,7 +679,17 @@ function adapterError(message: string): Error {
   const error = new Error(message);
   Object.defineProperty(error, "cause", { configurable: true, value: undefined });
   Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  ADAPTER_ERRORS.add(error);
   return error;
+}
+
+/**
+ * Predicate for errors emitted by this adapter.  Keep the marker private;
+ * the factory uses this predicate to preserve validator categories without
+ * allowing arbitrary thrown values through its hostile-input boundary.
+ */
+export function isNotesnookAdapterError(value: unknown): value is Error {
+  return typeof value === "object" && value !== null && ADAPTER_ERRORS.has(value);
 }
 
 function isNotesnookDatabase(value: unknown): value is NotesnookDatabase {
