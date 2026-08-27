@@ -272,12 +272,11 @@ function issueToken(
   const access = `access-${randomBytes(12).toString("hex")}`;
   const refresh = `refresh-${randomBytes(12).toString("hex")}`;
   refreshTokensIssued.set(access, { refresh_token: refresh, issuedAt: nowMs });
-  // The upstream `t` field is unix epoch seconds.
+  // The upstream `t` field is epoch milliseconds.
   const expiresInSec = Math.floor(accessTokenTtlMs / 1000);
-  const tSec = Math.floor(nowMs / 1000);
   return {
     access_token: access,
-    t: tSec,
+    t: nowMs,
     expires_in: expiresInSec,
     scope,
     refresh_token: refresh,
@@ -288,7 +287,7 @@ function scopeForMode(mode: FakeCoreMode): string {
   switch (mode) {
     case "mfa-required":
     case "mfa-retry":
-      return "auth:grant_types:mfa offline_access";
+      return "auth:grant_types:mfa";
     case "no-mfa":
     case "password-retry":
     case "refresh-fails":

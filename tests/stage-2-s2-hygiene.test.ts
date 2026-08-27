@@ -70,7 +70,7 @@ function makeLiveFixture(): LiveFixture {
     refresh_token: runtimeCanary(),
     expires_in: 3600,
     scope: "notes",
-    t: Math.floor(now / 1000),
+    t: now,
   };
   const user: NotesnookLiveUser = { id: runtimeCanary(12), email: runtimeEmail() };
   const tokenGetCalls = { count: 0 };
@@ -82,6 +82,7 @@ function makeLiveFixture(): LiveFixture {
       authenticateEmail: async () => envelope,
       authenticateMultiFactorCode: async () => undefined,
       authenticatePassword: async () => undefined,
+      _login: async () => undefined,
       getUser: async () => user,
       logout: async () => undefined,
     },

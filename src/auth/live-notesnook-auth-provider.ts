@@ -28,16 +28,18 @@
  *      `refresh_token`.
  *   3. Login follows the exact order documented in
  *      `docs/upstream-contract.md`:
- *        a. `core.user.authenticateEmail(email)`
- *        b. IF the response carries `scope` containing
- *           `auth:grant_types:mfa`, call the injected MFA supplier
- *           and then `core.user.authenticateMultiFactorCode(code, "app")`
- *        c. Call the injected password supplier OR the supplied
- *           initial password via `core.user.authenticatePassword(email, password)`.
- *      The MFA branch is conditional on the SCOPE returned by step
- *      (a); the password branch uses the supplied initial password
- *      first, then the supplier on rejection.  No password / MFA
- *      code is ever persisted on the provider.
+ *        a. `core.user.authenticateEmail(email)`; its return value is
+ *           metadata, not the token envelope used for branching.
+ *        b. Read the canonical envelope from `core.token.getToken()` and
+ *           branch only when its `scope` exactly equals the MFA sentinel:
+ *           - MFA: call the injected MFA supplier, then
+ *             `core.user.authenticateMultiFactorCode(code, "app")`,
+ *             followed by `core.user.authenticatePassword(email, password)`.
+ *           - Non-MFA: call `core.user._login({ email, hashedPassword })`
+ *             with the canonical SHA-256 password hash.
+ *        c. Each password branch starts with the supplied initial password
+ *           and consults the injected supplier only after rejection.
+ *      No password / MFA code is ever persisted on the provider.
  *   4. After the upstream returns successfully the provider calls
  *      `core.token.getToken()` to read the canonical upstream KV
  *      envelope and normalizes it into a refresh-token-free
@@ -79,6 +81,7 @@ import type {
   NotesnookLiveUser,
 } from "../core/notesnook-live-factory.js";
 import { NOTESNOOK_LIVE_KV_TOKEN_KEY } from "../core/notesnook-live-factory.js";
+import { hashNotesnookPassword } from "./notesnook-password-hash.js";
 import {
   isAuthProviderError,
   markAuthProviderError,
@@ -104,13 +107,14 @@ export const LIVE_NOTESNOOK_KV_TOKEN_KEY: NotesnookLiveKvKey = NOTESNOOK_LIVE_KV
  * sentinel so the contract is uniform across both slices.
  */
 const MFA_REQUIRED_SCOPE = "auth:grant_types:mfa" as const;
-const SCOPE_SEPARATOR = " ";
 
 /**
  * Caller-supplied function used by the provider to obtain a fresh
- * password attempt when the upstream `authenticatePassword` call
- * rejects the previous one.  Returning `null` signals that no
- * further password is available — the provider rejects the login.
+ * password attempt when the branch-specific upstream password step
+ * rejects the previous one.  MFA accounts retry
+ * `authenticatePassword`; non-MFA accounts retry `_login` with a
+ * newly hashed password.  Returning `null` signals that no further
+ * password is available — the provider rejects the login.
  *
  * The runner passes a supplier that yields a one-shot `Buffer`
  * the runner owns and zeroizes.  The provider holds the password
@@ -127,12 +131,13 @@ export type LivePasswordSupplier = () => Promise<string | null>;
 export type LiveMfaSupplier = () => Promise<string | null>;
 
 /**
- * Caller-supplied cleanup hook invoked AFTER `token` removal
- * completes (whether or not upstream logout succeeded).  The hook
- * is the ONLY path through which the provider can clear local
- * encrypted state.  Production code wires this to whatever
- * destructive boundary owns `db.reset()` in a later slice; offline
- * tests inject a stub that just records the call.
+ * Caller-supplied cleanup hook invoked after the canonical `token`
+ * deletion attempt (whether or not upstream logout or deletion
+ * succeeded).  It is the ONLY path through which the provider can
+ * clear local encrypted state and is the fallback when deletion
+ * fails.  Production code wires this to whatever destructive
+ * boundary owns `db.reset()` in a later slice; offline tests inject
+ * a stub that just records the call.
  */
 export type LiveCleanupHook = () => void | Promise<void>;
 
@@ -212,6 +217,14 @@ const defaultMfaSupplier: LiveMfaSupplier = async () => null;
  * provider accepts only the narrow factory handle, and the factory
  * is the only place that lazy-imports the real package.
  */
+type CleanupState = "clean" | "queued" | "deleting" | "verifying" | "fallback" | "blocked";
+
+/**
+ * The live provider owns one FIFO queue for every operation that can touch the
+ * shared Notesnook core.  The queue is deliberately provider-local: the core
+ * keeps mutable token state on the handle, so serializing only the final read
+ * is not sufficient.
+ */
 export class LiveNotesnookAuthProvider implements AuthProvider {
   private readonly handle: NotesnookLiveCoreHandle;
   private readonly passwordSupplier: LivePasswordSupplier;
@@ -222,24 +235,19 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
   private readonly cleanupHook: LiveCleanupHook;
   private readonly logger: Logger | undefined;
 
-  /**
-   * Operation epoch: bumped on logout, cancelPending, and every
-   * login/refresh start.  Login captures its generation before its
-   * initial wait so logout cannot follow a stale login.  Refresh
-   * guards against logout-without-an-active-session and against
-   * concurrent refreshes.
-   */
-  private operationEpoch = 0;
-  /**
-   * True once a login or successful restore has activated a session.
-   * Cleared by logout and cancelPending.  Refresh requires this to
-   * be true at entry.
-   */
+  /** Invalidating generation; captured before the first queue await. */
+  private invalidationGeneration = 0;
+  /** True only while the provider has published a usable session. */
   private hasActiveSession = false;
-  /** Tracks the most recent refresh promise so a competing caller is rejected. */
-  private refreshInFlight: Promise<AuthSession> | undefined;
-  /** Tracks the most recent logout promise so re-entry is idempotent. */
+
+  /** The single serialized mechanism for login, refresh, logout, and cancel. */
+  private operationTail: Promise<void> = Promise.resolve();
+  /** Explicit durable-cleanup state machine. */
+  private cleanupState: CleanupState = "clean";
+  private cleanupInFlight: Promise<void> | undefined;
   private logoutInFlight: Promise<void> | undefined;
+  /** Admission guard for the established single-flight refresh contract. */
+  private refreshInFlight: Promise<AuthSession> | undefined;
 
   constructor(options: LiveNotesnookAuthProviderOptions) {
     const normalized = normalizeProviderOptions(options);
@@ -279,76 +287,28 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
   }
 
   /**
-   * Drive the upstream login sequence and return a normalized,
-   * refresh-token-free `AuthSession`.  No credential is held on the
-   * provider instance — each retry loop variable is local to the
-   * method.
-   *
-   * Order:
-   *   1. `handle.user.authenticateEmail(email)`.
-   *   2. If the response's scope contains `auth:grant_types:mfa`,
-   *      call the injected MFA supplier and then
-   *      `handle.user.authenticateMultiFactorCode(code, "app")`.
-   *   3. Call `handle.user.authenticatePassword(email, password)`
-   *      with the supplied initial password; on rejection, consult
-   *      the injected password supplier up to `passwordMaxAttempts`
-   *      times.
-   *   4. After success, call `handle.token.getToken()` to read the
-   *      canonical upstream envelope, normalize it, and read the
-   *      upstream user via `handle.user.getUser()`.  Both reads
-   *      happen inside the same operation epoch.
-   *   5. Return a frozen, refresh-token-free `AuthSession`.
+   * Login captures the invalidation generation before entering the queue.  A
+   * login already queued when logout/cancel begins therefore cannot adopt the
+   * new generation after waiting and authenticate behind the cleanup barrier.
    */
   async login(credentials: AuthCredentials): Promise<AuthSession> {
     const validated = validateCredentials(credentials);
-    const epoch = ++this.operationEpoch;
-    await this.waitForLogout();
-    this.ensureOperationCurrent(epoch);
-    const { username, password } = validated;
-
-    // Step 1: upstream authenticateEmail.
-    let initialRaw: unknown;
-    try {
-      initialRaw = await this.handle.user.authenticateEmail(username);
-    } catch {
-      this.ensureOperationCurrent(epoch);
-      throw categoricalError("live notesnook email authentication failed");
-    }
-    this.ensureOperationCurrent(epoch);
-
-    // Step 2: optional MFA.  Branch on the SCOPE carried by the
-    // email response, not on a separate flag.
-    const initialEnvelope = asEnvelope(initialRaw);
-    if (scopeContainsMfa(initialEnvelope.scope)) {
-      await this.submitMfaWithRetry(epoch, initialEnvelope);
-      this.ensureOperationCurrent(epoch);
-    }
-
-    // Step 3: password.
-    await this.submitPasswordWithRetry(epoch, username, password);
-    this.ensureOperationCurrent(epoch);
-
-    // Step 4: read the canonical upstream envelope + user.
-    const envelope = await this.readEnvelopeIfCurrent(epoch);
-    const user = await this.readUserIfCurrent(epoch);
-    this.ensureOperationCurrent(epoch);
-
-    const session = envelopeToSession(envelope, user, this.providerNow());
-    this.hasActiveSession = true;
-    this.logInfo("live.notesnook.auth.login", { status: "authenticated", userId: session.userId });
-    return session;
+    this.ensureCleanupAvailable();
+    const generation = this.invalidationGeneration;
+    return this.enqueue(() => this.executeLogin(generation, validated));
   }
 
   /**
-   * Refresh the canonical upstream envelope by calling
-   * `handle.token._refreshToken(true)` and then re-reading
-   * `handle.token.getToken()`.  Refresh-after-logout is rejected;
-   * concurrent refreshes converge to a single upstream round
-   * with the loser rejected deterministically.
+   * Refresh participates in the same FIFO as login and cleanup.  In
+   * particular, a refresh that is blocked inside upstream work is followed by
+   * the queued authoritative cleanup rather than racing it.
    */
   async refresh(_session: AuthSession): Promise<AuthSession> {
     if (this.logoutInFlight) {
       throw categoricalError("live notesnook refresh unavailable during logout");
+    }
+    if (this.cleanupInFlight) {
+      throw categoricalError("live notesnook refresh unavailable during cancellation");
     }
     if (!this.hasActiveSession) {
       throw categoricalError("live notesnook refresh unavailable without an active session");
@@ -356,109 +316,258 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
     if (this.refreshInFlight) {
       throw categoricalError("live notesnook refresh already in progress");
     }
-    const epoch = ++this.operationEpoch;
-    const operation = this.refreshInternal(epoch);
-    this.refreshInFlight = operation;
-    try {
-      return await operation;
-    } finally {
+    const generation = this.invalidationGeneration;
+    const queued = this.enqueue(() => this.executeRefresh(generation));
+    const operation = queued.finally(() => {
       if (this.refreshInFlight === operation) this.refreshInFlight = undefined;
-    }
+    });
+    this.refreshInFlight = operation;
+    return operation;
   }
 
   /**
-   * Logout: revoke the upstream token, delete the local `token`
-   * envelope through the narrow KV accessor, then invoke the
-   * injected cleanup hook.  All three steps are independent — a
-   * failure in any one is reported as a categorical error after
-   * the others have been attempted.  No `db.reset()` or generic
-   * destructive operation is invoked directly.
+   * Invalidate synchronously, then queue revoke + canonical cleanup.  The
+   * promise is published before the queue body can reach an upstream await,
+   * which makes re-entrant logger callbacks safe and prevents new logins from
+   * crossing the cleanup barrier.
    */
   async logout(_session: AuthSession): Promise<void> {
     if (this.logoutInFlight) return this.logoutInFlight;
-    ++this.operationEpoch;
-    this.hasActiveSession = false;
-    const operation = this.logoutInternal();
-    this.logoutInFlight = operation;
-    try {
-      await operation;
-    } finally {
+
+    this.invalidate();
+    this.cleanupState = "queued";
+    const queued = this.enqueue(() => this.executeLogout());
+    const operation = queued.finally(() => {
       if (this.logoutInFlight === operation) this.logoutInFlight = undefined;
-    }
+      if (this.cleanupState !== "blocked") this.cleanupState = "clean";
+    });
+    this.logoutInFlight = operation;
+    return operation;
   }
 
   /**
-   * Cancel pending login / refresh completions without requiring an
-   * active session.  Used by the runner to invalidate stale state
-   * after a failure or a user-initiated cancellation.
+   * Invalidate synchronously and queue the same authoritative token cleanup
+   * used by logout, without the upstream revoke round.  If called from a
+   * logger while an operation is active, the active queue item finishes with a
+   * superseded error and this cleanup item runs next; it never awaits itself.
    */
-  cancelPending(): void {
-    ++this.operationEpoch;
-    this.hasActiveSession = false;
+  cancelPending(): Promise<void> {
+    this.invalidate();
+    if (this.logoutInFlight) return this.logoutInFlight;
+    if (this.cleanupInFlight) return this.cleanupInFlight;
+    return this.scheduleCleanup(false);
   }
 
   // ---------------------------------------------------------------------
-  // Internal implementations.
+  // One queue and the cleanup state machine.
   // ---------------------------------------------------------------------
 
-  private async refreshInternal(epoch: number): Promise<AuthSession> {
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.operationTail;
+    let release!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.operationTail = completion;
+
+    return (async () => {
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    })();
+  }
+
+  private invalidate(): void {
+    this.invalidationGeneration += 1;
+    this.hasActiveSession = false;
+  }
+
+  private ensureGeneration(generation: number): void {
+    if (this.invalidationGeneration !== generation) {
+      throw categoricalError("live notesnook auth operation superseded");
+    }
+  }
+
+  private ensureCleanupAvailable(): void {
+    if (this.cleanupState === "blocked") {
+      throw categoricalError("live notesnook cleanup requires reset");
+    }
+  }
+
+  private scheduleCleanup(invokeHookOnVerifiedDelete: boolean): Promise<void> {
+    const existing = this.cleanupInFlight;
+    if (existing) return existing;
+
+    this.cleanupState = "queued";
+    const queued = this.enqueue(() => this.runCleanup(invokeHookOnVerifiedDelete));
+    const operation = queued.finally(() => {
+      if (this.cleanupInFlight === operation) this.cleanupInFlight = undefined;
+      if (this.cleanupState !== "blocked") this.cleanupState = "clean";
+    });
+    this.cleanupInFlight = operation;
+    return operation;
+  }
+
+  private async runCleanup(invokeHookOnVerifiedDelete: boolean): Promise<void> {
+    this.cleanupState = "deleting";
+    let deleteFailed = false;
+    try {
+      await this.handle.kv.delete(LIVE_NOTESNOOK_KV_TOKEN_KEY);
+    } catch {
+      deleteFailed = true;
+    }
+
+    this.cleanupState = "verifying";
+    const deletedTokenIsAbsent = await this.verifyTokenAbsent();
+    const needsFallback = deleteFailed || !deletedTokenIsAbsent;
+    let hookFailed = false;
+    if (invokeHookOnVerifiedDelete || needsFallback) {
+      this.cleanupState = "fallback";
+      try {
+        await this.cleanupHook();
+      } catch {
+        hookFailed = true;
+      }
+    }
+
+    if (needsFallback) {
+      this.cleanupState = "verifying";
+      const fallbackProvedRemoval = await this.verifyTokenAbsent();
+      if (!fallbackProvedRemoval) {
+        this.cleanupState = "blocked";
+        throw categoricalError("live notesnook token cleanup failed");
+      }
+    }
+    if (hookFailed) {
+      this.cleanupState = "blocked";
+      throw categoricalError("live notesnook local-state cleanup failed");
+    }
+    this.cleanupState = "clean";
+  }
+
+  private async verifyTokenAbsent(): Promise<boolean> {
+    try {
+      const token = await this.handle.kv.read(LIVE_NOTESNOOK_KV_TOKEN_KEY);
+      return token === undefined || token === null;
+    } catch {
+      // An unreadable canonical token cannot be proven absent.
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Serialized operation bodies.
+  // ---------------------------------------------------------------------
+
+  private async executeLogin(
+    generation: number,
+    credentials: AuthCredentials,
+  ): Promise<AuthSession> {
+    this.ensureGeneration(generation);
+    this.ensureCleanupAvailable();
+    try {
+      return await this.loginInternal(generation, credentials);
+    } catch (error) {
+      const failure = isAuthProviderError(error)
+        ? error
+        : categoricalError("live notesnook login failed");
+      await this.compensateLoginToken(generation);
+      throw failure;
+    }
+  }
+
+  private async executeRefresh(generation: number): Promise<AuthSession> {
+    this.ensureGeneration(generation);
+    this.ensureCleanupAvailable();
+    try {
+      return await this.refreshInternal(generation);
+    } catch (error) {
+      if (isAuthProviderError(error)) throw error;
+      throw categoricalError("live notesnook token refresh failed");
+    }
+  }
+
+  private async executeLogout(): Promise<void> {
+    let failure: Error | undefined;
+    try {
+      await this.handle.user.logout(true);
+    } catch {
+      failure = categoricalError("live notesnook logout failed");
+    }
+
+    try {
+      // Cleanup runs inline because enqueuing a second queue item here would
+      // await the queue tail that this operation itself owns.
+      await this.runCleanup(true);
+    } catch (error) {
+      failure ??= isAuthProviderError(error)
+        ? error
+        : categoricalError("live notesnook token cleanup failed");
+    }
+    if (failure) throw failure;
+    this.logInfo("live.notesnook.auth.logout", { status: "signed-out" });
+  }
+
+  private async loginInternal(
+    generation: number,
+    credentials: AuthCredentials,
+  ): Promise<AuthSession> {
+    this.ensureGeneration(generation);
+    const { username, password } = credentials;
+
+    try {
+      await this.handle.user.authenticateEmail(username);
+    } catch {
+      this.ensureGeneration(generation);
+      throw categoricalError("live notesnook email authentication failed");
+    }
+    this.ensureGeneration(generation);
+
+    const emailEnvelope = await this.readEnvelopeIfCurrent(generation);
+    if (scopeContainsMfa(emailEnvelope.scope)) {
+      await this.submitMfaWithRetry(generation, emailEnvelope);
+      this.ensureGeneration(generation);
+      await this.submitPasswordWithRetry(generation, username, password);
+    } else {
+      await this.submitPasswordOnlyWithRetry(generation, username, password);
+    }
+    this.ensureGeneration(generation);
+
+    const envelope = await this.readEnvelopeIfCurrent(generation);
+    const user = await this.readUserIfCurrent(generation);
+    this.ensureGeneration(generation);
+
+    const session = envelopeToSession(envelope, user, this.providerNow());
+    this.hasActiveSession = true;
+    this.logInfo("live.notesnook.auth.login", { status: "authenticated", userId: session.userId });
+    // A logger may synchronously call cancelPending().  The queued cleanup
+    // must not be awaited from this operation; this check rejects the stale
+    // result and lets the next queue item remove the token.
+    this.ensureGeneration(generation);
+    return session;
+  }
+
+  private async refreshInternal(generation: number): Promise<AuthSession> {
     try {
       await this.handle.token._refreshToken(true);
     } catch {
       throw categoricalError("live notesnook token refresh failed");
     }
-    this.ensureOperationCurrent(epoch);
-    const envelope = await this.readEnvelopeIfCurrent(epoch);
-    const user = await this.readUserIfCurrent(epoch);
-    this.ensureOperationCurrent(epoch);
+    this.ensureGeneration(generation);
+    const envelope = await this.readEnvelopeIfCurrent(generation);
+    const user = await this.readUserIfCurrent(generation);
+    this.ensureGeneration(generation);
     const session = envelopeToSession(envelope, user, this.providerNow());
     this.hasActiveSession = true;
     this.logInfo("live.notesnook.auth.refresh", {
       status: "authenticated",
       userId: session.userId,
     });
+    this.ensureGeneration(generation);
     return session;
-  }
-
-  private async logoutInternal(): Promise<void> {
-    let failure: Error | undefined;
-    // Step 1: revoke the upstream token.  The narrow handle
-    // forwards `clearLocal: boolean` to the pinned upstream; we
-    // always pass `true` so the upstream cache is wiped on
-    // logout.  No boolean argument is exposed through this
-    // provider — the `true` is a production-only invariant.
-    try {
-      await this.handle.user.logout(true);
-    } catch {
-      failure = categoricalError("live notesnook logout failed");
-    }
-    // Step 2: delete the local token envelope.  Idempotent —
-    // upstream `db.reset()` does NOT clear token, so this is the
-    // explicit boundary for the local envelope.
-    try {
-      await this.handle.kv.delete(LIVE_NOTESNOOK_KV_TOKEN_KEY);
-    } catch {
-      failure ??= categoricalError("live notesnook token cleanup failed");
-    }
-    // Step 3: invoke the cleanup hook.  The hook is the only path
-    // through which a generic destructive boundary is reached.
-    try {
-      await this.cleanupHook();
-    } catch {
-      failure ??= categoricalError("live notesnook local-state cleanup failed");
-    }
-    if (failure) throw failure;
-    this.logInfo("live.notesnook.auth.logout", { status: "signed-out" });
-  }
-
-  private async waitForLogout(): Promise<void> {
-    if (this.logoutInFlight) await this.logoutInFlight;
-  }
-
-  private ensureOperationCurrent(epoch: number): void {
-    if (this.operationEpoch !== epoch) {
-      throw categoricalError("live notesnook auth operation superseded");
-    }
   }
 
   private providerNow(): number {
@@ -469,71 +578,81 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
     }
   }
 
-  /** Logging is best-effort; a logger throw never propagates past this seam. */
+  /** Logging is best-effort; a logger throw never changes the auth result. */
   private logInfo(message: string, record: { status: string; userId?: string }): void {
     try {
       this.logger?.info(message, record);
     } catch {
-      // A logger failure must never turn a successful auth operation into a
-      // raw, potentially secret-bearing error after persistence completed.
+      // Injected logger failures must never cross the provider boundary.
     }
   }
 
-  private async readEnvelopeIfCurrent(epoch: number): Promise<NotesnookLiveTokenEnvelope> {
-    this.ensureOperationCurrent(epoch);
+  /** Best-effort rollback for a login that may have persisted a token. */
+  private async compensateLoginToken(generation: number): Promise<void> {
+    // A queued logout/cancel is authoritative and will delete after this
+    // operation settles.  Never let this stale rollback race a later login.
+    if (this.invalidationGeneration !== generation) return;
+    try {
+      await this.handle.kv.delete(LIVE_NOTESNOOK_KV_TOKEN_KEY);
+    } catch {
+      // Preserve the original categorical login failure.  Logout/cancel can
+      // still retry authoritative cleanup through the state machine.
+    }
+  }
+
+  private async readEnvelopeIfCurrent(generation: number): Promise<NotesnookLiveTokenEnvelope> {
+    this.ensureGeneration(generation);
     let raw: unknown;
     try {
       raw = await this.handle.token.getToken();
     } catch {
       throw categoricalError("live notesnook token read failed");
     }
-    this.ensureOperationCurrent(epoch);
+    this.ensureGeneration(generation);
     return asEnvelope(raw);
   }
 
-  private async readUserIfCurrent(epoch: number): Promise<NotesnookLiveUser | undefined> {
-    this.ensureOperationCurrent(epoch);
+  private async readUserIfCurrent(generation: number): Promise<NotesnookLiveUser | undefined> {
+    this.ensureGeneration(generation);
     let user: NotesnookLiveUser | undefined;
     try {
       user = await this.handle.user.getUser();
     } catch {
       throw categoricalError("live notesnook user read failed");
     }
-    this.ensureOperationCurrent(epoch);
+    this.ensureGeneration(generation);
     return user;
   }
 
-  /**
-   * Submit the password to the upstream handle, retrying through
-   * the injected supplier on rejection.  The initial password is
-   * held in a local variable only; it is never persisted, logged,
-   * or stored on the provider instance.
-   */
-  private async submitPasswordWithRetry(
-    epoch: number,
+  private async submitPasswordOnlyWithRetry(
+    generation: number,
     email: string,
     initialPassword: string,
   ): Promise<void> {
     let currentPassword = initialPassword;
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= this.passwordMaxAttempts; attempt += 1) {
-      this.ensureOperationCurrent(epoch);
+      this.ensureGeneration(generation);
       try {
-        await this.handle.user.authenticatePassword(email, currentPassword);
-        this.ensureOperationCurrent(epoch);
+        await this.handle.user._login({
+          email,
+          password: currentPassword,
+          hashedPassword: hashNotesnookPassword(email, currentPassword),
+        });
+        this.ensureGeneration(generation);
         return;
       } catch {
-        this.ensureOperationCurrent(epoch);
+        this.ensureGeneration(generation);
         lastError = categoricalError("live notesnook password authentication failed");
         if (attempt === this.passwordMaxAttempts) break;
         let next: string | null;
         try {
           next = await this.passwordSupplier();
         } catch {
-          this.ensureOperationCurrent(epoch);
+          this.ensureGeneration(generation);
           throw categoricalError("live notesnook password supplier failed");
         }
-        this.ensureOperationCurrent(epoch);
+        this.ensureGeneration(generation);
         if (next === null) break;
         if (typeof next !== "string" || next.length === 0) {
           throw categoricalError("live notesnook password supplier returned invalid input");
@@ -544,27 +663,56 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
     throw lastError ?? categoricalError("live notesnook password authentication failed");
   }
 
-  /**
-   * Collect an MFA code from the injected supplier, retrying up to
-   * `mfaMaxAttempts` times.  The envelope is not consumed — this
-   * method only drives the upstream MFA round.  Throws on
-   * exhaustion with a categorical error.
-   */
+  private async submitPasswordWithRetry(
+    generation: number,
+    email: string,
+    initialPassword: string,
+  ): Promise<void> {
+    let currentPassword = initialPassword;
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= this.passwordMaxAttempts; attempt += 1) {
+      this.ensureGeneration(generation);
+      try {
+        await this.handle.user.authenticatePassword(email, currentPassword);
+        this.ensureGeneration(generation);
+        return;
+      } catch {
+        this.ensureGeneration(generation);
+        lastError = categoricalError("live notesnook password authentication failed");
+        if (attempt === this.passwordMaxAttempts) break;
+        let next: string | null;
+        try {
+          next = await this.passwordSupplier();
+        } catch {
+          this.ensureGeneration(generation);
+          throw categoricalError("live notesnook password supplier failed");
+        }
+        this.ensureGeneration(generation);
+        if (next === null) break;
+        if (typeof next !== "string" || next.length === 0) {
+          throw categoricalError("live notesnook password supplier returned invalid input");
+        }
+        currentPassword = next;
+      }
+    }
+    throw lastError ?? categoricalError("live notesnook password authentication failed");
+  }
+
   private async submitMfaWithRetry(
-    epoch: number,
+    generation: number,
     _initialEnvelope: NotesnookLiveTokenEnvelope,
   ): Promise<void> {
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= this.mfaMaxAttempts; attempt += 1) {
-      this.ensureOperationCurrent(epoch);
+      this.ensureGeneration(generation);
       let code: string | null;
       try {
         code = await this.mfaSupplier();
       } catch {
-        this.ensureOperationCurrent(epoch);
+        this.ensureGeneration(generation);
         throw categoricalError("live notesnook MFA supplier failed");
       }
-      this.ensureOperationCurrent(epoch);
+      this.ensureGeneration(generation);
       if (code === null) {
         throw categoricalError("live notesnook MFA input ended before a code was entered");
       }
@@ -573,12 +721,11 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
       }
       try {
         await this.handle.user.authenticateMultiFactorCode(code, "app");
-        this.ensureOperationCurrent(epoch);
+        this.ensureGeneration(generation);
         return;
       } catch {
-        this.ensureOperationCurrent(epoch);
+        this.ensureGeneration(generation);
         lastError = categoricalError("live notesnook MFA authentication failed");
-        continue;
       }
     }
     throw lastError ?? categoricalError("live notesnook MFA authentication failed");
@@ -644,6 +791,7 @@ function validateHandle(handle: unknown): asserts handle is NotesnookLiveCoreHan
       "authenticateEmail",
       "authenticateMultiFactorCode",
       "authenticatePassword",
+      "_login",
       "getUser",
       "logout",
     ]) {
@@ -769,7 +917,7 @@ function asEnvelope(raw: unknown): NotesnookLiveTokenEnvelope {
 /**
  * Translate an upstream token envelope into the public
  * `AuthSession` shape.  Refuses to expose `refresh_token`.  Uses
- * the envelope's `t` value (upstream unix epoch seconds) as the
+ * the envelope's `t` value (upstream epoch milliseconds) as the
  * base for `issuedAt` and `expiresAt` — both returned in
  * milliseconds.  The session's `userId` is the upstream user's
  * `id` (no token-derived hash).
@@ -779,8 +927,8 @@ function envelopeToSession(
   user: NotesnookLiveUser | undefined,
   now: number,
 ): AuthSession {
-  const issuedAt = envelope.t * 1000;
-  const expiresAt = (envelope.t + envelope.expires_in) * 1000;
+  const issuedAt = envelope.t;
+  const expiresAt = envelope.t + envelope.expires_in * 1000;
   if (!Number.isFinite(now)) {
     throw categoricalError("live notesnook auth clock must return a finite number");
   }
@@ -803,10 +951,7 @@ function envelopeToSession(
 }
 
 function scopeContainsMfa(scope: string): boolean {
-  for (const part of scope.split(SCOPE_SEPARATOR)) {
-    if (part === MFA_REQUIRED_SCOPE) return true;
-  }
-  return false;
+  return scope === MFA_REQUIRED_SCOPE;
 }
 
 function positiveInteger(value: unknown, name: string): number {
