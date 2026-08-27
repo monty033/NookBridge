@@ -399,32 +399,38 @@ export function createNotesnookCoreAdapter(
  * pinned real-upstream module.  Stage 2A's `Database` is a plain
  * object with a `setup({ storage })` static method; the real
  * upstream's `Database` is a CONSTRUCTABLE class.  Both are
- * structurally callish so we use a non-enumerable marker that the
- * live factory applies at construction time.  Stage 2A tests inject
- * the fake directly without a marker and are routed through the
- * fake branch; live values produced by the factory are routed
- * through the real branch.
+ * structurally callish so we use a non-forgeable identity marker
+ * that the live factory applies at construction time.  Stage 2A
+ * tests inject the fake directly without a marker and are routed
+ * through the fake branch; live values produced by the factory are
+ * routed through the real branch.
+ *
+ * The marker is held in a module-private `WeakSet<object>` keyed on
+ * object identity.  This deliberately does NOT mutate the supplied
+ * module object: dynamic `import("@notesnook/core")` returns an
+ * ECMAScript module namespace, which is non-extensible, and any
+ * attempt to attach a symbol-keyed property to it via
+ * `Object.defineProperty` throws `TypeError: Cannot define
+ * property ..., object is not extensible`.  Holding the marker in
+ * private state instead keeps the discriminator working on the real
+ * ESM namespace while remaining non-forgeable from outside (no
+ * observable property to set, no enumerable marker to forge).
  */
-const REAL_MODULE_MARKER = Symbol.for("nookbridge.notesnook-core-adapter.real");
-
-interface MarkedRealCoreModule extends NotesnookRealCoreModule {
-  [REAL_MODULE_MARKER]: true;
-}
+const markedRealCoreModules = new WeakSet<object>();
 
 export function markRealCoreModule(module: NotesnookRealCoreModule): NotesnookRealCoreModule {
-  Object.defineProperty(module, REAL_MODULE_MARKER, {
-    configurable: true,
-    enumerable: false,
-    writable: false,
-    value: true,
-  });
+  // `WeakSet#add` accepts any object reference and never mutates
+  // the target.  Idempotent: re-marking the same module is a no-op,
+  // which keeps the live factory's wrap-with-marker step safe
+  // against repeated construction paths.
+  markedRealCoreModules.add(module);
   return module;
 }
 
 function isRealCoreModule(
   core: NotesnookCoreModule | NotesnookRealCoreModule,
 ): core is NotesnookRealCoreModule {
-  return (core as Partial<MarkedRealCoreModule>)[REAL_MODULE_MARKER] === true;
+  return markedRealCoreModules.has(core);
 }
 
 function resolveCore(source: NotesnookCoreSource): NotesnookCoreModule | NotesnookRealCoreModule {
