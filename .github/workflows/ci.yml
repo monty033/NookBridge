@@ -43,34 +43,26 @@ permissions:
 jobs:
   format-and-lint:
     name: Prettier + ESLint
-    runs-on: ubuntu-latest
+    runs-on: nixos
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.23.0"
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm run format:check
-      - run: npm run lint
+      - run: nix develop --command npm ci --no-audit --no-fund
+      - run: nix develop --command npm run format:check
+      - run: nix develop --command npm run lint
 
   typecheck:
     name: TypeScript typecheck
-    runs-on: ubuntu-latest
+    runs-on: nixos
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.23.0"
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm run typecheck
+      - run: nix develop --command npm ci --no-audit --no-fund
+      - run: nix develop --command npm run typecheck
 
   unit-and-native:
     name: Vitest (unit + native-runtime)
-    runs-on: ubuntu-latest
+    runs-on: nixos
     timeout-minutes: 20
     # `services` is intentionally empty. Stage 0 tests must not depend on
     # any external service. Stage 1 may add a mocked sync-server container
@@ -82,12 +74,8 @@ jobs:
       NOOKBRIDGE_CI_NETWORK_OFF: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.23.0"
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm test
+      - run: nix develop --command npm ci --no-audit --no-fund
+      - run: nix develop --command npm test
       # If vitest emits a junit report, upload it. We don't enable it by
       # default to keep noise down, but the hook is here for Stage 1.
       - if: always()
