@@ -140,5 +140,32 @@ export type {
 } from "./core/notesnook-core-adapter.js";
 export { createNotesnookCoreAdapter, NotesnookCoreAdapter } from "./core/notesnook-core-adapter.js";
 
+// Stage 2B secure interactive secret-input boundary and admin auth
+// command plumbing. No @notesnook/core import, no live transport, no
+// credential persistence, and no real account login yet — the admin
+// auth runner resolves to a structured "deferred" outcome until the
+// upstream Notesnook core login API is reviewed and wired in.
+export type {
+  CollectedSecret,
+  CollectSecretOptions,
+  SecretKind,
+  SecretPrompt,
+} from "./auth/secret-input.js";
+export {
+  collectEmail,
+  collectMfaCode,
+  collectPassword,
+  createStdioPrompt,
+} from "./auth/secret-input.js";
+export type {
+  AuthSubcommand,
+  DeferredAuthOutcome,
+  ParseAuthCommandResult,
+  ParsedAuthCommand,
+  RunAuthCommandOptions,
+  RunAuthCommandResult,
+} from "./auth/admin-command.js";
+export { formatAuthHelp, parseAuthCommand, runAuthCommand } from "./auth/admin-command.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
