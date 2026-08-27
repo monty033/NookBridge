@@ -19,6 +19,44 @@ reviewers; nothing in this document extends the security claim beyond that
 scope. The current PR's documentation change is provenance bookkeeping and
 was not covered by those historical code/test reviews.
 
+## Offline S2 checkpoint (measured 2026-08-27)
+
+The focused `tests/stage-2-s2-hygiene.test.ts` checkpoint passes **5/5
+focused tests** (with 42 generated credential-carrier matrix cases inside the
+argv/env probe). It exercises the public package entry points and records only
+offline evidence:
+
+- `runAuthCommand` rejects split and equals-form forbidden argv carriers and
+  own, inherited, empty, and undefined environment carriers with categorical
+  diagnostics that omit generated canaries.
+- The opt-in public live runner/provider path uses a fake narrow handle, makes
+  zero `fetch` calls, and returns only the four-field refresh-token-free
+  `AuthSession` shape.
+- Direct refresh after logout is rejected before a fake token manager can issue
+  a replacement; `kv.token` remains absent.
+- Provider and outer `AuthCoordinator` logger failures do not leak their raw
+  messages or undo a committed authenticated state.
+- A disposable persistent fixture creates state/key/database/lock files at
+  modes `0700`/`0600`/`0600`/`0600`; generated canaries are absent from the
+  disposable tree and captured diagnostics.
+
+Verification inside the pinned `nix develop` shell: focused S2 **5 passed**;
+full `npm test` **205 passed across 10 files**; `typecheck`, `lint`,
+`format:check`, `build`, and `git diff --check` passed. This is offline mocked
+and filesystem evidence only. The authorized live-account gate remains
+**unperformed**: no real Notesnook account, credentials, or live transport was
+used, so this entry makes no claim of successful live-account authentication.
+
+### S2 staged scope
+
+| Field | Value |
+| --- | --- |
+| Stage | S2 offline checkpoint |
+| Scope | `tests/stage-2-s2-hygiene.test.ts` plus this ledger entry |
+| Focused evidence | 5/5 |
+| Full evidence | 205/205 across 10 files |
+| Live-account status | unperformed |
+
 ## Staged diff under review
 
 | Field | Value |
