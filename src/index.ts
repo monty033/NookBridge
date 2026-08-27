@@ -115,5 +115,30 @@ export { createLogger, formatLine, redactRecord, DEFAULT_REDACT_FIELDS } from ".
 export type { DoctorReport, Check, CheckStatus, RunDoctorOptions } from "./doctor/doctor.js";
 export { runDoctor } from "./doctor/doctor.js";
 
+// Stage 2A offline authentication boundary. The mock provider is explicitly
+// test-only/offline; real account authentication is deferred to Stage 2B.
+export type {
+  AuthCredentials,
+  AuthenticatedAuthState,
+  AuthProvider,
+  AuthSession,
+  AuthState,
+  ExpiredAuthState,
+  SignedOutAuthState,
+} from "./auth/types.js";
+export { AuthCoordinator, type AuthCoordinatorOptions } from "./auth/coordinator.js";
+export { MockAuthProvider, type MockAuthProviderOptions } from "./auth/mock-provider.js";
+
+// Stage 2A injected upstream-core seam. No @notesnook/core import or live
+// service transport is exposed by this boundary.
+export type {
+  NotesnookCoreAdapterOptions,
+  NotesnookCoreFactory,
+  NotesnookCoreModule,
+  NotesnookCoreSource,
+  NotesnookDatabase,
+} from "./core/notesnook-core-adapter.js";
+export { createNotesnookCoreAdapter, NotesnookCoreAdapter } from "./core/notesnook-core-adapter.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
