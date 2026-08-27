@@ -434,3 +434,65 @@ checkpoint remains explicitly deferred.
   offline POC slice. **S2 is NOT claimed.** The live-account
   S2 security checkpoint remains deferred to a separately
   authorized review.
+
+## Chronological ledger — Stage 2-live SQLite dialect init-recursion runtime fix (2026-08-27)
+
+This entry records a **local runtime correctness fix** in the gated live-login
+runtime's SQLite dialect wiring, plus its regression test and documentation.
+**No real Notesnook account, credential, or live network was exercised.** The
+pinned `@notesnook/core` package was not imported at runtime during this work;
+the regression test uses the existing injected-module seam. This entry does
+**not** claim S2 PASS or a live-account exercise; the live-account S2 security
+checkpoint remains explicitly deferred.
+
+- **Scope:** `src/auth/live-login-runtime.ts`,
+  `tests/stage-2-live-init-recursion.test.ts` (new),
+  `docs/stage-2-live.md`, `docs/security-reviews.md` (this entry).
+- **Defect:** `buildSetupOptions`'s `sqliteOptions.dialect` callback forwarded
+  upstream's second argument to kysely as
+  `new SqliteDialect({ database, onCreateConnection: init })`. At the pinned
+  commit that argument is upstream's own bootstrap driver
+  (`createDatabase`: `options.dialect(name, () => db.connection().execute(...))`),
+  not a connection hook. Wiring it as `onCreateConnection` re-entered the
+  driver from inside `SqliteDriver.init()`
+  (`driver.init() -> onCreateConnection -> bootstrap -> db.connection() -> driver.init() -> ...`),
+  raising `RangeError: Maximum call stack size exceeded` and aborting
+  `Database.init()` before the runtime could return a handle.
+- **Fix:** construct `new SqliteDialect({ database })` and ignore the
+  bootstrap callback (`_init`); upstream drives its own bootstrap. This is the
+  only behavioral change.
+- **Security boundaries unchanged:** the fix touches no security-relevant
+  behavior. The `notesnook` / `notesnook-logs` database allowlist, sqlcipher
+  keying via the local key store, `0o600` path hardening (before and after
+  keying, plus `-wal` / `-shm` / `-journal` siblings), SQLite handle tracking
+  and close-on-failure, the closed offline file adapter, the categorical
+  chain-free `runtimeError` shape, the lifecycle close / cleanup ordering, the
+  state-dir lock cleanup, the canonical `token` KV key, and the offline
+  `kv.token` separation are all byte-for-byte unchanged.
+- **Regression test:** `tests/stage-2-live-init-recursion.test.ts` (2 tests)
+  drives the real `createProductionLiveLoginRuntime` with an injected probe
+  core module that mirrors upstream's `createDatabase` wiring over a real
+  kysely instance and a real encrypted `better-sqlite3-multiple-ciphers` file
+  in a temp state dir. It asserts upstream's bootstrap runs exactly once
+  (`initCallbackRuns === 0`, `bootstrapRuns === 1`), that the bootstrap really
+  executed SQL through the live dialect, and — driving the production
+  dialect's own `createDriver().init()` — that `onCreateConnection` was never
+  invoked. A positive control constructs a dialect deliberately wired with
+  `onCreateConnection` and asserts the same driver-level probe observes it, so
+  the primary assertion cannot pass vacuously.
+- **Non-vacuity evidence:** with the pre-fix wiring temporarily restored, both
+  new tests FAIL with `RangeError: Maximum call stack size exceeded`; with the
+  fix applied, both PASS.
+- **Full repository evidence and gates (final run, all inside
+  `nix develop --offline`):** focused
+  `npx vitest run tests/stage-2-live-init-recursion.test.ts` PASS (2/2);
+  `npx vitest run` PASS (219/219 across 13 files); `npm run typecheck` PASS;
+  `npm run lint` PASS; `npm run format:check` PASS; `npm run build` PASS;
+  `git diff --check` PASS.
+- **Live CLI exercise:** **not performed.** No credential, argv/env carrier,
+  TTY prompt, or real account path was exercised.
+- **Deferral:** live-account S2 — real core initialization against the pinned
+  package, live authentication, live token revocation/refresh, transport
+  security, secret provisioning, and deployment isolation — remains deferred
+  to a separately authorized review. This fix removes a local initialization
+  defect only; it is not evidence that live authentication is safe or enabled.
