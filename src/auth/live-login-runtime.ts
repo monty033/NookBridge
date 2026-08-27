@@ -163,7 +163,14 @@ function buildSetupOptions(
 ): NotesnookDatabaseSetupOptions {
   return {
     sqliteOptions: {
-      dialect: (name, init) => {
+      // `_init` is upstream's bootstrap callback (`@notesnook/core@8.1.3`
+      // `createDatabase`: `options.dialect(name, () => db.connection().execute(...))`).
+      // It MUST NOT be forwarded to kysely as `onCreateConnection`: upstream
+      // already drives the bootstrap itself, and wiring it here re-enters the
+      // driver from inside `SqliteDriver.init()`
+      // (onCreateConnection -> bootstrap -> connection() -> driver init ...),
+      // which overflows the stack before `Database.init()` can resolve.
+      dialect: (name, _init) => {
         if (name !== "notesnook" && name !== "notesnook-logs") {
           throw runtimeError("live-login requested an unsupported SQLite database");
         }
@@ -175,10 +182,7 @@ function buildSetupOptions(
           database.pragma(`key="${escapeSqliteKey(key)}"`);
           hardenLiveSqlitePath(dbPath);
           sqliteDatabases.add(database);
-          return new SqliteDialect({
-            database,
-            ...(init === undefined ? {} : { onCreateConnection: init }),
-          });
+          return new SqliteDialect({ database });
         } catch {
           try {
             database.close();

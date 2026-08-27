@@ -90,6 +90,41 @@ followed by `db.kv.read("token")` on restore and `db.kv.delete("token")`
 on logout. The envelope lives in upstream's SQL `KVStorage`; NookBridge
 does not own a parallel token store.
 
+## SQLite dialect wiring — upstream's `init` callback is not a connection hook
+
+`src/auth/live-login-runtime.ts` supplies the `sqliteOptions.dialect` callback
+that upstream invokes from `createDatabase(name, options)` at the pinned
+commit:
+
+```text
+new Kysely({ dialect: options.dialect(name, async () => {
+  await db.connection().execute(async (conn) => { /* upstream bootstrap */ });
+}) })
+```
+
+The second argument is upstream's **own bootstrap driver**, not a kysely
+connection hook. Upstream calls that bootstrap itself (unless
+`skipInitialization` is set), so the runtime's dialect callback must construct
+`new SqliteDialect({ database })` and **ignore** the callback.
+
+Forwarding it as kysely's `onCreateConnection` re-enters the driver from inside
+`SqliteDriver.init()`:
+
+```text
+driver.init() -> onCreateConnection -> upstream bootstrap -> db.connection()
+  -> driver.init() -> ...  => RangeError: Maximum call stack size exceeded
+```
+
+which aborts `Database.init()` before the live-login runtime can return a
+handle. `tests/stage-2-live-init-recursion.test.ts` is the regression guard: it
+drives `createProductionLiveLoginRuntime` with an injected probe core that
+mirrors upstream's `createDatabase` wiring over a real kysely instance and a
+real encrypted `better-sqlite3-multiple-ciphers` database, asserts the
+bootstrap runs exactly once (never re-entered), drives the dialect's own
+`createDriver().init()` to prove `onCreateConnection` was never wired, and
+includes a positive control that the same driver-level probe *does* observe a
+deliberately wired `onCreateConnection`.
+
 ## Login order
 
 The provider follows the exact order documented in
@@ -248,6 +283,12 @@ The recorded outcomes for this slice are:
   the explicit flag and subcommand, forbidden argv/env carriers, non-TTY
   failure before runtime initialization, success/error cleanup, deferred
   ordinary login, and an offline injected runtime construction seam.
+- `tests/stage-2-live-init-recursion.test.ts` — focused regression tests
+  proving the production runtime's SQLite dialect does not forward upstream's
+  `init` bootstrap callback to kysely as `onCreateConnection`, so
+  `Database.init()` completes instead of overflowing the stack. Exercised
+  against a real kysely instance and a real encrypted local SQLite file with
+  an injected probe core; no real account, credential, or network.
 
 ## Explicit offline-only statement
 
