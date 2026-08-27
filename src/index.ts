@@ -116,7 +116,9 @@ export type { DoctorReport, Check, CheckStatus, RunDoctorOptions } from "./docto
 export { runDoctor } from "./doctor/doctor.js";
 
 // Stage 2A offline authentication boundary. The mock provider is explicitly
-// test-only/offline; real account authentication is deferred to Stage 2B.
+// test-only/offline; real account authentication remains deferred to the
+// separately authorized Stage 2B live checkpoint — the default CLI
+// `nookctl auth` path resolves to a structured `deferred` outcome.
 export type {
   AuthCredentials,
   AuthenticatedAuthState,
@@ -156,14 +158,89 @@ export type {
   NotesnookCoreModule,
   NotesnookCoreSource,
   NotesnookDatabase,
+  NotesnookDatabaseSetupOptions,
+  NotesnookEventSourceConstructor,
+  NotesnookEventSourceInit,
+  NotesnookEventSourceLike,
+  NotesnookFileEncryptionMetadata,
+  NotesnookFileEncryptionMetadataWithHash,
+  NotesnookICompressor,
+  NotesnookIFileStorage,
+  NotesnookRealCoreModule,
+  NotesnookRequestOptions,
+  NotesnookSQLiteDialect,
+  NotesnookSQLiteOptions,
 } from "./core/notesnook-core-adapter.js";
-export { createNotesnookCoreAdapter, NotesnookCoreAdapter } from "./core/notesnook-core-adapter.js";
+export {
+  createNotesnookCoreAdapter,
+  markRealCoreModule,
+  NotesnookCoreAdapter,
+  validateDatabaseSetupOptions,
+  validateSQLiteOptions,
+} from "./core/notesnook-core-adapter.js";
+
+// Stage 2B-live minimal lazy narrow real-core factory. The dynamic
+// `import("@notesnook/core")` lives inside the exported factory
+// function; ordinary imports of this module do NOT load the pinned
+// package, so offline tooling can pull the narrow types without
+// paying the cost (or the network surface) of the live module.
+export type {
+  NotesnookLiveCoreFactory,
+  NotesnookLiveCoreHandle,
+  NotesnookLiveFactoryOptions,
+  NotesnookLiveKvKey,
+  NotesnookLiveTokenEnvelope,
+  NotesnookLiveUser,
+} from "./core/notesnook-live-factory.js";
+export {
+  NOTESNOOK_LIVE_KV_TOKEN_KEY,
+  createNotesnookLiveCoreFactory,
+} from "./core/notesnook-live-factory.js";
+
+// Stage 2B-live explicit live Notesnook auth provider. The provider is
+// wired to the narrow {@link NotesnookLiveCoreHandle} returned by the
+// lazy factory above — it never accepts a raw `Database`, a generic
+// transport, or a generic core passthrough. The provider follows the
+// pinned login order (email -> optional MFA -> password), refreshes
+// via the canonical `_refreshToken(true)` then `getToken()` path,
+// persists the envelope only through the upstream `db.kv` accessor
+// under the canonical `kv.token` key, and cleans up via
+// `core.user.logout(true)` + `kv.token` removal + the injected
+// cleanup hook. No password/MFA code is ever cached on the
+// provider; the public `AuthSession` never carries a `refresh_token`.
+export type {
+  LiveCleanupHook,
+  LiveMfaSupplier,
+  LiveNotesnookAuthProviderOptions,
+  LivePasswordSupplier,
+} from "./auth/live-notesnook-auth-provider.js";
+export {
+  LIVE_NOTESNOOK_KV_TOKEN_KEY,
+  LiveNotesnookAuthProvider,
+  createLiveNotesnookAuthProvider,
+} from "./auth/live-notesnook-auth-provider.js";
+
+// Stage 2B-live explicit live auth runner. The runner is the only
+// path that drives the live provider from the CLI boundary; it
+// collects credentials ONLY through the injected `SecretPrompt`,
+// zeroizes every captured buffer, and returns a redacted outcome.
+// The runner is OPT-IN — production CLI runs preserve the deferred
+// default; callers wire this runner in via the `providerFactory`
+// seam when they want to exercise the live handle.
+export type {
+  LiveAuthCommandKind,
+  LiveProviderFactory,
+  RunLiveAuthCommandOptions,
+  RunLiveAuthResult,
+} from "./auth/live-auth-runner.js";
+export { runLiveAuthCommand } from "./auth/live-auth-runner.js";
 
 // Stage 2B secure interactive secret-input boundary and admin auth
 // command plumbing. No @notesnook/core import, no live transport, no
-// credential persistence, and no real account login yet — the admin
-// auth runner resolves to a structured "deferred" outcome until the
-// upstream Notesnook core login API is reviewed and wired in.
+// credential persistence, and no real account login by default —
+// the default admin auth runner resolves to a structured "deferred"
+// outcome. The live runner above is the OPT-IN path; it is not
+// reached unless a caller wires in the `providerFactory` seam.
 export type {
   CollectedSecret,
   CollectSecretOptions,

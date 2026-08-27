@@ -200,6 +200,16 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
         ].join("\n"),
       );
       return 0;
+    case "live-login":
+      process.stdout.write(
+        [
+          `nookctl auth ${result.outcome.subcommand}: ${result.outcome.status}`,
+          `  ${result.outcome.message}`,
+          `  userId=${result.session.userId}`,
+          "",
+        ].join("\n"),
+      );
+      return 0;
   }
 }
 

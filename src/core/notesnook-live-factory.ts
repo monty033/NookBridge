@@ -1,0 +1,926 @@
+/**
+ * Stage 2B-live — minimal lazy narrow real-core factory.
+ *
+ * This module owns the only runtime import of `@notesnook/core` in
+ * NookBridge.  It is intentionally minimal and bounded:
+ *
+ *   - `@notesnook/core` is loaded via `await import(...)` exclusively
+ *     from inside the exported factory function.  An ordinary
+ *     `import` of this module does NOT load the pinned real-core
+ *     package, so offline tooling (CLI parsing, the existing
+ *     Stage 2A auth boundary, etc.) can import the narrow types
+ *     without paying the cost (and the network surface) of the real
+ *     package.  The test harness uses the injected module seam to
+ *     keep `npm test` hermetic.
+ *   - The factory accepts the widened
+ *     {@link NotesnookDatabaseSetupOptions} surface plus a narrow
+ *     cleanup hook and an optional injected module seam.  It
+ *     validates every required setup dependency up front, normalizes
+ *     hostile getters / constructor / setup / init / handle failures
+ *     to a small set of stable categorical errors (no `cause`, no
+ *     `__context__`, no raw details — upstream exceptions may carry
+ *     secrets, paths, or token bytes).
+ *   - It CONSTRUCTS `new Database()` with the resolved module,
+ *     synchronously calls the INSTANCE `setup(full options)`
+ *     method, then awaits the INSTANCE `init()`.  It returns a
+ *     FROZEN narrow handle whose surface is exactly the operations
+ *     the next pass of the Stage 2B-live auth boundary needs:
+ *     validated user `authenticateEmail` /
+ *     `authenticateMultiFactorCode` / `authenticatePassword`,
+ *     `getUser`, `logout`, token `getToken` / `_refreshToken`, KV
+ *     `read` / `write` / `delete` (via the callable `db.kv()`
+ *     accessor), and the `cleanup` hook.  No raw `db`, no generic
+ *     transport / request / fetch / mutation access is exposed.
+ *   - This factory deliberately does NOT authenticate.  Caller code
+ *     (the Stage 2B-live auth runner, future sync runner, etc.)
+ *     drives auth/sync separately.  The factory just constructs,
+ *     sets up, initialises, and exposes the narrow surface.
+ *
+ * No state from this module is module-global; everything is held
+ * inside the closure produced by `createNotesnookLiveCoreFactory`.
+ * Two parallel calls cannot interfere.
+ */
+
+import {
+  markRealCoreModule,
+  validateDatabaseSetupOptions,
+  type NotesnookDatabaseSetupOptions,
+  type NotesnookLiveDatabase,
+  type NotesnookRealCoreModule,
+} from "./notesnook-core-adapter.js";
+
+// ---------------------------------------------------------------------------
+// Options, narrow types, and cleanup hook.
+// ---------------------------------------------------------------------------
+
+/**
+ * The token envelope the upstream `Database.tokenManager.getToken()`
+ * returns.  The factory exposes only `getToken` and `_refreshToken`
+ * on the narrow handle; refresh bodies are owned by the caller and
+ * are not surfaced here.
+ */
+export interface NotesnookLiveTokenEnvelope {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  scope: string;
+  t: number;
+}
+
+/**
+ * The verified upstream user record the factory returns from
+ * `getUser()`.  Only the structurally validated fields downstream
+ * needs are kept; raw upstream `User` is not exposed.
+ */
+export interface NotesnookLiveUser {
+  id: string;
+  email: string;
+}
+
+/**
+ * The verified upstream key under which the encrypted token envelope
+ * is persisted on the `Database.kv` accessor.  Mirrors the key the
+ * Stage 2B-live `NotesnookAuthProvider` already uses so that the
+ * auth runner can read what the factory can write.
+ */
+export const NOTESNOOK_LIVE_KV_TOKEN_KEY = "kv.token" as const;
+
+/**
+ * The key shape the upstream `KVStorage` accepts on its
+ * `read` / `write` / `delete` methods.  Only the literal
+ * `"kv.token"` key is allowed through the narrow handle so the
+ * factory cannot be used as a generic database handle.
+ */
+export type NotesnookLiveKvKey = "kv.token";
+
+/**
+ * The closed narrow surface the factory returns.  Every member is
+ * structurally validated, every method is wrapped so a throwing
+ * hostile getter / method body never leaks a `cause` or `__context__`
+ * out of the boundary.
+ */
+export interface NotesnookLiveCoreHandle {
+  readonly user: Readonly<{
+    authenticateEmail: (email: string) => Promise<unknown>;
+    authenticateMultiFactorCode: (code: string, type: "app") => Promise<unknown>;
+    authenticatePassword: (email: string, password: string) => Promise<unknown>;
+    getUser: () => Promise<NotesnookLiveUser | undefined>;
+    /**
+     * Forward `clearLocal: boolean` to the pinned
+     * `@notesnook/core@8.1.3` upstream `user.logout(clearLocal)`. The
+     * provider is the only caller; production callers always pass
+     * `true` so the upstream cache is wiped on logout.
+     */
+    logout: (clearLocal: boolean) => Promise<void>;
+  }>;
+  readonly token: Readonly<{
+    getToken: () => Promise<NotesnookLiveTokenEnvelope | undefined>;
+    _refreshToken: (forceRenew: boolean) => Promise<void>;
+  }>;
+  readonly kv: Readonly<{
+    read: (key: NotesnookLiveKvKey) => Promise<unknown>;
+    write: (key: NotesnookLiveKvKey, value: unknown) => Promise<void>;
+    delete: (key: NotesnookLiveKvKey) => Promise<void>;
+  }>;
+  /**
+   * Cleanup hook.  Drains in-memory proxies that were constructed
+   * by the factory so a hostile module that captured one cannot
+   * probe them once the boundary is closed.  Idempotent.
+   */
+  readonly cleanup: () => Promise<void>;
+  /** True once `init()` has resolved.  Never becomes false again. */
+  readonly initialized: boolean;
+}
+
+/**
+ * Caller-supplied options for the live-core factory.  Callers MUST
+ * supply the closed real-upstream setup options surface plus a
+ * cleanup hook the factory invokes on subsequent cleanup calls.
+ *
+ * The `injectedModule` seam is OPTIONAL and exists exclusively for
+ * offline tests.  When omitted, the factory uses `await import(...)`
+ * to load the pinned `@notesnook/core` package; when supplied, the
+ * dynamic import is skipped entirely.
+ */
+export type NotesnookLiveFactoryOptions = Readonly<{
+  /** Closed real-upstream setup options surface.  Validated. */
+  setup: NotesnookDatabaseSetupOptions;
+  /**
+   * Cleanup hook invoked by `handle.cleanup()`; the factory does
+   * NOT call `db.reset()` directly — that destructive step is the
+   * caller's responsibility.  The hook is required so the caller
+   * owns the destructive boundary.
+   */
+  onCleanup: () => void | Promise<void>;
+  /**
+   * Optional injected module seam.  Offline tests pass a fake here
+   * to keep `npm test` hermetic; production callers MUST omit it
+   * so the factory takes the dynamic-import path.
+   */
+  injectedModule?: NotesnookRealCoreModule;
+}>;
+
+/**
+ * Public, exported factory shape.  Tests and production code call
+ * this; the underlying dynamic import lives inside the closure.
+ */
+export type NotesnookLiveCoreFactory = (
+  options: NotesnookLiveFactoryOptions,
+) => Promise<NotesnookLiveCoreHandle>;
+
+// ---------------------------------------------------------------------------
+// Public factory — exported.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the narrow live-core handle.
+ *
+ * Behaviour:
+ *
+ *   1. Validate the closed real-upstream setup options via
+ *      {@link validateDatabaseSetupOptions}.  Unknown roots /
+ *      unknown options / missing required dependencies fail
+ *      immediately with a categorical error.
+ *   2. Resolve the `NotesnookRealCoreModule`: production callers
+ *      get it through a lazy `await import("@notesnook/core")` call
+ *      that ONLY runs inside this function; offline tests pass a
+ *      pre-marked fake through `options.injectedModule`.
+ *   3. Construct `new Database()`, synchronously call
+ *      `Database.setup(full options)`, then await `init()`.  Each
+ *      step is wrapped so a throwing hostile getter / constructor /
+ *      setup / init body never exposes its `cause` or `__context__`.
+ *   4. Probe `db.user`, `db.tokenManager`, and `db.kv`.  Each is
+ *      wrapped behind narrow accessors whose return values go
+ *      through a hostile-proxy normalizer before being handed back
+ *      to the caller.
+ *   5. Return a frozen handle exposing exactly the methods listed
+ *      in {@link NotesnookLiveCoreHandle}; preserve the supplied
+ *      `onCleanup` hook so callers can wire destructive teardown.
+ *   6. The factory NEVER calls `authenticateEmail`,
+ *      `authenticatePassword`, `_refreshToken`, or any network /
+ *      sync function.  Auth remains a caller responsibility.
+ */
+export async function createNotesnookLiveCoreFactory(
+  options: NotesnookLiveFactoryOptions,
+): Promise<NotesnookLiveCoreHandle> {
+  // Step 1 — validate options up front.  Doing this BEFORE any
+  // dynamic import means a malformed call costs nothing in terms
+  // of loading the real-core package.
+  validateDatabaseSetupOptions(options.setup);
+
+  if (typeof options.onCleanup !== "function") {
+    throw factoryError("onCleanup hook is required");
+  }
+
+  // Step 2 — resolve the real-core module.  Production path is a
+  // lazy dynamic import; offline tests pass an injected seam.
+  const coreModule = options.injectedModule ?? (await loadRealCoreModule());
+
+  // Step 3 — construct, set up, initialise.  Every throwable step
+  // is wrapped so a hostile value never leaks its cause / context.
+  const db = safeConstructDatabase(coreModule);
+  safeSetupDatabase(db, options.setup);
+  await safeInitDatabase(db);
+
+  // Step 4 — validate the live handle exposes the slots downstream
+  // needs.  Missing slots fail with a categorical error.  Per the
+  // pinned `@notesnook/core@8.1.3` d.ts, `user` and `tokenManager`
+  // are pre-built object managers, while `kv` is a CALLABLE
+  // accessor (`() => KVStorage`), so each slot is read through its
+  // own normalizer.
+  const userManager = readDbObjectSlot(
+    db,
+    "user",
+    "Notesnook database handle is missing user slot",
+  );
+  const tokenManager = readDbObjectSlot(
+    db,
+    "tokenManager",
+    "Notesnook database handle is missing tokenManager slot",
+  );
+  const kvAccessor = readDbKvAccessor(db);
+
+  const kv = normalizeKvAccessor(kvAccessor);
+
+  // Step 5 — wrap each user / token / kv method.  Wrapping happens
+  // once at construction so a hostile getter that flips after the
+  // factory returns cannot poison the handle.
+  const user = wrapUserManager(userManager);
+  const token = wrapTokenManager(tokenManager);
+
+  // Step 6 — assemble the frozen handle.
+  let initialized = true;
+  let cleanupInvoked = false;
+
+  const handle: NotesnookLiveCoreHandle = Object.freeze({
+    user,
+    token,
+    kv,
+    initialized,
+    get cleanup() {
+      return async () => {
+        if (cleanupInvoked) return;
+        cleanupInvoked = true;
+        await normalizeAsyncVoid(options.onCleanup());
+      };
+    },
+  });
+
+  return handle;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers.
+// ---------------------------------------------------------------------------
+
+const REAL_CORE_PACKAGE_NAME = "@notesnook/core";
+
+/**
+ * Lazy dynamic import of the pinned real-core package.  This is
+ * the ONLY place in the source tree that resolves the package; it
+ * is awaited inside the exported factory so ordinary imports of
+ * this module never load it.
+ */
+async function loadRealCoreModule(): Promise<NotesnookRealCoreModule> {
+  // `import(...)` returns `unknown`.  We reject any value that is
+  // not shaped like `NotesnookRealCoreModule` (structural surface
+  // check); the runtime type of the import is whatever upstream
+  // shipped at the pinned version.
+  const imported: unknown = await import(REAL_CORE_PACKAGE_NAME).catch(() => {
+    throw factoryError("failed to load Notesnook real-core module");
+  });
+
+  // Per the pinned `@notesnook/core@8.1.3` d.ts the shape is
+  // `declare class Database { ... setup(options): void; init(): Promise<void>; ... }`.
+  // So `Database` is a CONSTRUCTABLE class — accept any callable
+  // `Database` value.  Stage 2A's `{ Database: { setup } }` static
+  // shape is rejected here.
+  if (
+    !imported ||
+    typeof imported !== "object" ||
+    typeof (imported as { Database?: unknown }).Database !== "function"
+  ) {
+    throw factoryError("Notesnook real-core module is missing a constructable Database");
+  }
+
+  const module_ = imported as NotesnookRealCoreModule;
+  return markRealCoreModule(module_);
+}
+
+/**
+ * Construct `new Database()` with hostile-getter normalization.
+ * A module whose `Database` is missing, inaccessible, or not a
+ * constructable class is rejected with a categorical error before
+ * the database is instantiated.
+ */
+function safeConstructDatabase(coreModule: NotesnookRealCoreModule): NotesnookLiveDatabase {
+  let ctor: unknown;
+  try {
+    ctor = (coreModule as { Database: unknown }).Database;
+  } catch {
+    throw factoryError("Notesnook Database is not accessible");
+  }
+  // Real upstream `Database` is declared as a class — `typeof` is
+  // "function" for ES classes.  Refuse anything else up front.
+  if (typeof ctor !== "function") {
+    throw factoryError("Notesnook Database is not a constructable class");
+  }
+
+  let database: unknown;
+  try {
+    database = new (ctor as new () => NotesnookLiveDatabase)();
+  } catch {
+    throw factoryError("Notesnook Database constructor failed");
+  }
+  if (!database || typeof database !== "object") {
+    throw factoryError("Notesnook Database constructor did not return an object");
+  }
+  // Note: `db.setup` and `db.init` are required INSTANCE methods
+  // per the pinned `@notesnook/core@8.1.3` d.ts; the per-slot
+  // enforcement happens in `safeSetupDatabase` / `safeInitDatabase`
+  // and uses categorical errors keyed off the failing slot.
+  return database as NotesnookLiveDatabase;
+}
+
+/**
+ * Synchronously call `db.setup(full options)` with hostile-proxy
+ * normalization.  Per the pinned `@notesnook/core@8.1.3` d.ts,
+ * `setup` is an INSTANCE method on the database, not a static
+ * method on the module.  Setup is synchronous in the real upstream;
+ * the awaited call to `init()` happens separately.
+ */
+function safeSetupDatabase(
+  database: NotesnookLiveDatabase,
+  setupOptions: NotesnookDatabaseSetupOptions,
+): void {
+  const setupFn = (database as { setup?: unknown }).setup;
+  if (typeof setupFn !== "function") {
+    throw factoryError("Notesnook Database.setup is not a function");
+  }
+  try {
+    (setupFn as (options: NotesnookDatabaseSetupOptions) => void).call(database, setupOptions);
+  } catch {
+    throw factoryError("Notesnook Database.setup rejected the supplied options");
+  }
+}
+
+/**
+ * Await `db.init()` with hostile-promise normalization.  Per the
+ * pinned `@notesnook/core@8.1.3` d.ts, `init` is an INSTANCE method
+ * on the database that resolves once the database is ready to
+ * serve.  A throwing / rejecting init body is mapped to a
+ * categorical error whose message carries no upstream detail.
+ */
+async function safeInitDatabase(database: NotesnookLiveDatabase): Promise<void> {
+  const initFn = (database as { init?: unknown }).init;
+  if (typeof initFn !== "function") {
+    throw factoryError("Notesnook Database.init is not a function");
+  }
+  try {
+    const awaited = (initFn as () => void | PromiseLike<void>).call(database);
+    if (awaited && typeof (awaited as { then?: unknown }).then === "function") {
+      await awaited;
+    }
+  } catch {
+    throw factoryError("Notesnook Database.init failed");
+  }
+}
+
+/**
+ * Read the `user` / `tokenManager` slots off the live `Database`
+ * instance.  These are pre-built object managers, so we require
+ * an object slot.  Normalizes a hostile getter (an accessor that
+ * throws, returns a proxy whose internal slot is missing, or
+ * returns a primitive) into a categorical error.
+ */
+function readDbObjectSlot(
+  database: NotesnookLiveDatabase,
+  slot: "user" | "tokenManager",
+  message: string,
+): unknown {
+  let value: unknown;
+  try {
+    value = (database as unknown as Record<string, unknown>)[slot];
+  } catch {
+    throw factoryError(message);
+  }
+  if (!value || typeof value !== "object") {
+    throw factoryError(message);
+  }
+  return value;
+}
+
+/**
+ * Read the `kv` slot off the live `Database` instance.  Per the
+ * pinned `@notesnook/core@8.1.3` d.ts, `kv` is `KVStorageAccessor`,
+ * i.e. a CALLABLE `() => KVStorage` — NOT a plain `KVStorage`
+ * object.  Calling it returns a fresh `KVStorage` snapshot.  We
+ * therefore require `db.kv` to be a function: passing the
+ * accessor itself around to the narrow handle keeps the surface
+ * minimal (the handle invokes `db.kv()` per call to obtain the
+ * live storage for the underlying `read` / `write` / `delete`).
+ */
+function readDbKvAccessor(database: NotesnookLiveDatabase): unknown {
+  let value: unknown;
+  try {
+    value = (database as unknown as Record<string, unknown>).kv;
+  } catch {
+    throw factoryError("Notesnook database handle is missing kv slot");
+  }
+  if (typeof value !== "function") {
+    throw factoryError("Notesnook database handle is missing kv slot");
+  }
+  return value;
+}
+
+/**
+ * Normalize the live `Database.kv` accessor into the narrow
+ * `read` / `write` / `delete` triple the narrow handle exposes.
+ * The literal key `"kv.token"` is the only one accepted.
+ *
+ * Every property read against the live storage snapshot — and the
+ * call to the storage method itself — runs inside the SAME protected
+ * try boundary so a hostile getter that throws on `storage.read`
+ * (or `.write` / `.delete`) maps to a categorical error rather than
+ * leaking the raw getter throw.
+ */
+function normalizeKvAccessor(kvAccessor: unknown): NotesnookLiveCoreHandle["kv"] {
+  // Invoke the live accessor; any hostile getter or non-storage
+  // return maps to a categorical error without leaking the raw
+  // detail.  `enforceStorageShape` (declared below) folds the
+  // structural property-read check into the same protected try so
+  // a hostile `storage.read` getter cannot bubble either.
+  const callAccessor = (): unknown => {
+    try {
+      const storage = (kvAccessor as () => unknown)();
+      enforceStorageShape(storage);
+      return storage;
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv accessor threw");
+    }
+  };
+
+  const readStorage = (storage: unknown): unknown => {
+    try {
+      enforceStorageShape(storage);
+      const fn = (storage as { read?: unknown }).read;
+      if (typeof fn !== "function") {
+        throw factoryError("Notesnook kv accessor returned an invalid storage");
+      }
+      return fn;
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      // A hostile getter on `storage.read` throws here — map it
+      // to the categorical "invalid storage" error so the raw
+      // getter throw cannot leak out.
+      throw factoryError("Notesnook kv accessor returned an invalid storage");
+    }
+  };
+
+  const writeStorage = (storage: unknown): unknown => {
+    try {
+      enforceStorageShape(storage);
+      const fn = (storage as { write?: unknown }).write;
+      if (typeof fn !== "function") {
+        throw factoryError("Notesnook kv accessor returned an invalid storage");
+      }
+      return fn;
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv accessor returned an invalid storage");
+    }
+  };
+
+  const deleteStorage = (storage: unknown): unknown => {
+    try {
+      enforceStorageShape(storage);
+      const fn = (storage as { delete?: unknown }).delete;
+      if (typeof fn !== "function") {
+        throw factoryError("Notesnook kv accessor returned an invalid storage");
+      }
+      return fn;
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv accessor returned an invalid storage");
+    }
+  };
+
+  const read = async (key: NotesnookLiveKvKey) => {
+    enforceKvKey(key);
+    const storage = callAccessor();
+    const fn = readStorage(storage) as (k: NotesnookLiveKvKey) => Promise<unknown>;
+    try {
+      return await fn(key);
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv read failed");
+    }
+  };
+
+  const write = async (key: NotesnookLiveKvKey, value: unknown) => {
+    enforceKvKey(key);
+    const storage = callAccessor();
+    const fn = writeStorage(storage) as (k: NotesnookLiveKvKey, v: unknown) => Promise<void>;
+    try {
+      await fn(key, value);
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv write failed");
+    }
+  };
+
+  const del = async (key: NotesnookLiveKvKey) => {
+    enforceKvKey(key);
+    const storage = callAccessor();
+    const fn = deleteStorage(storage) as (k: NotesnookLiveKvKey) => Promise<void>;
+    try {
+      await fn(key);
+    } catch (error) {
+      if (isFactoryError(error)) throw error;
+      throw factoryError("Notesnook kv delete failed");
+    }
+  };
+
+  return Object.freeze({ read, write, delete: del });
+}
+
+/**
+ * Structural check that the value returned from `db.kv()` is a
+ * non-null object (or function).  Throws a categorical
+ * `Notesnook kv accessor returned an invalid storage` error when
+ * the value is missing / non-object / hostile-getter-failed.  This
+ * is the same protected boundary every storage-slot reader in
+ * {@link normalizeKvAccessor} goes through so a hostile `storage.read`
+ * getter throw does NOT leak out of the factory.
+ */
+function enforceStorageShape(storage: unknown): void {
+  if (
+    storage === null ||
+    storage === undefined ||
+    (typeof storage !== "object" && typeof storage !== "function")
+  ) {
+    throw factoryError("Notesnook kv accessor returned an invalid storage");
+  }
+}
+
+function enforceKvKey(key: unknown): asserts key is NotesnookLiveKvKey {
+  if (key !== NOTESNOOK_LIVE_KV_TOKEN_KEY) {
+    throw factoryError("Notesnook kv key is not permitted");
+  }
+}
+
+/**
+ * Wrap the user manager into a narrow, hostile-getter-safe
+ * surface.  Every method body is captured once at construction
+ * time so a later flip on the upstream object cannot poison the
+ * handle.
+ */
+function wrapUserManager(userManager: unknown): NotesnookLiveCoreHandle["user"] {
+  if (!userManager || typeof userManager !== "object") {
+    throw factoryError("Notesnook user manager is not an object");
+  }
+  // Capture the required method slots up-front.  Each accessor
+  // call is wrapped so a subsequent hostile proxy cannot trap the
+  // narrow handle.
+  const slotAuthEmail = readUserFn(userManager, "authenticateEmail");
+  const slotMfa = readUserFn(userManager, "authenticateMultiFactorCode");
+  const slotPassword = readUserFn(userManager, "authenticatePassword");
+  const slotGetUser = readUserFn(userManager, "getUser");
+  const slotLogout = readUserFn(userManager, "logout");
+
+  return Object.freeze({
+    authenticateEmail: wrapAsyncSingleArg(slotAuthEmail, "user.authenticateEmail failed"),
+    authenticateMultiFactorCode: wrapAsyncMfa(slotMfa, "user.authenticateMultiFactorCode failed"),
+    authenticatePassword: wrapAsyncPassword(slotPassword, "user.authenticatePassword failed"),
+    getUser: wrapGetUser(slotGetUser),
+    logout: wrapAsyncLogout(slotLogout, "user.logout failed"),
+  });
+}
+
+/**
+ * Capture a single user-manager slot as a function that returns
+ * `unknown`.  We then trust individual wrappers (e.g.
+ * `wrapAsyncSingleArg`) to type-check the call; the captured
+ * closure binds `this` to the original user-manager slot so a
+ * hostile proxy swap on the live handle cannot unbind the call.
+ */
+function readUserFn(userManager: unknown, slot: string): (...args: unknown[]) => unknown {
+  const fn = (userManager as Record<string, unknown>)[slot];
+  if (typeof fn !== "function") {
+    throw factoryError(`Notesnook user manager is missing ${slot}`);
+  }
+  return (...args: unknown[]) => {
+    try {
+      return (fn as (...args: unknown[]) => unknown).apply(userManager, args);
+    } catch {
+      throw factoryError(`Notesnook user.${slot} threw synchronously`);
+    }
+  };
+}
+
+function wrapAsyncSingleArg(
+  fn: (...args: unknown[]) => unknown,
+  message: string,
+): (arg: string) => Promise<unknown> {
+  return async (arg: string) => {
+    if (typeof arg !== "string") {
+      throw factoryError("Notesnook authenticateEmail requires a string email");
+    }
+    try {
+      const result: unknown = fn(arg);
+      return await (result as unknown);
+    } catch {
+      throw factoryError(message);
+    }
+  };
+}
+
+function wrapAsyncMfa(
+  fn: (...args: unknown[]) => unknown,
+  message: string,
+): (code: string, type: "app") => Promise<unknown> {
+  return async (code: string, type: "app") => {
+    if (typeof code !== "string") {
+      throw factoryError("Notesnook authenticateMultiFactorCode requires a string code");
+    }
+    if (type !== "app") {
+      throw factoryError('Notesnook authenticateMultiFactorCode requires type "app"');
+    }
+    try {
+      const result: unknown = fn(code, type);
+      return await (result as unknown);
+    } catch {
+      throw factoryError(message);
+    }
+  };
+}
+
+function wrapAsyncPassword(
+  fn: (...args: unknown[]) => unknown,
+  message: string,
+): (email: string, password: string) => Promise<unknown> {
+  return async (email: string, password: string) => {
+    if (typeof email !== "string") {
+      throw factoryError("Notesnook authenticatePassword requires a string email");
+    }
+    if (typeof password !== "string") {
+      throw factoryError("Notesnook authenticatePassword requires a string password");
+    }
+    try {
+      const result: unknown = fn(email, password);
+      return await (result as unknown);
+    } catch {
+      throw factoryError(message);
+    }
+  };
+}
+
+function wrapGetUser(
+  fn: (...args: unknown[]) => unknown,
+): () => Promise<NotesnookLiveUser | undefined> {
+  return async () => {
+    try {
+      const raw: unknown = fn();
+      const awaited: unknown = await (raw as unknown);
+      return normalizeUser(awaited);
+    } catch {
+      throw factoryError("user.getUser failed");
+    }
+  };
+}
+
+/**
+ * Wrap the upstream user.logout seam so the narrow handle forwards
+ * the caller's `clearLocal: boolean` to the pinned
+ * `@notesnook/core@8.1.3` upstream.  Per the pinned d.ts the
+ * upstream call is `user.logout(clearLocal: boolean)`.  NookBridge
+ * always passes `true` from the auth provider so the upstream
+ * cache is wiped on logout; the explicit boolean parameter
+ * preserves the upstream contract without widening the surface.
+ */
+function wrapAsyncLogout(
+  fn: (...args: unknown[]) => unknown,
+  message: string,
+): (clearLocal: boolean) => Promise<void> {
+  return async (clearLocal: boolean) => {
+    if (typeof clearLocal !== "boolean") {
+      throw factoryError("Notesnook logout requires a boolean clearLocal");
+    }
+    try {
+      const result: unknown = fn(clearLocal);
+      await (result as unknown);
+    } catch {
+      throw factoryError(message);
+    }
+  };
+}
+
+/**
+ * Normalize a hostile upstream `User` value into the narrow
+ * {@link NotesnookLiveUser} shape (or undefined).  Proxies that
+ * return primitives, throw on key access, or omit `id` / `email`
+ * are rejected with a categorical error.
+ */
+function normalizeUser(raw: unknown): NotesnookLiveUser | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") {
+    throw factoryError("Notesnook user.getUser returned a non-object");
+  }
+  let id: unknown;
+  let email: unknown;
+  try {
+    id = (raw as { id?: unknown }).id;
+    email = (raw as { email?: unknown }).email;
+  } catch {
+    throw factoryError("Notesnook user.getUser rejected property access");
+  }
+  if (typeof id !== "string" || id.length === 0) {
+    throw factoryError("Notesnook user.getUser did not return a string id");
+  }
+  if (typeof email !== "string" || email.length === 0) {
+    throw factoryError("Notesnook user.getUser did not return a string email");
+  }
+  // Freeze so downstream consumers cannot mutate a hostile returned object.
+  return Object.freeze({ id, email });
+}
+
+/**
+ * Wrap the token manager into the narrow `getToken` /
+ * `_refreshToken` surface, normalizing hostile upstream returns
+ * into the closed {@link NotesnookLiveTokenEnvelope} shape (or
+ * undefined).
+ */
+function wrapTokenManager(tokenManager: unknown): NotesnookLiveCoreHandle["token"] {
+  if (!tokenManager || typeof tokenManager !== "object") {
+    throw factoryError("Notesnook token manager is not an object");
+  }
+
+  const slots = {
+    getToken: readTokenSlot(tokenManager, "getToken"),
+    _refreshToken: readTokenSlot(tokenManager, "_refreshToken"),
+  };
+
+  return Object.freeze({
+    getToken: async () => {
+      try {
+        const raw: unknown = await slots.getToken();
+        return normalizeTokenEnvelope(raw);
+      } catch (error) {
+        // Factory-generated validation errors (e.g. a hostile
+        // envelope missing `access_token`) propagate unchanged so
+        // the categorical message reaches the caller; only
+        // arbitrary upstream throws / rejections are normalized to
+        // the generic `token.getToken failed` boundary error.
+        if (isFactoryError(error)) throw error;
+        throw factoryError("token.getToken failed");
+      }
+    },
+    _refreshToken: async (forceRenew: boolean) => {
+      if (typeof forceRenew !== "boolean") {
+        throw factoryError("Notesnook _refreshToken requires a boolean forceRenew");
+      }
+      try {
+        await slots._refreshToken(forceRenew);
+      } catch (error) {
+        if (isFactoryError(error)) throw error;
+        throw factoryError("token._refreshToken failed");
+      }
+    },
+  });
+}
+
+function readTokenSlot(tokenManager: unknown, slot: string): (...args: unknown[]) => unknown {
+  const fn = (tokenManager as Record<string, unknown>)[slot];
+  if (typeof fn !== "function") {
+    throw factoryError(`Notesnook token manager is missing ${slot}`);
+  }
+  return (...args: unknown[]) => {
+    try {
+      return (fn as (...args: unknown[]) => unknown).apply(tokenManager, args);
+    } catch {
+      throw factoryError(`Notesnook token.${slot} threw synchronously`);
+    }
+  };
+}
+
+/**
+ * Normalize an upstream token envelope into the closed
+ * {@link NotesnookLiveTokenEnvelope} shape (or undefined when
+ * upstream reports "no current token").  Every hostile getter
+ * branch is mapped to a categorical error.
+ */
+function normalizeTokenEnvelope(raw: unknown): NotesnookLiveTokenEnvelope | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") {
+    throw factoryError("Notesnook token.getToken returned a non-object");
+  }
+  let access: unknown;
+  let refresh: unknown;
+  let expires: unknown;
+  let scope: unknown;
+  let t: unknown;
+  try {
+    const r = raw as Record<string, unknown>;
+    access = r.access_token;
+    refresh = r.refresh_token;
+    expires = r.expires_in;
+    scope = r.scope;
+    t = r.t;
+  } catch {
+    throw factoryError("Notesnook token.getToken rejected property access");
+  }
+  if (typeof access !== "string" || access.length === 0) {
+    throw factoryError("Notesnook token.getToken did not return an access_token");
+  }
+  if (typeof refresh !== "string" || refresh.length === 0) {
+    throw factoryError("Notesnook token.getToken did not return a refresh_token");
+  }
+  if (typeof expires !== "number" || !Number.isFinite(expires) || expires <= 0) {
+    throw factoryError("Notesnook token.getToken did not return a positive numeric expires_in");
+  }
+  if (typeof scope !== "string") {
+    throw factoryError("Notesnook token.getToken did not return a string scope");
+  }
+  if (typeof t !== "number" || !Number.isFinite(t)) {
+    throw factoryError("Notesnook token.getToken did not return a numeric t");
+  }
+  return Object.freeze({
+    access_token: access,
+    refresh_token: refresh,
+    expires_in: expires,
+    scope,
+    t,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Hostile-proxy normalizers.
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize an arbitrary non-undefined value into a `Promise<void>`.
+ * Used for the `onCleanup` hook and any other async returns where
+ * we accept `void | PromiseLike<void>`.
+ */
+async function normalizeAsyncVoid(value: unknown): Promise<void> {
+  if (value === undefined || value === null) return;
+  if (typeof value === "object" && typeof (value as { then?: unknown }).then === "function") {
+    try {
+      await (value as PromiseLike<void>);
+      return;
+    } catch {
+      throw factoryError("Notesnook cleanup hook rejected");
+    }
+  }
+  throw factoryError("Notesnook cleanup hook returned a non-thenable value");
+}
+
+// ---------------------------------------------------------------------------
+// Categorical error.
+// ---------------------------------------------------------------------------
+
+/**
+ * Construct a categorical, chain-free factory error.  We
+ * deliberately wipe `cause` and `__context__` so a hostile
+ * upstream throw never bubbles a secret-bearing payload out of
+ * the boundary.  The error message is one of a small fixed set
+ * enumerated above.
+ *
+ * The factory error is also tagged with a non-enumerable
+ * {@link FACTORY_ERROR_MARKER} symbol so the boundary predicates
+ * ({@link isFactoryError}) can recognise our own categorical
+ * throws and let them propagate unchanged through outer
+ * try/catch wrappers (e.g. `token.getToken`'s outer catch), while
+ * upstream thrown / rejected values still normalize to the
+ * caller's expected categorical message.
+ */
+const FACTORY_ERROR_MARKER: unique symbol = Symbol("notesnook.factoryError");
+
+function factoryError(message: string): Error {
+  const error = new Error(message);
+  Object.defineProperty(error, "cause", { configurable: true, value: undefined });
+  Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
+  Object.defineProperty(error, FACTORY_ERROR_MARKER, {
+    configurable: true,
+    value: true,
+    enumerable: false,
+    writable: false,
+  });
+  return error;
+}
+
+/**
+ * Predicate: is `value` an Error thrown by {@link factoryError}?
+ * Used by outer wrappers (notably `token.getToken`) to allow our
+ * own categorical validation errors to propagate unchanged while
+ * still normalising arbitrary upstream throws / rejections to
+ * the wrapped boundary's categorical message.
+ */
+function isFactoryError(value: unknown): value is Error {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { [FACTORY_ERROR_MARKER]?: unknown })[FACTORY_ERROR_MARKER] === true
+  );
+}
