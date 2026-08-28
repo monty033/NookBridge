@@ -21,9 +21,9 @@ import { LIVE_SYNC_ENABLE_ENV, runSyncCommand } from "../src/core/notesnook-sync
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
-  syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
+  syncCalls: Array<{ type: "fetch"; force?: boolean }>;
 } {
-  const syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }> = [];
+  const syncCalls: Array<{ type: "fetch"; force?: boolean }> = [];
   return {
     syncCalls,
     lastSynced: async () => 1234,
@@ -104,15 +104,21 @@ describe("NotesnookReadOnlyAdapter", () => {
     ]);
   });
 
-  it("allows full/fetch sync but rejects send and invalid inputs", async () => {
+  it("allows fetch-only sync and rejects full, send, force, and invalid inputs", async () => {
     const database = createFakeDatabase();
     const adapter = createNotesnookReadOnlyAdapter({ source: database });
 
-    await expect(adapter.sync({ type: "full", force: true })).resolves.toBe(true);
-    expect(database.syncCalls).toEqual([{ type: "full", force: true }]);
+    await expect(adapter.sync({ type: "fetch" })).resolves.toBe(true);
+    expect(database.syncCalls).toEqual([{ type: "fetch" }]);
 
-    await expect(adapter.sync({ type: "send" as "full" })).rejects.toMatchObject({
-      message: 'Notesnook read-only adapter: sync type must be "full" or "fetch"',
+    await expect(adapter.sync({ type: "full" as "fetch" })).rejects.toMatchObject({
+      message: 'Notesnook read-only adapter: sync type must be "fetch"',
+    });
+    await expect(adapter.sync({ type: "send" as "fetch" })).rejects.toMatchObject({
+      message: 'Notesnook read-only adapter: sync type must be "fetch"',
+    });
+    await expect(adapter.sync({ type: "fetch", force: true })).rejects.toMatchObject({
+      message: "Notesnook read-only adapter: sync force is out of scope",
     });
     await expect(adapter.noteMetadata("")).rejects.toMatchObject({
       message: "Notesnook read-only adapter: note id must be a non-empty string",
@@ -120,7 +126,7 @@ describe("NotesnookReadOnlyAdapter", () => {
     await expect(adapter.search("")).rejects.toMatchObject({
       message: "Notesnook read-only adapter: search query must be a non-empty string",
     });
-    expect(database.syncCalls).toEqual([{ type: "full", force: true }]);
+    expect(database.syncCalls).toEqual([{ type: "fetch" }]);
   });
 
   it("coalesces concurrent sync calls to one upstream attempt", async () => {
@@ -137,10 +143,10 @@ describe("NotesnookReadOnlyAdapter", () => {
     };
     const adapter = createNotesnookReadOnlyAdapter({ source: database });
 
-    const first = adapter.sync({ type: "full" });
+    const first = adapter.sync({ type: "fetch" });
     const second = adapter.sync({ type: "fetch" });
     await Promise.resolve();
-    expect(database.syncCalls).toEqual([{ type: "full" }]);
+    expect(database.syncCalls).toEqual([{ type: "fetch" }]);
 
     release(true);
     await expect(first).resolves.toBe(true);
@@ -188,9 +194,9 @@ describe("NotesnookReadOnlyAdapter", () => {
 });
 
 function createFakeLiveDatabase(): NotesnookLiveDatabase & {
-  syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
+  syncCalls: Array<{ type: "fetch"; force?: boolean }>;
 } {
-  const syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }> = [];
+  const syncCalls: Array<{ type: "fetch"; force?: boolean }> = [];
   const notebooks = new Map([
     ["nb-1", { id: "nb-1", title: "Work", dateEdited: 11, body: "hidden" }],
   ]);
@@ -216,7 +222,7 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
     tokenManager: {},
     kv: vi.fn(() => ({})),
     syncer: {
-      start: vi.fn(async (options: { type: "full" | "fetch"; force?: boolean }) => {
+      start: vi.fn(async (options: { type: "fetch"; force?: boolean }) => {
         syncCalls.push(options);
         return true;
       }),
@@ -234,7 +240,7 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
     hasUnsyncedChanges: async () => false,
   };
   return database as unknown as NotesnookLiveDatabase & {
-    syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
+    syncCalls: Array<{ type: "fetch"; force?: boolean }>;
   };
 }
 
@@ -251,7 +257,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "search",
       "sync",
     ]);
-    await expect(readOnly.sync({ type: "full", force: true })).resolves.toBe(true);
+    await expect(readOnly.sync({ type: "fetch" })).resolves.toBe(true);
     await expect(readOnly.listNotebooks()).resolves.toEqual([
       { id: "nb-1", title: "Work", dateModified: 11 },
     ]);
@@ -265,10 +271,16 @@ describe("Stage 3 production projection and sync gate", () => {
       { id: "note-1", title: "A note", source: "note" },
       { id: "nb-1", title: "Work", source: "notebook" },
     ]);
-    await expect(readOnly.sync({ type: "send" as "full" })).rejects.toSatisfy(
+    await expect(readOnly.sync({ type: "full" as "fetch" })).rejects.toSatisfy(
       isNotesnookReadOnlyProjectionError,
     );
-    expect(database.syncCalls).toEqual([{ type: "full", force: true }]);
+    await expect(readOnly.sync({ type: "send" as "fetch" })).rejects.toSatisfy(
+      isNotesnookReadOnlyProjectionError,
+    );
+    await expect(readOnly.sync({ type: "fetch", force: true })).rejects.toSatisfy(
+      isNotesnookReadOnlyProjectionError,
+    );
+    expect(database.syncCalls).toEqual([{ type: "fetch" }]);
   });
 
   it("redacts hostile upstream metadata failures", async () => {

@@ -162,9 +162,8 @@ export type RunOfflineSyncProofOptions = Readonly<{
  *
  *   1. Resolves the source and constructs the read-only adapter.
  *   2. Reads the closed status snapshot.
- *   3. Issues `sync({type: "full", force: true})`.  `"send"` is
- *      rejected categorically by the adapter before the source is
- *      ever touched.
+ *   3. Issues `sync({type: "fetch"})`.  Upstream `full` sync includes
+ *      a send phase, so the proof deliberately uses fetch only.
  *   4. Lists notebook summaries through the adapter.
  *   5. Reads note metadata for the supplied id (if any).
  *   6. Runs the title-only search through the adapter (if a query
@@ -224,14 +223,13 @@ export async function runOfflineSyncProof(
   }
 
   // Step 3 — sync.  `status` deliberately skips this step; the
-  // read-only command issues `"full"` with `force: true` so the proof
-  // observes an unconditional sync attempt.  `"send"` is rejected
-  // categorically by the adapter.
+  // read-only command issues `"fetch"` without `force`.  Upstream
+  // `full` sync includes a send phase and is therefore not allowed.
   if (options.performSync !== false) {
     summary.syncStartedAt = Date.now();
     let syncOutcome: boolean;
     try {
-      syncOutcome = await adapter.sync({ type: "full", force: true });
+      syncOutcome = await adapter.sync({ type: "fetch" });
       if (typeof syncOutcome !== "boolean") {
         throw proofError("sync returned a non-boolean result");
       }

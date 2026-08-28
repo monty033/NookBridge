@@ -88,15 +88,14 @@ import type { NotesnookLiveDatabase } from "./notesnook-core-adapter.js";
 //
 // We mirror the structural `SyncOptions` literal set
 // `{ type: "full" | "fetch" | "send", force?: boolean, offlineMode?: boolean }`
-// from `@notesnook/core@8.1.3` and NARROW it to the read-side subset.
-// `"send"` is a write-side operation (push local changes upstream) and is
-// rejected categorically at the projection boundary.
+// from `@notesnook/core@8.1.3` and NARROW it to the truly read-only
+// `"fetch"` operation. Upstream `Sync.start({type: "full"})` performs
+// a fetch followed by a send, so `"full"` is not safe here.
 // ---------------------------------------------------------------------------
 
-export type NotesnookReadOnlyProjectionSyncType = "full" | "fetch";
+export type NotesnookReadOnlyProjectionSyncType = "fetch";
 
 const VALID_PROJECTION_SYNC_TYPES: ReadonlySet<NotesnookReadOnlyProjectionSyncType> = new Set([
-  "full",
   "fetch",
 ]);
 
@@ -286,22 +285,14 @@ export function flattenLiveDatabaseToReadOnly(
       const syncType = options?.type;
       if (!VALID_PROJECTION_SYNC_TYPES.has(syncType as NotesnookReadOnlyProjectionSyncType)) {
         // Categorical rejection.  No upstream call is made.
-        throw projectionError(
-          'Notesnook read-only projection: sync type must be "full" or "fetch"',
-        );
+        throw projectionError('Notesnook read-only projection: sync type must be "fetch"');
       }
-      const force = options?.force;
-      const syncArgs: { type: NotesnookReadOnlyProjectionSyncType; force?: boolean } = {
+      if (options?.force !== undefined) {
+        throw projectionError("Notesnook read-only projection: sync force is out of scope");
+      }
+      const syncArgs: { type: NotesnookReadOnlyProjectionSyncType } = {
         type: syncType,
       };
-      if (force !== undefined) {
-        if (typeof force !== "boolean") {
-          throw projectionError(
-            "Notesnook read-only projection: sync force flag must be a boolean",
-          );
-        }
-        syncArgs.force = force;
-      }
       const result = await callThrough(
         startFn,
         [syncArgs],

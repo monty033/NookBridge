@@ -10,7 +10,7 @@ The first live proof remains gated on an operator-owned interactive session. It 
 
 The Stage 3 surface must remain read-only:
 
-- allow `full`/`fetch` sync only; reject `send` before any upstream sync call;
+- allow `fetch` sync only; reject `full`, `send`, and forced sync before any upstream call because upstream `full` includes a send phase;
 - expose notebook and note metadata plus title-safe lookup/search only;
 - do not expose the raw `Database`, generic transport, collection mutators, note bodies, or file-storage writes;
 - preserve the canonical `kv.token` persistence boundary;

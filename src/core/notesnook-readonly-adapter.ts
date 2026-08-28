@@ -13,8 +13,8 @@
  * the offline, deterministic seam that future Stage 3 wiring will
  * plug an opened `Database` into.  It deliberately:
  *
- *   - exposes a CLOSED read-only surface (`status`, `sync("full" |
- *     "fetch")`, `listNotebooks`, `getNoteMetadata`, `search`);
+ *   - exposes a CLOSED read-only surface (`status`, `sync("fetch")`,
+ *     `listNotebooks`, `getNoteMetadata`, `search`);
  *   - uses an INJECTED structural seam so tests run offline against
  *     deterministic fakes with no real Database, no real network, no
  *     real account;
@@ -110,12 +110,13 @@ export interface NotesnookReadOnlySearchHit {
 //       offlineMode?: boolean;
 //     };
 //
-// We deliberately NARROW the discriminator set to `"full" | "fetch"`.
-// `"send"` pushes local changes upstream and is a write-side
-// operation; the adapter rejects it as out-of-scope.
+// We deliberately NARROW the discriminator set to `"fetch"`.
+// Upstream `Sync.start({type: "full"})` performs both fetch and send;
+// therefore `"full"` is not read-only even though its name sounds safe.
+// `"send"` also pushes local changes upstream and is rejected as out-of-scope.
 // ---------------------------------------------------------------------------
 
-export type NotesnookReadOnlySyncType = "full" | "fetch";
+export type NotesnookReadOnlySyncType = "fetch";
 
 export interface NotesnookReadOnlySyncOptions {
   readonly type: NotesnookReadOnlySyncType;
@@ -221,19 +222,18 @@ export class NotesnookReadOnlyAdapter {
   /**
    * Request a read-only sync.
    *
-   * Only `"full"` and `"fetch"` are accepted; `"send"` is rejected
-   * categorically as out of scope.  Concurrent calls collapse to
+   * Only `"fetch"` is accepted; `"full"` and `"send"` are rejected
+   * categorically because upstream full sync includes a send phase.
+   * Concurrent calls collapse to
    * one in-flight upstream sync attempt; the second caller awaits
    * the first and receives its boolean result.
    */
   async sync(options: NotesnookReadOnlySyncOptions): Promise<boolean> {
     if (!isReadOnlySyncType(options?.type)) {
-      throw readOnlyAdapterError(
-        'Notesnook read-only adapter: sync type must be "full" or "fetch"',
-      );
+      throw readOnlyAdapterError('Notesnook read-only adapter: sync type must be "fetch"');
     }
-    if (options.force !== undefined && typeof options.force !== "boolean") {
-      throw readOnlyAdapterError("Notesnook read-only adapter: sync force flag must be a boolean");
+    if (options.force !== undefined) {
+      throw readOnlyAdapterError("Notesnook read-only adapter: sync force is out of scope");
     }
     if (this.#syncInFlight) {
       const existing = this.#syncInFlight;
@@ -514,7 +514,7 @@ async function safeAwait(
 }
 
 function isReadOnlySyncType(value: unknown): value is NotesnookReadOnlySyncType {
-  return value === "full" || value === "fetch";
+  return value === "fetch";
 }
 
 function coerceNotebookSummary(value: unknown): NotesnookReadOnlyNotebookSummary {
