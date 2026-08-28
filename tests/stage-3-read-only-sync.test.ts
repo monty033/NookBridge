@@ -6,13 +6,19 @@
  * future live runner is allowed to exercise native sync.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createNotesnookReadOnlyAdapter,
   isNotesnookReadOnlyAdapterError,
   type NotesnookReadOnlyDatabase,
 } from "../src/core/notesnook-readonly-adapter.js";
+import {
+  flattenLiveDatabaseToReadOnly,
+  isNotesnookReadOnlyProjectionError,
+} from "../src/core/notesnook-readonly-projection.js";
+import { LIVE_SYNC_ENABLE_ENV, runSyncCommand } from "../src/core/notesnook-sync-admin.js";
+import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
   syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
@@ -178,5 +184,135 @@ describe("NotesnookReadOnlyAdapter", () => {
         } as never),
       "Notesnook read-only adapter: injected source must resolve before construction",
     );
+  });
+});
+
+function createFakeLiveDatabase(): NotesnookLiveDatabase & {
+  syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
+} {
+  const syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }> = [];
+  const notebooks = new Map([
+    ["nb-1", { id: "nb-1", title: "Work", dateEdited: 11, body: "hidden" }],
+  ]);
+  const notes = new Map([
+    [
+      "note-1",
+      {
+        id: "note-1",
+        title: "A note",
+        dateEdited: 22,
+        notebooks: [{ id: "nb-1" }],
+        body: "secret body",
+      },
+    ],
+  ]);
+  const searchResults = (ids: string[]) => ({ ids: async () => ids });
+  const database = {
+    syncCalls,
+    setup: vi.fn(),
+    host: vi.fn(),
+    init: vi.fn(async () => undefined),
+    user: {},
+    tokenManager: {},
+    kv: vi.fn(() => ({})),
+    syncer: {
+      start: vi.fn(async (options: { type: "full" | "fetch"; force?: boolean }) => {
+        syncCalls.push(options);
+        return true;
+      }),
+    },
+    notebooks: {
+      all: { ids: async () => ["nb-1"] },
+      notebook: async (id: string) => notebooks.get(id),
+    },
+    notes: { note: async (id: string) => notes.get(id) },
+    lookup: {
+      notes: async () => searchResults(["note-1"]),
+      notebooks: async () => searchResults(["nb-1"]),
+    },
+    lastSynced: async () => 99,
+    hasUnsyncedChanges: async () => false,
+  };
+  return database as unknown as NotesnookLiveDatabase & {
+    syncCalls: Array<{ type: "full" | "fetch"; force?: boolean }>;
+  };
+}
+
+describe("Stage 3 production projection and sync gate", () => {
+  it("flattens pinned-core-shaped APIs without exposing raw managers or bodies", async () => {
+    const database = createFakeLiveDatabase();
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+    expect(Object.keys(readOnly).sort()).toEqual([
+      "hasUnsyncedChanges",
+      "lastSynced",
+      "listNotebooks",
+      "noteMetadata",
+      "search",
+      "sync",
+    ]);
+    await expect(readOnly.sync({ type: "full", force: true })).resolves.toBe(true);
+    await expect(readOnly.listNotebooks()).resolves.toEqual([
+      { id: "nb-1", title: "Work", dateModified: 11 },
+    ]);
+    await expect(readOnly.noteMetadata("note-1")).resolves.toEqual({
+      id: "note-1",
+      title: "A note",
+      dateModified: 22,
+      notebookId: "nb-1",
+    });
+    await expect(readOnly.search("note")).resolves.toEqual([
+      { id: "note-1", title: "A note", source: "note" },
+      { id: "nb-1", title: "Work", source: "notebook" },
+    ]);
+    await expect(readOnly.sync({ type: "send" as "full" })).rejects.toSatisfy(
+      isNotesnookReadOnlyProjectionError,
+    );
+    expect(database.syncCalls).toEqual([{ type: "full", force: true }]);
+  });
+
+  it("redacts hostile upstream metadata failures", async () => {
+    const database = createFakeLiveDatabase();
+    const secret = "upstream-secret-note-body";
+    (database.notes as { note: (id: string) => Promise<unknown> }).note = async () => {
+      throw new Error(secret);
+    };
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+    const failure = await readOnly.noteMetadata("note-1").catch((error: unknown) => error);
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(failure).toMatchObject({
+      message: "Notesnook read-only projection: notes.note rejected",
+    });
+    expect(String(failure)).not.toContain(secret);
+  });
+
+  it("requires the separate live-sync gate and always tears down a production runtime", async () => {
+    const source = createFakeDatabase();
+    const createProofSource = vi.fn(() => source);
+    await expect(
+      runSyncCommand({ argv: ["read-only"], env: {}, createProofSource }),
+    ).resolves.toMatchObject({ kind: "error", exitCode: 2 });
+    expect(createProofSource).not.toHaveBeenCalled();
+
+    const cleanup = vi.fn(async () => undefined);
+    await expect(
+      runSyncCommand({
+        argv: ["read-only"],
+        env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+        createProofRuntime: async () => ({ source, cleanup }),
+      }),
+    ).resolves.toMatchObject({ kind: "report", report: { kind: "pass" } });
+    expect(cleanup).toHaveBeenCalledOnce();
+
+    const statusSource = createFakeDatabase();
+    await expect(
+      runSyncCommand({
+        argv: ["status"],
+        env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+        createProofSource: () => statusSource,
+      }),
+    ).resolves.toMatchObject({ kind: "report", subcommand: "status" });
+    expect(statusSource.syncCalls).toEqual([]);
   });
 });

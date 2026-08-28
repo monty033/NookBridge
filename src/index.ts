@@ -290,5 +290,40 @@ export {
   NotesnookReadOnlyAdapter,
 } from "./core/notesnook-readonly-adapter.js";
 
+// Stage 3 production projection and operator-only sync proof.  The
+// projection exposes only the flattened read-only seam; the raw live
+// Database remains internal to the live factory/runtime.
+export type { NotesnookReadOnlyProjectionSource } from "./core/notesnook-readonly-projection.js";
+export {
+  flattenLiveDatabaseToReadOnly,
+  isNotesnookReadOnlyProjectionError,
+  NotesnookReadOnlyProjectionError,
+} from "./core/notesnook-readonly-projection.js";
+export type {
+  OfflineSyncProofReport,
+  OfflineSyncProofStep,
+  RunOfflineSyncProofOptions,
+} from "./core/notesnook-sync-proof.js";
+export {
+  formatOfflineSyncProofReport,
+  isOfflineSyncProofError,
+  runOfflineSyncProof,
+  OfflineSyncProofError,
+} from "./core/notesnook-sync-proof.js";
+export type {
+  ParseSyncCommandResult,
+  ParsedSyncCommand,
+  RunSyncCommandOptions,
+  RunSyncCommandResult,
+  SyncSubcommand,
+} from "./core/notesnook-sync-admin.js";
+export {
+  formatSyncCommandResult,
+  formatSyncHelp,
+  LIVE_SYNC_ENABLE_ENV,
+  parseSyncCommand,
+  runSyncCommand,
+} from "./core/notesnook-sync-admin.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";

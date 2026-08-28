@@ -33,6 +33,7 @@ import {
   type SecretPrompt,
 } from "./secret-input.js";
 import { runLiveAuthCommand, type LiveProviderFactory } from "./live-auth-runner.js";
+import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { AuthSession } from "./types.js";
 
 /**
@@ -375,6 +376,8 @@ export type RunAuthCommandOptions = Readonly<{
 export type LiveLoginRuntime = Readonly<{
   providerFactory: LiveProviderFactory;
   cleanup: () => void | Promise<void>;
+  /** Flattened Stage 3 read-only surface when the runtime is production-backed. */
+  readOnly?: NotesnookReadOnlyDatabase;
 }>;
 
 export type LiveLoginRuntimeOptions = Readonly<{

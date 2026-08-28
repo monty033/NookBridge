@@ -112,6 +112,7 @@ export async function createProductionLiveLoginRuntime(
         }
         if (failure) throw failure;
       },
+      ...(liveHandle.readOnly === undefined ? {} : { readOnly: liveHandle.readOnly }),
     };
   } catch {
     lifecycle.close();
