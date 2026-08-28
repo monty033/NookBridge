@@ -229,6 +229,14 @@ export interface NotesnookDatabase {
  */
 export interface NotesnookLiveDatabase {
   setup(options: NotesnookDatabaseSetupOptions): void;
+  /** Select the exact upstream service hosts before any live operation. */
+  host(hosts: {
+    AUTH_HOST?: string;
+    API_HOST?: string;
+    SSE_HOST?: string;
+    SUBSCRIPTIONS_HOST?: string;
+    ISSUES_HOST?: string;
+  }): void;
   init(): Promise<void>;
   user: unknown;
   tokenManager: unknown;

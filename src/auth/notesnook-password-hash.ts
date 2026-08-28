@@ -5,12 +5,22 @@
  * auth provider needs the same deterministic form as PersistentStorage, but
  * must not expose a generic storage or database passthrough.
  */
-import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 
 const NOTESNOOK_APP_SALT = "oVzKtazBo7d8sb7TBvY9jw";
+const require = createRequire(import.meta.url);
+const { NNCrypto } = require("@notesnook/crypto") as {
+  NNCrypto: new () => {
+    hash(password: string, salt: string): Promise<string>;
+  };
+};
+const crypto = new NNCrypto();
 
-export function hashNotesnookPassword(email: string, password: string): string {
-  return createHash("sha256")
-    .update(`${NOTESNOOK_APP_SALT}${email.toLowerCase()}${password}`, "utf8")
-    .digest("base64");
+/**
+ * Delegate to the pinned Notesnook crypto implementation.  Its Node CJS
+ * export is selected deliberately: the published ESM sodium bridge is not
+ * compatible with Node 22's CJS named-export interop.
+ */
+export async function hashNotesnookPassword(email: string, password: string): Promise<string> {
+  return crypto.hash(password, `${NOTESNOOK_APP_SALT}${email.toLowerCase()}`);
 }

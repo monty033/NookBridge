@@ -62,7 +62,8 @@ import {
  */
 export interface NotesnookLiveTokenEnvelope {
   access_token: string;
-  refresh_token: string;
+  /** Absent on the temporary email/MFA grant; required after login completes. */
+  refresh_token?: string;
   expires_in: number;
   scope: string;
   t: number;
@@ -238,6 +239,7 @@ export async function createNotesnookLiveCoreFactory(
   try {
     const db = safeConstructDatabase(coreModule);
     safeSetupDatabase(db, normalized.setup);
+    safeConfigureProductionHosts(db, normalized.injectedModule === undefined);
     await safeInitDatabase(db);
     ensureOpen();
 
@@ -461,6 +463,36 @@ function safeSetupDatabase(
     (setupFn as (options: NotesnookDatabaseSetupOptions) => void).call(database, setupOptions);
   } catch {
     throw factoryError("Notesnook Database.setup rejected the supplied options");
+  }
+}
+
+/**
+ * Set the pinned public Notesnook service endpoints explicitly.  Core derives
+ * localhost defaults from ambient NODE_ENV at module-load time, which is
+ * unsuitable for an operator-facing production command.
+ */
+function safeConfigureProductionHosts(database: NotesnookLiveDatabase, required: boolean): void {
+  let hostFn: unknown;
+  try {
+    hostFn = (database as { host?: unknown }).host;
+  } catch {
+    if (!required) return;
+    throw factoryError("Notesnook Database.host is not accessible");
+  }
+  if (typeof hostFn !== "function") {
+    if (!required) return;
+    throw factoryError("Notesnook Database.host is not a function");
+  }
+  try {
+    hostFn.call(database, {
+      AUTH_HOST: "https://auth.streetwriters.co",
+      API_HOST: "https://api.notesnook.com",
+      SSE_HOST: "https://events.streetwriters.co",
+      SUBSCRIPTIONS_HOST: "https://subscriptions.streetwriters.co",
+      ISSUES_HOST: "https://issues.streetwriters.co",
+    });
+  } catch {
+    throw factoryError("Notesnook Database.host rejected production hosts");
   }
 }
 
@@ -1028,8 +1060,8 @@ function normalizeTokenEnvelope(raw: unknown): NotesnookLiveTokenEnvelope | unde
   if (typeof access !== "string" || access.length === 0) {
     throw factoryError("Notesnook token.getToken did not return an access_token");
   }
-  if (typeof refresh !== "string" || refresh.length === 0) {
-    throw factoryError("Notesnook token.getToken did not return a refresh_token");
+  if (refresh !== undefined && typeof refresh !== "string") {
+    throw factoryError("Notesnook token.getToken returned an invalid refresh_token");
   }
   if (typeof expires !== "number" || !Number.isFinite(expires) || expires <= 0) {
     throw factoryError("Notesnook token.getToken did not return a positive numeric expires_in");
@@ -1042,7 +1074,7 @@ function normalizeTokenEnvelope(raw: unknown): NotesnookLiveTokenEnvelope | unde
   }
   return Object.freeze({
     access_token: access,
-    refresh_token: refresh,
+    ...(refresh === undefined ? {} : { refresh_token: refresh }),
     expires_in: expires,
     scope,
     t,

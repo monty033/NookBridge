@@ -90,6 +90,10 @@ import {
   type AuthSession,
 } from "./types.js";
 
+type AuthenticatedTokenEnvelope = NotesnookLiveTokenEnvelope & {
+  refresh_token: string;
+};
+
 // ---------------------------------------------------------------------------
 // Public surface.
 // ---------------------------------------------------------------------------
@@ -185,6 +189,50 @@ function categoricalError(message: string): Error {
   Object.defineProperty(error, "cause", { configurable: true, value: undefined });
   Object.defineProperty(error, "__context__", { configurable: true, value: undefined });
   return markAuthProviderError(error);
+}
+
+/**
+ * The only upstream-authentication diagnostics allowed to cross from the
+ * provider to the runner.  This intentionally describes the operation we
+ * attempted, not any upstream response or exception.
+ */
+export type LiveAuthFailureDiagnostic = Readonly<{
+  phase: "email" | "password" | "mfa";
+  category: "upstream-rejected";
+}>;
+
+const LIVE_AUTH_FAILURE_DIAGNOSTIC = Symbol("live-auth-failure-diagnostic");
+
+function upstreamRejectedError(phase: LiveAuthFailureDiagnostic["phase"]): Error {
+  const error = categoricalError("live notesnook authentication rejected");
+  Object.defineProperty(error, LIVE_AUTH_FAILURE_DIAGNOSTIC, {
+    configurable: false,
+    enumerable: false,
+    value: phase,
+  });
+  return error;
+}
+
+/**
+ * Return a diagnostic only when this module itself attached one.  Never read
+ * an error message, cause, context, or arbitrary property from an upstream
+ * exception to construct it.
+ */
+export function getLiveAuthFailureDiagnostic(
+  error: unknown,
+): LiveAuthFailureDiagnostic | undefined {
+  try {
+    if (typeof error !== "object" || error === null || !isAuthProviderError(error)) {
+      return undefined;
+    }
+    const phase = Object.getOwnPropertyDescriptor(error, LIVE_AUTH_FAILURE_DIAGNOSTIC)?.value;
+    if (phase === "email" || phase === "password" || phase === "mfa") {
+      return { phase, category: "upstream-rejected" };
+    }
+  } catch {
+    // A hostile error object must not influence the public diagnostic.
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +570,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
       await this.handle.user.authenticateEmail(username);
     } catch {
       this.ensureGeneration(generation);
-      throw categoricalError("live notesnook email authentication failed");
+      throw upstreamRejectedError("email");
     }
     this.ensureGeneration(generation);
 
@@ -536,7 +584,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
     }
     this.ensureGeneration(generation);
 
-    const envelope = await this.readEnvelopeIfCurrent(generation);
+    const envelope = requireAuthenticatedEnvelope(await this.readEnvelopeIfCurrent(generation));
     const user = await this.readUserIfCurrent(generation);
     this.ensureGeneration(generation);
 
@@ -557,7 +605,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
       throw categoricalError("live notesnook token refresh failed");
     }
     this.ensureGeneration(generation);
-    const envelope = await this.readEnvelopeIfCurrent(generation);
+    const envelope = requireAuthenticatedEnvelope(await this.readEnvelopeIfCurrent(generation));
     const user = await this.readUserIfCurrent(generation);
     this.ensureGeneration(generation);
     const session = envelopeToSession(envelope, user, this.providerNow());
@@ -637,13 +685,13 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
         await this.handle.user._login({
           email,
           password: currentPassword,
-          hashedPassword: hashNotesnookPassword(email, currentPassword),
+          hashedPassword: await hashNotesnookPassword(email, currentPassword),
         });
         this.ensureGeneration(generation);
         return;
       } catch {
         this.ensureGeneration(generation);
-        lastError = categoricalError("live notesnook password authentication failed");
+        lastError = upstreamRejectedError("password");
         if (attempt === this.passwordMaxAttempts) break;
         let next: string | null;
         try {
@@ -678,7 +726,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
         return;
       } catch {
         this.ensureGeneration(generation);
-        lastError = categoricalError("live notesnook password authentication failed");
+        lastError = upstreamRejectedError("password");
         if (attempt === this.passwordMaxAttempts) break;
         let next: string | null;
         try {
@@ -714,7 +762,12 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
       }
       this.ensureGeneration(generation);
       if (code === null) {
-        throw categoricalError("live notesnook MFA input ended before a code was entered");
+        // If a submitted code was already rejected, retain that fixed
+        // upstream diagnostic when the operator declines another attempt.
+        // Before any submission this remains an input-ending error.
+        throw (
+          lastError ?? categoricalError("live notesnook MFA input ended before a code was entered")
+        );
       }
       if (typeof code !== "string" || code.length === 0) {
         throw categoricalError("live notesnook MFA supplier returned invalid input");
@@ -725,7 +778,7 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
         return;
       } catch {
         this.ensureGeneration(generation);
-        lastError = categoricalError("live notesnook MFA authentication failed");
+        lastError = upstreamRejectedError("mfa");
       }
     }
     throw lastError ?? categoricalError("live notesnook MFA authentication failed");
@@ -893,8 +946,8 @@ function asEnvelope(raw: unknown): NotesnookLiveTokenEnvelope {
   if (typeof access !== "string" || access.length === 0) {
     throw categoricalError("live notesnook token envelope is missing access_token");
   }
-  if (typeof refresh !== "string" || refresh.length === 0) {
-    throw categoricalError("live notesnook token envelope is missing refresh_token");
+  if (refresh !== undefined && typeof refresh !== "string") {
+    throw categoricalError("live notesnook token envelope has invalid refresh_token");
   }
   if (typeof scope !== "string") {
     throw categoricalError("live notesnook token envelope is missing scope");
@@ -907,7 +960,7 @@ function asEnvelope(raw: unknown): NotesnookLiveTokenEnvelope {
   }
   return Object.freeze({
     access_token: access,
-    refresh_token: refresh,
+    ...(refresh === undefined ? {} : { refresh_token: refresh }),
     expires_in: expiresIn,
     scope,
     t,
@@ -922,8 +975,17 @@ function asEnvelope(raw: unknown): NotesnookLiveTokenEnvelope {
  * milliseconds.  The session's `userId` is the upstream user's
  * `id` (no token-derived hash).
  */
-function envelopeToSession(
+function requireAuthenticatedEnvelope(
   envelope: NotesnookLiveTokenEnvelope,
+): AuthenticatedTokenEnvelope {
+  if (typeof envelope.refresh_token !== "string" || envelope.refresh_token.length === 0) {
+    throw categoricalError("live notesnook authenticated token envelope is missing refresh_token");
+  }
+  return envelope as AuthenticatedTokenEnvelope;
+}
+
+function envelopeToSession(
+  envelope: AuthenticatedTokenEnvelope,
   user: NotesnookLiveUser | undefined,
   now: number,
 ): AuthSession {

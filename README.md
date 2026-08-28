@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stage 2 complete; live-login diagnosis is the current checkpoint.** The Stage 2 live-auth hardening slice is merged. Stage 3 native sync remains blocked until the fresh-state live-login failure is classified.
+> **Status: pre-alpha. Stage 2 live authentication is proven; Stage 3 read-only native sync is next.** The gated fresh-state live login completed successfully on 2026-08-28 after the production-host, intermediate-token, and upstream password-hash compatibility fixes.
 
 ## What this project is
 
@@ -22,11 +22,10 @@ development environment, persistent-storage foundation, and gated live-auth
 path. The live path accepts credentials only through the echo-disabled
 interactive TTY flow and rejects argv/environment credential carriers.
 
-The latest manual run used a fresh disposable state directory and reached the
-live provider, but ended with `nookctl: live notesnook runner: login failed`.
-The gate, local initialization, prompt sequence, and cleanup completed; the
-failed authentication phase is not yet exposed. **Stage 3 native sync and all
-MCP work remain blocked.** The exact handoff and acceptance criteria are in
+On 2026-08-28, a fresh-state manual run completed the full live login flow and
+returned `authenticated`. The Stage 2 diagnosis gate is closed. **Stage 3
+read-only native sync may begin; MCP work remains deferred.** The exact
+handoff and acceptance criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
 All stages follow the same rule: **do not start the next stage until the
@@ -81,20 +80,12 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 ## Current handoff
 
-The next task is diagnosis only, intended for Patrick's local Codex:
-
-1. Start from the PR branch tip and ignore generated `var/` state.
-2. Add a fixed, allowlisted `phase`/`category` diagnostic to the live-auth
-   failure path; never expose credentials, token envelopes, response bodies,
-   causes, stack traces, or raw upstream error text.
-3. Add deterministic offline regression coverage first, then run the focused
-   tests and complete offline matrix through `nix develop --offline`.
-4. Rerun the live command manually from a TTY with a new disposable state
-   directory only after the offline checks pass.
-
-Do not begin Stage 3 sync or MCP implementation until the failure is classified.
-See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
-for the exact command and constraints.
+The next task is Stage 3's first bounded proof: reopen the authenticated
+client state, perform a read-only native sync, and report a repeatable
+pass/fail result without adding an agent-facing write surface. Ignore generated
+`var/` state and keep credentials at the interactive TTY boundary. See the
+[implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
+for the exact constraints.
 
 ## License
 

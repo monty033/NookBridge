@@ -66,6 +66,7 @@ re-evaluated separately. Stage 0 explicitly rules this out.
 
 | Package | Version | License | Notes |
 |---|---|---|---|
+| `@notesnook/crypto` | `2.1.3` | GPL-3.0-or-later | Upstream Argon2id password-grant derivation used by live authentication. |
 | `better-sqlite3-multiple-ciphers` | `11.5.0` | MIT | Encrypted SQLite driver; required by `@notesnook/core` at the pinned commit. |
 | `sqlite-better-trigram` | `0.0.3` | Public Domain (per upstream `package.json`) | Trigram tokenizer for FTS5; required by `@notesnook/core`. |
 | `sqlite-regex` | `0.2.4-alpha.1` | see npm registry | Regex extension; required by `@notesnook/core`. |

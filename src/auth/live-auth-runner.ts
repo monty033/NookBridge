@@ -43,7 +43,11 @@ import {
   type SecretPrompt,
 } from "./secret-input.js";
 import type { AuthSession } from "./types.js";
-import type { LiveMfaSupplier, LivePasswordSupplier } from "./live-notesnook-auth-provider.js";
+import {
+  getLiveAuthFailureDiagnostic,
+  type LiveMfaSupplier,
+  type LivePasswordSupplier,
+} from "./live-notesnook-auth-provider.js";
 import type { AuthProvider } from "./types.js";
 
 /**
@@ -277,9 +281,13 @@ async function runLogin(options: NormalizedRunnerOptions): Promise<RunLiveAuthRe
     if (isSecretInputEof(error)) {
       return { kind: "error", message: "live notesnook runner: credential input ended" };
     }
+    const diagnostic = getLiveAuthFailureDiagnostic(error);
     return {
       kind: "error",
-      message: "live notesnook runner: login failed",
+      message:
+        diagnostic === undefined
+          ? "live notesnook runner: login failed"
+          : `live notesnook runner: login failed (phase=${diagnostic.phase} category=${diagnostic.category})`,
     };
   } finally {
     // Zeroize in reverse-collection order so the password bytes never

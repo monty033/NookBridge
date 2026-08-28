@@ -74,6 +74,10 @@ function makeLiveModule(): NotesnookRealCoreModule {
       // Deliberately empty: this probe exercises the factory lifecycle boundary.
     }
 
+    host(_hosts: unknown): void {
+      // Deliberately inert: this probe does not contact an upstream service.
+    }
+
     async init(): Promise<void> {
       return undefined;
     }

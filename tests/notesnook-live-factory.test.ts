@@ -82,6 +82,7 @@ interface FakeKv {
 interface FakeDatabase {
   ctor: ReturnType<typeof vi.fn>;
   setup: ReturnType<typeof vi.fn>;
+  host: ReturnType<typeof vi.fn>;
   init: ReturnType<typeof vi.fn>;
   user: FakeUserManager;
   token: FakeTokenManager;
@@ -145,6 +146,7 @@ function createFakeDatabase(): FakeDatabase {
   const db: FakeDatabase = {
     ctor: vi.fn(),
     setup: vi.fn(),
+    host: vi.fn(),
     init: vi.fn(),
     user,
     token,
@@ -167,6 +169,7 @@ function installDefaultFakeConstructor(db: FakeDatabase): void {
   db.ctor.mockImplementation(function Ctor() {
     return {
       setup: (...args: unknown[]) => db.setup(...args),
+      host: (...args: unknown[]) => db.host(...args),
       init: (...args: unknown[]) => db.init(...args),
       user: db.user,
       tokenManager: db.token,
@@ -471,6 +474,19 @@ describe("Stage 2B-live — notesnook-live-factory", () => {
       });
       expect(order).toEqual(["constructor", "setup", "init"]);
       expect(handle.initialized).toBe(true);
+    });
+
+    it("selects the fixed production Notesnook hosts before initialization", async () => {
+      const handle = await createHandle();
+
+      expect(handle.initialized).toBe(true);
+      expect(db?.host).toHaveBeenCalledWith({
+        AUTH_HOST: "https://auth.streetwriters.co",
+        API_HOST: "https://api.notesnook.com",
+        SSE_HOST: "https://events.streetwriters.co",
+        SUBSCRIPTIONS_HOST: "https://subscriptions.streetwriters.co",
+        ISSUES_HOST: "https://issues.streetwriters.co",
+      });
     });
 
     it("fails when init runs BEFORE setup", async () => {
@@ -870,6 +886,32 @@ describe("Stage 2B-live — notesnook-live-factory", () => {
         (e: Error) => e,
       );
       expect(error?.message).toMatch(/access_token/);
+    });
+
+    it("accepts an intermediate email/MFA token without a refresh token", async () => {
+      const fakeDb = createFakeDatabase();
+      installDefaultFakeConstructor(fakeDb);
+      fakeDb.token.getToken.mockImplementation(async () => ({
+        access_token: "intermediate-access",
+        expires_in: 60,
+        scope: "auth:grant_types:mfa",
+        t: Date.now(),
+      }));
+      const fakeModule = markRealCoreModule({
+        Database: fakeDb.ctor as unknown as NotesnookRealCoreModule["Database"],
+      });
+      const handle = await createNotesnookLiveCoreFactory({
+        setup: buildValidSetupOptions(),
+        onCleanup: () => undefined,
+        injectedModule: fakeModule,
+      });
+
+      await expect(handle.token.getToken()).resolves.toEqual({
+        access_token: "intermediate-access",
+        expires_in: 60,
+        scope: "auth:grant_types:mfa",
+        t: expect.any(Number),
+      });
     });
 
     it("wraps a rejecting upstream getToken into a categorical error", async () => {

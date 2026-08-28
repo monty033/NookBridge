@@ -94,6 +94,9 @@ function recordingDatabase(order: string[]): new () => NotesnookLiveDatabase {
     setup(_options: NotesnookDatabaseSetupOptions): void {
       order.push("setup");
     }
+    host(_hosts: unknown): void {
+      order.push("host");
+    }
     async init(): Promise<void> {
       order.push("init");
     }

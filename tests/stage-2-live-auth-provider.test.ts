@@ -31,7 +31,7 @@
  * the repo is a real secret.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import process from "node:process";
 
@@ -61,6 +61,7 @@ import {
   type LiveProviderFactory,
 } from "../src/auth/live-auth-runner.js";
 import { runAuthCommand } from "../src/auth/admin-command.js";
+import { hashNotesnookPassword } from "../src/auth/notesnook-password-hash.js";
 import type { SecretPrompt } from "../src/auth/secret-input.js";
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,14 @@ function syntheticEmail(): string {
 function syntheticSecret(label: string): string {
   return `${label}-${randomBytes(8).toString("hex")}`;
 }
+
+describe("Notesnook password-grant hash", () => {
+  it("uses the pinned upstream Argon2id derivation", async () => {
+    await expect(hashNotesnookPassword("USER@example.test", "password")).resolves.toBe(
+      "2-WbZ-zg8wvQWmYs68NniCal55QMzWyzpRok_TZMNhw",
+    );
+  });
+});
 
 function syntheticSession(now: number): {
   envelope: NotesnookLiveTokenEnvelope;
@@ -595,9 +604,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
         {
           email,
           password,
-          hashedPassword: createHash("sha256")
-            .update(`oVzKtazBo7d8sb7TBvY9jw${email.toLowerCase()}${password}`, "utf8")
-            .digest("base64"),
+          hashedPassword: await hashNotesnookPassword(email, password),
         },
       ]);
       expect(harness.mfaSupplier).not.toHaveBeenCalled();
@@ -2009,6 +2016,29 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
     expect(keys).toEqual(["accessToken", "expiresAt", "issuedAt", "userId"]);
   });
 
+  it("accepts a refresh-token-free intermediate email grant before password login", async () => {
+    const prompt = makeFakePrompt({
+      email: Buffer.from(syntheticEmail(), "utf8"),
+      password: Buffer.from(syntheticSecret("password"), "utf8"),
+    });
+    const { factory } = makeLoginHarness({
+      emailToken: {
+        access_token: syntheticSecret("intermediate-access"),
+        expires_in: 60,
+        scope: "auth:grant_types:password",
+        t: FROZEN_NOW_MS,
+      },
+    });
+
+    await expect(
+      runLiveAuthCommand({
+        command: "login" as LiveAuthCommandKind,
+        prompt,
+        providerFactory: factory,
+      }),
+    ).resolves.toMatchObject({ kind: "authenticated" });
+  });
+
   it("treats an EOF on the MFA prompt as 'no MFA round' without surfacing an error", async () => {
     const prompt = makeFakePrompt({
       email: Buffer.from(syntheticEmail(), "utf8"),
@@ -2064,7 +2094,7 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
     envSpy.mockRestore();
   });
 
-  it("returns a categorical error result when the provider rejects login", async () => {
+  it("reports an allowlisted phase/category when upstream email authentication rejects", async () => {
     const prompt = makeFakePrompt({
       email: Buffer.from(syntheticEmail(), "utf8"),
       password: Buffer.from(syntheticSecret("password"), "utf8"),
@@ -2077,13 +2107,78 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
       providerFactory: factory,
     });
 
-    // The runner surfaces an `error` result whose message contains
-    // "login failed" — this is the documented runner-level failure
-    // channel for upstream provider rejections.  The runner does NOT
-    // propagate the raw upstream error message into the result.
+    // The runner surfaces only its generic failure plus a provider-owned,
+    // allowlisted diagnostic.  The raw upstream exception never crosses the
+    // public runner boundary.
     expect(result.kind).toBe("error");
     if (result.kind !== "error") throw new Error("expected error result");
-    expect(result.message).toMatch(/login failed/);
+    expect(result.message).toBe(
+      "live notesnook runner: login failed (phase=email category=upstream-rejected)",
+    );
+  });
+
+  it.each([
+    ["password", { loginRejects: 3 } satisfies FakeHandleBehavior],
+    [
+      "mfa",
+      {
+        emailToken: {
+          access_token: syntheticSecret("access"),
+          refresh_token: syntheticSecret("refresh"),
+          expires_in: 3600,
+          scope: "auth:grant_types:mfa",
+          t: FROZEN_NOW_MS,
+        },
+        mfaRejects: 3,
+      } satisfies FakeHandleBehavior,
+    ],
+  ] as const)(
+    "reports the allowlisted %s/upstream-rejected diagnostic",
+    async (phase, behavior) => {
+      const prompt = makeFakePrompt({
+        email: Buffer.from(syntheticEmail(), "utf8"),
+        password: Buffer.from(syntheticSecret("password"), "utf8"),
+        mfa: Buffer.from(syntheticSecret("mfa"), "utf8"),
+      });
+      const { factory } = makeLoginHarness(behavior);
+
+      const result = await runLiveAuthCommand({
+        command: "login" as LiveAuthCommandKind,
+        prompt,
+        providerFactory: factory,
+      });
+
+      expect(result).toEqual({
+        kind: "error",
+        message: `live notesnook runner: login failed (phase=${phase} category=upstream-rejected)`,
+      });
+    },
+  );
+
+  it("does not derive a diagnostic from arbitrary provider error text", async () => {
+    const secret = syntheticSecret("arbitrary-provider-error");
+    const prompt = makeFakePrompt({
+      email: Buffer.from(syntheticEmail(), "utf8"),
+      password: Buffer.from(syntheticSecret("password"), "utf8"),
+    });
+    const factory: LiveProviderFactory = () => ({
+      login: async () => {
+        throw new Error(secret);
+      },
+      refresh: async () => {
+        throw new Error("not used");
+      },
+      logout: async () => undefined,
+    });
+
+    const result = await runLiveAuthCommand({
+      command: "login" as LiveAuthCommandKind,
+      prompt,
+      providerFactory: factory,
+    });
+
+    expect(result).toEqual({ kind: "error", message: "live notesnook runner: login failed" });
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it("logout invokes the provider with no-op suppliers and returns a signed-out result", async () => {

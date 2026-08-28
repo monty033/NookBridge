@@ -1498,7 +1498,7 @@ The upstream `main` branch is at merge commit
 - No live account credentials were included in logs, plans, commits, or review
   packets.
 
-### Fresh-state live-login result
+### Fresh-state live-login diagnosis and result
 
 On 2026-08-27, the operator reran the gated command from an interactive TTY
 using the disposable state directory below:
@@ -1517,44 +1517,31 @@ and ended with:
 nookctl: live notesnook runner: login failed
 ```
 
-This is a reproducible failure after gate, TTY input, local runtime
-initialization, and cleanup. The current runner intentionally suppresses the
-underlying authentication error, so the failed auth phase is still unknown.
+This was a reproducible failure after gate, TTY input, local runtime
+initialization, and cleanup. The runner was subsequently extended with a fixed
+allowlisted phase/category diagnostic. Diagnosis found three local compatibility
+defects: the core's ambient-development hosts selected localhost, intermediate
+email/MFA grants were incorrectly required to carry a refresh token, and the
+password grant used a SHA-256 reimplementation instead of Notesnook's Argon2id
+derivation. Each defect received deterministic offline regression coverage.
 The disposable state directory is generated runtime state and must not be
 committed or inspected for credentials.
 
-### Handoff to Patrick's local Codex
+### Successful fresh-state live-login result
 
-The next bounded task is **diagnosis only**. Start from the branch tip recorded
-by the PR, not from generated `var/` state:
+On 2026-08-28, after the compatibility fixes and complete offline verification,
+the operator ran the gated command from an interactive TTY with a new
+disposable state directory. It completed the email/password/MFA prompt flow and
+returned the authenticated status. No credentials, token envelopes, response
+bodies, causes, stack traces, or raw upstream error text were recorded in the
+handoff.
 
-1. Inspect `src/auth/live-auth-runner.ts`,
-   `src/auth/live-notesnook-auth-provider.ts`,
-   `src/auth/admin-command.ts`, and the focused live-auth tests.
-2. Add a machine-owned, allowlisted diagnostic containing only `phase` and
-   `category` (for example, `email/upstream-rejected` or
-   `password/upstream-rejected`). Never derive it by interpolating or parsing
-   arbitrary upstream exception text.
-3. Preserve the public credential-hygiene boundary and generic failure behavior
-   except for the new fixed diagnostic. Never expose email, passwords, MFA
-   codes, token envelopes, response bodies, causes, stack traces, or state
-   contents.
-4. Add deterministic offline regression coverage first (RED), then implement
-   the smallest production change (GREEN). Do not contact the real account from
-   an automated test.
-5. Run the focused live-auth tests, then the complete offline matrix:
-   `npm test`, `npm run typecheck`, `npm run lint`, format check, build, and
-   `git diff --check` through `nix develop --offline`.
-6. Only after those checks pass, Patrick may rerun the live command manually
-   from his own TTY with a new disposable state directory. Credentials must
-   stay at the TTY prompts and must not be sent through chat, logs, argv, or
-   environment variables.
+The resulting working tree passed the full offline Nix matrix: **251/251
+tests**, typecheck, lint, format check, build, and `git diff --check`.
 
-**Acceptance:** the failure reports one fixed phase/category pair, no sensitive
-or raw upstream text appears in the result, focused and full offline checks
-pass, and the fresh-state live result is classified as either a code defect or
-an external account/service failure. Do not begin Stage 3 sync or MCP work
-until this gate is closed.
+**Acceptance:** met. Stage 2 live-login is proven for this pinned compatibility
+tuple. Stage 3 native sync may begin; MCP and write functionality remain
+blocked until their respective gates pass.
 
 ### Stage 3 gate
 
