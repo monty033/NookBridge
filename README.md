@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stage -1 — native-runtime compatibility spike.** No application code, packaging, deployment configuration, or source/dependency/build files have been added to this repository yet. This bootstrap commit ships documentation only.
+> **Status: pre-alpha. Stage 2 complete; live-login diagnosis is the current checkpoint.** The Stage 2 live-auth hardening slice is merged. Stage 3 native sync remains blocked until the fresh-state live-login failure is classified.
 
 ## What this project is
 
@@ -16,11 +16,22 @@ The goal is to give an authorized agent capabilities comparable to an authorized
 
 ## Current stage
 
-The project is at **Stage -1 — NixOS native runtime compatibility spike**.
+Stages 0–2A and the Stage 2B offline/live-auth slices are complete and merged.
+The repository contains the TypeScript/Node implementation, pinned Nix
+development environment, persistent-storage foundation, and gated live-auth
+path. The live path accepts credentials only through the echo-disabled
+interactive TTY flow and rejects argv/environment credential carriers.
 
-This is the cheapest possible go/no-go signal on the highest-uncertainty technical dependency (Notesnook's native Node SQLite / search-extension stack under NixOS) before any bridge architecture, persistence, authentication, or MCP code is written. Stage -1 builds only a minimal temporary Nix `devShell` / Node harness on the actual target NixOS host, attempts to build and load `better-sqlite3-multiple-ciphers` plus the Notesnook-required FTS/trigram/regex extensions, creates and reopens an encrypted SQLite database, runs representative extension queries, and — if feasible — initializes the smallest Notesnook DB test harness. No source code, dependency manifests, build files, Nix modules, or service configuration are being added at this stage.
+The latest manual run used a fresh disposable state directory and reached the
+live provider, but ended with `nookctl: live notesnook runner: login failed`.
+The gate, local initialization, prompt sequence, and cleanup completed; the
+failed authentication phase is not yet exposed. **Stage 3 native sync and all
+MCP work remain blocked.** The exact handoff and acceptance criteria are in
+[`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
-Stages 0 through 9 (reproducible baseline, persistent client, authentication, native sync, writes, production service boundary, MCP proxy, NixOS package, security-parity review) follow the same rule: **do not start the next stage until the current stage has a repeatable automated test and a written pass/fail result**. Failed gates are concrete decisions: fix, change architecture, or stop.
+All stages follow the same rule: **do not start the next stage until the
+current stage has a repeatable automated test and a written pass/fail result**.
+Failed gates are concrete decisions: fix, change architecture, or stop.
 
 ## Target architecture and security boundary
 
@@ -68,9 +79,22 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 - [`docs/implementation-plan-v1.5.md`](docs/implementation-plan-v1.5.md) — full Development and Design Plan v1.5: goals, background research, proposed architecture, technical decisions, staged development plan and gates (Stage -1 through Stage 9 plus the production MVP), MVP interface and permission model, Linux packaging and deployment design, testing and validation strategy, security and privacy model, risks, post-MVP roadmap, recommended repository structure, definition of done, and research sources.
 
-## What is *not* in this bootstrap commit
+## Current handoff
 
-To be explicit about the current state of the repository: nothing in this commit claims that NookBridge functionality has been implemented. There is no application source code, no `package.json` / `package-lock.json` / `tsconfig.json`, no Nix flake or module, no `flake.nix`, no systemd units, no Docker artifacts, no test harness, no CI configuration, and no `.gitignore` — none of those have been authored yet. They will be introduced as the project advances through the stages defined in the implementation plan, starting with the Stage -1 spike on the target NixOS host.
+The next task is diagnosis only, intended for Patrick's local Codex:
+
+1. Start from the PR branch tip and ignore generated `var/` state.
+2. Add a fixed, allowlisted `phase`/`category` diagnostic to the live-auth
+   failure path; never expose credentials, token envelopes, response bodies,
+   causes, stack traces, or raw upstream error text.
+3. Add deterministic offline regression coverage first, then run the focused
+   tests and complete offline matrix through `nix develop --offline`.
+4. Rerun the live command manually from a TTY with a new disposable state
+   directory only after the offline checks pass.
+
+Do not begin Stage 3 sync or MCP implementation until the failure is classified.
+See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
+for the exact command and constraints.
 
 ## License
 
