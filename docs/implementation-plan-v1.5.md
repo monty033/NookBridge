@@ -558,9 +558,9 @@ Objective: make the headless process a real authenticated Notesnook client while
 
 Objective: prove the central claim: the headless client participates in real Notesnook sync and provides useful reads without plaintext export workflows.
 
-- Implement `SyncCoordinator` with full/fetch/send operations and a single sync mutex.
-- Implement list notebooks/notes, get note, search notes, and sync status as internal application methods/CLI commands.
-- Use Notesnook content helpers to return text/Markdown views while retaining canonical content internally.
+- Implement the initial read-only POC with `fetch` sync and a single sync mutex. Do not expose `full` or `send` through the read-only boundary; pinned `@notesnook/core@8.1.3` implements `full` as fetch plus send. Full/fetch/send coordination belongs to the later write-capable sync layer.
+- Implement list notebooks/notes, get note, search notes, and sync status as internal application methods/CLI commands, exposing only the metadata needed by the current proof.
+- Use Notesnook content helpers to return text/Markdown views only after the read-only content and locked-note scenarios pass, while retaining canonical content internally.
 - Return stable identifiers, organizational metadata, `dateModified`, sync state, and a revision token for later writes.
 - Detect and expose conflicted notes rather than silently choosing a side.
 - Implement the Section 4.8 locked-note/Vault semantics: title-only discoverability when locked, no body snippet/content leakage, and structured `vault_locked` errors for body reads/mutations.
@@ -568,13 +568,27 @@ Objective: prove the central claim: the headless client participates in real Not
 
 | **Gate 3 scenario** | **Pass condition** |
 |---|---|
-| Remote → bridge | Create/edit a note on phone/laptop, sync, then bridge fetch/full sync; expected content is returned. |
+| Remote → bridge | Create/edit a note on phone/laptop, fetch sync, then return only the explicitly requested bounded content/metadata. |
 | Search | Known title/body keywords return expected note IDs without creating a plaintext side index. |
 | Restart + sync | Restart, fetch changes made while offline, and return them correctly. |
 | Conflict visibility | Generate a two-device conflict; bridge identifies it and does not silently resolve it. |
 | Locked note | Locked note can be identified by permitted metadata/title behavior without body leakage; `getNote` returns `vault_locked`. |
 
 **Security checkpoint S3:** LLM red-team attempts to locate decrypted note bodies in state directories, temp directories, logs, process arguments, and crash outputs. Only explicitly requested content in process responses/memory is acceptable.
+
+### Stage 3 initial read-only POC receipt
+
+On 2026-08-28, the merged Stage 3 branch completed the interactive disposable-state proof using the pinned Nix/Node/native tuple. The operator authenticated through the echo-disabled TTY flow, reopened the persisted client state in `var/state/stage-3-live-crypto-poc`, and ran the separately gated fetch-only proof.
+
+- `sync status`: **PASS**; state reopened and the status snapshot completed.
+- `sync read-only`: **PASS**; the native fetch completed and returned 41 notebook summaries.
+- Note bodies: none requested or exposed.
+- Teardown: **PASS**; persistent storage and the production runtime closed cleanly.
+- Final offline matrix: **266/266 tests passed**; typecheck, lint, format check, build, flake check, and diff checks passed.
+- Independent security review of the final staged candidate: **PASS**, no blocking findings.
+- Merged PR: `patrick/NookBridge#15`, merge commit `7e137b990d4a30a4a366de4be44c93e580754b28`.
+
+This closes the initial Stage 3 read-only native-sync POC. It does **not** claim the full Gate 3 scenario matrix: known content/search canaries, restart-after-remote-change, conflict visibility, and locked-note behavior remain required before Stage 4 safe writes.
 
 ## Stage 4 — Safe writes and bidirectional sync (Functional POC)
 
@@ -1580,19 +1594,21 @@ boundaries, and explanatory documentation; no reusable credential values were
 present. Generated `var/` state was deliberately excluded from the review.
 This is a **PASS** for S2 credential hygiene within the development-state scope.
 
-### Next handoff — begin Stage 3
+### Next handoff — finish the Gate 3 read-only scenarios
 
-Reopen the authenticated client state, perform a read-only native sync, and
-report a repeatable pass/fail result before adding an agent-facing write
-surface. Keep credentials at the interactive TTY boundary and do not inspect
-or commit generated `var/` state.
+The initial read-only native-sync proof is complete, but the full Gate 3
+scenario matrix remains open. Next, use disposable operator-controlled test
+data to prove known title/body search behavior, restart after remote changes,
+conflict visibility, and locked-note handling without body leakage. Keep
+credentials at the interactive TTY boundary and do not inspect or commit
+generated `var/` state.
 
-### Stage 3 gate
+### Stage 3 gate status
 
-Stage 3 — native sync/read-only POC — remains pending. Its first proof must use
-the pinned Nix/Node/native dependency tuple to initialize and reopen a real
-persistent core client, perform read-only native sync, and report a repeatable
-pass/fail result before any agent-facing write surface is added.
+**Initial read-only native-sync POC: PASS.** The fetch-only boundary is merged
+and security-reviewed. **Full Gate 3: IN PROGRESS** until the remaining content,
+search, restart, conflict, and locked-note scenarios have written pass results.
+Stage 4 safe writes and bidirectional sync remain blocked until then.
 
 # Appendix A. Research Sources
 

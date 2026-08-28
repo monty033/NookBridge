@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stage 2 authentication and session persistence are proven; Stage 3 read-only native sync is next.** The gated live-login, cold-restart, refresh, logout/relogin, and credential-hygiene checks completed on 2026-08-28.
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; safe writes and bidirectional sync are next.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, and fetch-only sync checks completed on 2026-08-28.
 
 ## What this project is
 
@@ -16,17 +16,21 @@ The goal is to give an authorized agent capabilities comparable to an authorized
 
 ## Current stage
 
-Stages 0–2A and the Stage 2B offline/live-auth slices are complete and merged.
-The repository contains the TypeScript/Node implementation, pinned Nix
-development environment, persistent-storage foundation, and gated live-auth
-path. The live path accepts credentials only through the echo-disabled
-interactive TTY flow and rejects argv/environment credential carriers.
+Stages 0–2A, Stage 2B authentication, and the Stage 3 read-only native-sync POC
+are complete and merged. The repository contains the TypeScript/Node
+implementation, pinned Nix development environment, production-compatible
+Notesnook crypto/storage adapter, closed read-only projection, and gated live
+sync path. Credentials are accepted only through the echo-disabled interactive
+TTY flow; argv/environment credential carriers are rejected.
 
 On 2026-08-28, a fresh-state manual run completed the full live login flow and
 returned `authenticated`. The follow-up cold-restart, explicit refresh,
-logout/relogin, and credential-hygiene receipts passed. **Stage 3 read-only
-native sync may begin; MCP work remains deferred.** The exact handoff and
-acceptance criteria are in
+logout/relogin, credential-hygiene, and fetch-only native-sync receipts passed.
+The live proof fetched 41 notebook summaries without exposing note bodies and
+completed teardown cleanly. **Stage 4 safe writes remain blocked until the
+remaining Gate 3 content, search, restart, conflict, and locked-note scenarios
+are proven; MCP work remains deferred.** The exact handoff and acceptance
+criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
 All stages follow the same rule: **do not start the next stage until the
@@ -81,12 +85,14 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 ## Current handoff
 
-The next task is Stage 3's first bounded proof: reopen the authenticated client
-state, perform a read-only native sync, and report a repeatable pass/fail
-result without adding an agent-facing write surface. Ignore generated `var/`
-state and keep credentials at the interactive TTY boundary. See the
-[implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
-for the exact constraints.
+The first Stage 3 proof is complete: reopen the authenticated client state,
+perform a fetch-only native sync, return bounded metadata, and tear down the
+runtime without adding an agent-facing write surface. The next bounded work is
+to complete the remaining Gate 3 scenarios—content/search canaries, restart,
+conflict visibility, and locked-note behavior—before implementing Stage 4
+writes. Ignore generated `var/` state and keep credentials at the interactive
+TTY boundary. See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
+for the exact constraints and receipt.
 
 ## License
 
