@@ -263,5 +263,67 @@ export type {
 } from "./auth/admin-command.js";
 export { formatAuthHelp, parseAuthCommand, runAuthCommand } from "./auth/admin-command.js";
 
+// Stage 3 preparation — narrow read-only core adapter seam.  The seam
+// is the offline, deterministic shape a future Stage 3 runner will
+// plug an opened Notesnook Database (or a fake) into.  It exposes a
+// closed allowlisted read-only surface (status, sync("full"|"fetch"),
+// listNotebooks, noteMetadata, search); it rejects any mutation /
+// delete / generic-passthrough; it serializes concurrent sync
+// attempts through a per-instance single-flight mutex; and it
+// normalizes every failure to a categorical, chain-free error.  No
+// raw Database, no generic transport, no live network call is
+// exposed.
+export type {
+  NotesnookReadOnlyAdapterOptions,
+  NotesnookReadOnlyDatabase,
+  NotesnookReadOnlyDatabaseSource,
+  NotesnookReadOnlyNoteMetadata,
+  NotesnookReadOnlyNotebookSummary,
+  NotesnookReadOnlySearchHit,
+  NotesnookReadOnlyStatus,
+  NotesnookReadOnlySyncOptions,
+  NotesnookReadOnlySyncType,
+} from "./core/notesnook-readonly-adapter.js";
+export {
+  createNotesnookReadOnlyAdapter,
+  isNotesnookReadOnlyAdapterError,
+  NotesnookReadOnlyAdapter,
+} from "./core/notesnook-readonly-adapter.js";
+
+// Stage 3 production projection and operator-only sync proof.  The
+// projection exposes only the flattened read-only seam; the raw live
+// Database remains internal to the live factory/runtime.
+export type { NotesnookReadOnlyProjectionSource } from "./core/notesnook-readonly-projection.js";
+export {
+  flattenLiveDatabaseToReadOnly,
+  isNotesnookReadOnlyProjectionError,
+  NotesnookReadOnlyProjectionError,
+} from "./core/notesnook-readonly-projection.js";
+export type {
+  OfflineSyncProofReport,
+  OfflineSyncProofStep,
+  RunOfflineSyncProofOptions,
+} from "./core/notesnook-sync-proof.js";
+export {
+  formatOfflineSyncProofReport,
+  isOfflineSyncProofError,
+  runOfflineSyncProof,
+  OfflineSyncProofError,
+} from "./core/notesnook-sync-proof.js";
+export type {
+  ParseSyncCommandResult,
+  ParsedSyncCommand,
+  RunSyncCommandOptions,
+  RunSyncCommandResult,
+  SyncSubcommand,
+} from "./core/notesnook-sync-admin.js";
+export {
+  formatSyncCommandResult,
+  formatSyncHelp,
+  LIVE_SYNC_ENABLE_ENV,
+  parseSyncCommand,
+  runSyncCommand,
+} from "./core/notesnook-sync-admin.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";

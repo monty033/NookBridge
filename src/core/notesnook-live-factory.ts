@@ -49,6 +49,8 @@ import {
   type NotesnookLiveDatabase,
   type NotesnookRealCoreModule,
 } from "./notesnook-core-adapter.js";
+import { flattenLiveDatabaseToReadOnly } from "./notesnook-readonly-projection.js";
+import type { NotesnookReadOnlyDatabase } from "./notesnook-readonly-adapter.js";
 
 // ---------------------------------------------------------------------------
 // Options, narrow types, and cleanup hook.
@@ -141,6 +143,8 @@ export interface NotesnookLiveCoreHandle {
   readonly cleanup: () => Promise<void>;
   /** True once `init()` has resolved.  Never becomes false again. */
   readonly initialized: boolean;
+  /** Flattened Stage 3 read-only surface; absent on legacy auth-only fakes. */
+  readonly readOnly?: NotesnookReadOnlyDatabase;
 }
 
 /**
@@ -261,6 +265,10 @@ export async function createNotesnookLiveCoreFactory(
     // wrappers.  No generic Database/storage object escapes this boundary.
     const user = wrapUserManager(userManager, ensureOpen);
     const token = wrapTokenManager(tokenManager, ensureOpen);
+    const readOnly =
+      normalized.injectedModule === undefined || hasReadOnlyProjectionSurface(db)
+        ? guardReadOnlyProjection(flattenLiveDatabaseToReadOnly(db), ensureOpen)
+        : undefined;
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -288,6 +296,7 @@ export async function createNotesnookLiveCoreFactory(
       kv,
       initialized: true,
       cleanup,
+      ...(readOnly === undefined ? {} : { readOnly }),
     });
 
     return handle;
@@ -521,6 +530,51 @@ async function safeInitDatabase(database: NotesnookLiveDatabase): Promise<void> 
   } catch {
     throw factoryError("Notesnook Database.init failed");
   }
+}
+
+function hasReadOnlyProjectionSurface(database: NotesnookLiveDatabase): boolean {
+  try {
+    return ["syncer", "notebooks", "notes", "lookup", "lastSynced", "hasUnsyncedChanges"].every(
+      (slot) => slot in (database as unknown as object),
+    );
+  } catch {
+    // Production construction will call the projection and return its
+    // categorical slot error; legacy injected auth-only fakes simply
+    // remain without the optional Stage 3 surface.
+    return false;
+  }
+}
+
+function guardReadOnlyProjection(
+  readOnly: NotesnookReadOnlyDatabase,
+  ensureOpen: () => void,
+): NotesnookReadOnlyDatabase {
+  return Object.freeze({
+    lastSynced: async () => {
+      ensureOpen();
+      return readOnly.lastSynced();
+    },
+    hasUnsyncedChanges: async () => {
+      ensureOpen();
+      return readOnly.hasUnsyncedChanges();
+    },
+    sync: async (options: Parameters<NotesnookReadOnlyDatabase["sync"]>[0]) => {
+      ensureOpen();
+      return readOnly.sync(options);
+    },
+    listNotebooks: async () => {
+      ensureOpen();
+      return readOnly.listNotebooks();
+    },
+    noteMetadata: async (id: string) => {
+      ensureOpen();
+      return readOnly.noteMetadata(id);
+    },
+    search: async (query: string) => {
+      ensureOpen();
+      return readOnly.search(query);
+    },
+  });
 }
 
 /**

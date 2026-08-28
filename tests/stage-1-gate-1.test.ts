@@ -154,7 +154,10 @@ describe("Stage 1 Gate 1 — Persistence round-trip + At-rest encryption", () =>
       "The bridgeless world grew outwards, but the lock was always",
       "on the inside.",
     ].join("\n");
-    serialKey = { password: "stage-1-password-A", salt: "stage-1-salt-A" };
+    serialKey = {
+      password: "stage-1-password-A",
+      salt: "AAAAAAAAAAAAAAAAAAAAAA==",
+    };
   });
 
   it("writes an encrypted note through PersistentStorage and reads it back", async () => {
@@ -168,6 +171,7 @@ describe("Stage 1 Gate 1 — Persistence round-trip + At-rest encryption", () =>
       // write/read envelope so the test covers the full IStorage surface.
       await storage.write("note:stage1", payload);
       const envelope: Cipher<"base64"> = await storage.encrypt(serialKey, payload);
+      expect(envelope.alg).toBe("xcha-argon2i13-7");
       await storage.write("note:stage1-cipher", envelope);
       storage.close();
       releaseLock(fx.stateDir);
@@ -188,7 +192,10 @@ describe("Stage 1 Gate 1 — Persistence round-trip + At-rest encryption", () =>
       if (!restored) {
         throw new Error("encrypted envelope missing from persistent storage");
       }
-      const decrypted = await storage.decrypt(serialKey, restored);
+      const decrypted = await storage.decrypt(serialKey, {
+        ...restored,
+        format: undefined,
+      } as unknown as Cipher<"base64">);
       expect(decrypted).toBe(payload);
       storage.close();
       releaseLock(fx.stateDir);

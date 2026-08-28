@@ -39,6 +39,7 @@
             name = "nookbridge-stage-0";
             buildInputs = with pkgs; [
               nodejs_22
+              just
               gcc
               gnumake
               pkg-config

@@ -242,6 +242,13 @@ export interface NotesnookLiveDatabase {
   tokenManager: unknown;
   /** Callable accessor: `db.kv()` returns the live `KVStorage`. */
   kv: () => unknown;
+  /** Stage 3 read-only projection slots. Optional for legacy auth-only fakes. */
+  syncer?: unknown;
+  notebooks?: unknown;
+  notes?: unknown;
+  lookup?: unknown;
+  lastSynced?: () => Promise<unknown>;
+  hasUnsyncedChanges?: () => Promise<unknown>;
 }
 
 /**

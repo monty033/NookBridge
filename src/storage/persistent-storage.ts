@@ -30,7 +30,7 @@
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
-import { Buffer } from "node:buffer";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 
 import { tryAcquireLock, releaseLock } from "../config/lock.js";
@@ -41,16 +41,18 @@ import { SqliteStorage } from "./sqlite-storage.js";
 import type { Cipher, IStorage, SerializedKey, SerializedKeyPair } from "./istorage.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 
-// ---------------------------------------------------------------------------
-// Cryptographic primitives — Stage 1 uses only Node built-ins.
-//
-// Stage 2 will replace these with `@notesnook/crypto` (which itself
-// wraps libsodium).  Keeping the primitives local for now means
-// PersistentStorage is fully self-contained for Gate 1 testing.
-
-import { createCipheriv, createDecipheriv, randomBytes, pbkdf2Sync } from "node:crypto";
-
 import { hashNotesnookPassword } from "../auth/notesnook-password-hash.js";
+
+import type { NNCrypto as NotesnookCrypto } from "@notesnook/crypto";
+
+// `@notesnook/crypto@2.1.3` exposes a broken ESM node entrypoint under
+// Node 22 because its sodium-native dependency is CommonJS.  Its CommonJS
+// entrypoint is functional, so keep the compatibility bridge local here.
+const require = createRequire(import.meta.url);
+const { NNCrypto: NNCryptoConstructor } = require("@notesnook/crypto") as {
+  NNCrypto: new () => NotesnookCrypto;
+};
+const notesnookCrypto = new NNCryptoConstructor();
 
 // ---------------------------------------------------------------------------
 
@@ -249,31 +251,8 @@ export class PersistentStorage implements IStorage {
     return this.sq.all<{ key: string }>(`SELECT key FROM kv ORDER BY key`).map((r) => r.key);
   }
 
-  // ----- Crypto envelope (Stage 1 local implementation) -------------------
-  //
-  // Stage 2 will swap these implementations for `@notesnook/crypto`
-  // wrappers so the IStorage contract gets the upstream-validated
-  // crypto envelopes.  Until then the Stage 1 envelopes are
-  // deterministic and round-trip-stable so Stage 1 tests can lock
-  // them in.  They never persist the password to disk — only the
-  // derived key material.
-
   async encrypt(_key: SerializedKey, plainText: string): Promise<Cipher<"base64">> {
-    const keyMaterial = deriveKeyMaterial(_key);
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", keyMaterial, iv);
-    const data = Buffer.from(plainText, "utf8");
-    const enc = Buffer.concat([cipher.update(data), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    const blob = Buffer.concat([enc, tag]).toString("base64");
-    return {
-      format: "base64",
-      alg: "aes-256-gcm",
-      cipher: blob,
-      iv: iv.toString("base64"),
-      salt: _key.salt ?? "",
-      length: data.length,
-    };
+    return (await notesnookCrypto.encrypt(_key, plainText, "text", "base64")) as Cipher<"base64">;
   }
 
   async encryptMulti(key: SerializedKey, items: string[]): Promise<Cipher<"base64">[]> {
@@ -281,15 +260,10 @@ export class PersistentStorage implements IStorage {
   }
 
   async decrypt(key: SerializedKey, cipherData: Cipher<"base64">): Promise<string> {
-    const keyMaterial = deriveKeyMaterial(key);
-    const iv = Buffer.from(cipherData.iv, "base64");
-    const blob = Buffer.from(cipherData.cipher, "base64");
-    const tag = blob.subarray(blob.length - 16);
-    const enc = blob.subarray(0, blob.length - 16);
-    const decipher = createDecipheriv("aes-256-gcm", keyMaterial, iv);
-    decipher.setAuthTag(tag);
-    const out = Buffer.concat([decipher.update(enc), decipher.final()]);
-    return out.toString("utf8");
+    // SyncHub items omit the local envelope's `format` field; upstream's
+    // storage adapter treats the wire ciphertext as URL-safe base64.
+    const normalizedCipher = { ...cipherData, format: cipherData.format ?? "base64" };
+    return (await notesnookCrypto.decrypt(key, normalizedCipher, "text")) as string;
   }
 
   async decryptMulti(key: SerializedKey, items: Cipher<"base64">[]): Promise<string[]> {
@@ -297,13 +271,8 @@ export class PersistentStorage implements IStorage {
   }
 
   async deriveCryptoKey(credentials: SerializedKey): Promise<void> {
-    const keyMaterial = deriveKeyMaterial(credentials);
-    const encoded = keyMaterial.toString("base64");
-    // Mirror upstream `NodeStorageInterface.deriveCryptoKey` — store
-    // the derived key under `userEncryptionKey` so subsequent
-    // encrypt/decrypt calls can be issued with a SerializedKey
-    // carrying only the password+salt and recover the material.
-    await this.write(`userEncryptionKey`, encoded);
+    const exported = await exportCryptoKey(credentials);
+    await this.write(`userEncryptionKey`, exported.key);
   }
 
   async hash(password: string, email: string): Promise<string> {
@@ -315,9 +284,7 @@ export class PersistentStorage implements IStorage {
   }
 
   async generateCryptoKey(password: string, salt?: string): Promise<SerializedKey> {
-    const finalSalt = salt ?? randomBytes(16).toString("base64");
-    const material = pbkdf2Sync(password, finalSalt, 100_000, 32, "sha256");
-    return { password, salt: finalSalt, key: material.toString("base64") };
+    return await notesnookCrypto.exportKey(password, salt);
   }
 
   async generatePGPKeyPair(): Promise<SerializedKeyPair> {
@@ -343,9 +310,8 @@ export class PersistentStorage implements IStorage {
     return this.generateCryptoKey(password, salt);
   }
 
-  async deriveCryptoKeyFallback(_credentials: SerializedKey): Promise<void> {
-    // no-op in Stage 1; Stage 2 plugs in @notesnook/crypto's fallback path.
-    return Promise.resolve();
+  async deriveCryptoKeyFallback(credentials: SerializedKey): Promise<void> {
+    await this.deriveCryptoKey(credentials);
   }
 
   close(): void {
@@ -368,16 +334,11 @@ export class PersistentStorage implements IStorage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function deriveKeyMaterial(key: SerializedKey): Buffer {
-  // Precedence mirrors upstream: an explicit materialised `key`
-  // wins; otherwise derive via PBKDF2 with the provided salt.
-  if (key.key) {
-    return Buffer.from(key.key, "base64");
+async function exportCryptoKey(credentials: SerializedKey): Promise<SerializedKey> {
+  if (typeof credentials.password !== "string" || credentials.password.length === 0) {
+    throw new Error("deriveCryptoKey requires a non-empty password");
   }
-  if (!key.password || !key.salt) {
-    throw new Error("encrypt/decrypt requires a SerializedKey with `key` or `password`+`salt`");
-  }
-  return pbkdf2Sync(key.password, key.salt, 100_000, 32, "sha256");
+  return await notesnookCrypto.exportKey(credentials.password, credentials.salt);
 }
 
 // ---------------------------------------------------------------------------

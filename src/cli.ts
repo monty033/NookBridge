@@ -31,12 +31,19 @@ import { ensureStateDir } from "./config/state-dir.js";
 import { createDevelopmentFileKeyStore } from "./keystore/file-keystore.js";
 import { loadConfig } from "./config/config.js";
 import { formatAuthHelp, parseAuthCommand, runAuthCommand } from "./auth/admin-command.js";
+import {
+  formatSyncCommandResult,
+  formatSyncHelp,
+  parseSyncCommand,
+  runSyncCommand,
+} from "./core/notesnook-sync-admin.js";
 import { createStdioPrompt } from "./auth/secret-input.js";
 
 type Args = {
   stateDir?: string;
   endpoint?: string;
   authArgs?: readonly string[];
+  syncArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -53,12 +60,17 @@ function normalizeCliArgv(argv: unknown): string[] {
 function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   const [, , subcommand, ...rest] = argv;
   const args: Args = {};
-  // `auth` is a sealed subcommand tree: its options are parsed by the
-  // auth parser, not the top-level one.  Pass `rest` through verbatim
-  // so that forbidden flags (e.g. `--password`) reach the auth parser
-  // and surface as a parse error rather than being silently consumed.
+  // `auth` and `sync` are sealed subcommand trees: their options are
+  // parsed by the per-subcommand parser, not the top-level one.  Pass
+  // `rest` through verbatim so that forbidden flags (e.g. `--password`)
+  // reach the subcommand parser and surface as a parse error rather
+  // than being silently consumed.
   if (subcommand === "auth") {
     args.authArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "sync") {
+    args.syncArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -101,6 +113,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "auth") {
     return runAuth(args, logger);
   }
+  if (subcommand === "sync") {
+    return runSync(args, logger);
+  }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
@@ -138,6 +153,74 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
   return 0;
+}
+
+/**
+ * Dispatch the `nookctl sync <subcommand>` plumbing.
+ *
+ * The Stage 3 sync tree is gated on `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`.
+ * The CLI constructs the production runtime lazily only after the
+ * parser and explicit sync gate have passed.  The runtime exposes a
+ * flattened read-only handle and owns teardown; the command runner
+ * awaits that teardown on every path.
+ *
+ * The runner itself is the boundary: it never accepts argv / env
+ * values for credentials (the parser rejects forbidden carriers
+ * before they reach the runner), and the report it returns is
+ * already redacted to categorical step outcomes.
+ */
+async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Promise<number> {
+  void logger;
+  const argv = args.syncArgs ?? [];
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+  // Honour `nookctl sync help` so the operator can render the help
+  // text without needing the live-sync gate.  We do this BEFORE the
+  // parser so an operator who only wants the help text never trips
+  // the gate.
+  if (argv.length === 0) {
+    process.stdout.write(formatSyncHelp());
+    return 0;
+  }
+  // Parse-only path: when the operator asks for `help`, render it
+  // without requiring the gate.  This avoids a confusing "sync
+  // help is disabled" message when the operator only wants the
+  // help text.
+  const parsedForHelp = parseSyncCommand(argv, environment);
+  if (parsedForHelp.kind === "parsed" && parsedForHelp.command.kind === "help") {
+    process.stdout.write(formatSyncHelp());
+    return 0;
+  }
+  const stateDir = resolve(environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"));
+  const result = await runSyncCommand({
+    argv,
+    env: environment,
+    createProofRuntime: async () => {
+      const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
+      const runtime = await createProductionLiveLoginRuntime({ stateDir, logger });
+      if (runtime.readOnly === undefined) {
+        await runtime.cleanup();
+        throw new Error("read-only runtime surface is unavailable");
+      }
+      return { source: runtime.readOnly, cleanup: runtime.cleanup };
+    },
+  });
+  switch (result.kind) {
+    case "error":
+      process.stderr.write(`nookctl: ${result.message}\n`);
+      return result.exitCode;
+    case "help":
+      process.stdout.write(result.text);
+      return 0;
+    case "report":
+      process.stdout.write(`${formatSyncCommandResult(result)}\n`);
+      return result.report.kind === "pass" ? 0 : 1;
+  }
 }
 
 /**
@@ -284,6 +367,7 @@ function printHelp(): void {
       "Usage:",
       "  nookctl doctor [--state-dir <path>] [--endpoint <url>]",
       "  nookctl auth <login|live-login|status|logout|reset-local-client|help>",
+      "  nookctl sync <status|read-only|help>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -292,6 +376,7 @@ function printHelp(): void {
       "Subcommands:",
       "  doctor                run the Stage 1 diagnostics",
       "  auth                  Stage 2B admin auth; live-login is explicitly gated",
+      "  sync                  Stage 3 read-only sync; live commands are explicitly gated",
       "  help                  show this help",
       "",
     ].join("\n"),
