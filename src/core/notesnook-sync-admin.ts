@@ -69,6 +69,8 @@ export type ParsedSyncCommand =
       subcommand: "read-only";
       /** Title-only search query (optional). */
       query?: string;
+      /** Optional categorical assertion against the search hit ids. */
+      expectedSearchId?: string;
       /** Optional note id to read metadata for. */
       noteMetadataId?: string;
     }>
@@ -217,12 +219,13 @@ export function parseSyncCommand(
         if (stringArgv.length !== 1) return invalidParseInput();
         return { kind: "parsed", command: { kind: "status", subcommand: "status" } };
       case "read-only": {
-        // The `read-only` subcommand accepts up to two optional
-        // named flags: `--query <text>` and `--note-id <text>`.  We
-        // do NOT accept any credential carrier.  Both flags are
+        // The `read-only` subcommand accepts optional `--query`,
+        // `--expect-search-id`, and `--note-id` flags.  We
+        // do NOT accept any credential carrier.  All flags are
         // optional; the proof runner treats them as no-ops when
         // omitted.
         let query: string | undefined;
+        let expectedSearchId: string | undefined;
         let noteMetadataId: string | undefined;
         for (let i = 1; i < stringArgv.length; i++) {
           const cur = stringArgv[i];
@@ -237,6 +240,13 @@ export function parseSyncCommand(
             if (typeof next !== "string" || next.length === 0) return invalidParseInput();
             noteMetadataId = next;
             i++;
+          } else if (cur === "--expect-search-id") {
+            const next = stringArgv[i + 1];
+            if (expectedSearchId !== undefined || typeof next !== "string" || next.length === 0) {
+              return invalidParseInput();
+            }
+            expectedSearchId = next;
+            i++;
           } else if (cur.startsWith("--query=")) {
             const next = cur.slice("--query=".length);
             if (next.length === 0) return invalidParseInput();
@@ -245,16 +255,22 @@ export function parseSyncCommand(
             const next = cur.slice("--note-id=".length);
             if (next.length === 0) return invalidParseInput();
             noteMetadataId = next;
+          } else if (cur.startsWith("--expect-search-id=")) {
+            const next = cur.slice("--expect-search-id=".length);
+            if (expectedSearchId !== undefined || next.length === 0) return invalidParseInput();
+            expectedSearchId = next;
           } else {
             return invalidParseInput();
           }
         }
+        if (expectedSearchId !== undefined && query === undefined) return invalidParseInput();
         return {
           kind: "parsed",
           command: {
             kind: "read-only",
             subcommand: "read-only",
             ...(query !== undefined ? { query } : {}),
+            ...(expectedSearchId !== undefined ? { expectedSearchId } : {}),
             ...(noteMetadataId !== undefined ? { noteMetadataId } : {}),
           },
         };
@@ -295,8 +311,9 @@ export function formatSyncHelp(): string {
     "  nookctl sync help                  show this help",
     "",
     "Options (sync read-only only):",
-    "  --query <text>     optional title-only search query",
-    "  --note-id <id>     optional note id to read metadata for",
+    "  --query <text>             optional title-only search query",
+    "  --expect-search-id <id>    require a categorical matching search hit",
+    "  --note-id <id>             optional note id to read metadata for",
     "",
     "Credential boundary:",
     "  Password, MFA, and token bytes are read only from an interactive TTY",
@@ -421,6 +438,7 @@ export async function runSyncCommand(
   const proofOptions: {
     source: RunOfflineSyncProofOptions["source"];
     query?: string;
+    expectedSearchId?: string;
     noteMetadataId?: string;
     performSync?: boolean;
   } = {
@@ -429,6 +447,9 @@ export async function runSyncCommand(
   };
   if (command.kind === "read-only") {
     if (command.query !== undefined) proofOptions.query = command.query;
+    if (command.expectedSearchId !== undefined) {
+      proofOptions.expectedSearchId = command.expectedSearchId;
+    }
     if (command.noteMetadataId !== undefined) proofOptions.noteMetadataId = command.noteMetadataId;
   }
 

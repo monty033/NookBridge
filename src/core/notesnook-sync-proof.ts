@@ -139,6 +139,9 @@ export type OfflineSyncProofReport = Readonly<{
  * The `query` is the optional title-only search query the proof runs
  * against the source after a successful sync.  It is only validated
  * for shape here; the adapter's `search` rejects empty queries.
+ * `expectedSearchId`, when supplied with a query, turns that search
+ * into a categorical canary assertion.  The id is compared in memory
+ * and is never copied into the report.
  *
  * `noteMetadataId` is the optional note id the proof reads metadata
  * for.  It is only validated for shape here; the adapter's
@@ -147,6 +150,7 @@ export type OfflineSyncProofReport = Readonly<{
 export type RunOfflineSyncProofOptions = Readonly<{
   source: NotesnookReadOnlyDatabaseSource;
   query?: string;
+  expectedSearchId?: string;
   noteMetadataId?: string;
   /** Status uses the same bounded runner without initiating sync. */
   performSync?: boolean;
@@ -319,16 +323,32 @@ export async function runOfflineSyncProof(
         throw proofError("search returned a non-array result");
       }
       summary.searchHits = hits.length;
+      if (
+        typeof options.expectedSearchId === "string" &&
+        !hits.some((hit) => hit.id === options.expectedSearchId)
+      ) {
+        throw proofError("expected search hit was not observed");
+      }
       steps.push({
         name: "search",
         status: "pass",
-        detail: `${hits.length} title-only hit read`,
+        detail:
+          typeof options.expectedSearchId === "string"
+            ? "expected search hit observed"
+            : `${hits.length} title-only hit read`,
       });
     } catch (error) {
       const detail = normaliseErrorMessage(error, "search");
       steps.push({ name: "search", status: "fail", detail });
       return failedReport(steps, summary);
     }
+  } else if (typeof options.expectedSearchId === "string") {
+    steps.push({
+      name: "search",
+      status: "fail",
+      detail: "search failed: categorical error",
+    });
+    return failedReport(steps, summary);
   } else {
     steps.push({
       name: "search",
