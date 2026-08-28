@@ -263,5 +263,32 @@ export type {
 } from "./auth/admin-command.js";
 export { formatAuthHelp, parseAuthCommand, runAuthCommand } from "./auth/admin-command.js";
 
+// Stage 3 preparation — narrow read-only core adapter seam.  The seam
+// is the offline, deterministic shape a future Stage 3 runner will
+// plug an opened Notesnook Database (or a fake) into.  It exposes a
+// closed allowlisted read-only surface (status, sync("full"|"fetch"),
+// listNotebooks, noteMetadata, search); it rejects any mutation /
+// delete / generic-passthrough; it serializes concurrent sync
+// attempts through a per-instance single-flight mutex; and it
+// normalizes every failure to a categorical, chain-free error.  No
+// raw Database, no generic transport, no live network call is
+// exposed.
+export type {
+  NotesnookReadOnlyAdapterOptions,
+  NotesnookReadOnlyDatabase,
+  NotesnookReadOnlyDatabaseSource,
+  NotesnookReadOnlyNoteMetadata,
+  NotesnookReadOnlyNotebookSummary,
+  NotesnookReadOnlySearchHit,
+  NotesnookReadOnlyStatus,
+  NotesnookReadOnlySyncOptions,
+  NotesnookReadOnlySyncType,
+} from "./core/notesnook-readonly-adapter.js";
+export {
+  createNotesnookReadOnlyAdapter,
+  isNotesnookReadOnlyAdapterError,
+  NotesnookReadOnlyAdapter,
+} from "./core/notesnook-readonly-adapter.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
