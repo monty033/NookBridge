@@ -1467,6 +1467,102 @@ Maintain `docs/threat-model.md` plus a rolling `docs/security-status.md` contain
 
 Maintain `docs/licensing.md` separately with upstream license inventory and the public-distribution compliance status.
 
+## 13.7 Current implementation status and Codex handoff
+
+**Status date:** 2026-08-27 (America/New_York)
+
+The project has completed and merged the Stage 2 live-auth hardening slice.
+The upstream `main` branch is at merge commit
+`c08fd9a8c02fb4bc7f5bc285e7df664c9fcb73bc`, which merged PR #13:
+[fix: harden Notesnook live authentication lifecycle](https://git.montycasa.net/patrick/NookBridge/pulls/13).
+
+### Completed through Stage 2
+
+- Stages 0–2A and the Stage 2B offline/live-auth slices are merged.
+- Live authentication uses the explicit `auth live-login` command and the
+  opt-in gate `NOOKBRIDGE_ENABLE_LIVE_AUTH=1`.
+- Live login, refresh, logout, and cancellation use the serialized provider
+  queue, generation invalidation, and explicit cleanup state machine.
+- The pinned Notesnook 8.1.3 contract and offline security/lifecycle tests are
+  covered; CLI credentials remain restricted to the echo-disabled interactive
+  TTY path. argv and environment carriers are rejected before live runtime/core
+  initialization.
+
+### Verification receipt for the merged baseline
+
+- Full test matrix: **244/244 passed**.
+- Typecheck, lint, format check, build, and `git diff --check`: passed.
+- Independent MiniMax M3 xhigh security review: **PASS**.
+- Review snapshot hash:
+  `b89d0335f69213ff6cf2f8b0313f973c94a9f99c81ed2c4ae6562548bc5ca767`.
+- No live account credentials were included in logs, plans, commits, or review
+  packets.
+
+### Fresh-state live-login result
+
+On 2026-08-27, the operator reran the gated command from an interactive TTY
+using the disposable state directory below:
+
+```bash
+NOOKBRIDGE_ENABLE_LIVE_AUTH=1 \
+NOOKBRIDGE_STATE_DIR="$PWD/var/state/live-login-test-2" \
+nix develop --offline --command node dist/cli.js auth live-login
+```
+
+The run confirmed the requested `stateDir` exactly, opened and closed local
+PersistentStorage cleanly, completed the email/password/MFA prompt sequence,
+and ended with:
+
+```text
+nookctl: live notesnook runner: login failed
+```
+
+This is a reproducible failure after gate, TTY input, local runtime
+initialization, and cleanup. The current runner intentionally suppresses the
+underlying authentication error, so the failed auth phase is still unknown.
+The disposable state directory is generated runtime state and must not be
+committed or inspected for credentials.
+
+### Handoff to Patrick's local Codex
+
+The next bounded task is **diagnosis only**. Start from the branch tip recorded
+by the PR, not from generated `var/` state:
+
+1. Inspect `src/auth/live-auth-runner.ts`,
+   `src/auth/live-notesnook-auth-provider.ts`,
+   `src/auth/admin-command.ts`, and the focused live-auth tests.
+2. Add a machine-owned, allowlisted diagnostic containing only `phase` and
+   `category` (for example, `email/upstream-rejected` or
+   `password/upstream-rejected`). Never derive it by interpolating or parsing
+   arbitrary upstream exception text.
+3. Preserve the public credential-hygiene boundary and generic failure behavior
+   except for the new fixed diagnostic. Never expose email, passwords, MFA
+   codes, token envelopes, response bodies, causes, stack traces, or state
+   contents.
+4. Add deterministic offline regression coverage first (RED), then implement
+   the smallest production change (GREEN). Do not contact the real account from
+   an automated test.
+5. Run the focused live-auth tests, then the complete offline matrix:
+   `npm test`, `npm run typecheck`, `npm run lint`, format check, build, and
+   `git diff --check` through `nix develop --offline`.
+6. Only after those checks pass, Patrick may rerun the live command manually
+   from his own TTY with a new disposable state directory. Credentials must
+   stay at the TTY prompts and must not be sent through chat, logs, argv, or
+   environment variables.
+
+**Acceptance:** the failure reports one fixed phase/category pair, no sensitive
+or raw upstream text appears in the result, focused and full offline checks
+pass, and the fresh-state live result is classified as either a code defect or
+an external account/service failure. Do not begin Stage 3 sync or MCP work
+until this gate is closed.
+
+### Stage 3 gate
+
+Stage 3 — native sync/read-only POC — remains pending. Its first proof must use
+the pinned Nix/Node/native dependency tuple to initialize and reopen a real
+persistent core client, perform read-only native sync, and report a repeatable
+pass/fail result before any agent-facing write surface is added.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
