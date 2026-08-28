@@ -21,6 +21,9 @@ result-*
 *.log
 /tmp-harness/
 
+# Generated local encrypted runtime state; may contain reusable auth state.
+/var/
+
 # Build-time native artifacts
 *.node
 

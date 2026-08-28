@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stage 2 live authentication is proven; Stage 3 read-only native sync is next.** The gated fresh-state live login completed successfully on 2026-08-28 after the production-host, intermediate-token, and upstream password-hash compatibility fixes.
+> **Status: pre-alpha. Stage 2 authentication and session persistence are proven; Stage 3 read-only native sync is next.** The gated live-login, cold-restart, refresh, logout/relogin, and credential-hygiene checks completed on 2026-08-28.
 
 ## What this project is
 
@@ -23,9 +23,10 @@ path. The live path accepts credentials only through the echo-disabled
 interactive TTY flow and rejects argv/environment credential carriers.
 
 On 2026-08-28, a fresh-state manual run completed the full live login flow and
-returned `authenticated`. The Stage 2 diagnosis gate is closed. **Stage 3
-read-only native sync may begin; MCP work remains deferred.** The exact
-handoff and acceptance criteria are in
+returned `authenticated`. The follow-up cold-restart, explicit refresh,
+logout/relogin, and credential-hygiene receipts passed. **Stage 3 read-only
+native sync may begin; MCP work remains deferred.** The exact handoff and
+acceptance criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
 All stages follow the same rule: **do not start the next stage until the
@@ -80,10 +81,10 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 ## Current handoff
 
-The next task is Stage 3's first bounded proof: reopen the authenticated
-client state, perform a read-only native sync, and report a repeatable
-pass/fail result without adding an agent-facing write surface. Ignore generated
-`var/` state and keep credentials at the interactive TTY boundary. See the
+The next task is Stage 3's first bounded proof: reopen the authenticated client
+state, perform a read-only native sync, and report a repeatable pass/fail
+result without adding an agent-facing write surface. Ignore generated `var/`
+state and keep credentials at the interactive TTY boundary. See the
 [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
 for the exact constraints.
 

@@ -222,4 +222,135 @@ describe("nookctl auth live-login operator gate", () => {
     expect(createPromptSpy).not.toHaveBeenCalled();
     expect(createRuntimeSpy).not.toHaveBeenCalled();
   });
+
+  it("reopens persisted state through gated status without constructing a TTY prompt", async () => {
+    const session = {
+      userId: runtimeCanary("restored-user"),
+      accessToken: runtimeCanary("restored-access"),
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    };
+    const provider = {
+      login: vi.fn(),
+      refresh: vi.fn(),
+      logout: vi.fn(),
+      restoreSession: vi.fn(async () => session),
+    };
+    const runtime = createRuntime({ providerFactory: vi.fn(() => provider) });
+    const createPromptSpy = vi.fn(() => createPrompt([]));
+    const result = await runAuthCommand({
+      argv: ["status"],
+      env: { NOOKBRIDGE_ENABLE_LIVE_AUTH: "1" },
+      liveLogin: {
+        stateDir: "/tmp/live-gate-test",
+        createPrompt: createPromptSpy,
+        createRuntime: vi.fn(async () => runtime),
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "auth-state",
+      outcome: { subcommand: "status", status: "authenticated" },
+    });
+    expect(provider.restoreSession).toHaveBeenCalledTimes(1);
+    expect(createPromptSpy).not.toHaveBeenCalled();
+    expect(runtime.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes an expired restored session through gated status without a TTY prompt", async () => {
+    const restored = {
+      userId: runtimeCanary("expired-user"),
+      accessToken: runtimeCanary("expired-access"),
+      issuedAt: 1,
+      expiresAt: 2,
+    };
+    const refreshed = {
+      ...restored,
+      accessToken: runtimeCanary("fresh-access"),
+      expiresAt: Date.now() + 60_000,
+    };
+    const provider = {
+      login: vi.fn(),
+      refresh: vi.fn(async () => refreshed),
+      logout: vi.fn(),
+      restoreSession: vi.fn(async () => restored),
+    };
+    const runtime = createRuntime({ providerFactory: vi.fn(() => provider) });
+    const createPromptSpy = vi.fn(() => createPrompt([]));
+    const result = await runAuthCommand({
+      argv: ["status"],
+      env: { NOOKBRIDGE_ENABLE_LIVE_AUTH: "1" },
+      liveLogin: {
+        stateDir: "/tmp/live-gate-test",
+        createPrompt: createPromptSpy,
+        createRuntime: vi.fn(async () => runtime),
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "auth-state",
+      outcome: { subcommand: "status", status: "authenticated" },
+    });
+    expect(provider.restoreSession).toHaveBeenCalledTimes(1);
+    expect(provider.refresh).toHaveBeenCalledWith(restored);
+    expect(createPromptSpy).not.toHaveBeenCalled();
+    expect(runtime.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("forces a refresh of a valid restored session only when --refresh is explicit", async () => {
+    const restored = {
+      userId: runtimeCanary("valid-user"),
+      accessToken: runtimeCanary("valid-access"),
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    };
+    const provider = {
+      login: vi.fn(),
+      refresh: vi.fn(async () => ({ ...restored, expiresAt: Date.now() + 120_000 })),
+      logout: vi.fn(),
+      restoreSession: vi.fn(async () => restored),
+    };
+    const runtime = createRuntime({ providerFactory: vi.fn(() => provider) });
+    const result = await runAuthCommand({
+      argv: ["status", "--refresh"],
+      env: { NOOKBRIDGE_ENABLE_LIVE_AUTH: "1" },
+      liveLogin: {
+        stateDir: "/tmp/live-gate-test",
+        createPrompt: vi.fn(() => createPrompt([])),
+        createRuntime: vi.fn(async () => runtime),
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "auth-state",
+      outcome: { subcommand: "status", status: "authenticated" },
+    });
+    expect(provider.refresh).toHaveBeenCalledWith(restored);
+  });
+
+  it("clears authenticated state through gated logout and reset without a TTY prompt", async () => {
+    for (const command of ["logout", "reset-local-client"] as const) {
+      const provider = {
+        login: vi.fn(),
+        refresh: vi.fn(),
+        logout: vi.fn(async () => undefined),
+      };
+      const runtime = createRuntime({ providerFactory: vi.fn(() => provider) });
+      const result = await runAuthCommand({
+        argv: [command],
+        env: { NOOKBRIDGE_ENABLE_LIVE_AUTH: "1" },
+        liveLogin: {
+          stateDir: "/tmp/live-gate-test",
+          createPrompt: vi.fn(() => createPrompt([])),
+          createRuntime: vi.fn(async () => runtime),
+        },
+      });
+      expect(result).toMatchObject({
+        kind: "auth-state",
+        outcome: { subcommand: command, status: "signed-out" },
+      });
+      expect(provider.logout).toHaveBeenCalledTimes(1);
+      expect(runtime.cleanup).toHaveBeenCalledTimes(1);
+    }
+  });
 });

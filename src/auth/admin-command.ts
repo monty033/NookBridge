@@ -10,12 +10,12 @@
  *     other non-secret channel.  The Stage 2 plan requires interactive
  *     secret input through an echo-disabled TTY seam — that input is
  *     collected by `secret-input.ts`, not by this module.
- *   - Provide a runner whose ordinary commands remain deferred and whose
- *     explicitly gated `live-login` path delegates to the runtime-only
- *     prompt/core seams.
+ *   - Provide a runner whose ordinary `login` remains deferred, while the
+ *     explicitly gated live commands delegate to the runtime-only core seam.
  *
- * The ordinary runner deliberately fails closed: `login` remains deferred,
- * while `live-login` is the sole explicitly enabled production exception.
+ * The ordinary runner deliberately fails closed: `login` remains deferred.
+ * `live-login` and credential-free local session commands require the exact
+ * operator gate before the core runtime is constructed.
  *
  * Stage 1 / Stage 2A behaviour, exports, and CLI shape remain
  * backward-compatible: `doctor` still works exactly as before, and
@@ -38,8 +38,8 @@ import type { AuthSession } from "./types.js";
 /**
  * The `auth` subcommands we recognise in this slice.  The set is a
  * superset of the Stage 2 plan's admin commands (lines 542-546 of the
- * implementation plan) but every entry currently resolves to the same
- * deferred outcome — the upstream login API is not wired in yet.
+ * implementation plan). Ordinary login remains deferred; the local session
+ * commands are explicitly gated because they open persisted client state.
  */
 export type AuthSubcommand =
   | "login"
@@ -61,6 +61,7 @@ export type ParsedAuthCommand =
   | Readonly<{
       kind: "status";
       subcommand: "status";
+      forceRefresh: boolean;
     }>
   | Readonly<{
       kind: "logout";
@@ -230,9 +231,19 @@ export function parseAuthCommand(
           command: { kind: "live-login", subcommand: "live-login" },
         };
       case "status":
+        if (
+          stringArgv.length !== 1 &&
+          !(stringArgv.length === 2 && stringArgv[1] === "--refresh")
+        ) {
+          return invalidParseInput();
+        }
         return {
           kind: "parsed",
-          command: { kind: "status", subcommand: "status" },
+          command: {
+            kind: "status",
+            subcommand: "status",
+            forceRefresh: stringArgv[1] === "--refresh",
+          },
         };
       case "logout":
         return {
@@ -283,15 +294,16 @@ export function formatAuthHelp(): string {
     "Usage:",
     "  nookctl auth login           collect credentials interactively (deferred)",
     "  nookctl auth live-login      gated live account login via an echo-disabled TTY",
-    "  nookctl auth status          show local auth state (deferred)",
-    "  nookctl auth logout          clear local auth state (deferred)",
-    "  nookctl auth reset-local-client  wipe local auth state (deferred)",
+    "  nookctl auth status [--refresh]  show or explicitly refresh gated local auth state",
+    "  nookctl auth logout          clear gated local auth state",
+    "  nookctl auth reset-local-client  clear gated local auth state",
     "  nookctl auth help            show this help",
     "",
     "Credential boundary:",
     "  Password and MFA codes are read from an echo-disabled TTY.",
     "  They cannot be supplied via --password/--mfa flags or via",
     "  NOOKBRIDGE_PASSWORD/NOOKBRIDGE_MFA environment variables.",
+    "  Live commands require NOOKBRIDGE_ENABLE_LIVE_AUTH=1.",
     "",
   ].join("\n");
 }
@@ -410,6 +422,14 @@ export type RunAuthCommandResult =
       text: string;
     }>
   | Readonly<{
+      kind: "auth-state";
+      outcome: Readonly<{
+        subcommand: "status" | "logout" | "reset-local-client";
+        status: "authenticated" | "signed-out";
+        message: string;
+      }>;
+    }>
+  | Readonly<{
       kind: "error";
       message: string;
       exitCode: 2 | 3;
@@ -516,6 +536,18 @@ export async function runAuthCommand(
 
   if (command.kind === "live-login") {
     return runOperatorLiveLogin(normalized);
+  }
+
+  if (
+    command.kind === "status" ||
+    command.kind === "logout" ||
+    command.kind === "reset-local-client"
+  ) {
+    return runOperatorSessionCommand(
+      normalized,
+      command.kind,
+      command.kind === "status" && command.forceRefresh,
+    );
   }
 
   if (command.kind === "help") {
@@ -626,18 +658,74 @@ export async function runAuthCommand(
     }
   }
 
-  // `status`, `logout`, and `reset-local-client` all return the same
-  // structured deferred outcome — none of them touches a real session
-  // or persistent storage in this slice.
-  const message = deferredMessageFor(command.kind);
-  return {
-    kind: "deferred",
-    outcome: {
-      subcommand: command.kind,
-      status: "deferred",
-      message,
-    },
-  };
+  throw categoricalAuthError("runAuthCommand: unreachable auth subcommand");
+}
+
+async function runOperatorSessionCommand(
+  options: NormalizedRunAuthOptions,
+  command: "status" | "logout" | "reset-local-client",
+  forceRefresh: boolean,
+): Promise<RunAuthCommandResult> {
+  const enabled =
+    Object.prototype.hasOwnProperty.call(options.env, LIVE_AUTH_ENABLE_ENV) &&
+    options.env[LIVE_AUTH_ENABLE_ENV] === "1";
+  if (!enabled) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth state commands are disabled; set NOOKBRIDGE_ENABLE_LIVE_AUTH=1",
+    };
+  }
+  const candidate = options.liveLogin;
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return { kind: "error", exitCode: 2, message: "nookctl auth state runtime is unavailable" };
+  }
+  const runtimeOptions = candidate as LiveLoginRuntimeOptions;
+  if (
+    typeof runtimeOptions.stateDir !== "string" ||
+    typeof runtimeOptions.createRuntime !== "function"
+  ) {
+    return { kind: "error", exitCode: 2, message: "nookctl auth state runtime is unavailable" };
+  }
+  let runtime: LiveLoginRuntime | undefined;
+  try {
+    runtime = await runtimeOptions.createRuntime({ stateDir: runtimeOptions.stateDir });
+    const live = await runLiveAuthCommand({
+      command: command === "status" ? (forceRefresh ? "refresh" : "status") : "logout",
+      // Status/logout never read this prompt; retain the runner's closed
+      // interface without opening stdin in a non-interactive command.
+      prompt: { readSecretLine: async () => null, writeLine: () => undefined },
+      providerFactory: runtime.providerFactory,
+    });
+    if (live.kind === "error" || live.kind === "noop") {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: live.kind === "error" ? live.message : "nookctl auth state operation failed",
+      };
+    }
+    return {
+      kind: "auth-state",
+      outcome: {
+        subcommand: command,
+        status: live.kind === "authenticated" ? "authenticated" : "signed-out",
+        message:
+          command === "status"
+            ? "local authenticated state inspected; no credentials were read"
+            : live.kind === "signed-out" && live.warning !== undefined
+              ? `${live.warning}; no credentials were read`
+              : "local authenticated state cleared; no credentials were read",
+      },
+    };
+  } catch {
+    return { kind: "error", exitCode: 2, message: "nookctl auth state operation failed" };
+  } finally {
+    try {
+      await runtime?.cleanup();
+    } catch {
+      /* result is already categorical */
+    }
+  }
 }
 
 function runOperatorLiveLogin(options: NormalizedRunAuthOptions): Promise<RunAuthCommandResult> {
@@ -766,22 +854,6 @@ async function runOperatorLiveLoginAsync(
     }
   }
   return result;
-}
-
-function deferredMessageFor(subcommand: AuthSubcommand): string {
-  switch (subcommand) {
-    case "status":
-      return "local auth status reporting is deferred until PersistentStorage-backed session records are wired in";
-    case "logout":
-      return "local auth logout is deferred until PersistentStorage-backed session records are wired in";
-    case "reset-local-client":
-      return "reset-local-client is deferred until PersistentStorage-backed session records are wired in";
-    case "login":
-    case "live-login":
-    case "help":
-      // Both are handled above; reaching here is a programmer error.
-      throw new Error(`deferredMessageFor called for non-deferred subcommand ${subcommand}`);
-  }
 }
 
 /**

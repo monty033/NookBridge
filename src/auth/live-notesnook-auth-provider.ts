@@ -374,6 +374,33 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
   }
 
   /**
+   * Reopen the authenticated upstream token already held in the encrypted
+   * core store.  This is deliberately credential-free: it neither prompts
+   * nor attempts a network refresh.  Callers decide whether a restored,
+   * expired session should be refreshed.
+   */
+  async restoreSession(): Promise<AuthSession | null> {
+    this.ensureCleanupAvailable();
+    const generation = this.invalidationGeneration;
+    return this.enqueue(async () => {
+      this.ensureGeneration(generation);
+      let envelope: NotesnookLiveTokenEnvelope | undefined;
+      try {
+        envelope = await this.handle.token.getToken();
+      } catch {
+        throw categoricalError("live notesnook token read failed");
+      }
+      this.ensureGeneration(generation);
+      if (envelope === undefined) return null;
+      const authenticated = requireAuthenticatedEnvelope(envelope);
+      const user = await this.readUserIfCurrent(generation);
+      const session = envelopeToSession(authenticated, user, this.providerNow());
+      this.hasActiveSession = true;
+      return session;
+    });
+  }
+
+  /**
    * Invalidate synchronously, then queue revoke + canonical cleanup.  The
    * promise is published before the queue body can reach an upstream await,
    * which makes re-entrant logger callbacks safe and prevents new logins from
@@ -539,11 +566,12 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
   }
 
   private async executeLogout(): Promise<void> {
-    let failure: Error | undefined;
+    let remoteLogoutFailed = false;
+    let cleanupFailure: Error | undefined;
     try {
       await this.handle.user.logout(true);
     } catch {
-      failure = categoricalError("live notesnook logout failed");
+      remoteLogoutFailed = true;
     }
 
     try {
@@ -551,11 +579,17 @@ export class LiveNotesnookAuthProvider implements AuthProvider {
       // await the queue tail that this operation itself owns.
       await this.runCleanup(true);
     } catch (error) {
-      failure ??= isAuthProviderError(error)
+      cleanupFailure = isAuthProviderError(error)
         ? error
         : categoricalError("live notesnook token cleanup failed");
     }
-    if (failure) throw failure;
+    if (cleanupFailure) throw cleanupFailure;
+    if (remoteLogoutFailed) {
+      // The canonical local token was verifiably removed even though the
+      // upstream revoke request failed. This is safe operational context, not
+      // an upstream response body or token-derived detail.
+      throw categoricalError("live notesnook remote logout failed; local auth state cleared");
+    }
     this.logInfo("live.notesnook.auth.logout", { status: "signed-out" });
   }
 

@@ -213,6 +213,15 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
         ].join("\n"),
       );
       return 0;
+    case "auth-state":
+      process.stdout.write(
+        [
+          `nookctl auth ${result.outcome.subcommand}: ${result.outcome.status}`,
+          `  ${result.outcome.message}`,
+          "",
+        ].join("\n"),
+      );
+      return 0;
   }
 }
 

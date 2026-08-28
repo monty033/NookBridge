@@ -68,6 +68,8 @@ export type RunLiveAuthResult =
   | Readonly<{
       kind: "signed-out";
       status: "signed-out";
+      /** Safe operational warning; never contains upstream response text. */
+      warning?: "remote logout failed; local auth state cleared";
     }>
   | Readonly<{
       kind: "noop";
@@ -117,7 +119,7 @@ export type RunLiveAuthCommandOptions = Readonly<{
 /**
  * The narrow set of subcommands the live runner honors.
  */
-export type LiveAuthCommandKind = "login" | "logout" | "status" | "noop";
+export type LiveAuthCommandKind = "login" | "logout" | "status" | "refresh" | "noop";
 
 /**
  * Drive a single explicit live auth command end-to-end.
@@ -154,10 +156,9 @@ export async function runLiveAuthCommand(
     case "logout":
       return runLogout(normalized);
     case "status":
-      return {
-        kind: "noop",
-        message: "live notesnook status reporting is not wired in this slice",
-      };
+      return runStatus(normalized, false);
+    case "refresh":
+      return runStatus(normalized, true);
     case "noop":
       return {
         kind: "noop",
@@ -180,7 +181,13 @@ function normalizeOptions(options: unknown): NormalizedRunnerOptions {
     }
     const candidate = options as Record<string, unknown>;
     const command = candidate.command;
-    if (command !== "login" && command !== "logout" && command !== "status" && command !== "noop") {
+    if (
+      command !== "login" &&
+      command !== "logout" &&
+      command !== "status" &&
+      command !== "refresh" &&
+      command !== "noop"
+    ) {
       throw runnerError("invalid runLiveAuthCommand command");
     }
     const prompt = candidate.prompt;
@@ -338,13 +345,52 @@ async function runLogout(options: NormalizedRunnerOptions): Promise<RunLiveAuthR
   // Logout is invoked with a synthetic empty session — the provider
   // ignores the session argument and operates against its own
   // operation epoch / active-session flag, so this is safe.
-  await provider.logout({
-    userId: "",
-    accessToken: "",
-    issuedAt: 0,
-    expiresAt: 0,
+  try {
+    await provider.logout({
+      userId: "",
+      accessToken: "",
+      issuedAt: 0,
+      expiresAt: 0,
+    });
+    return { kind: "signed-out", status: "signed-out" };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "live notesnook remote logout failed; local auth state cleared"
+    ) {
+      return {
+        kind: "signed-out",
+        status: "signed-out",
+        warning: "remote logout failed; local auth state cleared",
+      };
+    }
+    return { kind: "error", message: "live notesnook runner: logout failed" };
+  }
+}
+
+async function runStatus(
+  options: NormalizedRunnerOptions,
+  forceRefresh: boolean,
+): Promise<RunLiveAuthResult> {
+  const noopSupplier: LivePasswordSupplier & LiveMfaSupplier = async () => null;
+  const provider = options.providerFactory({
+    passwordSupplier: noopSupplier,
+    mfaSupplier: noopSupplier,
   });
-  return { kind: "signed-out", status: "signed-out" };
+  const candidate = provider as AuthProvider & {
+    restoreSession?: () => Promise<AuthSession | null>;
+  };
+  // Preserve the test-only generic AuthProvider seam, while production's
+  // live provider exposes the credential-free restore operation.
+  if (typeof candidate.restoreSession !== "function") {
+    return { kind: "noop", message: "live notesnook status reporting is unavailable" };
+  }
+  const session = await candidate.restoreSession();
+  if (session === null) return { kind: "signed-out", status: "signed-out" };
+  if (forceRefresh || session.expiresAt <= Date.now()) {
+    return { kind: "authenticated", session: await provider.refresh(session) };
+  }
+  return { kind: "authenticated", session };
 }
 
 /**

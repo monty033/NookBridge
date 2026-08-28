@@ -768,13 +768,26 @@ describe("Stage 2B runAuthCommand (admin auth plumbing)", () => {
     expect(text).toMatch(/NOOKBRIDGE_PASSWORD/);
   });
 
-  it("returns a deferred outcome for status/logout/reset-local-client without consulting a prompt", async () => {
+  it("accepts the explicit credential-free status refresh flag and rejects other status arguments", () => {
+    expect(parseAuthCommand(["status", "--refresh"], {})).toEqual({
+      kind: "parsed",
+      command: { kind: "status", subcommand: "status", forceRefresh: true },
+    });
+    expect(parseAuthCommand(["status", "--unexpected"], {})).toEqual({
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl auth: invalid command input",
+    });
+  });
+
+  it("fails closed for state commands without consulting a prompt when the live gate is absent", async () => {
     for (const sub of ["status", "logout", "reset-local-client"] as const) {
       const result = await runAuthCommand({ argv: [sub], env: {} });
-      expect(result.kind).toBe("deferred");
-      if (result.kind !== "deferred") throw new Error("expected deferred");
-      expect(result.outcome.subcommand).toBe(sub);
-      expect(result.outcome.status).toBe("deferred");
+      expect(result).toEqual({
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl auth state commands are disabled; set NOOKBRIDGE_ENABLE_LIVE_AUTH=1",
+      });
     }
   });
 
@@ -1004,31 +1017,35 @@ describe("Stage 2B CLI (runNookCtl)", () => {
     }
   });
 
-  it("runs `auth status` non-interactively without a prompt", async () => {
+  it("does not open a prompt for `auth status` when the live gate is absent", async () => {
     const stdout = captureStdout();
     const stderr = captureStderr();
     try {
       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false });
       const exitCode = await runNookCtl(["node", "nookctl", "auth", "status"]);
-      expect(exitCode).toBe(0);
-      expect(stdout.output()).toMatch(/auth status: deferred/);
-      expect(stderr.output()).toBe("");
+      expect(exitCode).toBe(2);
+      expect(stdout.output()).toBe("");
+      expect(stderr.output()).toBe(
+        "nookctl: nookctl auth state commands are disabled; set NOOKBRIDGE_ENABLE_LIVE_AUTH=1\n",
+      );
     } finally {
       stdout.restore();
       stderr.restore();
     }
   });
 
-  it("runs `auth logout` and `auth reset-local-client` non-interactively", async () => {
+  it("does not open a prompt for gated `auth logout` or `auth reset-local-client`", async () => {
     for (const sub of ["logout", "reset-local-client"] as const) {
       const stdout = captureStdout();
       const stderr = captureStderr();
       try {
         Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false });
         const exitCode = await runNookCtl(["node", "nookctl", "auth", sub]);
-        expect(exitCode).toBe(0);
-        expect(stdout.output()).toMatch(new RegExp(`auth ${sub}: deferred`));
-        expect(stderr.output()).toBe("");
+        expect(exitCode).toBe(2);
+        expect(stdout.output()).toBe("");
+        expect(stderr.output()).toBe(
+          "nookctl: nookctl auth state commands are disabled; set NOOKBRIDGE_ENABLE_LIVE_AUTH=1\n",
+        );
       } finally {
         stdout.restore();
         stderr.restore();

@@ -1469,12 +1469,12 @@ Maintain `docs/licensing.md` separately with upstream license inventory and the 
 
 ## 13.7 Current implementation status and Codex handoff
 
-**Status date:** 2026-08-27 (America/New_York)
+**Status date:** 2026-08-28 (America/New_York)
 
-The project has completed and merged the Stage 2 live-auth hardening slice.
-The upstream `main` branch is at merge commit
-`c08fd9a8c02fb4bc7f5bc285e7df664c9fcb73bc`, which merged PR #13:
-[fix: harden Notesnook live authentication lifecycle](https://git.montycasa.net/patrick/NookBridge/pulls/13).
+The project has completed and merged the Stage 2 live-auth hardening slice and
+its production compatibility fixes at `22294fe` (`fix: complete live Notesnook
+authentication`). This is a **partial Stage 2 result**: it proves fresh login,
+not the full Stage 2 gate.
 
 ### Completed through Stage 2
 
@@ -1539,9 +1539,53 @@ handoff.
 The resulting working tree passed the full offline Nix matrix: **251/251
 tests**, typecheck, lint, format check, build, and `git diff --check`.
 
-**Acceptance:** met. Stage 2 live-login is proven for this pinned compatibility
-tuple. Stage 3 native sync may begin; MCP and write functionality remain
-blocked until their respective gates pass.
+**Acceptance:** Gate 2 is met for this pinned compatibility tuple. Fresh login,
+cold restart, explicit token refresh, local logout cleanup plus clean relogin,
+and the S2 credential-hygiene review each have a written pass result. Stage 3
+native sync may begin; MCP and write functionality remain blocked until their
+respective gates pass.
+
+### Cold-restart operator receipt
+
+On 2026-08-28, the operator ran the gated `auth status` command in a new
+process against the successful disposable `live-login-test-6` state directory.
+PersistentStorage opened and closed cleanly, no credential prompt appeared, and
+the command returned `nookctl auth status: authenticated`. This is a **PASS**
+for reopening valid persisted authenticated state without password/MFA
+re-entry. It is a **PASS** for cold restart.
+
+On the same date, the operator ran gated `auth status --refresh` against the
+reprovisioned state. The live provider logged the authenticated refresh event,
+then the command returned `authenticated` without a credential prompt. This is
+a **PASS** for explicit refresh across a fresh process.
+
+### Logout/relogin operator receipt
+
+On 2026-08-28, the operator ran gated `auth logout` against the same disposable
+state. It returned a categorical failure, but a subsequent fresh-process
+`auth status` returned `signed-out`, proving the authoritative local token
+cleanup completed. The remote revoke failure is tracked separately and must
+not be represented as a successful remote logout. The operator then ran gated
+`auth live-login` against that same state directory; the interactive login
+completed successfully. This is a **PASS** for local logout cleanup and clean
+reprovisioning, with the remote revoke result explicitly **not proven**.
+
+### S2 credential-hygiene review
+
+On 2026-08-28, the offline S2 credential-carrier, provider-isolation,
+logout-invalidation, logger, filesystem-permissions, and live-security blocker
+checks passed (**20/20**). A tracked-source scan found credential/token names
+only in allowlisted parser guards, redaction tests, typed upstream-envelope
+boundaries, and explanatory documentation; no reusable credential values were
+present. Generated `var/` state was deliberately excluded from the review.
+This is a **PASS** for S2 credential hygiene within the development-state scope.
+
+### Next handoff — begin Stage 3
+
+Reopen the authenticated client state, perform a read-only native sync, and
+report a repeatable pass/fail result before adding an agent-facing write
+surface. Keep credentials at the interactive TTY boundary and do not inspect
+or commit generated `var/` state.
 
 ### Stage 3 gate
 

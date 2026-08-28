@@ -1240,7 +1240,7 @@ describe("Stage 2B-live — LiveNotesnookAuthProvider (focused)", () => {
           issuedAt: FROZEN_NOW_MS,
           expiresAt: FROZEN_NOW_MS + 60 * 60 * 1000,
         }),
-      ).rejects.toThrow(/logout failed/);
+      ).rejects.toThrow("live notesnook remote logout failed; local auth state cleared");
 
       const methods = harnessLocal.calls.map((entry) => entry.method);
       expect(methods).toContain("user.logout");
@@ -2206,7 +2206,37 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
     expect(logoutCalls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("status / noop commands return without touching the provider", async () => {
+  it("returns a safe signed-out warning when remote revoke fails after local cleanup", async () => {
+    const prompt = makeFakePrompt({});
+    const result = await runLiveAuthCommand({
+      command: "logout" as LiveAuthCommandKind,
+      prompt,
+      providerFactory: () => ({
+        login: async () => ({
+          userId: "test-user",
+          accessToken: "test-access",
+          issuedAt: FROZEN_NOW_MS,
+          expiresAt: FROZEN_NOW_MS + 1,
+        }),
+        refresh: async () => ({
+          userId: "test-user",
+          accessToken: "test-access",
+          issuedAt: FROZEN_NOW_MS,
+          expiresAt: FROZEN_NOW_MS + 1,
+        }),
+        logout: async () => {
+          throw new Error("live notesnook remote logout failed; local auth state cleared");
+        },
+      }),
+    });
+    expect(result).toEqual({
+      kind: "signed-out",
+      status: "signed-out",
+      warning: "remote logout failed; local auth state cleared",
+    });
+  });
+
+  it("status reopens persisted state without credentials while noop does not touch the provider", async () => {
     const prompt = makeFakePrompt({});
     const { factory, fake } = makeLoginHarness();
 
@@ -2221,10 +2251,18 @@ describe("Stage 2B-live — runLiveAuthCommand (focused)", () => {
       providerFactory: factory,
     });
 
-    expect(statusResult.kind).toBe("noop");
+    expect(statusResult.kind).toBe("authenticated");
     expect(noopResult.kind).toBe("noop");
-    // No upstream calls.
-    expect(fake.calls).toHaveLength(0);
+    // Status only reopens/refreshes the canonical token; it never
+    // authenticates or asks the credential suppliers for input. This fixture
+    // intentionally yields an expired token, so the refresh branch is used.
+    expect(fake.calls.map((entry) => entry.method)).toEqual([
+      "token.getToken",
+      "user.getUser",
+      "token._refreshToken",
+      "token.getToken",
+      "user.getUser",
+    ]);
   });
 
   it("rejects options with a missing prompt without touching the provider", async () => {
