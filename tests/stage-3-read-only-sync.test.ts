@@ -17,7 +17,11 @@ import {
   flattenLiveDatabaseToReadOnly,
   isNotesnookReadOnlyProjectionError,
 } from "../src/core/notesnook-readonly-projection.js";
-import { LIVE_SYNC_ENABLE_ENV, runSyncCommand } from "../src/core/notesnook-sync-admin.js";
+import {
+  formatSyncCommandResult,
+  LIVE_SYNC_ENABLE_ENV,
+  runSyncCommand,
+} from "../src/core/notesnook-sync-admin.js";
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
@@ -245,6 +249,72 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("fails categorically and cleans up when the expected search result is absent", async () => {
+    const source = createFakeDatabase();
+    const cleanup = vi.fn(async () => undefined);
+    const query = "private-query-canary";
+    const expectedId = "private-expected-note-id";
+    const result = await runSyncCommand({
+      argv: ["read-only", "--query", query, "--expect-search-id", expectedId],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          { name: "search", status: "fail", detail: "search failed: categorical error" },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    const formatted = formatSyncCommandResult(result);
+    expect(formatted).not.toContain(query);
+    expect(formatted).not.toContain(expectedId);
+    expect(formatted).not.toContain("A note");
+    expect(formatted).not.toContain("not exposed");
+  });
+
+  it("passes categorically when the expected search result is present", async () => {
+    const source = createFakeDatabase();
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: ["read-only", "--query=title-canary", "--expect-search-id=note-1"],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "pass",
+        steps: expect.arrayContaining([
+          { name: "search", status: "pass", detail: "expected search hit observed" },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(formatSyncCommandResult(result)).not.toContain("note-1");
+  });
+
+  it("rejects an expected search result without a query before runtime construction", async () => {
+    const createProofRuntime = vi.fn();
+    await expect(
+      runSyncCommand({
+        argv: ["read-only", "--expect-search-id", "note-1"],
+        env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+        createProofRuntime,
+      }),
+    ).resolves.toEqual({
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl sync: invalid command input",
+    });
+    expect(createProofRuntime).not.toHaveBeenCalled();
+  });
+
   it("flattens pinned-core-shaped APIs without exposing raw managers or bodies", async () => {
     const database = createFakeLiveDatabase();
     const readOnly = flattenLiveDatabaseToReadOnly(database);
