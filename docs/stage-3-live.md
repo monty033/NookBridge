@@ -4,7 +4,7 @@
 
 The Stage 3 read-only native-sync POC and the conflict/locked-note proof seam are **merged**. The pinned `@notesnook/core@8.1.3` runtime is projected into a flattened read-only handle, the operator command is separately gated by `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`, and the fetch-only boundary remains enforced.
 
-The completed live receipts cover persisted-state reopen, fetch-only native sync, bounded notebook metadata, title-safe search, body-keyword search with title-only output, remote rename visibility after restart, and clean teardown. PR #18 adds deterministic conflict-marker and Vault-locked body-refusal coverage, but live conflict and locked-note account proof is still pending. A local-only fixture additionally models pinned Notesnook behavior in which the device that detects a conflict has `conflicted=true` on its local note while an independent fresh fetch-only projection of the same remote note has no conflict marker. This is offline evidence only: the phone UI conflict is a separate upstream observation, and independent live conflict visibility is deferred to the later local-state phase. Offline tests do not substitute for live compatibility, so the proof remains recorded separately from the automated matrix.
+The completed live receipts cover persisted-state reopen, fetch-only native sync, bounded notebook metadata, title-safe search, body-keyword search with title-only output, remote rename visibility after restart, clean teardown, and Vault-locked-note handling without body exposure. PR #18 adds deterministic conflict-marker and Vault-locked body-refusal coverage. PR #20 adds a local-only fixture modeling pinned Notesnook behavior in which the device that detects a conflict has `conflicted=true` on its local note while an independent fresh fetch-only projection of the same remote note has no conflict marker. This is offline evidence only: the phone UI conflict is a separate upstream observation, and independent live conflict visibility is deferred to the later local-state phase. Offline tests do not substitute for live compatibility, so the proof remains recorded separately from the automated matrix.
 
 ## Safe preparation boundary
 
@@ -35,24 +35,25 @@ nix develop --offline --command just live-status
 nix develop --offline --command just live-sync
 ```
 
-The Stage 3 initial proof, search canaries, and remote-change restart proof are
-complete. The remaining operator Gate 3 work is the title-based Vault-locked-
-note canary against disposable test data. Independent live conflict visibility
-is deferred to the later local-state phase because the upstream conflict marker
-is device-local and is not observable by a fresh fetch-only client. The bridge
-must not issue a `send`, mutation, delete, or write operation.
+The Stage 3 initial proof, search canaries, remote-change restart proof, and
+title-based Vault-locked-note canary are complete. The Vault-locked canary
+returned `vault-locked: pass` after observing the body refusal through the
+fetch-only path. Independent live conflict visibility is deferred to the later
+local-state phase because the upstream conflict marker is device-local and is
+not observable by a fresh fetch-only client. The bridge must not issue a
+`send`, mutation, delete, or write operation.
 
-Required live scenarios for the later Gate 3 review:
+Recorded Gate 3 scenario status:
 
 - notebook and note listing — passed;
 - known title-safe search canary — passed;
 - body-keyword search with bounded title-only output — passed;
 - second-device edit visibility after restart — passed;
 - deliberate two-device conflict observation — deferred to the later local-state phase;
-- Vault-locked note handling without body exposure — pending live proof;
+- Vault-locked note handling without body exposure — passed;
 - clean teardown and restart from the same disposable state — passed.
 
-A live pass must include the requested state directory, categorical command outcomes, and evidence that no plaintext corpus sidecar was created. Remote logout/revoke remains a separate unproven boundary unless explicitly tested.
+A live pass must include the requested state directory, categorical command outcomes, and evidence that no plaintext corpus sidecar was created. Remote logout/revoke remains a separate unproven boundary unless explicitly tested. Gate 3 is now closed for this read-only scope; Stage 4 planning may proceed, but no write-capable operation is permitted yet.
 
 ## Offline validation
 
