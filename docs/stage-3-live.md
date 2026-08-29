@@ -2,9 +2,9 @@
 
 ## Current status
 
-The initial Stage 3 read-only native-sync POC is **passed and merged**. The pinned `@notesnook/core@8.1.3` runtime is projected into a flattened read-only handle, the operator command is separately gated by `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`, and a fresh authenticated disposable-state proof completed successfully.
+The Stage 3 read-only native-sync POC and the conflict/locked-note proof seam are **merged**. The pinned `@notesnook/core@8.1.3` runtime is projected into a flattened read-only handle, the operator command is separately gated by `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`, and the fetch-only boundary remains enforced.
 
-The proof reopened persisted authenticated state, performed fetch-only native sync, returned 41 notebook summaries without exposing note bodies, and completed teardown cleanly. Offline tests do not substitute for live compatibility, so the proof remains recorded separately from the automated matrix.
+The completed live receipts cover persisted-state reopen, fetch-only native sync, bounded notebook metadata, title-safe search, body-keyword search with title-only output, remote rename visibility after restart, and clean teardown. PR #18 adds deterministic conflict-marker and Vault-locked body-refusal coverage, but live conflict and locked-note account proof is still pending. Offline tests do not substitute for live compatibility, so the proof remains recorded separately from the automated matrix.
 
 ## Safe preparation boundary
 
@@ -35,16 +35,20 @@ nix develop --offline --command just live-status
 nix develop --offline --command just live-sync
 ```
 
-The initial proof is complete. The remaining Gate 3 work is to use disposable test data to verify known title/body search behavior, restart after remote changes, conflict visibility, and locked-note handling. The bridge must not issue a `send`, mutation, delete, or write operation.
+The Stage 3 initial proof, search canaries, and remote-change restart proof are
+complete. The remaining Gate 3 work is to run the new title-based conflict and
+Vault-locked-note canaries against disposable test data. The bridge must not
+issue a `send`, mutation, delete, or write operation.
 
 Required live scenarios for the later Gate 3 review:
 
-- notebook and note listing;
-- known title-safe search canary;
-- Vault-locked note handling without body exposure;
-- second-device edit visibility;
-- deliberate two-device conflict observation;
-- clean teardown and restart from the same disposable state.
+- notebook and note listing — passed;
+- known title-safe search canary — passed;
+- body-keyword search with bounded title-only output — passed;
+- second-device edit visibility after restart — passed;
+- deliberate two-device conflict observation — pending live proof;
+- Vault-locked note handling without body exposure — pending live proof;
+- clean teardown and restart from the same disposable state — passed.
 
 A live pass must include the requested state directory, categorical command outcomes, and evidence that no plaintext corpus sidecar was created. Remote logout/revoke remains a separate unproven boundary unless explicitly tested.
 

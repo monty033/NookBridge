@@ -85,13 +85,15 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 ## Current handoff
 
-The first Stage 3 proof is complete: reopen the authenticated client state,
-perform a fetch-only native sync, return bounded metadata, and tear down the
-runtime without adding an agent-facing write surface. The next bounded work is
-to complete the remaining Gate 3 scenarios—content/search canaries, restart,
-conflict visibility, and locked-note behavior—before implementing Stage 4
-writes. Ignore generated `var/` state and keep credentials at the interactive
-TTY boundary. See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
+The Stage 3 read-only proof is partially complete: authenticated state reopen,
+fetch-only sync, bounded metadata, title/body search canaries, remote-change
+restart visibility, and clean teardown all have live receipts. PR #18 also
+merged deterministic conflict-marker and Vault-locked body-refusal coverage.
+The next bounded work is to add title-based live canary selection so the
+operator does not need to obtain or guess internal note IDs, then run the live
+conflict and locked-note scenarios before implementing Stage 4 writes. Ignore
+generated `var/` state and keep credentials at the interactive TTY boundary.
+See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
 for the exact constraints and receipt.
 
 ## License

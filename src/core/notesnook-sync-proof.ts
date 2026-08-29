@@ -162,7 +162,9 @@ export type RunOfflineSyncProofOptions = Readonly<{
   expectedSearchId?: string;
   noteMetadataId?: string;
   expectedConflictId?: string;
+  expectedConflictTitle?: string;
   expectedVaultLockedId?: string;
+  expectedVaultLockedTitle?: string;
   /** Status uses the same bounded runner without initiating sync. */
   performSync?: boolean;
 }>;
@@ -323,9 +325,16 @@ export async function runOfflineSyncProof(
     });
   }
 
-  if (typeof options.expectedConflictId === "string" && options.expectedConflictId.length > 0) {
+  if (
+    (typeof options.expectedConflictId === "string" && options.expectedConflictId.length > 0) ||
+    (typeof options.expectedConflictTitle === "string" && options.expectedConflictTitle.length > 0)
+  ) {
     try {
-      const metadata = await adapter.noteMetadata(options.expectedConflictId);
+      const conflictId =
+        typeof options.expectedConflictTitle === "string"
+          ? await resolveUniqueExactNoteTitle(adapter, options.expectedConflictTitle)
+          : (options.expectedConflictId as string);
+      const metadata = await adapter.noteMetadata(conflictId);
       if (metadata?.conflicted !== true) {
         throw proofError("expected conflict marker was not observed");
       }
@@ -340,17 +349,23 @@ export async function runOfflineSyncProof(
   }
 
   if (
-    typeof options.expectedVaultLockedId === "string" &&
-    options.expectedVaultLockedId.length > 0
+    (typeof options.expectedVaultLockedId === "string" &&
+      options.expectedVaultLockedId.length > 0) ||
+    (typeof options.expectedVaultLockedTitle === "string" &&
+      options.expectedVaultLockedTitle.length > 0)
   ) {
     try {
-      const metadata = await adapter.noteMetadata(options.expectedVaultLockedId);
+      const vaultLockedId =
+        typeof options.expectedVaultLockedTitle === "string"
+          ? await resolveUniqueExactNoteTitle(adapter, options.expectedVaultLockedTitle)
+          : (options.expectedVaultLockedId as string);
+      const metadata = await adapter.noteMetadata(vaultLockedId);
       if (metadata?.locked !== true) {
         throw proofError("expected locked marker was not observed");
       }
       let vaultLocked = false;
       try {
-        await adapter.readNoteBody(options.expectedVaultLockedId);
+        await adapter.readNoteBody(vaultLockedId);
       } catch (error) {
         vaultLocked = isNotesnookReadOnlyAdapterError(error) && error.message === "vault_locked";
         if (!vaultLocked) throw error;
@@ -436,6 +451,18 @@ export async function runOfflineSyncProof(
 // ---------------------------------------------------------------------------
 // Internals.
 // ---------------------------------------------------------------------------
+
+async function resolveUniqueExactNoteTitle(
+  adapter: NotesnookReadOnlyAdapter,
+  title: string,
+): Promise<string> {
+  const hits = await adapter.search(title);
+  const exactNoteHits = hits.filter((hit) => hit.source === "note" && hit.title === title);
+  if (exactNoteHits.length !== 1) {
+    throw proofError("exact note title did not resolve uniquely");
+  }
+  return exactNoteHits[0]!.id;
+}
 
 function normaliseErrorMessage(error: unknown, step: string): string {
   if (isOfflineSyncProofError(error)) {

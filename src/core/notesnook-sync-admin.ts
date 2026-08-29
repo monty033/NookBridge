@@ -75,8 +75,12 @@ export type ParsedSyncCommand =
       noteMetadataId?: string;
       /** Optional note id whose upstream conflict marker must be visible. */
       expectedConflictId?: string;
+      /** Optional exact note title whose conflict marker must be visible. */
+      expectedConflictTitle?: string;
       /** Optional note id whose body access must fail as vault_locked. */
       expectedVaultLockedId?: string;
+      /** Optional exact note title whose body access must fail as vault_locked. */
+      expectedVaultLockedTitle?: string;
     }>
   | Readonly<{
       kind: "help";
@@ -233,7 +237,9 @@ export function parseSyncCommand(
         let expectedSearchId: string | undefined;
         let noteMetadataId: string | undefined;
         let expectedConflictId: string | undefined;
+        let expectedConflictTitle: string | undefined;
         let expectedVaultLockedId: string | undefined;
+        let expectedVaultLockedTitle: string | undefined;
         for (let i = 1; i < stringArgv.length; i++) {
           const cur = stringArgv[i];
           if (cur === undefined) return invalidParseInput();
@@ -272,6 +278,30 @@ export function parseSyncCommand(
             }
             expectedVaultLockedId = next;
             i++;
+          } else if (cur === "--expect-conflict-title") {
+            const next = stringArgv[i + 1];
+            if (
+              expectedConflictTitle !== undefined ||
+              typeof next !== "string" ||
+              next.trim().length === 0 ||
+              next.startsWith("--")
+            ) {
+              return invalidParseInput();
+            }
+            expectedConflictTitle = next;
+            i++;
+          } else if (cur === "--expect-vault-locked-title") {
+            const next = stringArgv[i + 1];
+            if (
+              expectedVaultLockedTitle !== undefined ||
+              typeof next !== "string" ||
+              next.trim().length === 0 ||
+              next.startsWith("--")
+            ) {
+              return invalidParseInput();
+            }
+            expectedVaultLockedTitle = next;
+            i++;
           } else if (cur.startsWith("--query=")) {
             const next = cur.slice("--query=".length);
             if (next.length === 0) return invalidParseInput();
@@ -294,6 +324,18 @@ export function parseSyncCommand(
               return invalidParseInput();
             }
             expectedVaultLockedId = next;
+          } else if (cur.startsWith("--expect-conflict-title=")) {
+            const next = cur.slice("--expect-conflict-title=".length);
+            if (expectedConflictTitle !== undefined || next.trim().length === 0) {
+              return invalidParseInput();
+            }
+            expectedConflictTitle = next;
+          } else if (cur.startsWith("--expect-vault-locked-title=")) {
+            const next = cur.slice("--expect-vault-locked-title=".length);
+            if (expectedVaultLockedTitle !== undefined || next.trim().length === 0) {
+              return invalidParseInput();
+            }
+            expectedVaultLockedTitle = next;
           } else {
             return invalidParseInput();
           }
@@ -308,7 +350,9 @@ export function parseSyncCommand(
             ...(expectedSearchId !== undefined ? { expectedSearchId } : {}),
             ...(noteMetadataId !== undefined ? { noteMetadataId } : {}),
             ...(expectedConflictId !== undefined ? { expectedConflictId } : {}),
+            ...(expectedConflictTitle !== undefined ? { expectedConflictTitle } : {}),
             ...(expectedVaultLockedId !== undefined ? { expectedVaultLockedId } : {}),
+            ...(expectedVaultLockedTitle !== undefined ? { expectedVaultLockedTitle } : {}),
           },
         };
       }
@@ -352,7 +396,9 @@ export function formatSyncHelp(): string {
     "  --expect-search-id <id>    require a categorical matching search hit",
     "  --note-id <id>             optional note id to read metadata for",
     "  --expect-conflict-id <id>  require a categorical conflict marker",
+    "  --expect-conflict-title <title>  require a conflict marker by exact note title",
     "  --expect-vault-locked-id <id>  require a vault_locked body refusal",
+    "  --expect-vault-locked-title <title>  require a vault_locked refusal by exact note title",
     "",
     "Credential boundary:",
     "  Password, MFA, and token bytes are read only from an interactive TTY",
@@ -480,7 +526,9 @@ export async function runSyncCommand(
     expectedSearchId?: string;
     noteMetadataId?: string;
     expectedConflictId?: string;
+    expectedConflictTitle?: string;
     expectedVaultLockedId?: string;
+    expectedVaultLockedTitle?: string;
     performSync?: boolean;
   } = {
     source,
@@ -495,8 +543,14 @@ export async function runSyncCommand(
     if (command.expectedConflictId !== undefined) {
       proofOptions.expectedConflictId = command.expectedConflictId;
     }
+    if (command.expectedConflictTitle !== undefined) {
+      proofOptions.expectedConflictTitle = command.expectedConflictTitle;
+    }
     if (command.expectedVaultLockedId !== undefined) {
       proofOptions.expectedVaultLockedId = command.expectedVaultLockedId;
+    }
+    if (command.expectedVaultLockedTitle !== undefined) {
+      proofOptions.expectedVaultLockedTitle = command.expectedVaultLockedTitle;
     }
   }
 
