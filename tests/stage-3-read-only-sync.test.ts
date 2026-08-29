@@ -49,6 +49,8 @@ function createFakeDatabase(): NotesnookReadOnlyDatabase & {
         id,
         title: "A note",
         dateCreated: 200,
+        ...(id === "conflict-note" ? { conflicted: true } : {}),
+        ...(id === "locked-note" ? { locked: true } : {}),
         body: "not exposed",
         internalSecret: "not exposed",
       }) as unknown as { id: string; title: string; dateCreated: number },
@@ -85,6 +87,7 @@ describe("NotesnookReadOnlyAdapter", () => {
       "sync",
       "listNotebooks",
       "noteMetadata",
+      "readNoteBody",
       "search",
     ]);
     expect((adapter as unknown as { database?: unknown }).database).toBeUndefined();
@@ -103,9 +106,35 @@ describe("NotesnookReadOnlyAdapter", () => {
       title: "A note",
       dateCreated: 200,
     });
+    await expect(adapter.noteMetadata("conflict-note")).resolves.toMatchObject({
+      conflicted: true,
+    });
+    await expect(adapter.noteMetadata("locked-note")).resolves.toMatchObject({ locked: true });
     await expect(adapter.search("note")).resolves.toEqual([
       { id: "note-1", title: "A note", source: "note" },
     ]);
+  });
+
+  it("returns stable categorical body-access errors without exposing content", async () => {
+    const adapter = createNotesnookReadOnlyAdapter({ source: createFakeDatabase() });
+
+    const locked = await adapter.readNoteBody("locked-note").catch((error: unknown) => error);
+    expect(isNotesnookReadOnlyAdapterError(locked)).toBe(true);
+    expect(locked).toMatchObject({ message: "vault_locked" });
+    expect((locked as Error & { cause?: unknown }).cause).toBeUndefined();
+
+    const unsupported = await adapter.readNoteBody("note-1").catch((error: unknown) => error);
+    expect(isNotesnookReadOnlyAdapterError(unsupported)).toBe(true);
+    expect(unsupported).toMatchObject({ message: "unsupported_content" });
+    expect(String(locked) + String(unsupported)).not.toContain("not exposed");
+
+    const malformedSource = createFakeDatabase();
+    (malformedSource as { noteMetadata: NotesnookReadOnlyDatabase["noteMetadata"] }).noteMetadata =
+      async (id) => ({ id, title: "private title", locked: "yes", body: "private body" }) as never;
+    const malformed = createNotesnookReadOnlyAdapter({ source: malformedSource });
+    await expect(malformed.readNoteBody("malformed-note")).rejects.toMatchObject({
+      message: "Notesnook read-only adapter: note lock marker is invalid",
+    });
   });
 
   it("allows fetch-only sync and rejects full, send, force, and invalid inputs", async () => {
@@ -215,6 +244,31 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
         body: "secret body",
       },
     ],
+    [
+      "conflict-note",
+      {
+        id: "conflict-note",
+        title: "Conflict title must stay internal",
+        dateEdited: 23,
+        conflicted: true,
+        body: "conflict body must stay internal",
+      },
+    ],
+    [
+      "locked-note",
+      {
+        id: "locked-note",
+        title: "Locked title must stay internal",
+        dateEdited: 24,
+        conflicted: false,
+        body: "locked note body must stay internal",
+      },
+    ],
+  ]);
+  const contents = new Map([
+    ["note-1", { locked: false, data: "ordinary body must stay internal" }],
+    ["conflict-note", { locked: false, data: "conflict body must stay internal" }],
+    ["locked-note", { locked: true, data: "locked note body must stay internal" }],
   ]);
   const searchResults = (ids: string[]) => ({ ids: async () => ids });
   const database = {
@@ -236,6 +290,7 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
       notebook: async (id: string) => notebooks.get(id),
     },
     notes: { note: async (id: string) => notes.get(id) },
+    content: { findByNoteId: async (id: string) => contents.get(id) },
     lookup: {
       notes: async () => searchResults(["note-1"]),
       notebooks: async () => searchResults(["nb-1"]),
@@ -249,6 +304,140 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("proves conflict visibility and vault_locked refusal through the CLI path", async () => {
+    const source = flattenLiveDatabaseToReadOnly(createFakeLiveDatabase());
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: [
+        "read-only",
+        "--expect-conflict-id",
+        "conflict-note",
+        "--expect-vault-locked-id=locked-note",
+      ],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "pass",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "pass", detail: "conflict marker observed" },
+          {
+            name: "vault-locked",
+            status: "pass",
+            detail: "vault_locked body refusal observed",
+          },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    const formatted = formatSyncCommandResult(result);
+    for (const forbidden of [
+      "conflict-note",
+      "locked-note",
+      "Conflict title",
+      "Locked title",
+      "conflict body",
+      "locked note body",
+    ]) {
+      expect(formatted).not.toContain(forbidden);
+    }
+  });
+
+  it("fails categorically and cleans up when a conflict marker is absent", async () => {
+    const source = flattenLiveDatabaseToReadOnly(createFakeLiveDatabase());
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: ["read-only", "--expect-conflict-id", "note-1"],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "fail", detail: "conflict failed: categorical error" },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(formatSyncCommandResult(result)).not.toContain("note-1");
+  });
+
+  it("fails categorically and cleans up when Vault locking is unsupported for a note", async () => {
+    const source = flattenLiveDatabaseToReadOnly(createFakeLiveDatabase());
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: ["read-only", "--expect-vault-locked-id", "note-1"],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          {
+            name: "vault-locked",
+            status: "fail",
+            detail: "vault-locked failed: categorical error",
+          },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(formatSyncCommandResult(result)).not.toContain("note-1");
+  });
+
+  it("rejects malformed conflict and lock markers categorically", async () => {
+    const conflictDatabase = createFakeLiveDatabase();
+    (conflictDatabase.notes as { note: (id: string) => Promise<unknown> }).note = async (id) => ({
+      id,
+      title: "private title",
+      conflicted: "yes",
+      body: "private body",
+    });
+    const conflictProjection = flattenLiveDatabaseToReadOnly(conflictDatabase);
+    await expect(conflictProjection.noteMetadata("malformed-conflict")).rejects.toSatisfy(
+      isNotesnookReadOnlyProjectionError,
+    );
+
+    const lockedDatabase = createFakeLiveDatabase();
+    (
+      lockedDatabase as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => ({ locked: "yes", data: "private body" });
+    const lockedProjection = flattenLiveDatabaseToReadOnly(lockedDatabase);
+    const failure = await lockedProjection
+      .noteMetadata("locked-note")
+      .catch((error: unknown) => error);
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(String(failure)).not.toContain("private body");
+  });
+
+  it("rejects malformed conflict and Vault flags before runtime construction", async () => {
+    const createProofRuntime = vi.fn();
+    for (const argv of [
+      ["read-only", "--expect-conflict-id"],
+      ["read-only", "--expect-vault-locked-id="],
+    ]) {
+      await expect(
+        runSyncCommand({
+          argv,
+          env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+          createProofRuntime,
+        }),
+      ).resolves.toMatchObject({ kind: "error", exitCode: 2 });
+    }
+    expect(createProofRuntime).not.toHaveBeenCalled();
+  });
+
   it("fails categorically and cleans up when the expected search result is absent", async () => {
     const source = createFakeDatabase();
     const cleanup = vi.fn(async () => undefined);

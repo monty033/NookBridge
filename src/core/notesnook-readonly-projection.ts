@@ -17,8 +17,8 @@
  *
  *   - `Database.syncer: SyncManager` → `syncer.start({type, force?,
  *     offlineMode?}): Promise<boolean>`.  We forward ONLY
- *     `type: "full" | "fetch"`.  Any other discriminator
- *     (including `"send"`, which is a write-side operation) is
+ *     `type: "fetch"`.  Any other discriminator (including `"full"`,
+ *     which includes a send phase, and `"send"` itself) is
  *     rejected by the projection before it reaches upstream.
  *   - `Database.notebooks: Notebooks` → `notebooks.all.ids()` +
  *     `notebooks.all.items()` (both per the d.ts).  We list notebook
@@ -56,8 +56,7 @@
  *     with `"send"`, `db.reset()`, `db.changePassword()`,
  *     `db.disconnectSSE()`, `db.connectSSE()`, or any other write or
  *     transport-tier method.  `db.syncer.start` is the only sync
- *     surface used and only the read-side discriminator values
- *     (`"full"`, `"fetch"`) flow through.
+ *     surface used and only the `"fetch"` discriminator flows through.
  *   - This module does NOT expose a raw `Database`, a raw `SyncManager`,
  *     a raw `Notebooks` / `Notes` / `Lookup`, or any per-slot escape
  *     hatch.  The structural projection is the entire surface.
@@ -168,7 +167,9 @@ export type NotesnookReadOnlyProjectionSource = NotesnookLiveDatabase;
  * `colors` / `shortcuts` / `relations` / `trash` / `sanitizer` /
  * `noteHistory` / `legacyTags` / `legacyColors` / `legacyNotes` /
  * `legacySettings` / `subscriptions` / `offers` / `debug` / `pricing`
- * collections is reachable through the projection.
+ * collections is reachable through the projection. The projection
+ * internally reads only `content.findByNoteId(id).locked` to enforce
+ * Vault refusal; it never returns the content record or its data.
  */
 export function flattenLiveDatabaseToReadOnly(
   source: NotesnookReadOnlyProjectionSource,
@@ -244,6 +245,7 @@ export function flattenLiveDatabaseToReadOnly(
     "note",
     "Notesnook read-only projection: notes.note is unavailable",
   );
+  const contentFindByNoteIdFn = readOptionalContentFindByNoteId(source);
 
   // Build the closed seam.  Every method is async; every throw /
   // reject maps to a categorical projection error.  Upstream
@@ -343,7 +345,10 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: notes.note rejected",
       );
       if (note === undefined || note === null) return undefined as never;
-      return coerceUpstreamNoteToMetadata(note) as never;
+      const metadata = coerceUpstreamNoteToMetadata(note);
+      if (metadata === undefined) return undefined as never;
+      const locked = await readLockedState(contentFindByNoteIdFn, id);
+      return (locked === true ? { ...metadata, locked: true } : metadata) as never;
     },
 
     search: async (
@@ -745,6 +750,8 @@ function coerceUpstreamNoteToMetadata(value: unknown):
       readonly pinned?: boolean;
       readonly favorite?: boolean;
       readonly localOnly?: boolean;
+      readonly conflicted?: boolean;
+      readonly locked?: boolean;
     }
   | undefined {
   if (value === undefined || value === null) return undefined;
@@ -758,6 +765,7 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   let pinned: unknown;
   let favorite: unknown;
   let localOnly: unknown;
+  let conflicted: unknown;
   try {
     id = record.id;
     title = record.title;
@@ -777,6 +785,7 @@ function coerceUpstreamNoteToMetadata(value: unknown):
     pinned = record.pinned;
     favorite = record.favorite;
     localOnly = record.localOnly;
+    conflicted = record.conflicted;
   } catch {
     throw projectionError("Notesnook read-only projection: note metadata rejected property access");
   }
@@ -785,6 +794,9 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   }
   if (typeof title !== "string") {
     throw projectionError("Notesnook read-only projection: note metadata is missing title");
+  }
+  if (conflicted !== undefined && typeof conflicted !== "boolean") {
+    throw projectionError("Notesnook read-only projection: note conflict marker is invalid");
   }
   const out: {
     readonly id: string;
@@ -795,6 +807,8 @@ function coerceUpstreamNoteToMetadata(value: unknown):
     readonly pinned?: boolean;
     readonly favorite?: boolean;
     readonly localOnly?: boolean;
+    readonly conflicted?: boolean;
+    readonly locked?: boolean;
   } = { id, title };
   if (typeof dateCreated === "number" && Number.isFinite(dateCreated) && dateCreated >= 0) {
     (out as { dateCreated?: number }).dateCreated = dateCreated;
@@ -808,5 +822,53 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   if (typeof pinned === "boolean") (out as { pinned?: boolean }).pinned = pinned;
   if (typeof favorite === "boolean") (out as { favorite?: boolean }).favorite = favorite;
   if (typeof localOnly === "boolean") (out as { localOnly?: boolean }).localOnly = localOnly;
+  if (typeof conflicted === "boolean") (out as { conflicted?: boolean }).conflicted = conflicted;
   return out;
+}
+
+function readOptionalContentFindByNoteId(
+  source: NotesnookReadOnlyProjectionSource,
+): ((...args: unknown[]) => unknown) | undefined {
+  let content: unknown;
+  try {
+    content = (source as unknown as Record<string, unknown>).content;
+  } catch {
+    throw projectionError("Notesnook read-only projection: content slot getter threw");
+  }
+  if (content === undefined || content === null) return undefined;
+  if (typeof content !== "object") {
+    throw projectionError("Notesnook read-only projection: content slot is not an object");
+  }
+  return readManagerMethod(
+    content as Record<string, unknown>,
+    "findByNoteId",
+    "Notesnook read-only projection: content.findByNoteId is unavailable",
+  );
+}
+
+async function readLockedState(
+  findByNoteId: ((...args: unknown[]) => unknown) | undefined,
+  id: string,
+): Promise<boolean | undefined> {
+  if (findByNoteId === undefined) return undefined;
+  const content = await callThrough<unknown>(
+    findByNoteId,
+    [id],
+    "Notesnook read-only projection: content.findByNoteId rejected",
+  );
+  if (content === undefined || content === null) return undefined;
+  if (typeof content !== "object") {
+    throw projectionError("Notesnook read-only projection: content record is not an object");
+  }
+  let locked: unknown;
+  try {
+    locked = (content as Record<string, unknown>).locked;
+  } catch {
+    throw projectionError("Notesnook read-only projection: content lock marker getter threw");
+  }
+  if (locked === undefined) return undefined;
+  if (typeof locked !== "boolean") {
+    throw projectionError("Notesnook read-only projection: content lock marker is invalid");
+  }
+  return locked;
 }
