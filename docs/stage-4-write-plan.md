@@ -1,6 +1,6 @@
 # Stage 4 — Safe Writes and Bidirectional Sync Plan
 
-**Status:** Active implementation plan. The pure write contract and local mutation adapter are merged; the next bounded slice is write-side runtime wiring. No remote sync, write CLI, or live write operation is included in the current slice.
+**Status:** Active implementation plan. The pure write contract, local mutation adapter, and write-side runtime wiring are merged; the next bounded slice is the injected synchronization coordinator. No remote sync transport, write CLI, or live write operation is included in the current slice.
 
 **Goal:** Add narrowly guarded create, append, and update behavior to the proven Notesnook client while preserving revision safety, bounded synchronization, and an auditable separation between local commit and remote sync.
 
@@ -11,11 +11,13 @@
 - **PR #22 — pure write contract:** merged at `0081e387`. Bounded commands, opaque revisions, categorical errors, and mutation-free validation are covered by the offline contract suite.
 - **PR #23 — local mutation adapter:** merged at `d976547`. The separately named `NotesnookWriteDatabase` seam now supports local create, append, and controlled update with fresh revision checks, locked/conflict/unsupported-content guards, explicit Markdown-to-stored-content codec handling, and local-only outcome flags.
 - **Offline receipts for PR #23:** 378/378 full tests, 28/28 adapter tests, 68/68 contract tests, strict typecheck, lint, format check, build, offline flake check, and independent specification/security reviews all passed.
-- **Current limitation:** the write seam is not yet constructed from the live Notesnook runtime. No live write canary has been claimed. Remote synchronization, write CLI exposure, and local conflict observation remain deferred.
+- **PR #24 — write-side runtime wiring:** merged at `955044c`. The separately named write capability is now constructed from an explicitly allowlisted structural runtime, with a frozen null-prototype 15-method seam, pinned relation/content mapping, strict identity/record validation, receiver-safe snapshots, and categorical error sanitization. `NotesnookReadOnlyDatabase` and the live read factory remain unchanged.
+- **Offline receipts for PR #24:** 472/472 full tests, 94/94 wiring tests, strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial security reviews all passed.
+- **Current limitation:** the write seam is wired but has no synchronization coordinator or remote transport. No live write canary has been claimed. Write CLI exposure, remote synchronization, and local conflict observation remain deferred.
 
-## Next bounded slice — write-side runtime wiring
+## Next bounded slice — separate local commit from remote sync
 
-Construct a separately named `NotesnookWriteDatabase` capability from the pinned local Notesnook runtime without changing `NotesnookReadOnlyDatabase` or `NotesnookLiveDatabase`. Wire only the explicit note/content/notebook/tag/relation slots consumed by the local mutation adapter, and preserve the existing fetch-only sync boundary.
+Introduce a narrow `SyncCoordinator` around an injected synchronization executor. It must represent local mutation as pending until a separate policy confirms remote synchronization, coalesce bursts into one in-flight execution, and apply bounded retry/backoff without importing Notesnook transport or widening the existing read-only/fetch-only boundaries.
 
 Required boundaries:
 
@@ -23,8 +25,9 @@ Required boundaries:
 - no `sync`, `send`, `full`, delete, force overwrite, Vault unlock, or write CLI path;
 - no plaintext body caching or persistence;
 - production wiring must use the same stored-content representation and codec contract as the local adapter;
-- offline tests must use a fake runtime seam plus structural rejection tests before any operator-local live canary is considered;
-- the live write canary remains a later gate after the wiring, offline matrix, and independent security review pass.
+- the coordinator must accept an injected executor and remain deterministic/offline-testable; it must not perform network or remote sync calls itself;
+- offline tests must cover pending outcomes, single-flight/coalescing, bounded retries, Retry-After handling, and restart-safe state semantics before any operator-local live canary is considered;
+- the live write canary remains a later gate after the coordinator, offline matrix, and independent security review pass.
 
 ## Non-negotiable boundaries
 
