@@ -1,10 +1,30 @@
 # Stage 4 — Safe Writes and Bidirectional Sync Plan
 
-**Status:** Planning only. No write-capable implementation or live write operation is included in this plan.
+**Status:** Active implementation plan. The pure write contract and local mutation adapter are merged; the next bounded slice is write-side runtime wiring. No remote sync, write CLI, or live write operation is included in the current slice.
 
 **Goal:** Add narrowly guarded create, append, and update behavior to the proven Notesnook client while preserving revision safety, bounded synchronization, and an auditable separation between local commit and remote sync.
 
 **Prerequisite:** Stage 3 Gate 3 is closed for the current fetch-only/read-only POC. The Vault-locked-note canary passed on 2026-08-29. Independent live conflict visibility remains deferred until the later local-note editing phase because Notesnook exposes that marker through device-local sync state rather than a fresh fetch-only projection.
+
+## Verified progress
+
+- **PR #22 — pure write contract:** merged at `0081e387`. Bounded commands, opaque revisions, categorical errors, and mutation-free validation are covered by the offline contract suite.
+- **PR #23 — local mutation adapter:** merged at `d976547`. The separately named `NotesnookWriteDatabase` seam now supports local create, append, and controlled update with fresh revision checks, locked/conflict/unsupported-content guards, explicit Markdown-to-stored-content codec handling, and local-only outcome flags.
+- **Offline receipts for PR #23:** 378/378 full tests, 28/28 adapter tests, 68/68 contract tests, strict typecheck, lint, format check, build, offline flake check, and independent specification/security reviews all passed.
+- **Current limitation:** the write seam is not yet constructed from the live Notesnook runtime. No live write canary has been claimed. Remote synchronization, write CLI exposure, and local conflict observation remain deferred.
+
+## Next bounded slice — write-side runtime wiring
+
+Construct a separately named `NotesnookWriteDatabase` capability from the pinned local Notesnook runtime without changing `NotesnookReadOnlyDatabase` or `NotesnookLiveDatabase`. Wire only the explicit note/content/notebook/tag/relation slots consumed by the local mutation adapter, and preserve the existing fetch-only sync boundary.
+
+Required boundaries:
+
+- no raw `Database`, generic collection passthrough, transport, credential, or encrypted-record exposure;
+- no `sync`, `send`, `full`, delete, force overwrite, Vault unlock, or write CLI path;
+- no plaintext body caching or persistence;
+- production wiring must use the same stored-content representation and codec contract as the local adapter;
+- offline tests must use a fake runtime seam plus structural rejection tests before any operator-local live canary is considered;
+- the live write canary remains a later gate after the wiring, offline matrix, and independent security review pass.
 
 ## Non-negotiable boundaries
 
