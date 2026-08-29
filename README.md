@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; safe writes and bidirectional sync are next.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, and fetch-only sync checks completed on 2026-08-28.
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; safe writes and bidirectional sync are next.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
 
 ## What this project is
 
@@ -26,11 +26,13 @@ TTY flow; argv/environment credential carriers are rejected.
 On 2026-08-28, a fresh-state manual run completed the full live login flow and
 returned `authenticated`. The follow-up cold-restart, explicit refresh,
 logout/relogin, credential-hygiene, and fetch-only native-sync receipts passed.
-The live proof fetched 41 notebook summaries without exposing note bodies and
-completed teardown cleanly. **Stage 4 safe writes remain blocked until the
-remaining Gate 3 content, search, restart, conflict, and locked-note scenarios
-are proven; MCP work remains deferred.** The exact handoff and acceptance
-criteria are in
+On 2026-08-29, the title-based Vault-locked-note canary returned
+`vault-locked: pass` with body refusal and clean teardown. PR #20 also added a
+local-only fixture documenting why the phone's device-local conflict marker
+cannot be independently observed by a fresh fetch-only client. **Gate 3 is
+closed for the current read-only scope. Stage 4 safe-write implementation has
+not started; only its plan is prepared, and MCP work remains deferred.** The
+exact handoff and acceptance criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
 All stages follow the same rule: **do not start the next stage until the
@@ -85,14 +87,15 @@ This is a summary; the authoritative specification, including all MVP tools, per
 
 ## Current handoff
 
-The Stage 3 read-only proof is partially complete: authenticated state reopen,
-fetch-only sync, bounded metadata, title/body search canaries, remote-change
-restart visibility, and clean teardown all have live receipts. PR #18 also
-merged deterministic conflict-marker and Vault-locked body-refusal coverage.
-The next bounded work is to add title-based live canary selection so the
-operator does not need to obtain or guess internal note IDs, then run the live
-conflict and locked-note scenarios before implementing Stage 4 writes. Ignore
-generated `var/` state and keep credentials at the interactive TTY boundary.
+The Stage 3 read-only proof is complete for its current scope: authenticated
+state reopen, fetch-only sync, bounded metadata, title/body search canaries,
+remote-change restart visibility, clean teardown, and Vault-locked-note body
+refusal all have live receipts. PR #20 merged the deterministic local conflict
+fixture. Independent live conflict visibility is deliberately deferred until
+the bridge is editing notes locally; the phone UI observation is not an
+independent fetch-only receipt. The next bounded artifact is the Stage 4
+safe-write plan. Ignore generated `var/` state and keep credentials at the
+interactive TTY boundary.
 See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
 for the exact constraints and receipt.
 
