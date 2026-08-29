@@ -226,7 +226,13 @@ describe("NotesnookReadOnlyAdapter", () => {
   });
 });
 
-function createFakeLiveDatabase(): NotesnookLiveDatabase & {
+function createFakeLiveDatabase(
+  options: {
+    noteSearchIds?: string[];
+    notebookSearchIds?: string[];
+    extraNotes?: Array<Readonly<Record<string, unknown>> & { id: string; title: string }>;
+  } = {},
+): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
 } {
   const syncCalls: Array<{ type: "fetch"; force?: boolean }> = [];
@@ -244,6 +250,7 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
         body: "secret body",
       },
     ],
+    ...(options.extraNotes ?? []).map((note) => [note.id, note] as const),
     [
       "conflict-note",
       {
@@ -292,8 +299,8 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
     notes: { note: async (id: string) => notes.get(id) },
     content: { findByNoteId: async (id: string) => contents.get(id) },
     lookup: {
-      notes: async () => searchResults(["note-1"]),
-      notebooks: async () => searchResults(["nb-1"]),
+      notes: async () => searchResults(options.noteSearchIds ?? ["note-1"]),
+      notebooks: async () => searchResults(options.notebookSearchIds ?? ["nb-1"]),
     },
     lastSynced: async () => 99,
     hasUnsyncedChanges: async () => false,
@@ -304,6 +311,169 @@ function createFakeLiveDatabase(): NotesnookLiveDatabase & {
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("proves title-based conflict and vault_locked canaries through the full CLI path", async () => {
+    const conflictTitle = "Conflict title must stay internal";
+    const lockedTitle = "Locked title must stay internal";
+    const database = createFakeLiveDatabase({
+      noteSearchIds: ["conflict-note", "locked-note"],
+      notebookSearchIds: [],
+    });
+    const source = flattenLiveDatabaseToReadOnly(database);
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: [
+        "read-only",
+        "--expect-conflict-title",
+        conflictTitle,
+        `--expect-vault-locked-title=${lockedTitle}`,
+      ],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source, cleanup }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "pass",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "pass", detail: "conflict marker observed" },
+          {
+            name: "vault-locked",
+            status: "pass",
+            detail: "vault_locked body refusal observed",
+          },
+          { name: "search", status: "pass", detail: "no query supplied" },
+        ]),
+      },
+    });
+    expect(database.syncCalls).toEqual([{ type: "fetch" }]);
+    expect(cleanup).toHaveBeenCalledOnce();
+    const formatted = formatSyncCommandResult(result);
+    for (const forbidden of [
+      conflictTitle,
+      lockedTitle,
+      "conflict-note",
+      "locked-note",
+      "conflict body",
+      "locked note body",
+    ]) {
+      expect(formatted).not.toContain(forbidden);
+    }
+  });
+
+  it.each([
+    {
+      name: "missing",
+      title: "Missing private title",
+      database: createFakeLiveDatabase({ noteSearchIds: ["note-1"], notebookSearchIds: [] }),
+    },
+    {
+      name: "ambiguous",
+      title: "Duplicate private title",
+      database: createFakeLiveDatabase({
+        noteSearchIds: ["duplicate-1", "duplicate-2"],
+        notebookSearchIds: [],
+        extraNotes: [
+          { id: "duplicate-1", title: "Duplicate private title", conflicted: true },
+          { id: "duplicate-2", title: "Duplicate private title", conflicted: true },
+        ],
+      }),
+    },
+    {
+      name: "notebook-only",
+      title: "Work",
+      database: createFakeLiveDatabase({ noteSearchIds: [], notebookSearchIds: ["nb-1"] }),
+    },
+  ])("fails categorically for a $name title resolution", async ({ title, database }) => {
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: ["read-only", "--expect-conflict-title", title],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({
+        source: flattenLiveDatabaseToReadOnly(database),
+        cleanup,
+      }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "fail", detail: "conflict failed: categorical error" },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    const formatted = formatSyncCommandResult(result);
+    expect(formatted).not.toContain(title);
+    expect(formatted).not.toContain("duplicate-1");
+    expect(formatted).not.toContain("duplicate-2");
+  });
+
+  it("rejects empty, duplicate, and malformed title flags before runtime construction", async () => {
+    const createProofRuntime = vi.fn();
+    for (const argv of [
+      ["read-only", "--expect-conflict-title"],
+      ["read-only", "--expect-conflict-title="],
+      ["read-only", "--expect-conflict-title=   "],
+      ["read-only", "--expect-conflict-title", "--expect-vault-locked-title=x"],
+      ["read-only", "--expect-vault-locked-title", ""],
+      ["read-only", "--expect-conflict-title", "first", "--expect-conflict-title=second"],
+      ["read-only", "--expect-vault-locked-title=first", "--expect-vault-locked-title", "second"],
+      ["read-only", "--expect-conflict-title-malformed=value"],
+    ]) {
+      await expect(
+        runSyncCommand({
+          argv,
+          env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+          createProofRuntime,
+        }),
+      ).resolves.toEqual({
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl sync: invalid command input",
+      });
+    }
+    expect(createProofRuntime).not.toHaveBeenCalled();
+  });
+
+  it("redacts title-resolution upstream failures and still cleans up", async () => {
+    const title = "Private locked title canary";
+    const upstreamText = "upstream search failure with private corpus text";
+    const database = createFakeLiveDatabase();
+    (database.lookup as { notes: () => Promise<never> }).notes = async () => {
+      throw new Error(upstreamText);
+    };
+    const cleanup = vi.fn(async () => undefined);
+    const result = await runSyncCommand({
+      argv: ["read-only", "--expect-vault-locked-title", title],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({
+        source: flattenLiveDatabaseToReadOnly(database),
+        cleanup,
+      }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          {
+            name: "vault-locked",
+            status: "fail",
+            detail: "vault-locked failed: read-only adapter rejected the request",
+          },
+        ]),
+      },
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    const formatted = formatSyncCommandResult(result);
+    expect(formatted).not.toContain(title);
+    expect(formatted).not.toContain(upstreamText);
+  });
+
   it("proves conflict visibility and vault_locked refusal through the CLI path", async () => {
     const source = flattenLiveDatabaseToReadOnly(createFakeLiveDatabase());
     const cleanup = vi.fn(async () => undefined);
