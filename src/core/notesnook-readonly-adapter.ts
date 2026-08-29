@@ -85,6 +85,8 @@ export interface NotesnookReadOnlyNoteMetadata {
   readonly pinned?: boolean;
   readonly favorite?: boolean;
   readonly localOnly?: boolean;
+  readonly conflicted?: boolean;
+  readonly locked?: boolean;
 }
 
 /**
@@ -307,6 +309,22 @@ export class NotesnookReadOnlyAdapter {
       }
       throw readOnlyAdapterError("Notesnook read-only adapter: failed to read note metadata");
     }
+  }
+
+  /**
+   * Resolve the categorical body-access policy without returning body
+   * content. Locked notes fail with the stable `vault_locked` category;
+   * all other notes remain outside this metadata-only slice.
+   */
+  async readNoteBody(id: string): Promise<never> {
+    if (typeof id !== "string" || id.length === 0) {
+      throw readOnlyAdapterError("Notesnook read-only adapter: note id must be a non-empty string");
+    }
+    const metadata = await this.noteMetadata(id);
+    if (metadata?.locked === true) {
+      throw readOnlyAdapterError("vault_locked");
+    }
+    throw readOnlyAdapterError("unsupported_content");
   }
 
   /**
@@ -547,6 +565,12 @@ function coerceNoteMetadata(value: unknown): NotesnookReadOnlyNoteMetadata {
   if (typeof record.title !== "string") {
     throw readOnlyAdapterError("Notesnook read-only adapter: note metadata is missing title");
   }
+  if (record.conflicted !== undefined && typeof record.conflicted !== "boolean") {
+    throw readOnlyAdapterError("Notesnook read-only adapter: note conflict marker is invalid");
+  }
+  if (record.locked !== undefined && typeof record.locked !== "boolean") {
+    throw readOnlyAdapterError("Notesnook read-only adapter: note lock marker is invalid");
+  }
   return {
     id: record.id,
     title: record.title,
@@ -556,6 +580,8 @@ function coerceNoteMetadata(value: unknown): NotesnookReadOnlyNoteMetadata {
     ...(typeof record.pinned === "boolean" ? { pinned: record.pinned } : {}),
     ...(typeof record.favorite === "boolean" ? { favorite: record.favorite } : {}),
     ...(typeof record.localOnly === "boolean" ? { localOnly: record.localOnly } : {}),
+    ...(typeof record.conflicted === "boolean" ? { conflicted: record.conflicted } : {}),
+    ...(typeof record.locked === "boolean" ? { locked: record.locked } : {}),
   };
 }
 

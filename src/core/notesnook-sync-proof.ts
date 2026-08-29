@@ -107,7 +107,16 @@ function proofError(message: string): OfflineSyncProofError {
  * categorical step name and the high-level outcome.
  */
 export type OfflineSyncProofStep = Readonly<{
-  name: "open" | "status" | "sync" | "list-notebooks" | "note-metadata" | "search" | "close";
+  name:
+    | "open"
+    | "status"
+    | "sync"
+    | "list-notebooks"
+    | "note-metadata"
+    | "conflict"
+    | "vault-locked"
+    | "search"
+    | "close";
   status: "pass" | "fail";
   /** Categorical step detail; never carries upstream error text. */
   detail: string;
@@ -152,6 +161,8 @@ export type RunOfflineSyncProofOptions = Readonly<{
   query?: string;
   expectedSearchId?: string;
   noteMetadataId?: string;
+  expectedConflictId?: string;
+  expectedVaultLockedId?: string;
   /** Status uses the same bounded runner without initiating sync. */
   performSync?: boolean;
 }>;
@@ -309,6 +320,57 @@ export async function runOfflineSyncProof(
       name: "note-metadata",
       status: "pass",
       detail: "no note id supplied",
+    });
+  }
+
+  if (typeof options.expectedConflictId === "string" && options.expectedConflictId.length > 0) {
+    try {
+      const metadata = await adapter.noteMetadata(options.expectedConflictId);
+      if (metadata?.conflicted !== true) {
+        throw proofError("expected conflict marker was not observed");
+      }
+      steps.push({ name: "conflict", status: "pass", detail: "conflict marker observed" });
+    } catch (error) {
+      const detail = normaliseErrorMessage(error, "conflict");
+      steps.push({ name: "conflict", status: "fail", detail });
+      return failedReport(steps, summary);
+    }
+  } else {
+    steps.push({ name: "conflict", status: "pass", detail: "no conflict canary supplied" });
+  }
+
+  if (
+    typeof options.expectedVaultLockedId === "string" &&
+    options.expectedVaultLockedId.length > 0
+  ) {
+    try {
+      const metadata = await adapter.noteMetadata(options.expectedVaultLockedId);
+      if (metadata?.locked !== true) {
+        throw proofError("expected locked marker was not observed");
+      }
+      let vaultLocked = false;
+      try {
+        await adapter.readNoteBody(options.expectedVaultLockedId);
+      } catch (error) {
+        vaultLocked = isNotesnookReadOnlyAdapterError(error) && error.message === "vault_locked";
+        if (!vaultLocked) throw error;
+      }
+      if (!vaultLocked) throw proofError("locked body access unexpectedly succeeded");
+      steps.push({
+        name: "vault-locked",
+        status: "pass",
+        detail: "vault_locked body refusal observed",
+      });
+    } catch (error) {
+      const detail = normaliseErrorMessage(error, "vault-locked");
+      steps.push({ name: "vault-locked", status: "fail", detail });
+      return failedReport(steps, summary);
+    }
+  } else {
+    steps.push({
+      name: "vault-locked",
+      status: "pass",
+      detail: "no locked-note canary supplied",
     });
   }
 

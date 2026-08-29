@@ -73,6 +73,10 @@ export type ParsedSyncCommand =
       expectedSearchId?: string;
       /** Optional note id to read metadata for. */
       noteMetadataId?: string;
+      /** Optional note id whose upstream conflict marker must be visible. */
+      expectedConflictId?: string;
+      /** Optional note id whose body access must fail as vault_locked. */
+      expectedVaultLockedId?: string;
     }>
   | Readonly<{
       kind: "help";
@@ -220,13 +224,16 @@ export function parseSyncCommand(
         return { kind: "parsed", command: { kind: "status", subcommand: "status" } };
       case "read-only": {
         // The `read-only` subcommand accepts optional `--query`,
-        // `--expect-search-id`, and `--note-id` flags.  We
+        // `--expect-search-id`, `--note-id`, `--expect-conflict-id`,
+        // and `--expect-vault-locked-id` flags.  We
         // do NOT accept any credential carrier.  All flags are
         // optional; the proof runner treats them as no-ops when
         // omitted.
         let query: string | undefined;
         let expectedSearchId: string | undefined;
         let noteMetadataId: string | undefined;
+        let expectedConflictId: string | undefined;
+        let expectedVaultLockedId: string | undefined;
         for (let i = 1; i < stringArgv.length; i++) {
           const cur = stringArgv[i];
           if (cur === undefined) return invalidParseInput();
@@ -247,6 +254,24 @@ export function parseSyncCommand(
             }
             expectedSearchId = next;
             i++;
+          } else if (cur === "--expect-conflict-id") {
+            const next = stringArgv[i + 1];
+            if (expectedConflictId !== undefined || typeof next !== "string" || next.length === 0) {
+              return invalidParseInput();
+            }
+            expectedConflictId = next;
+            i++;
+          } else if (cur === "--expect-vault-locked-id") {
+            const next = stringArgv[i + 1];
+            if (
+              expectedVaultLockedId !== undefined ||
+              typeof next !== "string" ||
+              next.length === 0
+            ) {
+              return invalidParseInput();
+            }
+            expectedVaultLockedId = next;
+            i++;
           } else if (cur.startsWith("--query=")) {
             const next = cur.slice("--query=".length);
             if (next.length === 0) return invalidParseInput();
@@ -259,6 +284,16 @@ export function parseSyncCommand(
             const next = cur.slice("--expect-search-id=".length);
             if (expectedSearchId !== undefined || next.length === 0) return invalidParseInput();
             expectedSearchId = next;
+          } else if (cur.startsWith("--expect-conflict-id=")) {
+            const next = cur.slice("--expect-conflict-id=".length);
+            if (expectedConflictId !== undefined || next.length === 0) return invalidParseInput();
+            expectedConflictId = next;
+          } else if (cur.startsWith("--expect-vault-locked-id=")) {
+            const next = cur.slice("--expect-vault-locked-id=".length);
+            if (expectedVaultLockedId !== undefined || next.length === 0) {
+              return invalidParseInput();
+            }
+            expectedVaultLockedId = next;
           } else {
             return invalidParseInput();
           }
@@ -272,6 +307,8 @@ export function parseSyncCommand(
             ...(query !== undefined ? { query } : {}),
             ...(expectedSearchId !== undefined ? { expectedSearchId } : {}),
             ...(noteMetadataId !== undefined ? { noteMetadataId } : {}),
+            ...(expectedConflictId !== undefined ? { expectedConflictId } : {}),
+            ...(expectedVaultLockedId !== undefined ? { expectedVaultLockedId } : {}),
           },
         };
       }
@@ -314,6 +351,8 @@ export function formatSyncHelp(): string {
     "  --query <text>             optional title-only search query",
     "  --expect-search-id <id>    require a categorical matching search hit",
     "  --note-id <id>             optional note id to read metadata for",
+    "  --expect-conflict-id <id>  require a categorical conflict marker",
+    "  --expect-vault-locked-id <id>  require a vault_locked body refusal",
     "",
     "Credential boundary:",
     "  Password, MFA, and token bytes are read only from an interactive TTY",
@@ -440,6 +479,8 @@ export async function runSyncCommand(
     query?: string;
     expectedSearchId?: string;
     noteMetadataId?: string;
+    expectedConflictId?: string;
+    expectedVaultLockedId?: string;
     performSync?: boolean;
   } = {
     source,
@@ -451,6 +492,12 @@ export async function runSyncCommand(
       proofOptions.expectedSearchId = command.expectedSearchId;
     }
     if (command.noteMetadataId !== undefined) proofOptions.noteMetadataId = command.noteMetadataId;
+    if (command.expectedConflictId !== undefined) {
+      proofOptions.expectedConflictId = command.expectedConflictId;
+    }
+    if (command.expectedVaultLockedId !== undefined) {
+      proofOptions.expectedVaultLockedId = command.expectedVaultLockedId;
+    }
   }
 
   let reportResult: RunSyncCommandResult;
