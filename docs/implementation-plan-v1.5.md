@@ -1610,27 +1610,41 @@ offline proof is covered by 18/18 focused tests, 275/275 full tests, the full
 static/build matrix, and an independent security review marked **PASS**. No
 live conflict or Vault-locked-note account result has been claimed yet.
 
-### Next handoff — title-addressed live conflict and locked-note canaries
+The local-only conflict fixture models the pinned behavior without account or
+network access: a detecting device's local note can expose `conflicted=true`,
+while an independent fresh fetch-only projection of the same remote note has no
+conflict marker. This fixture is offline evidence only. The conflict shown in
+the phone UI remains a separate upstream observation, and proving conflict
+visibility in independent live local state is deferred to the later
+local-state phase.
+
+### Next handoff — title-addressed live locked-note canary; conflict deferred
 
 The title-based canary selection is implemented in this branch: the bridge
 searches internally, requires an exact note-title match, inspects only the
 bounded metadata/lock marker, and emits categorical output without printing the
 title, ID, body, or upstream error text.
 
-After this branch merges, the operator will create disposable test notes and
-run the two live scenarios from an interactive TTY. Only after both live
-results are recorded will the plan close Gate 3 and permit a Stage 4 write
-plan. Credentials remain at the TTY boundary and generated `var/` state must
-not be inspected or committed.
+After this branch merges, the operator will run the remaining Vault-locked-note
+scenario against disposable test data from an interactive TTY. Independent live
+conflict visibility is deferred to the later local-state phase because the
+upstream conflict marker is device-local and is not observable by a fresh
+fetch-only client. Gate 3 remains open until the locked-note result is recorded
+and the deferred local-state conflict design is accepted for the later plan.
+Credentials remain at the TTY boundary and generated `var/` state must not be
+inspected or committed.
 
 ### Stage 3 gate status
 
 **Initial read-only native-sync POC: PASS.** The fetch-only boundary is merged
 and security-reviewed. **Gate 3 partial: PASS** for authenticated restart,
 metadata/listing, search canaries, remote-change restart visibility, and clean
-teardown; **implementation PASS but live proof pending** for conflict visibility
-and locked-note handling. Stage 4 safe writes and bidirectional sync remain
-blocked until those two live scenarios pass.
+teardown; **implementation PASS and local-fixture evidence recorded** for the
+device-local conflict marker, with the independent live conflict observation
+deferred to the later local-state phase; **live proof pending** for Vault-locked
+note handling. Stage 4 safe writes and bidirectional sync remain blocked until
+the locked-note result and the deferred local-state conflict design are
+accepted.
 
 # Appendix A. Research Sources
 

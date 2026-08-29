@@ -231,6 +231,7 @@ function createFakeLiveDatabase(
     noteSearchIds?: string[];
     notebookSearchIds?: string[];
     extraNotes?: Array<Readonly<Record<string, unknown>> & { id: string; title: string }>;
+    conflictMarker?: "present" | "absent";
   } = {},
 ): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -257,8 +258,9 @@ function createFakeLiveDatabase(
         id: "conflict-note",
         title: "Conflict title must stay internal",
         dateEdited: 23,
-        conflicted: true,
+        ...(options.conflictMarker === "absent" ? {} : { conflicted: true }),
         body: "conflict body must stay internal",
+        upstreamRevision: "upstream revision must stay internal",
       },
     ],
     [
@@ -311,6 +313,78 @@ function createFakeLiveDatabase(
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("distinguishes a detecting device's local conflict marker from a fresh fetch-only projection", async () => {
+    const privateTitle = "Conflict title must stay internal";
+    const detectingDatabase = createFakeLiveDatabase({
+      noteSearchIds: ["conflict-note"],
+      notebookSearchIds: [],
+      conflictMarker: "present",
+    });
+    const freshDatabase = createFakeLiveDatabase({
+      noteSearchIds: ["conflict-note"],
+      notebookSearchIds: [],
+      conflictMarker: "absent",
+    });
+    const detectingSource = flattenLiveDatabaseToReadOnly(detectingDatabase);
+    const freshSource = flattenLiveDatabaseToReadOnly(freshDatabase);
+
+    await expect(detectingSource.noteMetadata("conflict-note")).resolves.toMatchObject({
+      conflicted: true,
+    });
+    await expect(freshSource.noteMetadata("conflict-note")).resolves.toEqual({
+      id: "conflict-note",
+      title: privateTitle,
+      dateModified: 23,
+    });
+
+    const detectingCleanup = vi.fn(async () => undefined);
+    const detectingResult = await runSyncCommand({
+      argv: ["read-only", "--expect-conflict-title", privateTitle],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source: detectingSource, cleanup: detectingCleanup }),
+    });
+    const freshCleanup = vi.fn(async () => undefined);
+    const freshResult = await runSyncCommand({
+      argv: ["read-only", "--expect-conflict-title", privateTitle],
+      env: { [LIVE_SYNC_ENABLE_ENV]: "1" },
+      createProofRuntime: async () => ({ source: freshSource, cleanup: freshCleanup }),
+    });
+
+    expect(detectingResult).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "pass",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "pass", detail: "conflict marker observed" },
+        ]),
+      },
+    });
+    expect(freshResult).toMatchObject({
+      kind: "report",
+      report: {
+        kind: "fail",
+        steps: expect.arrayContaining([
+          { name: "conflict", status: "fail", detail: "conflict failed: categorical error" },
+        ]),
+      },
+    });
+    expect(detectingDatabase.syncCalls).toEqual([{ type: "fetch" }]);
+    expect(freshDatabase.syncCalls).toEqual([{ type: "fetch" }]);
+    expect(detectingCleanup).toHaveBeenCalledOnce();
+    expect(freshCleanup).toHaveBeenCalledOnce();
+
+    const categoricalOutput =
+      formatSyncCommandResult(detectingResult) + formatSyncCommandResult(freshResult);
+    for (const forbidden of [
+      privateTitle,
+      "conflict-note",
+      "conflict body must stay internal",
+      "upstream revision must stay internal",
+    ]) {
+      expect(categoricalOutput).not.toContain(forbidden);
+    }
+  });
+
   it("proves title-based conflict and vault_locked canaries through the full CLI path", async () => {
     const conflictTitle = "Conflict title must stay internal";
     const lockedTitle = "Locked title must stay internal";
