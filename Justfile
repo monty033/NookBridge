@@ -25,6 +25,13 @@ test:
 stage3-test:
     {{nix}} npx vitest run tests/stage-3-read-only-sync.test.ts
 
+# Offline pre-flight for the Stage 4 operator write gate. The gate is
+# intentionally absent here: this proves default-off behavior without opening
+# live state or contacting Notesnook.
+check-stage4-operator-gate:
+    env -u NOOKBRIDGE_ENABLE_LIVE_SYNC {{nix}} npx vitest run tests/stage-4-write-operator.test.ts
+    {{nix}} npm run typecheck
+
 # Compile the distributable output.
 build:
     {{nix}} npm run build

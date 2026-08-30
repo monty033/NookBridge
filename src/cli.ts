@@ -13,6 +13,7 @@
  *
  *   nookctl doctor [--state-dir <path>] [--endpoint <url>]
  *   nookctl auth login|live-login|status|logout|reset-local-client|help
+ *   nookctl write create|append|update|help
  *
  * Exit codes:
  *   0  doctor probe all `pass` (warnings allowed); auth deferred or
@@ -37,6 +38,12 @@ import {
   parseSyncCommand,
   runSyncCommand,
 } from "./core/notesnook-sync-admin.js";
+import {
+  formatWriteCommandResult,
+  formatWriteHelp,
+  parseWriteCommand,
+  runWriteCommand,
+} from "./core/notesnook-write-admin.js";
 import { createStdioPrompt } from "./auth/secret-input.js";
 
 type Args = {
@@ -44,6 +51,7 @@ type Args = {
   endpoint?: string;
   authArgs?: readonly string[];
   syncArgs?: readonly string[];
+  writeArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -71,6 +79,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "sync") {
     args.syncArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "write") {
+    args.writeArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -115,6 +127,9 @@ export async function run(argv: string[]): Promise<number> {
   }
   if (subcommand === "sync") {
     return runSync(args, logger);
+  }
+  if (subcommand === "write") {
+    return runWrite(args, logger);
   }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
@@ -220,6 +235,70 @@ async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Pro
     case "report":
       process.stdout.write(`${formatSyncCommandResult(result)}\n`);
       return result.report.kind === "pass" ? 0 : 1;
+  }
+}
+
+/**
+ * Dispatch the `nookctl write <subcommand>` plumbing.
+ *
+ * This is a SEPARATE subcommand tree from `sync`; the Stage 3 `sync
+ * read-only` path is unchanged and remains fetch-only.
+ *
+ * The write tree is gated on `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`.  The
+ * production write runtime is constructed lazily and ONLY after the
+ * parser, the credential-carrier policy, and the gate have all
+ * passed — the runner owns that ordering, so the dynamic import
+ * below never runs for a disabled or malformed invocation.
+ *
+ * The runtime exposes a separately named `localWrite` capability and
+ * owns its own teardown; the runner awaits that teardown on every
+ * path.  A successful write is reported as local-committed and
+ * remote-pending; this command never triggers remote synchronization.
+ */
+async function runWrite(args: Args, logger: ReturnType<typeof createLogger>): Promise<number> {
+  const argv = args.writeArgs ?? [];
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+  // Honour `nookctl write` / `nookctl write help` without the gate so an
+  // operator who only wants the help text never trips it.
+  if (argv.length === 0) {
+    process.stdout.write(formatWriteHelp());
+    return 0;
+  }
+  const parsedForHelp = parseWriteCommand(argv, environment);
+  if (parsedForHelp.kind === "parsed" && parsedForHelp.command.kind === "help") {
+    process.stdout.write(formatWriteHelp());
+    return 0;
+  }
+  const stateDir = resolve(environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"));
+  const result = await runWriteCommand({
+    argv,
+    env: environment,
+    createWriteRuntime: async () => {
+      const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
+      const runtime = await createProductionLiveLoginRuntime({ stateDir, logger });
+      if (runtime.localWrite === undefined) {
+        await runtime.cleanup();
+        throw new Error("local write capability is unavailable");
+      }
+      return { capability: runtime.localWrite, cleanup: runtime.cleanup };
+    },
+  });
+  switch (result.kind) {
+    case "error":
+      process.stderr.write(`nookctl: ${result.message}\n`);
+      return result.exitCode;
+    case "help":
+      process.stdout.write(result.text);
+      return 0;
+    case "report":
+      process.stdout.write(`${formatWriteCommandResult(result)}\n`);
+      return 0;
   }
 }
 
@@ -368,6 +447,7 @@ function printHelp(): void {
       "  nookctl doctor [--state-dir <path>] [--endpoint <url>]",
       "  nookctl auth <login|live-login|status|logout|reset-local-client|help>",
       "  nookctl sync <status|read-only|help>",
+      "  nookctl write <create|append|update|help>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -377,6 +457,7 @@ function printHelp(): void {
       "  doctor                run the Stage 1 diagnostics",
       "  auth                  Stage 2B admin auth; live-login is explicitly gated",
       "  sync                  Stage 3 read-only sync; live commands are explicitly gated",
+      "  write                 Stage 4 local write acceptance; explicitly gated, local-only",
       "  help                  show this help",
       "",
     ].join("\n"),

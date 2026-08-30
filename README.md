@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; safe writes and bidirectional sync are next.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes are offline-verified and remain remote-pending.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
 
 ## What this project is
 
@@ -31,13 +31,48 @@ On 2026-08-29, the title-based Vault-locked-note canary returned
 local-only fixture documenting why the phone's device-local conflict marker
 cannot be independently observed by a fresh fetch-only client. **Gate 3 is
 closed for the current read-only scope. Stage 4 safe-write implementation has
-not started; only its plan is prepared, and MCP work remains deferred.** The
+under offline verification; no live write or remote-sync proof is claimed, and
+MCP work remains deferred.** The
 exact handoff and acceptance criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
 
 All stages follow the same rule: **do not start the next stage until the
 current stage has a repeatable automated test and a written pass/fail result**.
 Failed gates are concrete decisions: fix, change architecture, or stop.
+
+## Stage 4 operator acceptance (offline-prepared)
+
+The write path is exposed only through the separate `nookctl write` command
+tree and is **off by default**. An operator must explicitly set
+`NOOKBRIDGE_ENABLE_LIVE_SYNC=1`; an unset or different value fails closed
+before the live runtime is constructed.
+
+Supported acceptance commands are intentionally narrow:
+
+```text
+nookctl write help
+nookctl write create --title <disposable-title> [--notebook-id <id>]
+nookctl write append --note-id <id> --expect-revision <token>
+nookctl write update --note-id <id> --expect-revision <token> (--set-pinned <true|false> | --set-favorite <true|false>)
+```
+
+Use only a disposable title and state. Create/append use fixed acceptance
+content owned by the command; note bodies are not accepted through argv,
+environment, logs, or chat. Credentials and MFA remain TTY-only and are never
+accepted by the write command. Output is categorical only: local commit,
+remote synchronization, pending state, and a bounded pending count.
+
+The current slice performs local writes only. It does **not** invoke remote
+sync, and successful writes are reported as `remote: pending` until a separate
+reviewed remote executor exists. The offline pre-flight is:
+
+```bash
+just check-stage4-operator-gate
+```
+
+This proves parser/gate behavior and the local pending contract; it is not a
+live-account, second-device, or Gate 4 canary receipt. Do not inspect or commit
+generated `var/` state.
 
 ## Target architecture and security boundary
 

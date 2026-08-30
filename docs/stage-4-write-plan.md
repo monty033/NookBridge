@@ -1,6 +1,6 @@
 # Stage 4 — Safe Writes and Bidirectional Sync Plan
 
-**Status:** Active implementation plan. The pure write contract, local mutation adapter, write-side runtime wiring, and metadata-only synchronization coordinator are merged; the current bounded slice is the local-write composition seam. No remote sync transport, write CLI, or live write operation is included in the current slice.
+**Status:** Active implementation plan. The pure write contract, local mutation adapter, write-side runtime wiring, metadata-only synchronization coordinator, local-write composition seam, and gated operator acceptance path are implemented in bounded slices. No remote sync transport or live write proof is claimed.
 
 **Goal:** Add narrowly guarded create, append, and update behavior to the proven Notesnook client while preserving revision safety, bounded synchronization, and an auditable separation between local commit and remote sync.
 
@@ -15,8 +15,10 @@
 - **Offline receipts for PR #24:** 472/472 full tests, 94/94 wiring tests, strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial security reviews all passed.
 - **PR #25 — metadata-only sync coordinator:** merged at `455b42b`. The coordinator now records bounded pending metadata, coalesces single-flight requests, applies bounded retry/Retry-After handling, preserves pending state across failures, and remains transport/network/Vault/credential-free.
 - **Offline receipts for PR #25:** 484/484 full tests at the PR #25 merge baseline across 19 files, 12/12 coordinator tests, strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial security reviews all passed.
-- **Current PR #26 offline receipts:** 53/53 composition tests; 121/121 focused composition-plus-contract tests; 537/537 full tests across 20 files; strict typecheck, lint, format check, build, `just check`, offline flake check, and fresh specification/adversarial reviews are required before publication.
-- **Current slice:** PR #26 adds a separately named local-write composition seam. It validates/copies adapter results, records only fresh pending metadata, keeps `requestSync()` explicit, and closes inherited-field, strict-ID, getter-capture, reentrancy, prototype, attempt-bound, and categorical-error escape paths. No live write canary has been claimed. Write CLI exposure, remote transport, and local conflict observation remain deferred.
+- **PR #26 — local-write composition seam:** merged at `ecbc577`. Offline receipts: 53/53 composition tests; 121/121 focused composition-plus-contract tests; 537/537 full tests across 20 files; strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial reviews all passed.
+- **PR #27 candidate — gated operator acceptance path:** adds a separately named `nookctl write` tree behind the exact `NOOKBRIDGE_ENABLE_LIVE_SYNC=1` opt-in. It projects only the five pinned Notesnook mutation collections into the reviewed write chain, uses fixed non-secret acceptance content, reports local commit separately from remote-pending state, and never exposes `requestSync`, raw IDs, bodies, credentials, or upstream causes.
+- **Offline receipts for the operator candidate:** 50/50 focused operator tests; 587/587 full tests across 21 files; strict typecheck, lint, format check, build, `just check`, offline flake check, and diff checks pass. These are offline receipts only; no live account or remote-sync proof is claimed.
+- **Current slice:** the operator acceptance path is prepared and verified offline. The remote executor remains intentionally absent, so writes remain pending and no remote synchronization is reported. Gate 4 live canaries and the local-state conflict observer remain deferred.
 
 ## Current bounded slice — compose local writes with pending sync metadata
 
