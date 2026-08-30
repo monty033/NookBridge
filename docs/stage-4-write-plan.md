@@ -1,6 +1,6 @@
 # Stage 4 — Safe Writes and Bidirectional Sync Plan
 
-**Status:** Active implementation plan. The pure write contract, local mutation adapter, and write-side runtime wiring are merged; the next bounded slice is the injected synchronization coordinator. No remote sync transport, write CLI, or live write operation is included in the current slice.
+**Status:** Active implementation plan. The pure write contract, local mutation adapter, write-side runtime wiring, and metadata-only synchronization coordinator are merged; the current bounded slice is the local-write composition seam. No remote sync transport, write CLI, or live write operation is included in the current slice.
 
 **Goal:** Add narrowly guarded create, append, and update behavior to the proven Notesnook client while preserving revision safety, bounded synchronization, and an auditable separation between local commit and remote sync.
 
@@ -13,21 +13,26 @@
 - **Offline receipts for PR #23:** 378/378 full tests, 28/28 adapter tests, 68/68 contract tests, strict typecheck, lint, format check, build, offline flake check, and independent specification/security reviews all passed.
 - **PR #24 — write-side runtime wiring:** merged at `955044c`. The separately named write capability is now constructed from an explicitly allowlisted structural runtime, with a frozen null-prototype 15-method seam, pinned relation/content mapping, strict identity/record validation, receiver-safe snapshots, and categorical error sanitization. `NotesnookReadOnlyDatabase` and the live read factory remain unchanged.
 - **Offline receipts for PR #24:** 472/472 full tests, 94/94 wiring tests, strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial security reviews all passed.
-- **Current limitation:** the write seam is wired but has no synchronization coordinator or remote transport. No live write canary has been claimed. Write CLI exposure, remote synchronization, and local conflict observation remain deferred.
+- **PR #25 — metadata-only sync coordinator:** merged at `455b42b`. The coordinator now records bounded pending metadata, coalesces single-flight requests, applies bounded retry/Retry-After handling, preserves pending state across failures, and remains transport/network/Vault/credential-free.
+- **Offline receipts for PR #25:** 484/484 full tests at the PR #25 merge baseline across 19 files, 12/12 coordinator tests, strict typecheck, lint, format check, build, `just check`, offline flake check, and independent specification/adversarial security reviews all passed.
+- **Current PR #26 offline receipts:** 53/53 composition tests; 121/121 focused composition-plus-contract tests; 537/537 full tests across 20 files; strict typecheck, lint, format check, build, `just check`, offline flake check, and fresh specification/adversarial reviews are required before publication.
+- **Current slice:** PR #26 adds a separately named local-write composition seam. It validates/copies adapter results, records only fresh pending metadata, keeps `requestSync()` explicit, and closes inherited-field, strict-ID, getter-capture, reentrancy, prototype, attempt-bound, and categorical-error escape paths. No live write canary has been claimed. Write CLI exposure, remote transport, and local conflict observation remain deferred.
 
-## Next bounded slice — separate local commit from remote sync
+## Current bounded slice — compose local writes with pending sync metadata
 
-Introduce a narrow `SyncCoordinator` around an injected synchronization executor. It must represent local mutation as pending until a separate policy confirms remote synchronization, coalesce bursts into one in-flight execution, and apply bounded retry/backoff without importing Notesnook transport or widening the existing read-only/fetch-only boundaries.
+Wrap the existing local mutation adapter and metadata-only `SyncCoordinator` without widening either capability. The seam exposes exactly `createNote`, `appendNote`, `updateNote`, explicit `requestSync`, and `pendingSnapshot`.
 
 Required boundaries:
 
-- no raw `Database`, generic collection passthrough, transport, credential, or encrypted-record exposure;
-- no `sync`, `send`, `full`, delete, force overwrite, Vault unlock, or write CLI path;
-- no plaintext body caching or persistence;
-- production wiring must use the same stored-content representation and codec contract as the local adapter;
-- the coordinator must accept an injected executor and remain deterministic/offline-testable; it must not perform network or remote sync calls itself;
-- offline tests must cover pending outcomes, single-flight/coalescing, bounded retries, Retry-After handling, and restart-safe state semantics before any operator-local live canary is considered;
-- the live write canary remains a later gate after the coordinator, offline matrix, and independent security review pass.
+- local methods must await and validate bounded adapter results before queue recording;
+- queue recording receives only fresh `{operation,id,localCommitted:true,remoteSynced:false,pendingSync:true}` metadata;
+- local writes never invoke remote synchronization; `requestSync()` remains explicit and reentrancy-guarded;
+- no raw `Database`, generic collection passthrough, transport, credential, encrypted-record, body, or Vault exposure;
+- no `sync`, `send`, `full`, delete, force overwrite, or write CLI path;
+- required returned fields and markers are own fields; IDs use the strict bounded identifier rule;
+- public results and snapshots are fresh, null-prototype, frozen bounded copies; failures remain categorical and chain-free;
+- offline tests must cover pending outcomes, hostile boundary inputs, queue failures, and explicit remote outcomes before any operator-local live canary is considered;
+- the live write canary remains a later gate after this seam, the offline matrix, and independent security review pass.
 
 ## Non-negotiable boundaries
 
