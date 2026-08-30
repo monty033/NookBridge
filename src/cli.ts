@@ -255,7 +255,7 @@ async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Pro
  * path.  A successful write is reported as local-committed and
  * remote-pending; this command never triggers remote synchronization.
  */
-async function runWrite(args: Args, logger: ReturnType<typeof createLogger>): Promise<number> {
+async function runWrite(args: Args, _logger: ReturnType<typeof createLogger>): Promise<number> {
   const argv = args.writeArgs ?? [];
   let environment: Record<string, string | undefined>;
   try {
@@ -281,7 +281,7 @@ async function runWrite(args: Args, logger: ReturnType<typeof createLogger>): Pr
     env: environment,
     createWriteRuntime: async () => {
       const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
-      const runtime = await createProductionLiveLoginRuntime({ stateDir, logger });
+      const runtime = await createProductionLiveLoginRuntime({ stateDir });
       if (runtime.localWrite === undefined) {
         await runtime.cleanup();
         throw new Error("local write capability is unavailable");
