@@ -13,7 +13,7 @@
  *
  *   nookctl doctor [--state-dir <path>] [--endpoint <url>]
  *   nookctl auth login|live-login|status|logout|reset-local-client|help
- *   nookctl write create|append|update|help
+ *   nookctl write create|append|update|sync|help
  *
  * Exit codes:
  *   0  doctor probe all `pass` (warnings allowed); auth deferred or
@@ -253,7 +253,7 @@ async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Pro
  * The runtime exposes a separately named `localWrite` capability and
  * owns its own teardown; the runner awaits that teardown on every
  * path.  A successful write is reported as local-committed and
- * remote-pending; this command never triggers remote synchronization.
+ * remote-pending; local write dispatch never triggers remote synchronization.
  */
 async function runWrite(args: Args, _logger: ReturnType<typeof createLogger>): Promise<number> {
   const argv = args.writeArgs ?? [];
@@ -286,7 +286,11 @@ async function runWrite(args: Args, _logger: ReturnType<typeof createLogger>): P
         await runtime.cleanup();
         throw new Error("local write capability is unavailable");
       }
-      return { capability: runtime.localWrite, cleanup: runtime.cleanup };
+      return {
+        capability: runtime.localWrite,
+        ...(runtime.remoteSync === undefined ? {} : { remoteSync: runtime.remoteSync }),
+        cleanup: runtime.cleanup,
+      };
     },
   });
   switch (result.kind) {
@@ -299,6 +303,9 @@ async function runWrite(args: Args, _logger: ReturnType<typeof createLogger>): P
     case "report":
       process.stdout.write(`${formatWriteCommandResult(result)}\n`);
       return 0;
+    case "sync-report":
+      process.stdout.write(`${formatWriteCommandResult(result)}\n`);
+      return result.report.status === "failed" ? 1 : 0;
   }
 }
 
@@ -447,7 +454,7 @@ function printHelp(): void {
       "  nookctl doctor [--state-dir <path>] [--endpoint <url>]",
       "  nookctl auth <login|live-login|status|logout|reset-local-client|help>",
       "  nookctl sync <status|read-only|help>",
-      "  nookctl write <create|append|update|help>",
+      "  nookctl write <create|append|update|sync|help>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",

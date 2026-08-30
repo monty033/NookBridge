@@ -19,10 +19,10 @@
  *     with its production inputs.
  *   - The published capability exposes exactly `createNote`, `appendNote`,
  *     `updateNote`, and `pendingSnapshot`.  `requestSync` is intentionally
- *     NOT exposed: this slice ships no live remote executor, so a remote
- *     trigger here could only ever produce an unprovable remote claim.  The
- *     injected coordinator executor therefore refuses every remote attempt,
- *     and pending work stays pending.
+ *     NOT exposed: this local capability must not trigger remote execution.
+ *     When no shared coordinator is supplied, its fallback executor refuses
+ *     remote attempts and pending work stays pending; production supplies the
+ *     shared coordinator to the separately named remote capability.
  *   - The capability is frozen and lifecycle-guarded: once the owning runtime
  *     has been closed, every method fails categorically instead of touching a
  *     torn-down database.
@@ -35,8 +35,9 @@ import { bindNotesnookWriteRuntime } from "./notesnook-write-wiring.js";
 import {
   createNotesnookLocalWriteComposition,
   type NotesnookLocalWriteComposition,
+  type NotesnookPendingSyncHandle,
 } from "./notesnook-write-composition.js";
-import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
+import { SyncCoordinator, type SyncExecutor } from "./notesnook-sync-coordinator.js";
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 
 /** The five collection slots the write chain consumes. */
@@ -112,11 +113,14 @@ function projectWriteRuntime(database: object): object {
 /**
  * Build the local-write composition for a live database.
  *
- * The coordinator's executor refuses every remote attempt, so a pending
- * marker can only ever be cleared by a future slice that wires a real
- * executor.  Local commits are never reported as remotely synchronised.
+ * The standalone local composition's fallback executor refuses remote
+ * attempts, so a pending marker remains pending.  Production supplies the
+ * shared coordinator to the separately named remote capability.
  */
-export function createLiveLocalWriteComposition(database: object): NotesnookLocalWriteComposition {
+export function createLiveLocalWriteComposition(
+  database: object,
+  options: LiveWriteCompositionOptions = {},
+): NotesnookLocalWriteComposition {
   const seam = bindNotesnookWriteRuntime(
     projectWriteRuntime(database) as Parameters<typeof bindNotesnookWriteRuntime>[0],
   );
@@ -124,13 +128,21 @@ export function createLiveLocalWriteComposition(database: object): NotesnookLoca
     source: seam,
     codec: DETERMINISTIC_MARKDOWN_CODEC,
   });
-  const coordinator = new SyncCoordinator({
-    // No live remote executor exists in this slice.  Refusing here keeps
-    // pending work pending rather than fabricating a remote receipt.
-    executor: () => ({ status: "failed" as const }),
-  });
+  const coordinator =
+    options.coordinator ??
+    new SyncCoordinator({
+      // The standalone local composition remains safe by default.  A live
+      // caller supplies the shared coordinator below; this fallback never
+      // fabricates a remote receipt.
+      executor: (() => ({ status: "failed" as const })) satisfies SyncExecutor,
+    });
   return createNotesnookLocalWriteComposition({ adapter, coordinator });
 }
+
+/** Options for sharing one coordinator between local writes and explicit sync. */
+export type LiveWriteCompositionOptions = Readonly<{
+  readonly coordinator?: NotesnookPendingSyncHandle;
+}>;
 
 /**
  * Project a live `Database` into the separately named write capability.
@@ -142,8 +154,9 @@ export function createLiveLocalWriteComposition(database: object): NotesnookLoca
 export function projectLiveDatabaseToWriteCapability(
   database: object,
   ensureOpen: () => void,
+  options: LiveWriteCompositionOptions = {},
 ): NotesnookLiveWriteCapability {
-  const composition = createLiveLocalWriteComposition(database);
+  const composition = createLiveLocalWriteComposition(database, options);
   return Object.freeze({
     createNote: async (command: Parameters<NotesnookLiveWriteCapability["createNote"]>[0]) => {
       ensureOpen();

@@ -894,8 +894,8 @@ describe("nookctl write — no auto-sync and pending semantics", () => {
     const composition = createLiveLocalWriteComposition(fake.db);
     await composition.createNote({ title: "Acceptance", content: "body" });
     const remote = await composition.requestSync();
-    // No live remote executor exists yet: the request must not report a
-    // remote success, and the pending marker must survive.
+    // The standalone local composition has no remote executor: the request
+    // must not report a remote success, and the pending marker must survive.
     expect(remote.remoteSynced).toBe(false);
     expect(remote.status).toBe("failed");
     expect(composition.pendingSnapshot().pending.length).toBe(1);
@@ -1228,13 +1228,6 @@ describe("Stage 4 operator write source boundaries", () => {
   /** Strip block/line comments so assertions test code, not prose. */
   const codeOnly = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-
-  it("the operator module never triggers remote synchronization", () => {
-    const source = codeOnly(readSource("src/core/notesnook-write-admin.ts"));
-    expect(source).not.toMatch(/\brequestSync\s*\(/);
-    expect(source).not.toMatch(/type:\s*"(full|send)"/);
-    expect(source).not.toContain("requestSync");
-  });
 
   it("the write capability module imports no Notesnook package", () => {
     const source = codeOnly(readSource("src/core/notesnook-live-write-capability.ts"));

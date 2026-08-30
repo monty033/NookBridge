@@ -35,6 +35,7 @@ import {
 import { runLiveAuthCommand, type LiveProviderFactory } from "./live-auth-runner.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookLiveWriteCapability } from "../core/notesnook-write-admin.js";
+import type { NotesnookLiveRemoteSyncCapability } from "../core/notesnook-live-remote-sync.js";
 import type { AuthSession } from "./types.js";
 
 /**
@@ -385,6 +386,8 @@ export type LiveLoginRuntime = Readonly<{
    * it, and no read-only caller can reach a write path through it.
    */
   localWrite?: NotesnookLiveWriteCapability;
+  /** Separately named explicit Stage 4 remote synchronization capability. */
+  remoteSync?: NotesnookLiveRemoteSyncCapability;
 }>;
 
 export type LiveLoginRuntimeOptions = Readonly<{
