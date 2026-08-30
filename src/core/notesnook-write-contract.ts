@@ -101,11 +101,16 @@ const WRITE_CONTRACT_ERROR_MESSAGES: { readonly [K in NotesnookWriteErrorCode]: 
  * `new NotesnookWriteContractError(code, secret)`.
  */
 export class NotesnookWriteContractError extends Error {
-  public readonly code: NotesnookWriteErrorCode;
+  public readonly code!: NotesnookWriteErrorCode;
 
   constructor(code: NotesnookWriteErrorCode, _ignoredMessage?: unknown) {
     super(WRITE_CONTRACT_ERROR_MESSAGES[code]);
-    this.code = code;
+    Object.defineProperty(this, "code", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: code,
+    });
     Object.defineProperty(this, "cause", { configurable: true, value: undefined });
     Object.defineProperty(this, "__context__", { configurable: true, value: undefined });
     Object.defineProperty(this, "name", {
