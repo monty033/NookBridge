@@ -51,6 +51,11 @@ import {
 } from "./notesnook-core-adapter.js";
 import { flattenLiveDatabaseToReadOnly } from "./notesnook-readonly-projection.js";
 import type { NotesnookReadOnlyDatabase } from "./notesnook-readonly-adapter.js";
+import {
+  hasLiveWriteSurface,
+  projectLiveDatabaseToWriteCapability,
+} from "./notesnook-live-write-capability.js";
+import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 
 // ---------------------------------------------------------------------------
 // Options, narrow types, and cleanup hook.
@@ -145,6 +150,13 @@ export interface NotesnookLiveCoreHandle {
   readonly initialized: boolean;
   /** Flattened Stage 3 read-only surface; absent on legacy auth-only fakes. */
   readonly readOnly?: NotesnookReadOnlyDatabase;
+  /**
+   * Separately named Stage 4 local write capability; absent on legacy
+   * auth-only fakes.  This is a DISTINCT surface from `readOnly`: nothing
+   * projects one into the other, so an existing read-only caller cannot
+   * acquire a write path.  The raw `Database` is not reachable through it.
+   */
+  readonly localWrite?: NotesnookLiveWriteCapability;
 }
 
 /**
@@ -269,6 +281,13 @@ export async function createNotesnookLiveCoreFactory(
       normalized.injectedModule === undefined || hasReadOnlyProjectionSurface(db)
         ? guardReadOnlyProjection(flattenLiveDatabaseToReadOnly(db), ensureOpen)
         : undefined;
+    // Stage 4: the write capability is built from a separate projection of
+    // the same opened database.  It is optional so legacy injected auth-only
+    // fakes remain valid, and it never widens `readOnly`.
+    const localWrite =
+      normalized.injectedModule === undefined || hasLiveWriteSurface(db)
+        ? projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen)
+        : undefined;
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -297,6 +316,7 @@ export async function createNotesnookLiveCoreFactory(
       initialized: true,
       cleanup,
       ...(readOnly === undefined ? {} : { readOnly }),
+      ...(localWrite === undefined ? {} : { localWrite }),
     });
 
     return handle;

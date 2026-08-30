@@ -34,6 +34,7 @@ import {
 } from "./secret-input.js";
 import { runLiveAuthCommand, type LiveProviderFactory } from "./live-auth-runner.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
+import type { NotesnookLiveWriteCapability } from "../core/notesnook-write-admin.js";
 import type { AuthSession } from "./types.js";
 
 /**
@@ -378,6 +379,12 @@ export type LiveLoginRuntime = Readonly<{
   cleanup: () => void | Promise<void>;
   /** Flattened Stage 3 read-only surface when the runtime is production-backed. */
   readOnly?: NotesnookReadOnlyDatabase;
+  /**
+   * Separately named Stage 4 local write capability when the runtime is
+   * production-backed.  Distinct from `readOnly`; the auth tree never uses
+   * it, and no read-only caller can reach a write path through it.
+   */
+  localWrite?: NotesnookLiveWriteCapability;
 }>;
 
 export type LiveLoginRuntimeOptions = Readonly<{
