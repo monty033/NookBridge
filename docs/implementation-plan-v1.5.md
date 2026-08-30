@@ -618,6 +618,21 @@ At the end of Stage 4 the project has a **functional headless Notesnook POC**. I
 
 Objective: turn the proven client into an isolated local service whose secrets/state are not owned by Hermes.
 
+> **Status (2026-08-30): docs-only decision record in progress.**
+> No daemon code, Nix configuration, credential handling, or socket work has
+> landed in this slice yet. The first deliverable is
+> [`docs/stage-5-service-boundary.md`](stage-5-service-boundary.md), which
+> captures the resolved trust zones, key-backend decision, deployment
+> ownership, initial RPC allowlist, and forbidden capabilities. **Gate 5 is
+> not passed.** Implementation begins only after that decision record is
+> merged, and the concrete Nix deployment expression is created in a later
+> task against the canonical NixOS configuration repository.
+>
+> The already-merged **"Stage 5 local conflict observation"** slice
+> (`nookctl conflicts`) is a separate, read-only CLI projection with a
+> pending positive two-device live canary; it is not the formal service
+> boundary and is not covered by Gate 5.
+
 - Run the authenticated client as a dedicated `nookbridge` Unix user.
 - Move all Notesnook DB/state ownership to that service identity with restrictive permissions.
 - Implement the production `SecureKeyStore` backend and runtime credential injection; no plaintext-next-to-DB fallback.
@@ -1666,6 +1681,47 @@ only categorical output. Focused Stage 5 projection/CLI tests pass **53/53**;
 typecheck, lint, format check, and build pass. A full native SQLite-dependent
 matrix and the operator-local two-device live canary remain pending after a
 native binding is available; no live conflict result is claimed here.
+
+### Stage 5 service boundary — decision record only
+
+On 2026-08-30, the formal **Stage 5 service boundary** work begins with
+[`docs/stage-5-service-boundary.md`](stage-5-service-boundary.md). This is
+a docs-only, pre-implementation decision record; **Gate 5 is not passed** by
+this task and no daemon code, Nix configuration, or credential handling has
+been merged.
+
+What this task establishes:
+
+- A trust-zone table covering `root`, the `nookbridge` daemon, `hermes`,
+  `nookbridge-clients`, sops-nix/systemd credential delivery, service state,
+  and the Unix socket.
+- The selected key backend: encrypted **sops-nix** source delivered through
+  systemd `LoadCredential` as a service-private credential under
+  `$CREDENTIALS_DIRECTORY`, with the non-secret label
+  **`nookbridge-db-key`**. The `development-file` backend remains
+  development-only and MUST NOT be selectable by the daemon.
+- Fail-closed startup behavior with no "generate-if-missing" or
+  plaintext-next-to-DB fallback.
+- Deployment ownership pointing at the canonical NixOS configuration
+  repository and the exact Hermes host deployment file, with the concrete
+  Nix expression deferred to a later task and verified there.
+- An initial RPC allowlist of exactly one method, `notes.search`, returning
+  bounded title-only results.
+- An explicit forbidden list and an explicit out-of-scope list (including
+  Stage 6 MCP work and the pending positive two-device conflict canary).
+
+What this task deliberately does **not** claim:
+
+- No new keystore implementation has landed in this repository.
+- No key bytes, key paths, secret names beyond the public label
+  `nookbridge-db-key`, or credential file contents appear anywhere in this
+  change.
+- No change to the existing Nix checkout, which remains dirty and
+  unmodified by this task.
+
+The two-device live conflict canary for the already merged **"Stage 5 local
+conflict observation"** slice remains a separate pending validation task and
+is **not** part of Gate 5.
 
 ### Stage 3 gate status
 
