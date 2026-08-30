@@ -14,6 +14,7 @@
  *   nookctl doctor [--state-dir <path>] [--endpoint <url>]
  *   nookctl auth login|live-login|status|logout|reset-local-client|help
  *   nookctl write create|append|update|sync|help
+ *   nookctl conflicts list|observe|help
  *
  * Exit codes:
  *   0  doctor probe all `pass` (warnings allowed); auth deferred or
@@ -44,6 +45,12 @@ import {
   parseWriteCommand,
   runWriteCommand,
 } from "./core/notesnook-write-admin.js";
+import {
+  formatConflictCommandResult,
+  formatConflictHelp,
+  parseConflictCommand,
+  runConflictCommand,
+} from "./core/notesnook-conflict-admin.js";
 import { createStdioPrompt } from "./auth/secret-input.js";
 
 type Args = {
@@ -52,6 +59,7 @@ type Args = {
   authArgs?: readonly string[];
   syncArgs?: readonly string[];
   writeArgs?: readonly string[];
+  conflictsArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -83,6 +91,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "write") {
     args.writeArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "conflicts") {
+    args.conflictsArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -131,6 +143,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "write") {
     return runWrite(args, logger);
   }
+  if (subcommand === "conflicts") {
+    return runConflicts(args);
+  }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
@@ -168,6 +183,64 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
   return 0;
+}
+
+/**
+ * Dispatch the `nookctl conflicts <subcommand>` plumbing.
+ *
+ * This is a separately named, read-only local-marker observer.  Help and
+ * parse failures return before the live runtime is imported.  Observation
+ * commands are gated by the exact non-secret opt-in and receive only the
+ * narrow observer capability from the production runtime.
+ */
+async function runConflicts(args: Args): Promise<number> {
+  const argv = args.conflictsArgs ?? [];
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+  if (argv.length === 0) {
+    process.stdout.write(formatConflictHelp());
+    return 0;
+  }
+  const parsedForHelp = parseConflictCommand(argv, environment);
+  if (parsedForHelp.kind === "parsed" && parsedForHelp.command.kind === "help") {
+    process.stdout.write(formatConflictHelp());
+    return 0;
+  }
+  const result = await runConflictCommand({
+    argv,
+    env: environment,
+    createObserverRuntime: async () => {
+      const stateDir = resolve(
+        environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"),
+      );
+      const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
+      const runtime = await createProductionLiveLoginRuntime({ stateDir });
+      if (runtime.localConflictObserver === undefined) {
+        await runtime.cleanup();
+        throw new Error("local conflict observer is unavailable");
+      }
+      return {
+        observer: runtime.localConflictObserver,
+        cleanup: runtime.cleanup,
+      };
+    },
+  });
+  switch (result.kind) {
+    case "error":
+      process.stderr.write(`nookctl: ${result.message}\n`);
+      return result.exitCode;
+    case "help":
+      process.stdout.write(result.text);
+      return 0;
+    case "report":
+      process.stdout.write(`${formatConflictCommandResult(result)}\n`);
+      return 0;
+  }
 }
 
 /**
@@ -455,6 +528,7 @@ function printHelp(): void {
       "  nookctl auth <login|live-login|status|logout|reset-local-client|help>",
       "  nookctl sync <status|read-only|help>",
       "  nookctl write <create|append|update|sync|help>",
+      "  nookctl conflicts <list|observe|help>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -465,6 +539,7 @@ function printHelp(): void {
       "  auth                  Stage 2B admin auth; live-login is explicitly gated",
       "  sync                  Stage 3 read-only sync; live commands are explicitly gated",
       "  write                 Stage 4 local write acceptance; explicitly gated, local-only",
+      "  conflicts             Stage 5 local conflict-marker observation; explicitly gated, read-only",
       "  help                  show this help",
       "",
     ].join("\n"),

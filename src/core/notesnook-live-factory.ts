@@ -64,6 +64,11 @@ import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
 import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
 
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
+import {
+  createNotesnookLocalConflictObserver,
+  type NotesnookLocalConflictObserver,
+  type NotesnookLocalConflictSource,
+} from "./notesnook-local-conflict-projection.js";
 
 // ---------------------------------------------------------------------------
 // Options, narrow types, and cleanup hook.
@@ -167,6 +172,14 @@ export interface NotesnookLiveCoreHandle {
   readonly localWrite?: NotesnookLiveWriteCapability;
   /** Separately named explicit remote synchronization capability. */
   readonly remoteSync?: NotesnookLiveRemoteSyncCapability;
+  /**
+   * Separately named Stage 5 read-only local-conflict observer; absent on
+   * legacy auth-only fakes and on databases whose `notes` slot does not
+   * expose the structural `conflicted.ids()` / `note(id)` shape required
+   * for safe observation.  Distinct from `readOnly` / `localWrite` /
+   * `remoteSync`: the conflict observer cannot reach any other surface.
+   */
+  readonly localConflictObserver?: NotesnookLocalConflictObserver;
 }
 
 /**
@@ -315,6 +328,16 @@ export async function createNotesnookLiveCoreFactory(
       localWrite === undefined || sharedCoordinator === undefined
         ? undefined
         : createLiveRemoteSyncCapability(() => sharedCoordinator!.requestSync(), ensureOpen);
+    // Stage 5: the local-conflict observer is built from the same opened
+    // database but only over the structural `notes.conflicted.ids()` /
+    // `notes.note(id)` shape.  It is optional so legacy injected auth-only
+    // fakes (and any database whose `notes` slot is absent or malformed)
+    // remain valid, and it never widens `readOnly` / `localWrite` /
+    // `remoteSync`.
+    const localConflictObserver =
+      normalized.injectedModule === undefined
+        ? buildLiveLocalConflictObserver(db as unknown as object, ensureOpen)
+        : buildOptionalLiveLocalConflictObserver(db as unknown as object, ensureOpen);
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -345,6 +368,7 @@ export async function createNotesnookLiveCoreFactory(
       ...(readOnly === undefined ? {} : { readOnly }),
       ...(localWrite === undefined ? {} : { localWrite }),
       ...(remoteSync === undefined ? {} : { remoteSync }),
+      ...(localConflictObserver === undefined ? {} : { localConflictObserver }),
     });
 
     return handle;
@@ -587,6 +611,72 @@ async function safeInitDatabase(database: NotesnookLiveDatabase): Promise<void> 
     }
   } catch {
     throw factoryError("Notesnook Database.init failed");
+  }
+}
+
+function buildLiveLocalConflictObserver(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictObserver {
+  const source = readLocalConflictSource(database, true);
+  if (source === undefined) throw factoryError("local conflict observer surface is unavailable");
+  const observer = createNotesnookLocalConflictObserver(source);
+  return Object.freeze({
+    listLocalConflicts: async () => {
+      ensureOpen();
+      return observer.listLocalConflicts();
+    },
+    observeNoteConflict: async (id: string) => {
+      ensureOpen();
+      return observer.observeNoteConflict(id);
+    },
+  });
+}
+
+function buildOptionalLiveLocalConflictObserver(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictObserver | undefined {
+  try {
+    return buildLiveLocalConflictObserver(database, ensureOpen);
+  } catch {
+    return undefined;
+  }
+}
+
+function readLocalConflictSource(
+  database: object,
+  required: boolean,
+): NotesnookLocalConflictSource | undefined {
+  try {
+    const notes = Reflect.get(database, "notes");
+    if (notes === undefined || notes === null) {
+      if (required) throw factoryError("local conflict notes slot is unavailable");
+      return undefined;
+    }
+    if (typeof notes !== "object") {
+      throw factoryError("local conflict notes slot is unavailable");
+    }
+    const conflicted = Reflect.get(notes, "conflicted");
+    if (conflicted === null || typeof conflicted !== "object") {
+      throw factoryError("local conflict selector is unavailable");
+    }
+    const ids = Reflect.get(conflicted, "ids");
+    const note = Reflect.get(notes, "note");
+    if (typeof ids !== "function" || typeof note !== "function") {
+      throw factoryError("local conflict observer methods are unavailable");
+    }
+    const selector = Object.freeze({
+      ids: () => Reflect.apply(ids, conflicted, []),
+    });
+    const sourceNotes = Object.freeze({
+      conflicted: selector,
+      note: (id: string) => Reflect.apply(note, notes, [id]),
+    });
+    return Object.freeze({ notes: sourceNotes }) as NotesnookLocalConflictSource;
+  } catch (error) {
+    if (isFactoryError(error)) throw error;
+    throw factoryError("local conflict observer surface is unavailable");
   }
 }
 

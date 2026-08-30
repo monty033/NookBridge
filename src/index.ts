@@ -325,5 +325,37 @@ export {
   runSyncCommand,
 } from "./core/notesnook-sync-admin.js";
 
+// Stage 5 local-state conflict-marker observer.  This is a separately named,
+// read-only projection and operator command; it does not expose the raw
+// database, synchronization, mutation, or conflict-resolution surfaces.
+export type {
+  NotesnookLocalConflictMetadata,
+  NotesnookLocalConflictObservation,
+  NotesnookLocalConflictObserver,
+  NotesnookLocalConflictSelector,
+  NotesnookLocalConflictSource,
+} from "./core/notesnook-local-conflict-projection.js";
+export {
+  createNotesnookLocalConflictObserver,
+  isNotesnookLocalConflictProjectionError,
+  NotesnookLocalConflictProjectionError,
+} from "./core/notesnook-local-conflict-projection.js";
+export type {
+  ConflictObservationReport,
+  ConflictSubcommand,
+  NotesnookLocalConflictRuntime,
+  ParseConflictCommandResult,
+  ParsedConflictCommand,
+  RunConflictCommandOptions,
+  RunConflictCommandResult,
+} from "./core/notesnook-conflict-admin.js";
+export {
+  formatConflictCommandResult,
+  formatConflictHelp,
+  LIVE_CONFLICT_ENABLE_ENV,
+  parseConflictCommand,
+  runConflictCommand,
+} from "./core/notesnook-conflict-admin.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
