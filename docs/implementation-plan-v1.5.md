@@ -1483,7 +1483,7 @@ Maintain `docs/licensing.md` separately with upstream license inventory and the 
 
 ## 13.7 Current implementation status and Codex handoff
 
-**Status date:** 2026-08-28 (America/New_York)
+**Status date:** 2026-08-30 (America/New_York)
 
 The project has completed and merged the Stage 2 live-auth hardening slice and
 its production compatibility fixes at `22294fe` (`fix: complete live Notesnook
@@ -1639,6 +1639,33 @@ Gate 3 is closed for the current fetch-only/read-only POC with that conflict
 observability limitation explicitly recorded. The next artifact is the
 Stage 4 safe-write plan in `docs/stage-4-write-plan.md`; no write-capable
 implementation or live write operation is authorized by this closeout.
+
+### Stage 5 local-state conflict observer — offline-prepared
+
+On 2026-08-30, the first Stage 5 vertical slice added a separately named,
+read-only local conflict projection over only `notes.conflicted.ids()` and
+`notes.note(id)`. It returns bounded frozen metadata and a categorical
+`conflicted=true` observation with strict identifier and own-field/identity
+checks. Malformed or hostile upstream values are normalized without bodies,
+raw errors, or database exposure.
+
+The gated operator surface is:
+
+```text
+nookctl conflicts help
+nookctl conflicts list
+nookctl conflicts observe --title <exact-title>
+```
+
+Help remains ungated. Observation commands require the exact
+`NOOKBRIDGE_ENABLE_LIVE_SYNC=1` opt-in and reject credential, body, ID,
+revision, force, and sync-mode carriers before runtime construction. The
+runtime forwards only the separately named observer; the command never invokes
+sync, mutation, conflict resolution, transport, or authentication and emits
+only categorical output. Focused Stage 5 projection/CLI tests pass **53/53**;
+typecheck, lint, format check, and build pass. A full native SQLite-dependent
+matrix and the operator-local two-device live canary remain pending after a
+native binding is available; no live conflict result is claimed here.
 
 ### Stage 3 gate status
 

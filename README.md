@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; the two-device live canary is still pending.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client.
 
 ## What this project is
 
@@ -41,6 +41,28 @@ reported it as local-committed and remote-pending, then used the separate
 explicit `nookctl write sync` command to report `remote: synced`, `pending: no`,
 and `attempts: 1`. The note was verified on Android. This receipt covers this
 operator-local canary only.
+
+## Stage 5 local conflict observation (offline-prepared)
+
+The read-only local conflict projection is exposed through a separate
+`nookctl conflicts` tree:
+
+```text
+nookctl conflicts help
+nookctl conflicts list
+nookctl conflicts observe --title <exact-title>
+```
+
+Help is ungated. `list` and `observe` require the exact
+`NOOKBRIDGE_ENABLE_LIVE_SYNC=1` opt-in, reject credential/body/ID/revision and
+sync-mode carriers before runtime construction, and emit only categorical
+`observed`/`not-observed` results. The projection reads only local
+`notes.conflicted.ids()` plus `notes.note(id)` metadata; it retains bounded
+IDs internally for title resolution and identity binding, but the CLI never
+emits IDs. It never syncs, mutates, resolves conflicts, exposes bodies, or
+prints upstream errors.
+A fresh fetch-only client is expected to return no local conflict marker. The
+two-device live conflict canary remains a separate pending gate.
 
 All stages follow the same rule: **do not start the next stage until the
 current stage has a repeatable automated test and a written pass/fail result**.

@@ -119,6 +119,9 @@ export async function createProductionLiveLoginRuntime(
       ...(liveHandle.readOnly === undefined ? {} : { readOnly: liveHandle.readOnly }),
       ...(liveHandle.localWrite === undefined ? {} : { localWrite: liveHandle.localWrite }),
       ...(liveHandle.remoteSync === undefined ? {} : { remoteSync: liveHandle.remoteSync }),
+      ...(liveHandle.localConflictObserver === undefined
+        ? {}
+        : { localConflictObserver: liveHandle.localConflictObserver }),
     };
   } catch {
     lifecycle.close();
