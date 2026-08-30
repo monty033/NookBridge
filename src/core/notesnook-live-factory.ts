@@ -55,6 +55,14 @@ import {
   hasLiveWriteSurface,
   projectLiveDatabaseToWriteCapability,
 } from "./notesnook-live-write-capability.js";
+import {
+  createLiveRemoteSyncCapability,
+  createLiveRemoteSyncExecutor,
+  type NotesnookLiveRemoteSyncCapability,
+} from "./notesnook-live-remote-sync.js";
+import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
+import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
+
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,8 @@ export interface NotesnookLiveCoreHandle {
    * acquire a write path.  The raw `Database` is not reachable through it.
    */
   readonly localWrite?: NotesnookLiveWriteCapability;
+  /** Separately named explicit remote synchronization capability. */
+  readonly remoteSync?: NotesnookLiveRemoteSyncCapability;
 }
 
 /**
@@ -187,6 +197,8 @@ export type NotesnookLiveFactoryOptions = Readonly<{
   injectedModule?: NotesnookRealCoreModule;
   /** Shared closed state owned by the production runtime. */
   lifecycle?: NotesnookLiveCoreLifecycle;
+  /** State-store seam supplied by the owning production runtime. */
+  syncStateStore?: SyncMetadataStateStore;
 }>;
 
 /** Shared lifecycle across the runtime, narrow handle, and providers. */
@@ -284,10 +296,25 @@ export async function createNotesnookLiveCoreFactory(
     // Stage 4: the write capability is built from a separate projection of
     // the same opened database.  It is optional so legacy injected auth-only
     // fakes remain valid, and it never widens `readOnly`.
+    let sharedCoordinator: SyncCoordinator | undefined;
     const localWrite =
       normalized.injectedModule === undefined || hasLiveWriteSurface(db)
-        ? projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen)
+        ? (() => {
+            sharedCoordinator = new SyncCoordinator({
+              executor: createLiveRemoteSyncExecutor(db as unknown as object, ensureOpen),
+              ...(normalized.syncStateStore === undefined
+                ? {}
+                : { stateStore: normalized.syncStateStore }),
+            });
+            return projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
+              coordinator: sharedCoordinator,
+            });
+          })()
         : undefined;
+    const remoteSync =
+      localWrite === undefined || sharedCoordinator === undefined
+        ? undefined
+        : createLiveRemoteSyncCapability(() => sharedCoordinator!.requestSync(), ensureOpen);
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -317,6 +344,7 @@ export async function createNotesnookLiveCoreFactory(
       cleanup,
       ...(readOnly === undefined ? {} : { readOnly }),
       ...(localWrite === undefined ? {} : { localWrite }),
+      ...(remoteSync === undefined ? {} : { remoteSync }),
     });
 
     return handle;
@@ -335,6 +363,7 @@ type NormalizedFactoryOptions = Readonly<{
   onCleanup: () => void | Promise<void>;
   injectedModule?: NotesnookRealCoreModule;
   lifecycle: NotesnookLiveCoreLifecycle;
+  syncStateStore?: SyncMetadataStateStore;
 }>;
 
 function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
@@ -347,6 +376,7 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
     const onCleanup = candidate.onCleanup;
     const injectedModule = candidate.injectedModule;
     const lifecycle = candidate.lifecycle;
+    const syncStateStore = candidate.syncStateStore;
     const validatedSetup = validateDatabaseSetupOptions(setup);
     if (typeof onCleanup !== "function") {
       throw factoryError("onCleanup hook is required");
@@ -363,6 +393,11 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
         throw factoryError("invalid Notesnook live runtime lifecycle");
       }
     }
+    if (syncStateStore !== undefined) {
+      if (typeof syncStateStore !== "object" || syncStateStore === null) {
+        throw factoryError("invalid sync metadata state store");
+      }
+    }
     return {
       setup: validatedSetup,
       onCleanup: onCleanup as () => void | Promise<void>,
@@ -371,6 +406,9 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
         : { injectedModule: injectedModule as NotesnookRealCoreModule }),
       lifecycle:
         lifecycle === undefined ? createLifecycle() : (lifecycle as NotesnookLiveCoreLifecycle),
+      ...(syncStateStore === undefined
+        ? {}
+        : { syncStateStore: syncStateStore as SyncMetadataStateStore }),
     };
   } catch (error) {
     if (isFactoryError(error) || isNotesnookAdapterError(error)) throw error;

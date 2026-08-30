@@ -35,8 +35,9 @@ import { bindNotesnookWriteRuntime } from "./notesnook-write-wiring.js";
 import {
   createNotesnookLocalWriteComposition,
   type NotesnookLocalWriteComposition,
+  type NotesnookPendingSyncHandle,
 } from "./notesnook-write-composition.js";
-import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
+import { SyncCoordinator, type SyncExecutor } from "./notesnook-sync-coordinator.js";
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 
 /** The five collection slots the write chain consumes. */
@@ -116,7 +117,10 @@ function projectWriteRuntime(database: object): object {
  * marker can only ever be cleared by a future slice that wires a real
  * executor.  Local commits are never reported as remotely synchronised.
  */
-export function createLiveLocalWriteComposition(database: object): NotesnookLocalWriteComposition {
+export function createLiveLocalWriteComposition(
+  database: object,
+  options: LiveWriteCompositionOptions = {},
+): NotesnookLocalWriteComposition {
   const seam = bindNotesnookWriteRuntime(
     projectWriteRuntime(database) as Parameters<typeof bindNotesnookWriteRuntime>[0],
   );
@@ -124,13 +128,21 @@ export function createLiveLocalWriteComposition(database: object): NotesnookLoca
     source: seam,
     codec: DETERMINISTIC_MARKDOWN_CODEC,
   });
-  const coordinator = new SyncCoordinator({
-    // No live remote executor exists in this slice.  Refusing here keeps
-    // pending work pending rather than fabricating a remote receipt.
-    executor: () => ({ status: "failed" as const }),
-  });
+  const coordinator =
+    options.coordinator ??
+    new SyncCoordinator({
+      // The standalone local composition remains safe by default.  A live
+      // caller supplies the shared coordinator below; this fallback never
+      // fabricates a remote receipt.
+      executor: (() => ({ status: "failed" as const })) satisfies SyncExecutor,
+    });
   return createNotesnookLocalWriteComposition({ adapter, coordinator });
 }
+
+/** Options for sharing one coordinator between local writes and explicit sync. */
+export type LiveWriteCompositionOptions = Readonly<{
+  readonly coordinator?: NotesnookPendingSyncHandle;
+}>;
 
 /**
  * Project a live `Database` into the separately named write capability.
@@ -142,8 +154,9 @@ export function createLiveLocalWriteComposition(database: object): NotesnookLoca
 export function projectLiveDatabaseToWriteCapability(
   database: object,
   ensureOpen: () => void,
+  options: LiveWriteCompositionOptions = {},
 ): NotesnookLiveWriteCapability {
-  const composition = createLiveLocalWriteComposition(database);
+  const composition = createLiveLocalWriteComposition(database, options);
   return Object.freeze({
     createNote: async (command: Parameters<NotesnookLiveWriteCapability["createNote"]>[0]) => {
       ensureOpen();

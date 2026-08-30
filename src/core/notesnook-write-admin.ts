@@ -54,6 +54,7 @@ import {
   type NotesnookWriteErrorCode,
 } from "./notesnook-write-contract.js";
 import type { NotesnookLocalWriteResult } from "./notesnook-write-composition.js";
+import type { NotesnookLiveRemoteSyncCapability } from "./notesnook-live-remote-sync.js";
 
 // ---------------------------------------------------------------------------
 // Public gate name — deliberately the SAME non-secret opt-in the Stage 3
@@ -125,7 +126,7 @@ const FORBIDDEN_BODY_FLAGS: readonly string[] = [
 // Parsed command shapes.
 // ---------------------------------------------------------------------------
 
-export type WriteSubcommand = "help" | "create" | "append" | "update";
+export type WriteSubcommand = "help" | "create" | "append" | "update" | "sync";
 
 export type ParsedWriteCommand =
   | Readonly<{ kind: "help"; subcommand: "help" }>
@@ -149,7 +150,8 @@ export type ParsedWriteCommand =
       /** Exactly one allowlisted boolean metadata field. */
       field: "pinned" | "favorite";
       value: boolean;
-    }>;
+    }>
+  | Readonly<{ kind: "sync"; subcommand: "sync" }>;
 
 export type ParseWriteCommandResult =
   | Readonly<{ kind: "parsed"; command: ParsedWriteCommand }>
@@ -169,11 +171,23 @@ export type WriteAcceptanceReport = Readonly<{
   readonly pendingCount: number;
 }>;
 
+/** Bounded categorical result for the explicit remote-sync command. */
+export type WriteSyncReport = Readonly<{
+  readonly status: "idle" | "synced" | "failed";
+  readonly pendingSync: boolean;
+  readonly attempts: number;
+}>;
+
 export type RunWriteCommandResult =
   | Readonly<{
       kind: "report";
       subcommand: "create" | "append" | "update";
       report: WriteAcceptanceReport;
+    }>
+  | Readonly<{
+      kind: "sync-report";
+      subcommand: "sync";
+      report: WriteSyncReport;
     }>
   | Readonly<{ kind: "help"; text: string }>
   | Readonly<{ kind: "error"; message: string; exitCode: 2 | 3 }>;
@@ -213,6 +227,7 @@ export interface NotesnookLiveWriteCapability {
 /** Runtime seam: the capability plus its owned teardown. */
 export type NotesnookLiveWriteRuntime = Readonly<{
   capability: NotesnookLiveWriteCapability;
+  remoteSync?: NotesnookLiveRemoteSyncCapability;
   cleanup?: () => void | Promise<void>;
 }>;
 
@@ -340,6 +355,10 @@ export function parseWriteCommand(
         return parseAppend(stringArgv);
       case "update":
         return parseUpdate(stringArgv);
+      case "sync":
+        return stringArgv.length === 1
+          ? { kind: "parsed", command: { kind: "sync", subcommand: "sync" } }
+          : invalidParseInput();
       default:
         return {
           kind: "error",
@@ -507,6 +526,7 @@ export function formatWriteHelp(): string {
     "  nookctl write append --note-id <id> --expect-revision <token>",
     "  nookctl write update --note-id <id> --expect-revision <token>",
     "                       (--set-pinned <true|false> | --set-favorite <true|false>)",
+    "  nookctl write sync                   request explicit remote synchronization",
     "  nookctl write help                 show this help",
     "",
     "Acceptance content:",
@@ -603,8 +623,8 @@ function normalizeRunWriteOptions(options: unknown): NormalizedWriteOptions {
  *   4. gate check — a missing or non-`1` opt-in returns exit code 2 and
  *      NEVER calls `createWriteRuntime`;
  *   5. construct the runtime;
- *   6. dispatch exactly one local write;
- *   7. read the pending count;
+ *   6. dispatch exactly one local write or explicit remote sync;
+ *   7. read bounded outcome metadata;
  *   8. always await cleanup.
  */
 export async function runWriteCommand(
@@ -659,7 +679,19 @@ export async function runWriteCommand(
   let outcome: RunWriteCommandResult;
   let cleanupFailed = false;
   try {
-    outcome = await dispatchWrite(runtime.capability, command);
+    if (command.kind === "sync") {
+      if (runtime.remoteSync === undefined) {
+        outcome = {
+          kind: "error",
+          exitCode: 2,
+          message: "nookctl write sync: remote synchronization capability is unavailable",
+        };
+      } else {
+        outcome = await dispatchSync(runtime.remoteSync);
+      }
+    } else {
+      outcome = await dispatchWrite(runtime.capability, command);
+    }
   } catch {
     outcome = {
       kind: "error",
@@ -667,8 +699,13 @@ export async function runWriteCommand(
       message: `nookctl write ${command.subcommand}: local write failed`,
     };
   } finally {
-    const cleanup = runtime.cleanup;
-    if (typeof cleanup === "function") {
+    let cleanup: (() => void | Promise<void>) | undefined;
+    try {
+      cleanup = runtime.cleanup;
+    } catch {
+      cleanupFailed = true;
+    }
+    if (!cleanupFailed && typeof cleanup === "function") {
       try {
         await cleanup();
       } catch {
@@ -691,7 +728,7 @@ export async function runWriteCommand(
  */
 async function dispatchWrite(
   capability: NotesnookLiveWriteCapability,
-  command: Exclude<ParsedWriteCommand, { kind: "help" }>,
+  command: Exclude<ParsedWriteCommand, { kind: "help" | "sync" }>,
 ): Promise<RunWriteCommandResult> {
   let result: NotesnookLocalWriteResult;
   try {
@@ -784,6 +821,51 @@ async function dispatchWrite(
   };
 }
 
+/** Dispatch only the separately named explicit remote-sync capability. */
+async function dispatchSync(
+  capability: NotesnookLiveRemoteSyncCapability,
+): Promise<RunWriteCommandResult> {
+  let result: unknown;
+  try {
+    result = await capability.requestSync();
+  } catch {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl write sync: synchronization failed",
+    };
+  }
+  if (!isPlainRecord(result)) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl write sync: synchronization result was not recognised",
+    };
+  }
+  const status = readOwn(result, "status");
+  const pendingSync = readOwn(result, "pendingSync");
+  const attempts = readOwn(result, "attempts");
+  if (
+    (status !== "idle" && status !== "synced" && status !== "failed") ||
+    typeof pendingSync !== "boolean" ||
+    typeof attempts !== "number" ||
+    !Number.isSafeInteger(attempts) ||
+    attempts < 0 ||
+    attempts > 8
+  ) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl write sync: synchronization result was not recognised",
+    };
+  }
+  return {
+    kind: "sync-report",
+    subcommand: "sync",
+    report: Object.freeze({ status, pendingSync, attempts }),
+  };
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -857,6 +939,13 @@ export function formatWriteCommandResult(result: RunWriteCommandResult): string 
         "  local:   committed",
         "  remote:  pending (explicit synchronization required)",
         `  pending: ${result.report.pendingCount}`,
+      ].join("\n");
+    case "sync-report":
+      return [
+        `nookctl write sync: ${result.report.status}`,
+        `  remote:  ${result.report.status}`,
+        `  pending: ${result.report.pendingSync ? "yes" : "no"}`,
+        `  attempts: ${result.report.attempts}`,
       ].join("\n");
   }
 }

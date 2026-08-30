@@ -1229,13 +1229,6 @@ describe("Stage 4 operator write source boundaries", () => {
   const codeOnly = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  it("the operator module never triggers remote synchronization", () => {
-    const source = codeOnly(readSource("src/core/notesnook-write-admin.ts"));
-    expect(source).not.toMatch(/\brequestSync\s*\(/);
-    expect(source).not.toMatch(/type:\s*"(full|send)"/);
-    expect(source).not.toContain("requestSync");
-  });
-
   it("the write capability module imports no Notesnook package", () => {
     const source = codeOnly(readSource("src/core/notesnook-live-write-capability.ts"));
     expect(source).not.toContain("@notesnook/");

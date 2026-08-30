@@ -31,6 +31,7 @@ import {
   type NotesnookLiveCoreLifecycle,
   type NotesnookLiveCoreHandle,
 } from "../core/notesnook-live-factory.js";
+import { PersistentSyncMetadataStateStore } from "../core/notesnook-sync-state-store.js";
 import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.js";
 import type { LiveLoginRuntime } from "./admin-command.js";
 
@@ -79,6 +80,9 @@ export async function createProductionLiveLoginRuntime(
       setup,
       onCleanup: () => undefined,
       lifecycle,
+      // The shared coordinator created by the live factory persists only
+      // bounded queue metadata through the already-open encrypted store.
+      syncStateStore: new PersistentSyncMetadataStateStore(storage),
       ...(normalized.injectedModule === undefined
         ? {}
         : { injectedModule: normalized.injectedModule }),
@@ -114,6 +118,7 @@ export async function createProductionLiveLoginRuntime(
       },
       ...(liveHandle.readOnly === undefined ? {} : { readOnly: liveHandle.readOnly }),
       ...(liveHandle.localWrite === undefined ? {} : { localWrite: liveHandle.localWrite }),
+      ...(liveHandle.remoteSync === undefined ? {} : { remoteSync: liveHandle.remoteSync }),
     };
   } catch {
     lifecycle.close();

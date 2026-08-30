@@ -208,12 +208,34 @@ export class PersistentStorage implements IStorage {
   }
 
   async read<T>(key: string, _isArray?: boolean): Promise<T | undefined> {
+    return this.readSync<T>(key);
+  }
+
+  /**
+   * Synchronous metadata read for restart-safe coordinators.
+   *
+   * This is deliberately a tiny additive seam: it uses the same encrypted
+   * SQLite table and decoder as the async IStorage surface, without changing
+   * IStorage or creating a second plaintext state channel.
+   */
+  readSync<T>(key: string): T | undefined {
     const row = this.sq.get<{ value: string; format: "json" | "text" }>(
       `SELECT value, format FROM kv WHERE key = ?`,
       [key],
     );
     if (!row) return undefined;
     return decodeValue(row.value, row.format) as T | undefined;
+  }
+
+  /** Synchronous metadata write backed by the existing encrypted SQLite KV table. */
+  writeSync<T>(key: string, data: T): void {
+    const format = defaultFormat(data);
+    const encoded = encodeValue(data, format);
+    if (typeof encoded !== "string") throw new Error("storage value is not serializable");
+    this.sq.run(
+      `INSERT INTO kv(key, value, format) VALUES(?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, format=excluded.format`,
+      [key, encoded, format],
+    );
   }
 
   async readMulti<T>(keys: string[]): Promise<[string, T][]> {
