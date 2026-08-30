@@ -894,8 +894,8 @@ describe("nookctl write — no auto-sync and pending semantics", () => {
     const composition = createLiveLocalWriteComposition(fake.db);
     await composition.createNote({ title: "Acceptance", content: "body" });
     const remote = await composition.requestSync();
-    // No live remote executor exists yet: the request must not report a
-    // remote success, and the pending marker must survive.
+    // The standalone local composition has no remote executor: the request
+    // must not report a remote success, and the pending marker must survive.
     expect(remote.remoteSynced).toBe(false);
     expect(remote.status).toBe("failed");
     expect(composition.pendingSnapshot().pending.length).toBe(1);

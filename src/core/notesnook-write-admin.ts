@@ -38,10 +38,10 @@
  *     operation category and the bounded outcome booleans plus a pending
  *     count.  It never contains a note id, revision token, title, body,
  *     path, upstream message, or cause.
- *   - **No auto-sync.**  The runner never calls `requestSync()`.  A
- *     successful local write is reported as `remote: pending`, never as
+ *   - **No auto-sync.**  The local write dispatch never calls `requestSync()`.
+ *     A successful local write is reported as `remote: pending`, never as
  *     remotely synchronised.  Remote execution stays a separate explicit
- *     step; this slice ships no live remote executor.
+ *     step through the `remoteSync` capability.
  *   - **Cleanup.**  When the runtime factory supplies a `cleanup`, it is
  *     awaited on every path (success, categorical failure, unexpected
  *     throw).  A cleanup failure is itself categorical (exit code 3).
@@ -200,9 +200,9 @@ export type RunWriteCommandResult =
 // runtime's `readOnly` surface: an existing read-only caller cannot acquire
 // a write path by accident, because nothing projects one type into the other.
 //
-// `requestSync` is deliberately ABSENT.  This slice ships no live remote
-// executor, so exposing a remote trigger here would let the operator path
-// claim a remote outcome it cannot prove.
+// `requestSync` is deliberately ABSENT from the local-write capability.
+// Remote execution is exposed only through the separately named `remoteSync`
+// capability, so local-write results cannot claim a remote outcome.
 // ---------------------------------------------------------------------------
 
 export interface NotesnookLiveWriteCapability {
@@ -764,8 +764,9 @@ async function dispatchWrite(
   }
 
   // Validate the relayed outcome flags rather than trusting them.  A
-  // capability that claims a remote sync is rejected: this slice has no
-  // live remote executor, so `remoteSynced: true` cannot be proven here.
+  // capability that claims a remote sync is rejected: local write dispatch
+  // must never report `remoteSynced: true`; explicit remote execution is
+  // handled by the separately named `remoteSync` capability.
   if (
     !isPlainRecord(result) ||
     readOwn(result, "operation") !== command.subcommand ||

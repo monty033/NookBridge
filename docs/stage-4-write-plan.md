@@ -1,6 +1,6 @@
 # Stage 4 — Safe Writes and Bidirectional Sync Plan
 
-**Status:** Active implementation plan. The pure write contract, local mutation adapter, write-side runtime wiring, metadata-only synchronization coordinator, local-write composition seam, gated operator acceptance path, and explicit remote-sync executor are implemented in bounded slices. The executor and `nookctl write sync` path have offline proof only; no live-account/remote sync proof is claimed.
+**Status:** Active implementation plan. The pure write contract, local mutation adapter, write-side runtime wiring, metadata-only synchronization coordinator, local-write composition seam, gated operator acceptance path, and explicit remote-sync executor are implemented in bounded slices. The executor has offline proof plus one operator-local live canary; broader live-account coverage remains out of scope.
 
 **Goal:** Add narrowly guarded create, append, and update behavior to the proven Notesnook client while preserving revision safety, bounded synchronization, and an auditable separation between local commit and remote sync.
 
@@ -19,8 +19,8 @@
 - **PR #27 candidate — gated operator acceptance path:** adds a separately named `nookctl write` tree behind the exact `NOOKBRIDGE_ENABLE_LIVE_SYNC=1` opt-in. It projects only the five pinned Notesnook mutation collections into the reviewed write chain, uses fixed non-secret acceptance content, reports local commit separately from remote-pending state, and never exposes raw IDs, bodies, credentials, or upstream causes.
 - **PR #28 — logger-path privacy hardening:** merged at `d7155ce`. It constructs the production write runtime without an injected logger so persistent-storage path records remain suppressed by the warn-level fallback. The black-box regression checks built CLI output and cleanup rather than source text.
 - **Current remote-executor slice:** adds an encrypted, restart-safe metadata state store under the fixed `nookbridge:sync-coordinator-state:v1` key; shares one bounded `SyncCoordinator` between local-write composition and a separately named `NotesnookLiveRemoteSyncCapability`; captures only the bound `syncer.start` method; and invokes it internally with exactly `{ type: "full" }`.
-- **Offline receipts for the remote-executor slice:** 15/15 focused executor/state/command tests, 101/101 targeted Stage 3/4 boundary tests, and 602/602 full tests across 23 files; strict typecheck, lint, format check, build, and `just check` pass. Coverage includes hostile getters, own-method binding, true/false/throw mapping, lifecycle closure, hostile rejection normalization, result canonicalization, encrypted restart recovery, malformed/extra-field metadata rejection, hostile cleanup handling, pending-then-explicit-sync, single-flight behavior, parser/gate/carrier rejection, no-auto-sync local commands, categorical output, and the unchanged fetch-only boundary. These are offline receipts only; no live account or remote-sync proof is claimed.
-- **Current slice status:** the explicit remote executor and `nookctl write sync` command are implemented and verified offline; PR #29 is open. Live-account canaries and the local-state conflict observer remain deferred.
+- **Offline and live receipts for the current Stage 4 slice:** 15/15 focused remote-executor/state/command tests, 101/101 targeted Stage 3/4 boundary tests, and 602/602 full tests across 23 files; strict typecheck, lint, format check, build, and `just check` passed. On 2026-08-30, an operator-local canary using an existing authenticated state reported `local-committed` with `remote: pending`, then explicit `nookctl write sync` reported `remote: synced`, `pending: no`, and `attempts: 1`; the user verified the note on Android. No broader live-account coverage is claimed.
+- **Current slice status:** the explicit remote executor and `nookctl write sync` command are implemented and verified offline plus the operator-local canary; PR #29 is open. The local-state conflict observer remains deferred.
 
 ## Current bounded slice — compose local writes with pending sync metadata
 
@@ -36,7 +36,7 @@ Required boundaries:
 - required returned fields and markers are own fields; IDs use the strict bounded identifier rule;
 - public results and snapshots are fresh, null-prototype, frozen bounded copies; failures remain categorical and chain-free;
 - offline tests must cover pending outcomes, hostile boundary inputs, queue failures, and explicit remote outcomes before any operator-local live canary is considered;
-- the live write canary remains a later gate after this seam, the offline matrix, and independent security review pass.
+- the live write canary is now recorded above; keep it as an operator-local receipt and do not treat it as broader live-account coverage.
 
 ## Current bounded slice — explicit remote executor
 
@@ -48,7 +48,7 @@ This slice adds the smallest operator-controlled bridge from the metadata-only c
 - `nookctl write sync` is a separate explicit command. It accepts no note IDs, titles, bodies, flags, or credential carriers, requires `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`, and returns only bounded categorical status/attempt metadata;
 - `nookctl sync read-only` remains unchanged and fetch-only;
 - offline coverage proves executor binding/options/result mapping, encrypted restart recovery, malformed-state rejection, pending-then-explicit-sync, single-flight behavior, parser/gate/carrier rejection, no-auto-sync local writes, redacted output, and the unchanged read-only boundary;
-- this slice has no live-account or remote transport proof. Gate 4 canaries remain operator-local and deferred until after independent review.
+- this slice has one operator-local live canary receipt as recorded above; it has no broader live-account or transport coverage.
 
 ## Non-negotiable boundaries
 

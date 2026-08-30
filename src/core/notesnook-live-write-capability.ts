@@ -19,10 +19,10 @@
  *     with its production inputs.
  *   - The published capability exposes exactly `createNote`, `appendNote`,
  *     `updateNote`, and `pendingSnapshot`.  `requestSync` is intentionally
- *     NOT exposed: this slice ships no live remote executor, so a remote
- *     trigger here could only ever produce an unprovable remote claim.  The
- *     injected coordinator executor therefore refuses every remote attempt,
- *     and pending work stays pending.
+ *     NOT exposed: this local capability must not trigger remote execution.
+ *     When no shared coordinator is supplied, its fallback executor refuses
+ *     remote attempts and pending work stays pending; production supplies the
+ *     shared coordinator to the separately named remote capability.
  *   - The capability is frozen and lifecycle-guarded: once the owning runtime
  *     has been closed, every method fails categorically instead of touching a
  *     torn-down database.
@@ -113,9 +113,9 @@ function projectWriteRuntime(database: object): object {
 /**
  * Build the local-write composition for a live database.
  *
- * The coordinator's executor refuses every remote attempt, so a pending
- * marker can only ever be cleared by a future slice that wires a real
- * executor.  Local commits are never reported as remotely synchronised.
+ * The standalone local composition's fallback executor refuses remote
+ * attempts, so a pending marker remains pending.  Production supplies the
+ * shared coordinator to the separately named remote capability.
  */
 export function createLiveLocalWriteComposition(
   database: object,

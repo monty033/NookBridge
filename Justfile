@@ -55,3 +55,11 @@ live-status:
 
 live-sync:
     NOOKBRIDGE_ENABLE_LIVE_SYNC=1 NOOKBRIDGE_STATE_DIR="{{live-state}}" {{nix}} node dist/cli.js sync read-only
+
+# Gated live Stage 4 canary: local write only; remote stays pending until `live-write-sync`.
+live-write-create:
+    NOOKBRIDGE_ENABLE_LIVE_SYNC=1 NOOKBRIDGE_STATE_DIR="{{live-state}}" {{nix}} node dist/cli.js write create --title "NookBridge Stage 4 live canary"
+
+# Explicit remote synchronization for the pending Stage 4 canary.
+live-write-sync:
+    NOOKBRIDGE_ENABLE_LIVE_SYNC=1 NOOKBRIDGE_STATE_DIR="{{live-state}}" {{nix}} node dist/cli.js write sync

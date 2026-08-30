@@ -253,7 +253,7 @@ async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Pro
  * The runtime exposes a separately named `localWrite` capability and
  * owns its own teardown; the runner awaits that teardown on every
  * path.  A successful write is reported as local-committed and
- * remote-pending; this command never triggers remote synchronization.
+ * remote-pending; local write dispatch never triggers remote synchronization.
  */
 async function runWrite(args: Args, _logger: ReturnType<typeof createLogger>): Promise<number> {
   const argv = args.writeArgs ?? [];

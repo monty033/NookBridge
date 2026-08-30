@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes are offline-verified and remain remote-pending.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Independent live conflict visibility is deferred until the later local-note editing phase.
 
 ## What this project is
 
@@ -31,10 +31,16 @@ On 2026-08-29, the title-based Vault-locked-note canary returned
 local-only fixture documenting why the phone's device-local conflict marker
 cannot be independently observed by a fresh fetch-only client. **Gate 3 is
 closed for the current read-only scope. Stage 4 safe-write implementation has
-under offline verification; no live write or remote-sync proof is claimed, and
-MCP work remains deferred.** The
-exact handoff and acceptance criteria are in
+offline verification plus one operator-local live canary; no broader live-account
+coverage is claimed, and MCP work remains deferred.** The exact handoff and
+acceptance criteria are in
 [`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
+
+On 2026-08-30, an operator-local Stage 4 canary created a disposable note,
+reported it as local-committed and remote-pending, then used the separate
+explicit `nookctl write sync` command to report `remote: synced`, `pending: no`,
+and `attempts: 1`. The note was verified on Android. This receipt covers this
+operator-local canary only.
 
 All stages follow the same rule: **do not start the next stage until the
 current stage has a repeatable automated test and a written pass/fail result**.
@@ -54,6 +60,7 @@ nookctl write help
 nookctl write create --title <disposable-title> [--notebook-id <id>]
 nookctl write append --note-id <id> --expect-revision <token>
 nookctl write update --note-id <id> --expect-revision <token> (--set-pinned <true|false> | --set-favorite <true|false>)
+nookctl write sync
 ```
 
 Use only a disposable title and state. Create/append use fixed acceptance
@@ -62,9 +69,9 @@ environment, logs, or chat. Credentials and MFA remain TTY-only and are never
 accepted by the write command. Output is categorical only: local commit,
 remote synchronization, pending state, and a bounded pending count.
 
-The current slice performs local writes only. It does **not** invoke remote
-sync, and successful writes are reported as `remote: pending` until a separate
-reviewed remote executor exists. The offline pre-flight is:
+Local create/append/update commands remain pending-only; the separate explicit
+`nookctl write sync` command executes remote synchronization behind the same
+opt-in gate. The offline pre-flight is:
 
 ```bash
 just check-stage4-operator-gate
@@ -128,8 +135,9 @@ remote-change restart visibility, clean teardown, and Vault-locked-note body
 refusal all have live receipts. PR #20 merged the deterministic local conflict
 fixture. Independent live conflict visibility is deliberately deferred until
 the bridge is editing notes locally; the phone UI observation is not an
-independent fetch-only receipt. The next bounded artifact is the Stage 4
-safe-write plan. Ignore generated `var/` state and keep credentials at the
+independent fetch-only receipt. The current bounded Stage 4 artifact is the
+safe-write and explicit remote-sync path; its operator-local canary is recorded
+above. Ignore generated `var/` state and keep credentials at the
 interactive TTY boundary.
 See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
 for the exact constraints and receipt.
