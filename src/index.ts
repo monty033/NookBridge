@@ -368,5 +368,18 @@ export {
   runConflictCommand,
 } from "./core/notesnook-conflict-admin.js";
 
+// Stage 5 Task 3 — isolated production service-runtime constructor.
+// The service consumes already-provisioned service-owned state and
+// exposes only the read-only database, the bounded title-only search
+// capability, and the idempotent cleanup hook.  No `Database`,
+// upstream `user` / `token` / `kv` slots, write surface, sync
+// surface, local-conflict observer, or auth provider factory is
+// reachable through this boundary.
+export type {
+  CreateProductionServiceRuntimeOptions,
+  ServiceRuntime,
+} from "./service/service-runtime.js";
+export { createProductionServiceRuntime } from "./service/service-runtime.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
