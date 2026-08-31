@@ -91,6 +91,17 @@ export {
   createDevelopmentFileKeyStore,
   type DevelopmentFileKeyStoreOptions,
 } from "./keystore/file-keystore.js";
+// Stage 5 production-safe systemd `LoadCredential=` backend.  The
+// daemon MUST NOT select the development-file backend; this factory
+// is the only production path.  The public credential label is
+// `NOOKBRIDGE_DB_KEY_LABEL` and the bounded max credential size is
+// `SYSTEMD_CREDENTIAL_MAX_BYTES`.
+export {
+  createSystemdCredentialKeyStore,
+  NOOKBRIDGE_DB_KEY_LABEL,
+  SYSTEMD_CREDENTIAL_MAX_BYTES,
+  type CreateSystemdCredentialKeyStoreOptions,
+} from "./keystore/systemd-credential-keystore.js";
 
 // Configuration + state-directory + lock plumbing.
 export type {
