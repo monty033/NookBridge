@@ -135,8 +135,8 @@ export function createSystemdCredentialKeyStore(
     if (
       typeof credentialsDirectory !== "string" ||
       credentialsDirectory.length === 0 ||
+      hasControlCharacter(credentialsDirectory) ||
       !isAbsolute(credentialsDirectory) ||
-      credentialsDirectory.includes("\0") ||
       credentialsDirectory.split("/").some((segment) => segment === "..")
     ) {
       // Missing or malformed credentialsDirectory: refuse without
@@ -169,6 +169,14 @@ export function createSystemdCredentialKeyStore(
     productionSafe: true,
     getDatabaseKey: () => cached,
   };
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 /**
@@ -341,8 +349,17 @@ function readOnce(credentialsDirectory: string, credentialName: string): string 
 function isPlainCredentialFilename(name: string): boolean {
   if (typeof name !== "string") return false;
   if (name.length === 0) return false;
-  // NUL is not matched by JavaScript's `\\s` character class but is
-  // rejected by the filesystem API, so reject it explicitly before join/open.
+  // Reject control characters (U+0000-U+001F and U+007F) categorically.
+  // Whitespace-based probes (e.g. /\s/) miss U+001F (US, Information
+  // Separator One) and U+007F (DEL); those characters survive the
+  // existing whitespace check and reach `join`, leaving a poisoned
+  // slot label the file system accepts.  The shared predicate below
+  // is the only authoritative control-character check; it must run
+  // before either the separator test or the absolute-path test.
+  if (hasControlCharacter(name)) return false;
+  // NUL is already covered by the predicate above but is called out
+  // explicitly because it is the one control character that does not
+  // round-trip cleanly through every terminal/encoding surface.
   if (name.includes("\0")) return false;
   // Whitespace of any kind is rejected.
   if (/\s/.test(name)) return false;

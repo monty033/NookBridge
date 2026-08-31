@@ -208,8 +208,60 @@ describe("Stage 5 strict service configuration", () => {
       expect(JSON.stringify(result)).not.toContain(VALID_FIXTURE.socketGroup);
     });
 
+    it("rejects control-bearing state and socket paths before normalization", () => {
+      const stateFile = writeJsonConfig(
+        "bad-state-control",
+        mutate({ stateDir: "/var/lib/nookbridge/\u0000canary" }),
+      );
+      const stateResult = loadServiceConfig(stateFile, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(stateResult.ok).toBe(false);
+      if (stateResult.ok) throw new Error("unreachable");
+      expect(stateResult.error.category).toBe("unsafe_state_dir");
+
+      const socketFile = writeJsonConfig(
+        "bad-socket-control",
+        mutate({ socketPath: "/run/nookbridge/nookbridge.sock\u001bcanary" }),
+      );
+      const socketResult = loadServiceConfig(socketFile, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(socketResult.ok).toBe(false);
+      if (socketResult.ok) throw new Error("unreachable");
+      expect(socketResult.error.category).toBe("invalid_socket_path");
+    });
+
     it("rejects relative socket paths", () => {
       const file = writeJsonConfig("bad-sock-rel", mutate({ socketPath: "nookbridge.sock" }));
+      const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error.category).toBe("invalid_socket_path");
+    });
+
+    it.each(["\u001f", "\u007f"])(
+      "rejects a socket path containing a non-trailing control character (U+%s)",
+      (control) => {
+        const file = writeJsonConfig(
+          "bad-sock-control-inline",
+          mutate({ socketPath: `/run/nookbridge/nookbridge.sock${control}canary` }),
+        );
+        const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("unreachable");
+        expect(result.error.category).toBe("invalid_socket_path");
+        // The canary suffix must never appear in the categorical error.
+        expect(JSON.stringify(result)).not.toContain("canary");
+      },
+    );
+
+    it("rejects a non-canonical socket path that resolves through .. traversal", () => {
+      // resolve() strips the .. segment, so /run/nookbridge/a/../b.sock
+      // is textually inside the allowlist but is NOT canonical form.
+      // The canonicalization check is the only way a hostile operator
+      // can be stopped from using a sibling service-owned root to land
+      // the socket.
+      const file = writeJsonConfig(
+        "bad-sock-canonical",
+        mutate({ socketPath: "/run/nookbridge/a/../b.sock" }),
+      );
       const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("unreachable");
@@ -430,6 +482,36 @@ describe("Stage 5 strict service configuration", () => {
   });
 });
 
+describe("loader path argument guard", () => {
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["empty string", ""],
+    ["relative path", "config.json"],
+    ["dot-relative path", "./config.json"],
+    ["parent-relative path", "../config.json"],
+    ["absolute non-canonical path", "/etc/../etc/hostname"],
+    ["absolute bare path with control U+0000", "/etc/nookbridge/config.json\u0000canary"],
+    ["absolute path with control U+001F", "/etc/nookbridge/config.json\u001fcanary"],
+    ["absolute path with control U+007F", "/etc/nookbridge/config.json\u007fcanary"],
+  ])("rejects a %s without touching readFileSync", (_label, hostile) => {
+    // Cast through unknown so the deliberately-typed invalid path
+    // arguments can be exercised without bypassing the test file's
+    // own type checking.
+    const result = loadServiceConfig(hostile as unknown as string, {
+      stat: ROOT_OWNED_STAT_SEAM.stat,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.category).toBe("config_unreadable");
+    // Categorical errors must not echo the input path or any segment.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("config.json");
+    expect(serialized).not.toContain("canary");
+    expect(serialized).not.toContain("\u0000");
+  });
+});
+
 describe("nookd --check-config operator command", () => {
   it("accepts --check-config <absolute-config-path> and exits 0 on pass", () => {
     const file = writeJsonConfig("cli-pass", VALID_FIXTURE);
@@ -461,6 +543,24 @@ describe("nookd --check-config operator command", () => {
     const err = stderr.write.mock.calls.map((c: unknown[]) => String(c[0])).join("");
     expect(err.includes("config.json")).toBe(false);
   });
+
+  it.each(["--check-config", "--config"])(
+    "rejects %s with a control-bearing absolute config path before touching disk",
+    (flag) => {
+      const stdout = { write: vi.fn() };
+      const stderr = { write: vi.fn() };
+      const canaryPath = `${join(workspaceRoot, "config.json")}\u007fcanary`;
+
+      const code = runNookdCli([flag, canaryPath], stdout, stderr, {
+        stat: ROOT_OWNED_STAT_SEAM.stat,
+      });
+
+      expect(code).toBe(64);
+      const err = stderr.write.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+      expect(err).toContain("invalid configuration argument");
+      expect(err).not.toContain("canary");
+    },
+  );
 
   it("rejects --check-config with a failing config and reports categorical fail", () => {
     const file = writeJsonConfig("cli-fail", mutate({ backend: "development-file" }));

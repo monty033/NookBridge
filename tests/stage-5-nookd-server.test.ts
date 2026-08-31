@@ -6,6 +6,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { setTimeout } from "node:timers";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -210,6 +211,46 @@ describe("nookd Unix socket server", () => {
     expect(search).toHaveBeenCalledTimes(1);
   });
 
+  it("consumes a rejected work finalizer promise", async () => {
+    let releaseSearch: (() => void) | undefined;
+    const searchStarted = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    const search = vi.fn(async () => {
+      await searchStarted;
+      return [{ title: "finalizer" }];
+    });
+    const { socketPath } = await fixture(search);
+    const socket = await connect(socketPath);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const originalWrite = net.Socket.prototype.write;
+    let rejectWrites = false;
+    const writeSpy = vi.spyOn(net.Socket.prototype, "write").mockImplementation(function (
+      this: net.Socket,
+      ...args: Parameters<net.Socket["write"]>
+    ) {
+      if (rejectWrites) throw new Error("WRITE_FINALIZER_CANARY");
+      return originalWrite.apply(this, args);
+    });
+
+    try {
+      socket.write(requestBytes("finalizer", "needle"));
+      await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+      rejectWrites = true;
+      releaseSearch?.();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+      writeSpy.mockRestore();
+      socket.destroy();
+    }
+  });
+
   it("stops accepting, unlinks only its socket, and cleans the runtime exactly once", async () => {
     const { handle, socketPath, cleanup } = await fixture(async () => []);
     expect((await stat(socketPath)).isSocket()).toBe(true);
@@ -236,6 +277,51 @@ describe("nookd Unix socket server", () => {
     await expect(
       startNookdServer({ socketPath: existing, runtime, installSignalHandlers: false }),
     ).rejects.toThrow("existing");
+  });
+
+  it.each(["\u0000", "\u001f", "\u007f"])(
+    "rejects a control-bearing socket path before creating a socket (U+%s)",
+    async (control) => {
+      const runtime: NookdServerRuntime = Object.freeze({
+        search: async () => [],
+        cleanup: async () => undefined,
+      });
+      const createServerSpy = vi.spyOn(net, "createServer");
+
+      try {
+        await expect(
+          startNookdServer({
+            socketPath: `${path.join(os.tmpdir(), "nookbridge.sock")}${control}canary`,
+            runtime,
+            installSignalHandlers: false,
+          }),
+        ).rejects.toThrow("absolute");
+        expect(createServerSpy).not.toHaveBeenCalled();
+      } finally {
+        createServerSpy.mockRestore();
+      }
+    },
+  );
+
+  it("rejects a non-canonical socket path before creating a socket", async () => {
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: async () => [],
+      cleanup: async () => undefined,
+    });
+    const createServerSpy = vi.spyOn(net, "createServer");
+
+    try {
+      await expect(
+        startNookdServer({
+          socketPath: "/tmp/nookbridge/a/../nookbridge.sock",
+          runtime,
+          installSignalHandlers: false,
+        }),
+      ).rejects.toThrow("absolute");
+      expect(createServerSpy).not.toHaveBeenCalled();
+    } finally {
+      createServerSpy.mockRestore();
+    }
   });
 });
 
