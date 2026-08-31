@@ -110,9 +110,21 @@ nookd --check-config <absolute-config-path>
 
 It reports only categorical pass/fail output and the selected non-secret
 backend identifier on success. It does not echo the config path, field
-values, parser errors, credential details, or state contents. Ordinary daemon
-startup remains fail-closed until the deployment task wires this schema to
-the approved credential and runtime contract.
+values, parser errors, credential details, or state contents.
+
+The ordinary daemon startup form is equally explicit:
+
+```text
+nookd --config <absolute-config-path>
+```
+
+Startup loads the validated config once, reads the fixed
+`nookbridge-db-key` label from the absolute `CREDENTIALS_DIRECTORY` supplied
+by systemd, constructs the production service runtime, and binds only the
+configured Unix socket. The credential label/path cannot be supplied through
+config or arbitrary environment overrides. Missing or malformed startup
+inputs, runtime failures, and bind failures are reported categorically, and
+implicit/no-argument startup remains fail-closed.
 
 ### Recovery of damaged service state
 

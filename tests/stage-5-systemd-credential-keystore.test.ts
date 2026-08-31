@@ -220,6 +220,26 @@ describe("Stage 5 systemd-credential SecureKeyStore", () => {
       expect(result.getDatabaseKey()).toBeUndefined();
     });
 
+    it.each(["\u001f", "\u007f"])(
+      "rejects a credentialName containing control character U+%s before opening the slot",
+      (control) => {
+        const dir = makeCredDir("control-name");
+        const openSpy = vi.mocked(fsMocked.openSync);
+        openSpy.mockClear();
+
+        const result = createSystemdCredentialKeyStore({
+          credentialsDirectory: dir.credentialsDirectory,
+          credentialName: `creds${control}canary`,
+        });
+
+        expect(result.backend).toBe("systemd-credential");
+        expect(result.productionSafe).toBe(true);
+        expect(result.getDatabaseKey()).toBeUndefined();
+        // The validator must reject the control before reaching openSync.
+        expect(openSpy).not.toHaveBeenCalled();
+      },
+    );
+
     it("accepts a configurable name that is a plain credential filename", () => {
       const dir = makeCredDir("custom-name");
       const custom = "alternate-db-key-1";
@@ -658,6 +678,22 @@ describe("Stage 5 systemd-credential SecureKeyStore", () => {
         expect(openSpy).not.toHaveBeenCalled();
       }
     });
+
+    it.each(["\u0000", "\u001f", "\u007f"])(
+      "rejects a control-bearing directory before attempting to open a credential (U+%s)",
+      (control) => {
+        const dir = makeCredDir("control-directory");
+        const openSpy = vi.mocked(fsMocked.openSync);
+        openSpy.mockClear();
+
+        const result = createSystemdCredentialKeyStore({
+          credentialsDirectory: `${dir.credentialsDirectory}${control}canary`,
+        });
+
+        expect(result.getDatabaseKey()).toBeUndefined();
+        expect(openSpy).not.toHaveBeenCalled();
+      },
+    );
 
     it("reads a stateful credentialsDirectory getter exactly once and uses its captured value", () => {
       const dir = makeCredDir("stateful-directory");

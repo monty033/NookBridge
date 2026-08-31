@@ -171,6 +171,24 @@ export function loadServiceConfig(
   path: string,
   options: LoadServiceConfigOptions = {},
 ): LoadServiceConfigResult {
+  // Reject runtime-invalid `path` arguments BEFORE any filesystem access.
+  // A hostile operator-script that wires a non-string, empty, relative, or
+  // control-bearing path through the loader must never reach `readFileSync`
+  // and must be turned into a categorical `config_unreadable` result so the
+  // error surface stays closed.
+  if (
+    typeof path !== "string" ||
+    path.length === 0 ||
+    !isAbsolute(path) ||
+    resolve(path) !== path ||
+    hasControlCharacter(path)
+  ) {
+    return {
+      ok: false,
+      error: new ServiceConfigError("config_unreadable", "service config path is invalid"),
+    };
+  }
+
   const stat = options.stat ?? defaultStat;
 
   let raw: string;
@@ -298,6 +316,12 @@ function validateFields(
       error: new ServiceConfigError("invalid_type", "service config stateDir is invalid"),
     };
   }
+  if (hasControlCharacter(stateDir)) {
+    return {
+      ok: false,
+      error: new ServiceConfigError("unsafe_state_dir", "service config stateDir is unsafe"),
+    };
+  }
   if (!isAbsolute(stateDir)) {
     return {
       ok: false,
@@ -322,6 +346,12 @@ function validateFields(
     return {
       ok: false,
       error: new ServiceConfigError("invalid_type", "service config socketPath is invalid"),
+    };
+  }
+  if (hasControlCharacter(socketPath)) {
+    return {
+      ok: false,
+      error: new ServiceConfigError("invalid_socket_path", "service config socketPath is unsafe"),
     };
   }
   if (!isAbsolute(socketPath)) {
@@ -490,10 +520,25 @@ function isSafeSocketPath(path: string): boolean {
   // `/run/nookbridge` — broader acceptance would over-claim the
   // deployment path that is not yet wired.
   if (!path.startsWith("/run/nookbridge/")) return false;
-  // Reject anything that resolves through `..` traversal.
+  if (path === "/run/nookbridge/") return false;
+  // Canonical-text requirement: the literal path must already be in
+  // resolved form (no `.` or `..` segments).  Without this check a hostile
+  // operator-script could submit `/run/nookbridge/a/../b.sock` — textually
+  // inside the allowlist — and slip past the prefix test.  `resolve()`
+  // normalizes those segments away, so `resolve(path) === path` is the
+  // canonical-form invariant the loader enforces.
   const normalized = resolve(path);
+  if (normalized !== path) return false;
   if (!normalized.startsWith("/run/nookbridge/")) return false;
   return true;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 /**

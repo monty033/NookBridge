@@ -226,9 +226,14 @@ export async function startNookdServer(
       }
     })();
     inFlight.add(work);
-    void work.finally(() => {
-      inFlight.delete(work);
-    });
+    void work
+      .finally(() => {
+        inFlight.delete(work);
+      })
+      .catch(() => {
+        // The work promise is intentionally not exposed; consume finalizer
+        // rejection so a transport write failure cannot become unhandled.
+      });
   }
 }
 
@@ -247,7 +252,12 @@ function validateOptions(
   if (typeof options !== "object" || options === null || Array.isArray(options)) {
     throw nookdServerError("invalid nookd server options");
   }
-  if (typeof options.socketPath !== "string" || !path.isAbsolute(options.socketPath)) {
+  if (
+    typeof options.socketPath !== "string" ||
+    hasControlCharacter(options.socketPath) ||
+    !path.isAbsolute(options.socketPath) ||
+    path.resolve(options.socketPath) !== options.socketPath
+  ) {
     throw nookdServerError("nookd socket path must be absolute");
   }
   if (
@@ -279,6 +289,14 @@ function validateOptions(
     shutdownTimeoutMs,
     installSignalHandlers,
   };
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 async function inspectExistingSocketPath(socketPath: string): Promise<boolean> {
