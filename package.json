@@ -30,7 +30,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "nookd": "node dist/nookd.js"
   },
   "dependencies": {
     "@notesnook/core": "8.1.3",
