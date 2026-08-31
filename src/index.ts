@@ -407,5 +407,11 @@ export {
   STAGE5_RPC_LIMITS,
 } from "./service/rpc-protocol.js";
 
+// Stage 5 Task 5 — pure `notes.search` application handler.  It bridges
+// parsed Task 4 requests to the bounded Task 3 service-runtime search seam;
+// it does not parse frames, open sockets, or touch live state.
+export type { RpcHandlerRuntimeLike } from "./service/rpc-handler.js";
+export { handleRpcRequest } from "./service/rpc-handler.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
