@@ -1,9 +1,11 @@
 /**
- * NookBridge Stage 1 — development-only file-backed SecureKeyStore.
+ * NookBridge Stage 1 / Stage 5 — development-only file-backed SecureKeyStore.
  *
  * **This backend is for Stage 1 development and CI only.**  It is NOT
  * suitable for production — it stores the database key in a plaintext
- * file.  Production arrives in Stage 5.
+ * file.  Production is the separate `systemd-credential` backend; the
+ * Stage 5 service-boundary decision record explicitly forbids the
+ * daemon from selecting this backend.
  *
  * Safety properties:
  *
@@ -16,7 +18,9 @@
  *     `log({ key: ... })` is dropped even if a caller tried.
  *   - The backend is explicitly named `development-file` so an
  *     operator reading doctor output cannot mistake it for a
- *     production path.
+ *     production path.  The literal `productionSafe: false` is also
+ *     pinned by the discriminated `SecureKeyStore` type so the
+ *     compiler rejects any attempt to mark this backend safe.
  */
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
