@@ -1,0 +1,1126 @@
+/**
+ * Stage 5 Task 4 — pure closed framed RPC protocol boundary.
+ *
+ * This module is the pure wire-protocol layer that sits in front of the
+ * future `nookd` Unix-socket daemon.  It is intentionally runtime-free:
+ *
+ *   - No filesystem, network, daemon, socket, auth, or Notesnook import.
+ *   - No state.  Every call is a pure function of its input bytes /
+ *     candidate envelope.
+ *   - Length-prefixed (4-byte big-endian) framing.
+ *   - Bounded frame / query / response / hit counts via
+ *     {@link STAGE5_RPC_LIMITS}.
+ *   - Parsed requests are frozen objects with a null prototype so a
+ *     hostile proxy / inherited getter cannot smuggle data back out.
+ *   - Duplicate JSON keys are rejected at every level (rather than
+ *     silently last-wins).
+ *   - Errors are categorical, chain-free (`cause` and `__context__` are
+ *     explicitly cleared), and never echo request values, raw parser
+ *     exceptions, paths, or unknown method names.
+ *   - The success surface is title-only: notes carry only `title` —
+ *     never `id`, never `body`, never `notebookId`, never anything else.
+ *
+ * This file is the *boundary*.  The future `nookd` server, the MCP
+ * proxy, the permission engine, and the live Notesnook runtime are
+ * deliberately NOT imported here.  Everything the protocol needs to
+ * reject happens BEFORE any of those surfaces are touched.
+ */
+
+import { Buffer } from "node:buffer";
+import { TextDecoder } from "node:util";
+
+// Capture every mutable intrinsic used by this closed boundary before any
+// caller can pollute a shared prototype or static method.
+const objectCreate = Object.create;
+const objectFreeze = Object.freeze;
+const objectSetPrototypeOf = Object.setPrototypeOf;
+const objectGetPrototypeOf = Object.getPrototypeOf;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectDefineProperty = Object.defineProperty;
+const objectKeys = Object.keys;
+const objectHasOwnProperty = Object.prototype.hasOwnProperty;
+const objectPrototype = Object.prototype;
+const reflectOwnKeys = Reflect.ownKeys;
+const reflectApply = Reflect.apply;
+const arrayIsArray = Array.isArray;
+const Uint8ArrayConstructor = Uint8Array;
+const ErrorConstructor = Error;
+const weakSetAdd = WeakSet.prototype.add;
+const weakSetHas = WeakSet.prototype.has;
+const weakMapSet = WeakMap.prototype.set;
+const weakMapGet = WeakMap.prototype.get;
+const jsonStringify = JSON.stringify;
+const bufferFrom = Buffer.from;
+const textDecoderDecode = TextDecoder.prototype.decode;
+const stringCharCodeAt = String.prototype.charCodeAt;
+const stringFromCodePoint = String.fromCodePoint;
+const stringSlice = String.prototype.slice;
+const numberFromString = Number;
+const numberIsFinite = Number.isFinite;
+
+// ---------------------------------------------------------------------------
+// Published limits — frozen constants the rest of the protocol is bounded by.
+// ---------------------------------------------------------------------------
+
+export interface Stage5RpcLimits {
+  readonly maxFrameBytes: number;
+  readonly maxQueryBytes: number;
+  readonly maxResponseBytes: number;
+  readonly maxSearchHits: number;
+  readonly maxTitleBytes: number;
+}
+
+/**
+ * The published Stage 5 RPC bounds.
+ *
+ * Frame limits are deliberately conservative for a single-method search
+ * surface: a search request only needs to carry a small `query` string
+ * plus a few identifier bytes, and the title-only success envelope only
+ * needs to carry a short `title` per hit.
+ *
+ * `maxFrameBytes` / `maxResponseBytes` are the byte budgets the parser
+ * and serializer enforce BEFORE JSON parsing / allocation so a hostile
+ * caller cannot force unbounded memory growth.  `maxQueryBytes`
+ * bounds the parsed UTF-8 query string so a single multi-byte query
+ * cannot smuggle arbitrary payload past a length check.  `maxTitleBytes`
+ * bounds the UTF-8 byte length of each returned title (a hit title is
+ * never expected to exceed a single short note title).
+ *
+ * `maxSearchHits` caps the number of hits a successful response may
+ * carry.  This is enforced at the serializer boundary.
+ *
+ * These numbers are the contract; downstream callers may read them
+ * directly but MUST NOT widen them without an explicit decision-record
+ * amendment.
+ */
+const stage5RpcLimits = objectCreate(null) as {
+  maxFrameBytes: number;
+  maxQueryBytes: number;
+  maxResponseBytes: number;
+  maxSearchHits: number;
+  maxTitleBytes: number;
+};
+stage5RpcLimits.maxFrameBytes = 65_536;
+stage5RpcLimits.maxQueryBytes = 512;
+stage5RpcLimits.maxResponseBytes = 65_536;
+stage5RpcLimits.maxSearchHits = 64;
+stage5RpcLimits.maxTitleBytes = 256;
+export const STAGE5_RPC_LIMITS: Stage5RpcLimits = objectFreeze(stage5RpcLimits);
+
+// ---------------------------------------------------------------------------
+// Wire envelope shapes.
+//
+// These are the ONLY shapes the protocol accepts on the wire.  Any
+// deviation is rejected categorically.
+// ---------------------------------------------------------------------------
+
+export interface RpcNotesSearchParams {
+  readonly query: string;
+}
+
+/**
+ * The closed set of allowed RPC methods.  Only `notes.search` is in the
+ * first protocol slice; additional methods are added through an explicit
+ * decision-record amendment.
+ */
+export type RpcMethod = "notes.search";
+
+export interface RpcNotesSearchRequest {
+  readonly id: string;
+  readonly method: "notes.search";
+  readonly params: RpcNotesSearchParams;
+}
+
+export type RpcRequest = RpcNotesSearchRequest;
+
+/**
+ * The closed success-result shape for `notes.search`.  Notes are
+ * title-only: `id`, `body`, `notebookId`, and any other metadata are
+ * intentionally absent.
+ */
+export interface RpcSearchHit {
+  readonly title: string;
+}
+
+export interface RpcSearchResult {
+  readonly kind: "search";
+  readonly notes: ReadonlyArray<RpcSearchHit>;
+}
+
+export interface RpcSuccessEnvelope {
+  readonly id: string;
+  readonly ok: true;
+  readonly result: RpcSearchResult;
+}
+
+export interface RpcErrorEnvelopePayload {
+  readonly code: RpcErrorCode;
+  readonly message: string;
+}
+
+/** The only error categories that may cross the RPC response boundary. */
+export type RpcErrorCode =
+  | "invalid_request"
+  | "permission_denied"
+  | "service_unavailable"
+  | "sync_failed"
+  | "vault_locked"
+  | "not_found";
+
+/** Fixed, non-sensitive messages for the categorical RPC error vocabulary. */
+const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
+rpcErrorMessages.invalid_request = "Invalid request";
+rpcErrorMessages.permission_denied = "Permission denied";
+rpcErrorMessages.service_unavailable = "Service unavailable";
+rpcErrorMessages.sync_failed = "Sync failed";
+rpcErrorMessages.vault_locked = "Vault locked";
+rpcErrorMessages.not_found = "Not found";
+const RPC_ERROR_MESSAGES: Readonly<Record<RpcErrorCode, string>> = objectFreeze(rpcErrorMessages);
+
+export interface RpcErrorEnvelope {
+  readonly id: string;
+  readonly ok: false;
+  readonly error: RpcErrorEnvelopePayload;
+}
+
+export type RpcResponseEnvelope = RpcSuccessEnvelope | RpcErrorEnvelope;
+
+// ---------------------------------------------------------------------------
+// Error type + predicate.
+// ---------------------------------------------------------------------------
+
+/**
+ * Module-private set of protocol-owned Error instances.  Predicates key
+ * off object identity rather than message matching so callers cannot
+ * accidentally treat an arbitrary error as a protocol error.
+ */
+const RPC_PROTOCOL_ERRORS = new WeakSet<object>();
+const RPC_PROTOCOL_ERROR_MESSAGES = new WeakMap<object, string>();
+
+/**
+ * Construct a categorical, chain-free protocol error.  `cause` and
+ * `__context__` are explicitly cleared so a hostile parser exception
+ * cannot smuggle data through the error chain.
+ */
+function rpcProtocolError(message: string): Error {
+  const error = new ErrorConstructor(message);
+  objectDefineProperty(error, "cause", { configurable: true, value: undefined });
+  objectDefineProperty(error, "__context__", { configurable: true, value: undefined });
+  objectDefineProperty(error, "name", { configurable: true, value: "RpcProtocolError" });
+  reflectApply(weakSetAdd, RPC_PROTOCOL_ERRORS, [error]);
+  reflectApply(weakMapSet, RPC_PROTOCOL_ERROR_MESSAGES, [error, message]);
+  return error;
+}
+
+/**
+ * True iff `value` is an Error instance produced by this module.  Used
+ * by callers that want to distinguish protocol rejections from
+ * upstream / runtime failures without parsing messages.
+ */
+export function isRpcProtocolError(value: unknown): value is Error {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    reflectApply(weakSetHas, RPC_PROTOCOL_ERRORS, [value])
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Boundary wrappers.
+//
+// `parseRpcFrame` and `serializeRpcResponse` perform property access
+// on hostile inputs.  Any non-RpcProtocolError thrown during input
+// inspection / serialization is normalized to a categorical
+// RpcProtocolError so a hostile Proxy / getter / `toJSON` trap cannot
+// leak raw error messages, `cause` chains, or context through the
+// Existing RpcProtocolErrors are reconstructed from their private identity
+// to canonical-message mapping so hostile mutation cannot alter the
+// diagnostic messages from the categorical rejections below.
+// ---------------------------------------------------------------------------
+
+function wrapProtocolBoundary<Arg, Result>(fn: (arg: Arg) => Result): (arg: Arg) => Result {
+  return (arg: Arg): Result => {
+    try {
+      return fn(arg);
+    } catch (error) {
+      if (isRpcProtocolError(error)) {
+        const canonicalMessage = reflectApply(weakMapGet, RPC_PROTOCOL_ERROR_MESSAGES, [error]);
+        if (typeof canonicalMessage === "string") throw rpcProtocolError(canonicalMessage);
+        throw rpcProtocolError("rpc protocol: internal boundary failure");
+      }
+      throw rpcProtocolError("rpc protocol: internal boundary failure");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Frame parsing.
+// ---------------------------------------------------------------------------
+
+const LENGTH_PREFIX_BYTES = 4;
+
+function writeLengthPrefix(frame: Uint8Array, payloadLength: number): void {
+  frame[0] = (payloadLength >>> 24) & 0xff;
+  frame[1] = (payloadLength >>> 16) & 0xff;
+  frame[2] = (payloadLength >>> 8) & 0xff;
+  frame[3] = payloadLength & 0xff;
+}
+
+const TYPED_ARRAY_PROTOTYPE = objectGetPrototypeOf(Uint8ArrayConstructor.prototype);
+const UINT8_ARRAY_BUFFER_GETTER = objectGetOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "buffer",
+)?.get;
+const UINT8_ARRAY_BYTE_OFFSET_GETTER = objectGetOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteOffset",
+)?.get;
+const UINT8_ARRAY_BYTE_LENGTH_GETTER = objectGetOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+)?.get;
+
+function getIntrinsicUint8ArrayMetadata(input: Uint8Array): {
+  buffer: ArrayBufferLike;
+  byteOffset: number;
+  byteLength: number;
+} {
+  if (
+    UINT8_ARRAY_BUFFER_GETTER === undefined ||
+    UINT8_ARRAY_BYTE_OFFSET_GETTER === undefined ||
+    UINT8_ARRAY_BYTE_LENGTH_GETTER === undefined
+  ) {
+    throw rpcProtocolError("rpc protocol: Uint8Array accessors are unavailable");
+  }
+  const metadata = objectCreate(null) as {
+    buffer: ArrayBufferLike;
+    byteOffset: number;
+    byteLength: number;
+  };
+  metadata.buffer = reflectApply(UINT8_ARRAY_BUFFER_GETTER, input, []);
+  metadata.byteOffset = reflectApply(UINT8_ARRAY_BYTE_OFFSET_GETTER, input, []);
+  metadata.byteLength = reflectApply(UINT8_ARRAY_BYTE_LENGTH_GETTER, input, []);
+  return metadata;
+}
+
+/**
+ * Maximum UTF-16 code units we are willing to walk via Buffer.byteLength
+ * during the preflight response-size guard.  Anything larger is rejected
+ * with a cheap O(1) length check before the walk runs, so a hostile
+ * multi-megabyte input cannot force a multi-megabyte Buffer.byteLength
+ * walk either.
+ */
+const PREFLIGHT_UTF16_WALK_CAP = STAGE5_RPC_LIMITS.maxResponseBytes * 6;
+
+/**
+ * Conservative envelope overhead used by the preflight response-size
+ * guard when summing worst-case JSON-escaped field sizes against
+ * `maxResponseBytes`. The envelope adds the literal JSON key names,
+ * value separators, and per-hit field structure. 1024 bytes is
+ * sufficient for the success envelope and the error envelope.
+ */
+const PREFLIGHT_ENVELOPE_OVERHEAD_BYTES = 1024;
+
+/**
+ * Run the preflight response-size guard on a single response-owned
+ * string field. The guard updates a running worst-case JSON-size sum
+ * that the serializer uses to reject envelopes that could exceed
+ * `maxResponseBytes` BEFORE any JSON.stringify allocation.
+ *
+ * Implementation notes:
+ *   - The first check is O(1) on the string's UTF-16 code-unit length
+ *     so a multi-megabyte hostile string never reaches any further
+ *     processing.
+ *   - Six output code units per input code unit covers JSON escaping
+ *     (`\\uXXXX`) conservatively, including structural characters.
+ *
+ * The guard never reads, copies, or echoes the field's contents into
+ * the thrown error.
+ */
+function preflightResponseStringField(value: string, rawSum: { n: number }): void {
+  // Cheap O(1) UTF-16 code-unit cap.  Rejects multi-megabyte hostile
+  // inputs before any linear walk runs.
+  if (value.length > PREFLIGHT_UTF16_WALK_CAP) {
+    throw rpcProtocolError("rpc protocol: response field exceeds maximum response bytes");
+  }
+  // Six output code units per input code unit is a conservative upper
+  // bound for JSON escaping.  The preceding cap keeps this multiplication
+  // small and safe before JSON.stringify is reached.
+  const escapedUpperBound = value.length * 6;
+  if (escapedUpperBound > STAGE5_RPC_LIMITS.maxResponseBytes) {
+    throw rpcProtocolError("rpc protocol: response field exceeds maximum response bytes");
+  }
+  rawSum.n += escapedUpperBound;
+  // Conservative upper-bound sum: if the worst-case escaped output plus
+  // fixed envelope overhead exceeds the response cap, reject before
+  // JSON.stringify rather than allocating a potentially oversized string.
+  if (rawSum.n + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) {
+    throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
+  }
+}
+
+/**
+ * Length-prefixed framing.  The first 4 bytes are a big-endian unsigned
+ * length; the remaining bytes are the UTF-8 encoded JSON payload.
+ *
+ * The parser is intentionally explicit about every step so an attacker
+ * cannot trick the boundary into allocating / parsing / forwarding
+ * anything beyond the published bounds:
+ *
+ *   1. The byte buffer is rejected as soon as its size exceeds
+ *      `maxFrameBytes`; no JSON parsing happens before that check.
+ *   2. The declared length is rejected if it exceeds `maxFrameBytes`,
+ *      if it is zero, or if it overflows the supplied buffer.
+ *   3. The payload is decoded as UTF-8; invalid UTF-8 is rejected.
+ *   4. The JSON parser is a hand-written strict parser that rejects
+ *      duplicate keys at every level and only accepts plain objects
+ *      with `Object.prototype === null` as the prototype.
+ *   5. The parsed request is wrapped in a frozen, null-prototype
+ *      object so any hostile getter / inherited field cannot smuggle
+ *      data back out of the boundary.
+ *
+ * Any non-RpcProtocolError thrown by input inspection / decoding /
+ * parsing is normalized to a categorical RpcProtocolError so a hostile
+ * Proxy / getter cannot leak raw error messages, `cause` chains, or
+ * context through the boundary.
+ */
+function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
+  if (!(input instanceof Uint8ArrayConstructor)) {
+    throw rpcProtocolError("rpc protocol: input must be a Uint8Array");
+  }
+  const inputMetadata = getIntrinsicUint8ArrayMetadata(input);
+  if (inputMetadata.byteLength > STAGE5_RPC_LIMITS.maxFrameBytes) {
+    throw rpcProtocolError("rpc protocol: frame exceeds maximum frame bytes");
+  }
+  if (inputMetadata.byteLength < LENGTH_PREFIX_BYTES) {
+    throw rpcProtocolError("rpc protocol: frame missing length prefix");
+  }
+
+  const header = new Uint8ArrayConstructor(
+    inputMetadata.buffer,
+    inputMetadata.byteOffset,
+    LENGTH_PREFIX_BYTES,
+  );
+  const declaredLength =
+    (((header[0] ?? 0) << 24) |
+      ((header[1] ?? 0) << 16) |
+      ((header[2] ?? 0) << 8) |
+      (header[3] ?? 0)) >>>
+    0;
+
+  if (declaredLength === 0) {
+    throw rpcProtocolError("rpc protocol: declared frame length is zero");
+  }
+  if (declaredLength > STAGE5_RPC_LIMITS.maxFrameBytes) {
+    throw rpcProtocolError("rpc protocol: declared frame length exceeds maximum frame bytes");
+  }
+  if (LENGTH_PREFIX_BYTES + declaredLength !== inputMetadata.byteLength) {
+    throw rpcProtocolError("rpc protocol: declared frame length does not match buffer length");
+  }
+
+  const payload = new Uint8ArrayConstructor(
+    inputMetadata.buffer,
+    inputMetadata.byteOffset + LENGTH_PREFIX_BYTES,
+    declaredLength,
+  );
+  const text = decodeUtf8Strict(payload);
+  if (reflectApply(stringCharCodeAt, text, [0]) === 0xfeff) {
+    throw rpcProtocolError("rpc protocol: payload must not start with a UTF-8 BOM");
+  }
+
+  const parsed = parseJsonStrict(text);
+  if (parsed === null || typeof parsed !== "object" || arrayIsArray(parsed)) {
+    throw rpcProtocolError("rpc protocol: request root must be a plain object");
+  }
+  const root = parsed as Record<string, JsonValue>;
+
+  // Only three top-level keys are allowed: id, method, params.  Anything
+  // else — `path`, `core`, `sync`, `credential`, `__proto__`, etc. —
+  // is rejected categorically.
+  const topKeys = objectKeys(root);
+  if (topKeys.length !== 3 || !keysAreExactly(topKeys, ["id", "method", "params"])) {
+    throw rpcProtocolError("rpc protocol: request root has unexpected fields");
+  }
+
+  const id = root.id;
+  if (typeof id !== "string" || id.length === 0) {
+    throw rpcProtocolError("rpc protocol: request id must be a non-empty string");
+  }
+
+  const method = root.method;
+  if (method !== "notes.search") {
+    throw rpcProtocolError("rpc protocol: method is not allowed");
+  }
+
+  const params = root.params;
+  if (params === null || typeof params !== "object" || arrayIsArray(params)) {
+    throw rpcProtocolError("rpc protocol: request params must be a plain object");
+  }
+  const paramsRecord = params as Record<string, JsonValue>;
+  const paramKeys = objectKeys(paramsRecord);
+  if (paramKeys.length !== 1 || paramKeys[0] !== "query") {
+    throw rpcProtocolError("rpc protocol: request params must contain exactly one field: query");
+  }
+
+  const query = paramsRecord.query;
+  if (typeof query !== "string") {
+    throw rpcProtocolError("rpc protocol: request query must be a string");
+  }
+  if (query.length === 0) {
+    throw rpcProtocolError("rpc protocol: request query must not be empty");
+  }
+  if (query.length > STAGE5_RPC_LIMITS.maxQueryBytes) {
+    throw rpcProtocolError("rpc protocol: request query exceeds maximum query bytes");
+  }
+  if (utf8ByteLength(query, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes) {
+    throw rpcProtocolError("rpc protocol: request query exceeds maximum query bytes");
+  }
+
+  // Reconstruct the frozen, null-prototype request.  `Object.create(null)`
+  // ensures no inherited getter can intercept field reads; `Object.freeze`
+  // prevents mutation.  The nested params object is wrapped the same way.
+  const paramsObj = objectCreate(null) as { query: string };
+  paramsObj.query = query;
+  objectFreeze(paramsObj);
+  const requestTarget = objectCreate(null) as {
+    id: string;
+    method: "notes.search";
+    params: { query: string };
+  };
+  requestTarget.id = id;
+  requestTarget.method = method;
+  requestTarget.params = paramsObj;
+  objectFreeze(requestTarget);
+  const request = requestTarget as unknown as RpcRequest;
+
+  return request;
+}
+
+/**
+ * Public `parseRpcFrame` entry point.  Wraps the internal parser with
+ * the boundary wrapper so any non-RpcProtocolError thrown by input
+ * inspection / decoding / parsing is normalized to a categorical
+ * RpcProtocolError before it crosses the module boundary.
+ */
+export const parseRpcFrame = wrapProtocolBoundary(parseRpcFrameInternal);
+
+// ---------------------------------------------------------------------------
+// Response serialization.
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize a closed response envelope into a length-prefixed frame.
+ *
+ *   - The envelope is structurally validated: only the documented own
+ *     fields are accepted; unknown / inherited / proxy-injected fields
+ *     are rejected.
+ *   - `notes.search` results are title-only: any hit field beyond
+ *     `title` is rejected.
+ *   - The hit count is bounded by `maxSearchHits`.
+ *   - The UTF-8 byte length of each title is bounded by
+ *     `maxTitleBytes`.
+ *   - A preflight response-size guard bounds every response-owned
+ *     string field (`id`, `code`, `message`) and the running
+ *     conservative UTF-8 byte sum BEFORE JSON.stringify allocates.
+ *     The post-stringify cap on `maxResponseBytes` remains as
+ *     belt-and-braces but is no longer the only line of defence.
+ *   - The final frame byte length is bounded by `maxResponseBytes`.
+ *
+ * Any deviation is reported through a thrown RpcProtocolError.  The
+ * thrown error never echoes the offending envelope.
+ *
+ * Any non-RpcProtocolError thrown by input inspection / serialization
+ * (e.g. a hostile Proxy / getter / `toJSON` trap) is normalized to a
+ * categorical RpcProtocolError so a hostile envelope cannot leak raw
+ * error messages, `cause` chains, or context through the boundary.
+ */
+function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
+  if (envelope === null || typeof envelope !== "object" || arrayIsArray(envelope)) {
+    throw rpcProtocolError("rpc protocol: response envelope must be a plain object");
+  }
+
+  const env = envelope as Record<string, JsonValue>;
+  const envKeys = validateClosedObject(
+    env,
+    ["id", "ok", "result", "error"],
+    "rpc protocol: response envelope has unexpected fields",
+  );
+
+  const id = env.id;
+  if (typeof id !== "string" || id.length === 0) {
+    throw rpcProtocolError("rpc protocol: response id must be a non-empty string");
+  }
+
+  // Preflight response-size guard for `id` BEFORE any further property
+  // access or allocation.  This is the line of defence that catches a
+  // multi-megabyte hostile `id` before JSON.stringify would allocate
+  // the payload.  The same guard is re-invoked for `code` / `message`
+  // on the error path and for `title` on each hit.
+  const rawSum = objectCreate(null) as { n: number };
+  rawSum.n = 0;
+  preflightResponseStringField(id, rawSum);
+
+  const ok = env.ok;
+  if (ok !== true && ok !== false) {
+    throw rpcProtocolError("rpc protocol: response ok must be a boolean");
+  }
+
+  if (ok === true) {
+    if (envKeys.length !== 3 || !keysAreExactly(envKeys, ["id", "ok", "result"])) {
+      throw rpcProtocolError("rpc protocol: success envelope has unexpected fields");
+    }
+    const result = env.result;
+    if (result === null || typeof result !== "object" || arrayIsArray(result)) {
+      throw rpcProtocolError("rpc protocol: success result must be a plain object");
+    }
+    const resultRecord = result as Record<string, JsonValue>;
+    const resultKeys = validateClosedObject(
+      resultRecord,
+      ["kind", "notes"],
+      "rpc protocol: search result has unexpected fields",
+    );
+    if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "notes"])) {
+      throw rpcProtocolError("rpc protocol: search result has unexpected fields");
+    }
+    if (resultRecord.kind !== "search") {
+      throw rpcProtocolError("rpc protocol: result kind is not allowed");
+    }
+    const notes = resultRecord.notes;
+    if (!arrayIsArray(notes)) {
+      throw rpcProtocolError("rpc protocol: search notes must be an array");
+    }
+    if (notes.length > STAGE5_RPC_LIMITS.maxSearchHits) {
+      throw rpcProtocolError("rpc protocol: search notes exceed maximum hit count");
+    }
+
+    const cleanNotes: Array<{ title: string }> = [];
+    objectSetPrototypeOf(cleanNotes, null);
+    let emittedHits = 0;
+    const noteCount = notes.length;
+    for (let index = 0; index < noteCount; index += 1) {
+      if (emittedHits >= STAGE5_RPC_LIMITS.maxSearchHits) {
+        throw rpcProtocolError("rpc protocol: search notes exceed maximum hit count");
+      }
+      if (!reflectApply(objectHasOwnProperty, notes, [index])) {
+        throw rpcProtocolError("rpc protocol: search notes must contain only own numeric entries");
+      }
+      emittedHits += 1;
+      const note = notes[index];
+      if (note === null || typeof note !== "object" || arrayIsArray(note)) {
+        throw rpcProtocolError("rpc protocol: search hit must be a plain object");
+      }
+      const noteRecord = note as Record<string, JsonValue>;
+      const noteKeys = validateClosedObject(
+        noteRecord,
+        ["title"],
+        "rpc protocol: search hit has unexpected fields",
+      );
+      if (noteKeys.length !== 1 || noteKeys[0] !== "title") {
+        throw rpcProtocolError("rpc protocol: search hit must contain exactly one field: title");
+      }
+      const title = noteRecord.title;
+      if (typeof title !== "string") {
+        throw rpcProtocolError("rpc protocol: search hit title must be a string");
+      }
+      if (title.length > STAGE5_RPC_LIMITS.maxTitleBytes) {
+        throw rpcProtocolError("rpc protocol: search hit title exceeds maximum title bytes");
+      }
+      if (
+        utf8ByteLength(title, STAGE5_RPC_LIMITS.maxTitleBytes) > STAGE5_RPC_LIMITS.maxTitleBytes
+      ) {
+        throw rpcProtocolError("rpc protocol: search hit title exceeds maximum title bytes");
+      }
+      // Preflight each title as well, so the sum bound catches an
+      // envelope where many titles collectively exceed the response
+      // cap.  The per-title cap above remains the tighter bound for
+      // any single hit; the preflight contributes the sum bound.
+      preflightResponseStringField(title, rawSum);
+      const cleanNote = objectCreate(null) as { title: string };
+      cleanNote.title = title;
+      cleanNotes[index] = cleanNote;
+    }
+
+    const resultPayload = objectCreate(null) as { kind: "search"; notes: Array<{ title: string }> };
+    resultPayload.kind = "search";
+    resultPayload.notes = cleanNotes;
+    const successEnvelope = objectCreate(null) as {
+      id: string;
+      ok: true;
+      result: { kind: "search"; notes: Array<{ title: string }> };
+    };
+    successEnvelope.id = id;
+    successEnvelope.ok = true;
+    successEnvelope.result = resultPayload;
+    const payload = jsonStringify(successEnvelope);
+    const payloadBytes = bufferFrom(payload, "utf8");
+    const payloadByteLength = getIntrinsicUint8ArrayMetadata(payloadBytes).byteLength;
+    if (payloadByteLength > STAGE5_RPC_LIMITS.maxResponseBytes) {
+      throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
+    }
+
+    const frame = new Uint8ArrayConstructor(LENGTH_PREFIX_BYTES + payloadByteLength);
+    writeLengthPrefix(frame, payloadByteLength);
+    for (let index = 0; index < payloadByteLength; index += 1) {
+      frame[LENGTH_PREFIX_BYTES + index] = payloadBytes[index] ?? 0;
+    }
+    return frame;
+  }
+
+  // ok === false
+  if (envKeys.length !== 3 || !keysAreExactly(envKeys, ["id", "ok", "error"])) {
+    throw rpcProtocolError("rpc protocol: error envelope has unexpected fields");
+  }
+  const error = env.error;
+  if (error === null || typeof error !== "object" || arrayIsArray(error)) {
+    throw rpcProtocolError("rpc protocol: response error must be a plain object");
+  }
+  const errorRecord = error as Record<string, JsonValue>;
+  const errorKeys = validateClosedObject(
+    errorRecord,
+    ["code", "message"],
+    "rpc protocol: response error has unexpected fields",
+  );
+  if (errorKeys.length !== 2 || !keysAreExactly(errorKeys, ["code", "message"])) {
+    throw rpcProtocolError("rpc protocol: response error has unexpected fields");
+  }
+  const code = errorRecord.code;
+  const message = errorRecord.message;
+  if (typeof code !== "string" || typeof message !== "string") {
+    throw rpcProtocolError("rpc protocol: response error fields must be strings");
+  }
+  if (!isRpcErrorCode(code) || message !== RPC_ERROR_MESSAGES[code]) {
+    throw rpcProtocolError("rpc protocol: response error category is not allowed");
+  }
+  const fixedMessage = RPC_ERROR_MESSAGES[code];
+  // Preflight `code` and `message` so a hostile multi-megabyte
+  // either of them is rejected before JSON.stringify would allocate
+  // the payload.  Per-field byte bound plus conservative sum bound
+  // together prevent any stringify-sized allocation for an oversize
+  // error envelope.
+  preflightResponseStringField(code, rawSum);
+  preflightResponseStringField(fixedMessage, rawSum);
+
+  const errorPayload = objectCreate(null) as { code: string; message: string };
+  errorPayload.code = code;
+  errorPayload.message = fixedMessage;
+  const errorEnvelope = objectCreate(null) as {
+    id: string;
+    ok: false;
+    error: { code: string; message: string };
+  };
+  errorEnvelope.id = id;
+  errorEnvelope.ok = false;
+  errorEnvelope.error = errorPayload;
+  const payload = jsonStringify(errorEnvelope);
+  const payloadBytes = bufferFrom(payload, "utf8");
+  const payloadByteLength = getIntrinsicUint8ArrayMetadata(payloadBytes).byteLength;
+  if (payloadByteLength > STAGE5_RPC_LIMITS.maxResponseBytes) {
+    throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
+  }
+
+  const frame = new Uint8ArrayConstructor(LENGTH_PREFIX_BYTES + payloadByteLength);
+  writeLengthPrefix(frame, payloadByteLength);
+  for (let index = 0; index < payloadByteLength; index += 1) {
+    frame[LENGTH_PREFIX_BYTES + index] = payloadBytes[index] ?? 0;
+  }
+  return frame;
+}
+
+/**
+ * Public `serializeRpcResponse` entry point.  Wraps the internal
+ * serializer with the boundary wrapper so any non-RpcProtocolError
+ * thrown by input inspection / serialization (e.g. a hostile Proxy
+ * getter or `toJSON` trap) is normalized to a categorical
+ * RpcProtocolError before it crosses the module boundary.
+ */
+export const serializeRpcResponse = wrapProtocolBoundary(serializeRpcResponseInternal);
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+/**
+ * Count the UTF-8 bytes TextEncoder would emit without allocating.
+ *
+ * Callers apply a cheap UTF-16 code-unit cap first, and this helper returns
+ * as soon as the bounded byte budget is exceeded.  Lone surrogates are
+ * counted as the three-byte replacement sequence emitted by TextEncoder.
+ */
+function utf8ByteLength(value: string, maxBytes: number): number {
+  let byteLength = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = reflectApply(stringCharCodeAt, value, [index]);
+    if (code <= 0x7f) {
+      byteLength += 1;
+    } else if (code <= 0x7ff) {
+      byteLength += 2;
+    } else if (
+      code >= 0xd800 &&
+      code <= 0xdbff &&
+      index + 1 < value.length &&
+      (reflectApply(stringCharCodeAt, value, [index + 1]) ?? 0) >= 0xdc00 &&
+      (reflectApply(stringCharCodeAt, value, [index + 1]) ?? 0) <= 0xdfff
+    ) {
+      byteLength += 4;
+      index += 1;
+    } else {
+      byteLength += 3;
+    }
+    if (byteLength > maxBytes) return byteLength;
+  }
+  return byteLength;
+}
+
+/**
+ * Minimal JSON value type used for narrowing the strict parser output.
+ */
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * Strict UTF-8 decode that throws on any invalid sequence.  We use
+ * `TextDecoder({ fatal: true })` so a hostile byte that fails UTF-8
+ * validation surfaces as an error rather than being silently replaced
+ * with U+FFFD.
+ */
+function decodeUtf8Strict(bytes: Uint8Array): string {
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    return reflectApply(textDecoderDecode, decoder, [bytes]);
+  } catch {
+    throw rpcProtocolError("rpc protocol: payload is not valid UTF-8");
+  }
+}
+
+/**
+ * Hand-written strict JSON parser.  Rejects:
+ *
+ *   - duplicate keys at every object level (including nested objects
+ *     inside `params` and inside array elements);
+ *   - non-object / array / scalar roots and the `null` root;
+ *   - any value whose prototype is not `Object.prototype` — proxy /
+ *     inherited-field smuggling is rejected because every value we
+ *     emit is a fresh `Object.create(null)` instance;
+ *   - non-string keys (the JSON spec already restricts keys to
+ *     strings, but we surface any deviation as an explicit rejection
+ *     so the caller can see the wire contract was violated rather
+ *     than getting a generic parse error).
+ *
+ * The parser is intentionally conservative: it allocates nothing
+ * beyond the result tree and never returns anything outside the wire
+ * shape contract.
+ */
+function parseJsonStrict(text: string): JsonValue {
+  let cursor = 0;
+
+  function fail(): never {
+    throw rpcProtocolError("rpc protocol: payload is not valid JSON");
+  }
+
+  function skipWhitespace(): void {
+    while (cursor < text.length && isWhitespace(reflectApply(stringCharCodeAt, text, [cursor]))) {
+      cursor += 1;
+    }
+  }
+
+  function peek(): string {
+    return cursor < text.length ? (text[cursor] as string) : "";
+  }
+
+  function expect(ch: string): void {
+    if (peek() !== ch) fail();
+    cursor += 1;
+  }
+
+  function parseValue(): JsonValue {
+    skipWhitespace();
+    if (cursor >= text.length) fail();
+    const ch = peek();
+    if (ch === "{") return parseObject();
+    if (ch === "[") return parseArray();
+    if (ch === '"') return parseString();
+    if (ch === "t" || ch === "f") return parseBoolean();
+    if (ch === "n") return parseNull();
+    if (ch === "-" || (ch >= "0" && ch <= "9")) return parseNumber();
+    fail();
+  }
+
+  function parseObject(): JsonValue {
+    expect("{");
+    const obj: Record<string, JsonValue> = objectCreate(null);
+    skipWhitespace();
+    if (peek() === "}") {
+      cursor += 1;
+      return obj;
+    }
+    while (true) {
+      skipWhitespace();
+      const key = parseString();
+      if (reflectApply(objectHasOwnProperty, obj, [key])) {
+        throw rpcProtocolError("rpc protocol: duplicate JSON key is not allowed");
+      }
+      skipWhitespace();
+      expect(":");
+      const value = parseValue();
+      obj[key] = value;
+      skipWhitespace();
+      if (cursor >= text.length) fail();
+      const sep = peek();
+      cursor += 1;
+      if (sep === ",") continue;
+      if (sep === "}") return obj;
+      fail();
+    }
+  }
+
+  function parseArray(): JsonValue {
+    expect("[");
+    const arr: JsonValue[] = [];
+    objectSetPrototypeOf(arr, null);
+    skipWhitespace();
+    if (peek() === "]") {
+      cursor += 1;
+      return arr;
+    }
+    while (true) {
+      arr[arr.length] = parseValue();
+      skipWhitespace();
+      if (cursor >= text.length) fail();
+      const sep = peek();
+      cursor += 1;
+      if (sep === ",") continue;
+      if (sep === "]") return arr;
+      fail();
+    }
+  }
+
+  function parseString(): string {
+    expect('"');
+    let out = "";
+    while (cursor < text.length) {
+      const ch = peek();
+      if (ch === '"') {
+        cursor += 1;
+        return out;
+      }
+      if (ch === "\\") {
+        cursor += 1;
+        const esc = peek();
+        cursor += 1;
+        if (esc === '"') out += '"';
+        else if (esc === "\\") out += "\\";
+        else if (esc === "/") out += "/";
+        else if (esc === "b") out += "\b";
+        else if (esc === "f") out += "\f";
+        else if (esc === "n") out += "\n";
+        else if (esc === "r") out += "\r";
+        else if (esc === "t") out += "\t";
+        else if (esc === "u") {
+          if (cursor + 4 > text.length) fail();
+          const hex = reflectApply(stringSlice, text, [cursor, cursor + 4]);
+          if (!isFourHexDigits(hex)) fail();
+          cursor += 4;
+          let code = 0;
+          for (let hexIndex = 0; hexIndex < 4; hexIndex += 1) {
+            code = code * 16 + hexDigitValue(reflectApply(stringCharCodeAt, hex, [hexIndex]));
+          }
+          out += stringFromCodePoint(code);
+        } else fail();
+        continue;
+      }
+      if (reflectApply(stringCharCodeAt, ch, [0]) <= 0x1f) fail();
+      out += ch;
+      cursor += 1;
+    }
+    fail();
+  }
+
+  function parseBoolean(): boolean {
+    if (matchesLiteral(text, cursor, "true")) {
+      cursor += 4;
+      return true;
+    }
+    if (matchesLiteral(text, cursor, "false")) {
+      cursor += 5;
+      return false;
+    }
+    fail();
+  }
+
+  function parseNull(): null {
+    if (matchesLiteral(text, cursor, "null")) {
+      cursor += 4;
+      return null;
+    }
+    fail();
+  }
+
+  function parseNumber(): number {
+    const start = cursor;
+    if (peek() === "-") cursor += 1;
+    const firstDigit = peek();
+    if (firstDigit === "0") {
+      cursor += 1;
+      if (isDecimalDigit(peek())) fail();
+    } else if (firstDigit >= "1" && firstDigit <= "9") {
+      cursor += 1;
+      while (isDecimalDigit(peek())) cursor += 1;
+    } else {
+      fail();
+    }
+    if (peek() === ".") {
+      cursor += 1;
+      if (!isDecimalDigit(peek())) fail();
+      while (isDecimalDigit(peek())) cursor += 1;
+    }
+    const expChar = peek();
+    if (expChar === "e" || expChar === "E") {
+      cursor += 1;
+      const sign = peek();
+      if (sign === "+" || sign === "-") cursor += 1;
+      if (!isDecimalDigit(peek())) fail();
+      while (isDecimalDigit(peek())) cursor += 1;
+    }
+    const numberText = reflectApply(stringSlice, text, [start, cursor]);
+    const value = numberFromString(numberText);
+    if (!numberIsFinite(value)) fail();
+    return value;
+  }
+
+  function isWhitespace(code: number): boolean {
+    return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+  }
+
+  const result = parseValue();
+  skipWhitespace();
+  if (cursor !== text.length) fail();
+  return result;
+}
+
+function matchesLiteral(text: string, offset: number, literal: string): boolean {
+  if (offset + literal.length > text.length) return false;
+  for (let index = 0; index < literal.length; index += 1) {
+    if (text[offset + index] !== literal[index]) return false;
+  }
+  return true;
+}
+
+function isDecimalDigit(value: string): boolean {
+  return value >= "0" && value <= "9";
+}
+
+function hexDigitValue(code: number): number {
+  if (code >= 0x30 && code <= 0x39) return code - 0x30;
+  if (code >= 0x41 && code <= 0x46) return code - 0x41 + 10;
+  return code - 0x61 + 10;
+}
+
+function arrayContains(values: ReadonlyArray<string>, candidate: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === candidate) return true;
+  }
+  return false;
+}
+
+/**
+ * True iff `actual` is a permutation of `expected` and has the same
+ * length.  Used to enforce the closed allowlist of own keys without
+ * allocating a sorted copy.
+ */
+function keysAreExactly(actual: ReadonlyArray<string>, expected: ReadonlyArray<string>): boolean {
+  if (actual.length !== expected.length) return false;
+  for (let expectedIndex = 0; expectedIndex < expected.length; expectedIndex += 1) {
+    const expectedKey = expected[expectedIndex];
+    let found = false;
+    for (let actualIndex = 0; actualIndex < actual.length; actualIndex += 1) {
+      if (actual[actualIndex] === expectedKey) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
+const standardObjectPrototypeNames = [
+  "constructor",
+  "__defineGetter__",
+  "__defineSetter__",
+  "hasOwnProperty",
+  "__lookupGetter__",
+  "__lookupSetter__",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toString",
+  "valueOf",
+  "__proto__",
+  "toLocaleString",
+];
+objectSetPrototypeOf(standardObjectPrototypeNames, null);
+const STANDARD_OBJECT_PROTOTYPE_NAMES: ReadonlyArray<string> = objectFreeze(
+  standardObjectPrototypeNames,
+);
+
+/**
+ * Validate the object boundary before reading any response-owned fields.
+ *
+ * `Object.keys` is insufficient here: it omits symbols and non-enumerable
+ * own properties, and it says nothing about enumerable properties inherited
+ * from a polluted prototype.  Response objects remain ordinary object
+ * literals (or null-prototype objects), but custom prototypes and every
+ * unknown own/inherited key are rejected.
+ */
+function validateClosedObject(
+  value: object,
+  allowed: ReadonlyArray<string>,
+  failureMessage: string,
+): ReadonlyArray<string> {
+  const prototype = objectGetPrototypeOf(value);
+  if (prototype !== objectPrototype && prototype !== null) {
+    throw rpcProtocolError(failureMessage);
+  }
+
+  const ownKeys = reflectOwnKeys(value);
+  for (let keyIndex = 0; keyIndex < ownKeys.length; keyIndex += 1) {
+    const key = ownKeys[keyIndex];
+    if (typeof key !== "string" || !arrayContains(allowed, key)) {
+      throw rpcProtocolError(failureMessage);
+    }
+    const descriptor = objectGetOwnPropertyDescriptor(value, key);
+    if (descriptor?.enumerable !== true) {
+      throw rpcProtocolError(failureMessage);
+    }
+  }
+
+  for (let inherited = prototype; inherited !== null; inherited = objectGetPrototypeOf(inherited)) {
+    const inheritedKeys = reflectOwnKeys(inherited);
+    for (let keyIndex = 0; keyIndex < inheritedKeys.length; keyIndex += 1) {
+      const key = inheritedKeys[keyIndex];
+      if (typeof key !== "string" || !arrayContains(STANDARD_OBJECT_PROTOTYPE_NAMES, key)) {
+        throw rpcProtocolError(failureMessage);
+      }
+      const descriptor = objectGetOwnPropertyDescriptor(inherited, key);
+      if (descriptor?.enumerable) {
+        throw rpcProtocolError(failureMessage);
+      }
+    }
+  }
+
+  return ownKeys as string[];
+}
+
+function isFourHexDigits(value: string): boolean {
+  if (value.length !== 4) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = reflectApply(stringCharCodeAt, value, [index]);
+    const isDecimal = code >= 0x30 && code <= 0x39;
+    const isLowerHex = code >= 0x61 && code <= 0x66;
+    const isUpperHex = code >= 0x41 && code <= 0x46;
+    if (!isDecimal && !isLowerHex && !isUpperHex) return false;
+  }
+  return true;
+}
+
+function isRpcErrorCode(value: string): value is RpcErrorCode {
+  return reflectApply(objectHasOwnProperty, RPC_ERROR_MESSAGES, [value]);
+}
