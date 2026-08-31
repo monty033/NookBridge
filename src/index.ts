@@ -381,5 +381,31 @@ export type {
 } from "./service/service-runtime.js";
 export { createProductionServiceRuntime } from "./service/service-runtime.js";
 
+// Stage 5 Task 4 — pure closed framed RPC protocol boundary.  The
+// parser and serializer are pure functions of their inputs; no
+// runtime / daemon / socket / filesystem / Notesnook import is
+// reached through this surface.  Only `notes.search` is in the
+// initial allowlist; request and response frames are bounded by
+// `STAGE5_RPC_LIMITS`; results are title-only.
+export type {
+  RpcErrorEnvelope,
+  RpcErrorEnvelopePayload,
+  RpcMethod,
+  RpcNotesSearchParams,
+  RpcNotesSearchRequest,
+  RpcRequest,
+  RpcResponseEnvelope,
+  RpcSearchHit,
+  RpcSearchResult,
+  RpcSuccessEnvelope,
+  Stage5RpcLimits,
+} from "./service/rpc-protocol.js";
+export {
+  isRpcProtocolError,
+  parseRpcFrame,
+  serializeRpcResponse,
+  STAGE5_RPC_LIMITS,
+} from "./service/rpc-protocol.js";
+
 // CLI entry.
 export { run as runNookCtl } from "./cli.js";
