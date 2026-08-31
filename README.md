@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; the two-device live canary is still pending.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client. **Formal Stage 5 service-boundary work is currently a docs-only decision record (`docs/stage-5-service-boundary.md`); Gate 5 is not passed and no daemon code, Nix deployment, or credential handling has landed in that slice.**
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; a positive two-device canary is not a NookBridge completion gate.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client. **Formal Stage 5 service-boundary work is currently a docs-only decision record (`docs/stage-5-service-boundary.md`); Gate 5 is not passed and no daemon code, Nix deployment, or credential handling has landed in that slice.**
 
 ## What this project is
 
@@ -61,8 +61,10 @@ sync-mode carriers before runtime construction, and emit only categorical
 IDs internally for title resolution and identity binding, but the CLI never
 emits IDs. It never syncs, mutates, resolves conflicts, exposes bodies, or
 prints upstream errors.
-A fresh fetch-only client is expected to return no local conflict marker. The
-two-device live conflict canary remains a separate pending gate.
+A fresh fetch-only client is expected to return no local conflict marker. A
+positive two-device canary is intentionally not a completion gate: it can only
+prove a marker in the detecting client's local state, which NookBridge neither
+owns nor mutates in this read-only slice.
 
 All stages follow the same rule: **do not start the next stage until the
 current stage has a repeatable automated test and a written pass/fail result**.

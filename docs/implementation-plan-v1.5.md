@@ -1679,8 +1679,9 @@ runtime forwards only the separately named observer; the command never invokes
 sync, mutation, conflict resolution, transport, or authentication and emits
 only categorical output. Focused Stage 5 projection/CLI tests pass **53/53**;
 typecheck, lint, format check, and build pass. A full native SQLite-dependent
-matrix and the operator-local two-device live canary remain pending after a
-native binding is available; no live conflict result is claimed here.
+matrix remains pending after a native binding is available. A positive
+two-device live canary is not an acceptance requirement: it can prove only a
+detecting client's local marker, not independent NookBridge observability.
 
 ### Stage 5 service boundary — decision record only
 
@@ -1708,7 +1709,7 @@ What this task establishes:
 - An initial RPC allowlist of exactly one method, `notes.search`, returning
   bounded title-only results.
 - An explicit forbidden list and an explicit out-of-scope list (including
-  Stage 6 MCP work and the pending positive two-device conflict canary).
+  Stage 6 MCP work and any positive two-device conflict reproduction).
 
 What this task deliberately does **not** claim:
 
@@ -1719,9 +1720,11 @@ What this task deliberately does **not** claim:
 - No change to the existing Nix checkout, which remains dirty and
   unmodified by this task.
 
-The two-device live conflict canary for the already merged **"Stage 5 local
-conflict observation"** slice remains a separate pending validation task and
-is **not** part of Gate 5.
+The positive two-device conflict canary for the already merged **"Stage 5 local
+conflict observation"** slice is retired as a NookBridge validation task and
+is **not** part of Gate 5. A 2026-08-30 desktop/Android attempt reconciled
+without a desktop local marker; that outcome is consistent with the documented
+device-local provenance boundary and is not a product failure.
 
 ### Stage 3 gate status
 
