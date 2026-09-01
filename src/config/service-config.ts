@@ -18,9 +18,9 @@
  *     non-empty safe socket-group token, the fixed
  *     `systemd-credential` backend id, the literal
  *     `nookbridge-db-key` credential label, and the read-policy
- *     allowlist `["notes.search"]`.  Anything else — credential paths,
- *     env overrides, dev backends, generic merge behavior — is
- *     categorically refused.
+ *     allowlist `["notes.search", "notes.status", "notes.list_notebooks",
+ *     "notes.get"]`.  Anything else — credential paths, env overrides, dev
+ *     backends, generic merge behavior — is categorically refused.
  *   - Every loader / diagnostic error is a frozen
  *     {@link ServiceConfigError} whose `category` is a closed string
  *     vocabulary.  Path, value, file contents, credential label, and
@@ -65,7 +65,12 @@ export const SERVICE_CONFIG_CREDENTIAL_NAME = "nookbridge-db-key" as const;
  * The closed read-policy allowlist.  Anything other than this exact
  * tuple is rejected.
  */
-export const SERVICE_CONFIG_READ_POLICY = Object.freeze(["notes.search"] as const);
+export const SERVICE_CONFIG_READ_POLICY = Object.freeze([
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+] as const);
 
 /**
  * Closed category vocabulary for {@link ServiceConfigError}.
@@ -250,7 +255,8 @@ export function loadServiceConfig(
  *     name grammar);
  *   - `backend` is the literal `systemd-credential`;
  *   - `credentialName` is the literal `nookbridge-db-key`;
- *   - `readPolicy` is the tuple `["notes.search"]` in order;
+ *   - `readPolicy` is the tuple `["notes.search", "notes.status",
+ *     "notes.list_notebooks", "notes.get"]` in order;
  *   - no credential-path, env-override, dev-backend, or generic
  *     passthrough field slipped through the strict walk.
  */

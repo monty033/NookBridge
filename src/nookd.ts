@@ -427,8 +427,13 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
   if (!isSafeSocketGroupToken(socketGroup)) {
     throw new Error("invalid service config");
   }
-  if (readPolicy.length !== 1 || readPolicy[0] !== SERVICE_CONFIG_READ_POLICY[0]) {
+  if (readPolicy.length !== SERVICE_CONFIG_READ_POLICY.length) {
     throw new Error("invalid service config");
+  }
+  for (let index = 0; index < readPolicy.length; index += 1) {
+    if (readPolicy[index] !== SERVICE_CONFIG_READ_POLICY[index]) {
+      throw new Error("invalid service config");
+    }
   }
 
   return freeze({
@@ -471,14 +476,21 @@ function captureStringField(record: Record<PropertyKey, unknown>, key: string): 
 function captureReadPolicyField(
   record: Record<PropertyKey, unknown>,
   key: string,
-): readonly [unknown] {
+): readonly unknown[] {
   const value = safeGet(record, key);
   if (!isArray(value)) throw new Error("invalid service config");
   const length = value.length;
-  if (length !== 1) throw new Error("invalid service config");
-  const first = value[0];
-  if (first !== SERVICE_CONFIG_READ_POLICY[0]) throw new Error("invalid service config");
-  return [first];
+  if (length !== SERVICE_CONFIG_READ_POLICY.length) throw new Error("invalid service config");
+
+  const captured: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    try {
+      captured[index] = value[index];
+    } catch {
+      throw new Error("invalid service config");
+    }
+  }
+  return captured;
 }
 
 function isCanonicalAbsolutePath(value: string, allowedRoot: string): boolean {

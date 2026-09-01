@@ -90,7 +90,7 @@ non-secret schema:
   "socketGroup": "nookbridge-clients",
   "backend": "systemd-credential",
   "credentialName": "nookbridge-db-key",
-  "readPolicy": ["notes.search"]
+  "readPolicy": ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"]
 }
 ```
 
@@ -137,23 +137,30 @@ automatic recovery step. Restore service operation only after the operator
 has identified and approved the recovery action; missing or malformed
 credentials remain a fail-closed startup condition.
 
-## 5. Initial RPC allowlist
+## 5. Initial RPC allowlist (superseded by Stage 6 Slice 2)
 
-The first daemon vertical slice exposes **exactly one** RPC method:
+The first daemon vertical slice exposed **exactly one** RPC method, as recorded
+below. Stage 6 Slice 2 is the current read-only contract and expands that
+allowlist to the exact ordered tuple `notes.search`, `notes.status`,
+`notes.list_notebooks`, `notes.get`.
 
 | Method | Request | Success result (title-only) |
 |--------|---------|----------------------------|
 | `notes.search` | `{ id, method: "notes.search", params: { query } }` | `{ id, ok: true, result: { kind: "search", notes: [{ title }] } }` |
 
-Rules that bound this surface from day one:
+Rules that bound this surface from day one and continue to apply to the
+four-method Stage 6 Slice 2 surface:
 
-- The only allowed method is `notes.search`. Every other method name is
-  rejected categorically, including methods that *look* like existing CLI
-  verbs.
+- The current allowlist is exactly `notes.search`, `notes.status`,
+  `notes.list_notebooks`, and `notes.get`, in that order. Every other method
+  name is rejected categorically, including methods that *look* like existing
+  CLI verbs. No write, authentication, sync, or generic dispatch method is
+  admitted.
 - Request frames are length-prefixed and size-capped before JSON parsing.
-- The query is bounded; values exceeding the limit are rejected.
-- The success result is **title-only**: no note IDs, no bodies, no paths,
-  no revision tokens, no credentials, no raw upstream strings.
+- The query and identifiers are bounded; values exceeding their limits are
+  rejected.
+- Success results remain **title-only**: no note IDs, bodies, paths, revision
+  tokens, credentials, or raw upstream strings.
 - Response frames are size-capped; over-limit responses fail as a bounded
   categorical error.
 - Every response is a frozen envelope; unknown response fields fail.
