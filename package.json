@@ -10,6 +10,9 @@
     "node": ">=22.23.0 <23.0.0"
   },
   "main": "./dist/index.js",
+  "bin": {
+    "nook-mcp": "./dist/mcp/cli.js"
+  },
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -34,6 +37,7 @@
     "nookd": "node dist/nookd.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@notesnook/core": "8.1.3",
     "@notesnook/crypto": "2.1.3",
     "@streetwriters/kysely": "0.27.4",
