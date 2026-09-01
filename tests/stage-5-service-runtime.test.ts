@@ -334,6 +334,9 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
         expect(typeof runtime.readOnly).toBe("object");
         expect(runtime.readOnly).not.toBeNull();
         expect(typeof runtime.search).toBe("function");
+        expect(typeof runtime.status).toBe("function");
+        expect(typeof runtime.listNotebooks).toBe("function");
+        expect(typeof runtime.noteMetadata).toBe("function");
         expect(typeof runtime.cleanup).toBe("function");
 
         // The runtime is frozen — no runtime caller can grow the
@@ -344,7 +347,9 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
         // Cast through unknown to peek at the absence of these slots
         // without making the production type wider than necessary.
         const slotNames = Object.keys(runtime);
-        expect(slotNames.sort()).toEqual(["cleanup", "readOnly", "search"].sort());
+        expect(slotNames.sort()).toEqual(
+          ["cleanup", "listNotebooks", "noteMetadata", "readOnly", "search", "status"].sort(),
+        );
         const denied = [
           "providerFactory",
           "user",

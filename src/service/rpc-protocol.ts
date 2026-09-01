@@ -68,6 +68,7 @@ export interface Stage5RpcLimits {
   readonly maxResponseBytes: number;
   readonly maxSearchHits: number;
   readonly maxTitleBytes: number;
+  readonly maxIdentifierBytes: number;
 }
 
 /**
@@ -99,12 +100,14 @@ const stage5RpcLimits = objectCreate(null) as {
   maxResponseBytes: number;
   maxSearchHits: number;
   maxTitleBytes: number;
+  maxIdentifierBytes: number;
 };
 stage5RpcLimits.maxFrameBytes = 65_536;
 stage5RpcLimits.maxQueryBytes = 512;
 stage5RpcLimits.maxResponseBytes = 65_536;
 stage5RpcLimits.maxSearchHits = 64;
 stage5RpcLimits.maxTitleBytes = 256;
+stage5RpcLimits.maxIdentifierBytes = 256;
 export const STAGE5_RPC_LIMITS: Stage5RpcLimits = objectFreeze(stage5RpcLimits);
 
 // ---------------------------------------------------------------------------
@@ -118,12 +121,19 @@ export interface RpcNotesSearchParams {
   readonly query: string;
 }
 
+export type RpcNotesStatusParams = Record<string, never>;
+
+export type RpcNotesListNotebooksParams = Record<string, never>;
+
+export interface RpcNotesGetParams {
+  readonly id: string;
+}
+
 /**
- * The closed set of allowed RPC methods.  Only `notes.search` is in the
- * first protocol slice; additional methods are added through an explicit
- * decision-record amendment.
+ * The closed set of allowed RPC methods for the Stage 6 Slice 2
+ * read-only surface.
  */
-export type RpcMethod = "notes.search";
+export type RpcMethod = "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -131,7 +141,29 @@ export interface RpcNotesSearchRequest {
   readonly params: RpcNotesSearchParams;
 }
 
-export type RpcRequest = RpcNotesSearchRequest;
+export interface RpcNotesStatusRequest {
+  readonly id: string;
+  readonly method: "notes.status";
+  readonly params: RpcNotesStatusParams;
+}
+
+export interface RpcNotesListNotebooksRequest {
+  readonly id: string;
+  readonly method: "notes.list_notebooks";
+  readonly params: RpcNotesListNotebooksParams;
+}
+
+export interface RpcNotesGetRequest {
+  readonly id: string;
+  readonly method: "notes.get";
+  readonly params: RpcNotesGetParams;
+}
+
+export type RpcRequest =
+  | RpcNotesSearchRequest
+  | RpcNotesStatusRequest
+  | RpcNotesListNotebooksRequest
+  | RpcNotesGetRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -147,10 +179,58 @@ export interface RpcSearchResult {
   readonly notes: ReadonlyArray<RpcSearchHit>;
 }
 
+export interface RpcStatusResult {
+  readonly kind: "status";
+  readonly lastSynced: number;
+  readonly hasUnsyncedChanges: boolean;
+}
+
+export interface RpcNotebookSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly dateCreated?: number;
+  readonly dateModified?: number;
+}
+
+export interface RpcListNotebooksResult {
+  readonly kind: "notebooks";
+  readonly notebooks: ReadonlyArray<RpcNotebookSummary>;
+}
+
+export interface RpcNoteMetadata {
+  readonly id: string;
+  readonly title: string;
+  readonly dateCreated?: number;
+  readonly dateModified?: number;
+  readonly notebookId?: string;
+  readonly pinned?: boolean;
+  readonly favorite?: boolean;
+  readonly localOnly?: boolean;
+  readonly conflicted?: boolean;
+  readonly locked?: boolean;
+}
+
+export interface RpcGetNoteResult {
+  readonly kind: "note";
+  readonly note: RpcNoteMetadata;
+}
+
+export type RpcResult =
+  | RpcSearchResult
+  | RpcStatusResult
+  | RpcListNotebooksResult
+  | RpcGetNoteResult;
+
 export interface RpcSuccessEnvelope {
   readonly id: string;
   readonly ok: true;
   readonly result: RpcSearchResult;
+}
+
+export interface RpcAnySuccessEnvelope {
+  readonly id: string;
+  readonly ok: true;
+  readonly result: RpcResult;
 }
 
 export interface RpcErrorEnvelopePayload {
@@ -184,6 +264,7 @@ export interface RpcErrorEnvelope {
 }
 
 export type RpcResponseEnvelope = RpcSuccessEnvelope | RpcErrorEnvelope;
+export type RpcAnyResponseEnvelope = RpcAnySuccessEnvelope | RpcErrorEnvelope;
 
 // ---------------------------------------------------------------------------
 // Error type + predicate.
@@ -448,7 +529,12 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
   }
 
   const method = root.method;
-  if (method !== "notes.search") {
+  if (
+    method !== "notes.search" &&
+    method !== "notes.status" &&
+    method !== "notes.list_notebooks" &&
+    method !== "notes.get"
+  ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
 
@@ -458,42 +544,64 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
   }
   const paramsRecord = params as Record<string, JsonValue>;
   const paramKeys = objectKeys(paramsRecord);
-  if (paramKeys.length !== 1 || paramKeys[0] !== "query") {
-    throw rpcProtocolError("rpc protocol: request params must contain exactly one field: query");
-  }
 
-  const query = paramsRecord.query;
-  if (typeof query !== "string") {
-    throw rpcProtocolError("rpc protocol: request query must be a string");
+  // Reconstruct the frozen, null-prototype request. `Object.create(null)`
+  // ensures no inherited getter can intercept field reads.
+  let paramsObj: Record<string, unknown>;
+  if (method === "notes.search") {
+    if (paramKeys.length !== 1 || paramKeys[0] !== "query") {
+      throw rpcProtocolError("rpc protocol: search params must contain exactly one field: query");
+    }
+    const query = paramsRecord.query;
+    if (typeof query !== "string") {
+      throw rpcProtocolError("rpc protocol: request query must be a string");
+    }
+    if (query.length === 0) {
+      throw rpcProtocolError("rpc protocol: request query must not be empty");
+    }
+    if (
+      query.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      utf8ByteLength(query, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes
+    ) {
+      throw rpcProtocolError("rpc protocol: request query exceeds maximum query bytes");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.query = query;
+  } else if (method === "notes.get") {
+    if (paramKeys.length !== 1 || paramKeys[0] !== "id") {
+      throw rpcProtocolError("rpc protocol: get params must contain exactly one field: id");
+    }
+    const noteId = paramsRecord.id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    ) {
+      throw rpcProtocolError("rpc protocol: request note id is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+  } else {
+    if (paramKeys.length !== 0) {
+      throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
   }
-  if (query.length === 0) {
-    throw rpcProtocolError("rpc protocol: request query must not be empty");
-  }
-  if (query.length > STAGE5_RPC_LIMITS.maxQueryBytes) {
-    throw rpcProtocolError("rpc protocol: request query exceeds maximum query bytes");
-  }
-  if (utf8ByteLength(query, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes) {
-    throw rpcProtocolError("rpc protocol: request query exceeds maximum query bytes");
-  }
-
-  // Reconstruct the frozen, null-prototype request.  `Object.create(null)`
-  // ensures no inherited getter can intercept field reads; `Object.freeze`
-  // prevents mutation.  The nested params object is wrapped the same way.
-  const paramsObj = objectCreate(null) as { query: string };
-  paramsObj.query = query;
   objectFreeze(paramsObj);
+
   const requestTarget = objectCreate(null) as {
     id: string;
-    method: "notes.search";
-    params: { query: string };
+    method: RpcMethod;
+    params: Record<string, unknown>;
   };
   requestTarget.id = id;
   requestTarget.method = method;
   requestTarget.params = paramsObj;
   objectFreeze(requestTarget);
-  const request = requestTarget as unknown as RpcRequest;
-
-  return request;
+  return requestTarget as unknown as RpcRequest;
 }
 
 /**
@@ -574,96 +682,132 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       throw rpcProtocolError("rpc protocol: success result must be a plain object");
     }
     const resultRecord = result as Record<string, JsonValue>;
-    const resultKeys = validateClosedObject(
-      resultRecord,
-      ["kind", "notes"],
-      "rpc protocol: search result has unexpected fields",
-    );
-    if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "notes"])) {
-      throw rpcProtocolError("rpc protocol: search result has unexpected fields");
-    }
-    if (resultRecord.kind !== "search") {
-      throw rpcProtocolError("rpc protocol: result kind is not allowed");
-    }
-    const notes = resultRecord.notes;
-    if (!arrayIsArray(notes)) {
-      throw rpcProtocolError("rpc protocol: search notes must be an array");
-    }
-    if (notes.length > STAGE5_RPC_LIMITS.maxSearchHits) {
-      throw rpcProtocolError("rpc protocol: search notes exceed maximum hit count");
+    const kind = resultRecord.kind;
+    if (kind === "search") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "notes"],
+        "rpc protocol: search result has unexpected fields",
+      );
+      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "notes"])) {
+        throw rpcProtocolError("rpc protocol: search result has unexpected fields");
+      }
+      const notes = resultRecord.notes;
+      if (!arrayIsArray(notes) || notes.length > STAGE5_RPC_LIMITS.maxSearchHits) {
+        throw rpcProtocolError("rpc protocol: search notes are invalid");
+      }
+      const cleanNotes: Array<{ title: string }> = [];
+      objectSetPrototypeOf(cleanNotes, null);
+      for (let index = 0; index < notes.length; index += 1) {
+        if (!reflectApply(objectHasOwnProperty, notes, [index])) {
+          throw rpcProtocolError(
+            "rpc protocol: search notes must contain only own numeric entries",
+          );
+        }
+        const note = notes[index];
+        if (note === null || typeof note !== "object" || arrayIsArray(note)) {
+          throw rpcProtocolError("rpc protocol: search hit must be a plain object");
+        }
+        const noteRecord = note as Record<string, JsonValue>;
+        const noteKeys = validateClosedObject(
+          noteRecord,
+          ["title"],
+          "rpc protocol: search hit has unexpected fields",
+        );
+        if (noteKeys.length !== 1 || noteKeys[0] !== "title") {
+          throw rpcProtocolError("rpc protocol: search hit must contain exactly one field: title");
+        }
+        const title = noteRecord.title;
+        assertBoundedString(title, STAGE5_RPC_LIMITS.maxTitleBytes, "search hit title");
+        preflightResponseStringField(title, rawSum);
+        const cleanNote = objectCreate(null) as { title: string };
+        cleanNote.title = title;
+        cleanNotes[index] = cleanNote;
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "search";
+        notes: Array<{ title: string }>;
+      };
+      resultPayload.kind = "search";
+      resultPayload.notes = cleanNotes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
-    const cleanNotes: Array<{ title: string }> = [];
-    objectSetPrototypeOf(cleanNotes, null);
-    let emittedHits = 0;
-    const noteCount = notes.length;
-    for (let index = 0; index < noteCount; index += 1) {
-      if (emittedHits >= STAGE5_RPC_LIMITS.maxSearchHits) {
-        throw rpcProtocolError("rpc protocol: search notes exceed maximum hit count");
-      }
-      if (!reflectApply(objectHasOwnProperty, notes, [index])) {
-        throw rpcProtocolError("rpc protocol: search notes must contain only own numeric entries");
-      }
-      emittedHits += 1;
-      const note = notes[index];
-      if (note === null || typeof note !== "object" || arrayIsArray(note)) {
-        throw rpcProtocolError("rpc protocol: search hit must be a plain object");
-      }
-      const noteRecord = note as Record<string, JsonValue>;
-      const noteKeys = validateClosedObject(
-        noteRecord,
-        ["title"],
-        "rpc protocol: search hit has unexpected fields",
+    if (kind === "status") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "lastSynced", "hasUnsyncedChanges"],
+        "rpc protocol: status result has unexpected fields",
       );
-      if (noteKeys.length !== 1 || noteKeys[0] !== "title") {
-        throw rpcProtocolError("rpc protocol: search hit must contain exactly one field: title");
-      }
-      const title = noteRecord.title;
-      if (typeof title !== "string") {
-        throw rpcProtocolError("rpc protocol: search hit title must be a string");
-      }
-      if (title.length > STAGE5_RPC_LIMITS.maxTitleBytes) {
-        throw rpcProtocolError("rpc protocol: search hit title exceeds maximum title bytes");
+      if (
+        resultKeys.length !== 3 ||
+        !keysAreExactly(resultKeys, ["kind", "lastSynced", "hasUnsyncedChanges"])
+      ) {
+        throw rpcProtocolError("rpc protocol: status result has unexpected fields");
       }
       if (
-        utf8ByteLength(title, STAGE5_RPC_LIMITS.maxTitleBytes) > STAGE5_RPC_LIMITS.maxTitleBytes
+        !isNonNegativeFiniteNumber(resultRecord.lastSynced) ||
+        typeof resultRecord.hasUnsyncedChanges !== "boolean"
       ) {
-        throw rpcProtocolError("rpc protocol: search hit title exceeds maximum title bytes");
+        throw rpcProtocolError("rpc protocol: status result fields are invalid");
       }
-      // Preflight each title as well, so the sum bound catches an
-      // envelope where many titles collectively exceed the response
-      // cap.  The per-title cap above remains the tighter bound for
-      // any single hit; the preflight contributes the sum bound.
-      preflightResponseStringField(title, rawSum);
-      const cleanNote = objectCreate(null) as { title: string };
-      cleanNote.title = title;
-      cleanNotes[index] = cleanNote;
+      const resultPayload = objectCreate(null) as {
+        kind: "status";
+        lastSynced: number;
+        hasUnsyncedChanges: boolean;
+      };
+      resultPayload.kind = "status";
+      resultPayload.lastSynced = resultRecord.lastSynced;
+      resultPayload.hasUnsyncedChanges = resultRecord.hasUnsyncedChanges;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
-    const resultPayload = objectCreate(null) as { kind: "search"; notes: Array<{ title: string }> };
-    resultPayload.kind = "search";
-    resultPayload.notes = cleanNotes;
-    const successEnvelope = objectCreate(null) as {
-      id: string;
-      ok: true;
-      result: { kind: "search"; notes: Array<{ title: string }> };
-    };
-    successEnvelope.id = id;
-    successEnvelope.ok = true;
-    successEnvelope.result = resultPayload;
-    const payload = jsonStringify(successEnvelope);
-    const payloadBytes = bufferFrom(payload, "utf8");
-    const payloadByteLength = getIntrinsicUint8ArrayMetadata(payloadBytes).byteLength;
-    if (payloadByteLength > STAGE5_RPC_LIMITS.maxResponseBytes) {
-      throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
+    if (kind === "notebooks") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "notebooks"],
+        "rpc protocol: notebooks result has unexpected fields",
+      );
+      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "notebooks"])) {
+        throw rpcProtocolError("rpc protocol: notebooks result has unexpected fields");
+      }
+      const notebooks = resultRecord.notebooks;
+      if (!arrayIsArray(notebooks) || notebooks.length > STAGE5_RPC_LIMITS.maxSearchHits) {
+        throw rpcProtocolError("rpc protocol: notebooks result is invalid");
+      }
+      const cleanNotebooks: Array<Record<string, JsonValue>> = [];
+      objectSetPrototypeOf(cleanNotebooks, null);
+      for (let index = 0; index < notebooks.length; index += 1) {
+        if (!reflectApply(objectHasOwnProperty, notebooks, [index]))
+          throw rpcProtocolError("rpc protocol: notebooks result has sparse entries");
+        const clean = normaliseNotebookResult(notebooks[index], rawSum);
+        cleanNotebooks[index] = clean;
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "notebooks";
+        notebooks: Array<Record<string, JsonValue>>;
+      };
+      resultPayload.kind = "notebooks";
+      resultPayload.notebooks = cleanNotebooks;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
-    const frame = new Uint8ArrayConstructor(LENGTH_PREFIX_BYTES + payloadByteLength);
-    writeLengthPrefix(frame, payloadByteLength);
-    for (let index = 0; index < payloadByteLength; index += 1) {
-      frame[LENGTH_PREFIX_BYTES + index] = payloadBytes[index] ?? 0;
+    if (kind === "note") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "note"],
+        "rpc protocol: note result has unexpected fields",
+      );
+      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "note"])) {
+        throw rpcProtocolError("rpc protocol: note result has unexpected fields");
+      }
+      const cleanNote = normaliseNoteResult(resultRecord.note, rawSum);
+      const resultPayload = objectCreate(null) as { kind: "note"; note: Record<string, JsonValue> };
+      resultPayload.kind = "note";
+      resultPayload.note = cleanNote;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
     }
-    return frame;
+    throw rpcProtocolError("rpc protocol: result kind is not allowed");
   }
 
   // ok === false
@@ -734,6 +878,152 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
  * RpcProtocolError before it crosses the module boundary.
  */
 export const serializeRpcResponse = wrapProtocolBoundary(serializeRpcResponseInternal);
+
+function serializeSuccessFrame(
+  id: string,
+  resultPayload: Record<string, unknown>,
+  rawSum: { n: number },
+): Uint8Array {
+  const successEnvelope = objectCreate(null) as {
+    id: string;
+    ok: true;
+    result: Record<string, unknown>;
+  };
+  successEnvelope.id = id;
+  successEnvelope.ok = true;
+  successEnvelope.result = resultPayload;
+  const payload = jsonStringify(successEnvelope);
+  if (typeof payload !== "string")
+    throw rpcProtocolError("rpc protocol: response is not serializable");
+  void rawSum;
+  const payloadBytes = bufferFrom(payload, "utf8");
+  const payloadByteLength = getIntrinsicUint8ArrayMetadata(payloadBytes).byteLength;
+  if (payloadByteLength > STAGE5_RPC_LIMITS.maxResponseBytes) {
+    throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
+  }
+  const frame = new Uint8ArrayConstructor(LENGTH_PREFIX_BYTES + payloadByteLength);
+  writeLengthPrefix(frame, payloadByteLength);
+  for (let index = 0; index < payloadByteLength; index += 1) {
+    frame[LENGTH_PREFIX_BYTES + index] = payloadBytes[index] ?? 0;
+  }
+  return frame;
+}
+
+function assertBoundedString(
+  value: JsonValue | undefined,
+  maxBytes: number,
+  label: string,
+): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || hasControlCharacter(value)) {
+    throw rpcProtocolError(`rpc protocol: ${label} is invalid`);
+  }
+  const boundLabel = label.includes("title")
+    ? "title bytes"
+    : label.includes("id")
+      ? "identifier bytes"
+      : "bytes";
+  if (value.length > maxBytes || utf8ByteLength(value, maxBytes) > maxBytes) {
+    throw rpcProtocolError(`rpc protocol: ${label} exceeds maximum ${boundLabel}`);
+  }
+}
+
+function isNonNegativeFiniteNumber(value: JsonValue | undefined): value is number {
+  return typeof value === "number" && numberIsFinite(value) && value >= 0;
+}
+
+function validateOptionalMetadataNumber(
+  record: Record<string, JsonValue>,
+  key: "dateCreated" | "dateModified",
+): number | undefined {
+  const value = record[key];
+  if (value !== undefined && !isNonNegativeFiniteNumber(value)) {
+    throw rpcProtocolError("rpc protocol: metadata timestamp is invalid");
+  }
+  return value;
+}
+
+function normaliseNotebookResult(
+  value: JsonValue | undefined,
+  rawSum: { n: number },
+): Record<string, JsonValue> {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: notebook summary must be an object");
+  }
+  const record = value as Record<string, JsonValue>;
+  const keys = validateClosedObject(
+    record,
+    ["id", "title", "dateCreated", "dateModified"],
+    "rpc protocol: notebook summary has unexpected fields",
+  );
+  if (keys.length < 2 || !keys.includes("id") || !keys.includes("title")) {
+    throw rpcProtocolError("rpc protocol: notebook summary is missing fields");
+  }
+  assertBoundedString(record.id, STAGE5_RPC_LIMITS.maxIdentifierBytes, "notebook id");
+  assertBoundedString(record.title, STAGE5_RPC_LIMITS.maxTitleBytes, "notebook title");
+  preflightResponseStringField(record.id, rawSum);
+  preflightResponseStringField(record.title, rawSum);
+  const clean = objectCreate(null) as Record<string, JsonValue>;
+  clean.id = record.id;
+  clean.title = record.title;
+  const dateCreated = validateOptionalMetadataNumber(record, "dateCreated");
+  const dateModified = validateOptionalMetadataNumber(record, "dateModified");
+  if (dateCreated !== undefined) clean.dateCreated = dateCreated;
+  if (dateModified !== undefined) clean.dateModified = dateModified;
+  return clean;
+}
+
+function normaliseNoteResult(
+  value: JsonValue | undefined,
+  rawSum: { n: number },
+): Record<string, JsonValue> {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: note metadata must be an object");
+  }
+  const record = value as Record<string, JsonValue>;
+  const keys = validateClosedObject(
+    record,
+    [
+      "id",
+      "title",
+      "dateCreated",
+      "dateModified",
+      "notebookId",
+      "pinned",
+      "favorite",
+      "localOnly",
+      "conflicted",
+      "locked",
+    ],
+    "rpc protocol: note metadata has unexpected fields",
+  );
+  if (keys.length < 2 || !keys.includes("id") || !keys.includes("title")) {
+    throw rpcProtocolError("rpc protocol: note metadata is missing fields");
+  }
+  assertBoundedString(record.id, STAGE5_RPC_LIMITS.maxIdentifierBytes, "note id");
+  assertBoundedString(record.title, STAGE5_RPC_LIMITS.maxTitleBytes, "note title");
+  preflightResponseStringField(record.id, rawSum);
+  preflightResponseStringField(record.title, rawSum);
+  const clean = objectCreate(null) as Record<string, JsonValue>;
+  clean.id = record.id;
+  clean.title = record.title;
+  const dateCreated = validateOptionalMetadataNumber(record, "dateCreated");
+  const dateModified = validateOptionalMetadataNumber(record, "dateModified");
+  if (dateCreated !== undefined) clean.dateCreated = dateCreated;
+  if (dateModified !== undefined) clean.dateModified = dateModified;
+  if (record.notebookId !== undefined) {
+    assertBoundedString(record.notebookId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "notebook id");
+    preflightResponseStringField(record.notebookId, rawSum);
+    clean.notebookId = record.notebookId;
+  }
+  for (const key of ["pinned", "favorite", "localOnly", "conflicted", "locked"] as const) {
+    if (record[key] !== undefined) {
+      if (typeof record[key] !== "boolean")
+        throw rpcProtocolError("rpc protocol: note metadata flag is invalid");
+      clean[key] = record[key];
+    }
+  }
+  return clean;
+}
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -1123,4 +1413,12 @@ function isFourHexDigits(value: string): boolean {
 
 function isRpcErrorCode(value: string): value is RpcErrorCode {
   return reflectApply(objectHasOwnProperty, RPC_ERROR_MESSAGES, [value]);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = reflectApply(stringCharCodeAt, value, [index]);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }

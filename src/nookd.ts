@@ -79,7 +79,8 @@ export type NookdCliOutput = Readonly<{
   stderr: NookdOutputStream;
 }>;
 
-export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup">;
+export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
+  Partial<Pick<ServiceRuntime, "status" | "listNotebooks" | "noteMetadata">>;
 
 /** Narrow seams for testing composition without replacing production defaults. */
 export type NookdStartupFactories = Readonly<{
@@ -240,6 +241,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   }
 
   let search: NookdStartupRuntime["search"];
+  let status: NookdStartupRuntime["status"];
+  let listNotebooks: NookdStartupRuntime["listNotebooks"];
+  let noteMetadata: NookdStartupRuntime["noteMetadata"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"];
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -247,11 +251,23 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       throw new Error("invalid service runtime");
     }
     const capturedSearch = runtime.search;
+    const capturedStatus = runtime.status;
+    const capturedListNotebooks = runtime.listNotebooks;
+    const capturedNoteMetadata = runtime.noteMetadata;
     const capturedCleanup = runtime.cleanup;
-    if (typeof capturedSearch !== "function" || typeof capturedCleanup !== "function") {
+    if (
+      typeof capturedSearch !== "function" ||
+      typeof capturedCleanup !== "function" ||
+      (capturedStatus !== undefined && typeof capturedStatus !== "function") ||
+      (capturedListNotebooks !== undefined && typeof capturedListNotebooks !== "function") ||
+      (capturedNoteMetadata !== undefined && typeof capturedNoteMetadata !== "function")
+    ) {
       throw new Error("invalid service runtime");
     }
     search = capturedSearch;
+    status = capturedStatus;
+    listNotebooks = capturedListNotebooks;
+    noteMetadata = capturedNoteMetadata;
     runtimeCleanup = capturedCleanup;
   } catch {
     throw startupError("runtime", "nookd runtime startup failed");
@@ -260,6 +276,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   const cleanup = onceAsync(runtimeCleanup);
   const serverRuntime: NookdServerRuntime = freeze({
     search,
+    ...(status === undefined ? {} : { status }),
+    ...(listNotebooks === undefined ? {} : { listNotebooks }),
+    ...(noteMetadata === undefined ? {} : { noteMetadata }),
     cleanup,
   });
 

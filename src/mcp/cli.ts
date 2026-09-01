@@ -21,7 +21,7 @@ export const NOOK_MCP_MAX_QUERY_BYTES = 512;
 
 const HELP_TEXT =
   "Usage: nook-mcp --socket /run/nookbridge/nookbridge.sock\n" +
-  "Exposes one read-only notesnook_search_notes tool over MCP stdio.\n";
+  "Exposes four read-only Notesnook metadata/search tools over MCP stdio.\n";
 
 export type CliParseResult =
   | { readonly kind: "ok"; readonly socketPath: string }
