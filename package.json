@@ -11,7 +11,9 @@
   },
   "main": "./dist/index.js",
   "bin": {
-    "nook-mcp": "./dist/mcp/cli.js"
+    "nook-mcp": "./dist/mcp/cli.js",
+    "nookbridge-provision": "./dist/provision.js",
+    "nookbridge-sync": "./dist/sync.js"
   },
   "types": "./dist/index.d.ts",
   "exports": {
