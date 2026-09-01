@@ -1,6 +1,6 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; a positive two-device canary is not a NookBridge completion gate.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client. **Formal Stage 5 service-boundary work is currently a docs-only decision record (`docs/stage-5-service-boundary.md`); Gate 5 is not passed and no daemon code, Nix deployment, or credential handling has landed in that slice.**
+> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; a positive two-device canary is not a NookBridge completion gate.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client. **The Stage 5 production service boundary and Stage 6 Slice 2 read-only MCP proxy are implemented; the application-side production provisioning path is ready, and its manual systemd-credential-backed Nix wrappers are maintained in the deployment repository.**
 
 ## What this project is
 
@@ -104,6 +104,26 @@ just check-stage4-operator-gate
 This proves parser/gate behavior and the local pending contract; it is not a
 live-account, second-device, or Gate 4 canary receipt. Do not inspect or commit
 generated `var/` state.
+
+## Production state provisioning (manual)
+
+The Nix deployment exposes two root-only operator commands. They launch
+transient `systemd-run --pty --wait --collect` units as `nookbridge`, inject the
+same `nookbridge-db-key` credential used by `nookd`, and bind to the fixed state
+directory `/var/lib/nookbridge`:
+
+```text
+nookbridge-provision    # interactive Notesnook login; credentials are TTY-only
+nookbridge-sync         # fetch-only sync; never performs a send/write phase
+```
+
+Both commands are manual and have no `wantedBy` activation. Run them from a
+real host TTY as root. Do not pass passwords, MFA, tokens, or account names in
+argv or environment. Do not substitute `nookctl auth live-login` or
+`nookctl sync read-only` for production state: those development CLI paths use
+the file-backed development key and can initialize a separate encrypted
+store. After provisioning and fetch-only sync, the daemon can be restarted and
+the read-only MCP acceptance checks can be run against the populated state.
 
 ## Target architecture and security boundary
 

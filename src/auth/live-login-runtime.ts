@@ -48,6 +48,12 @@ import type { LiveLoginRuntime } from "./admin-command.js";
 export type CreateLiveLoginRuntimeOptions = Readonly<{
   stateDir: string;
   logger?: Logger;
+  /**
+   * Optional caller-selected key backend.  The ordinary CLI path omits this
+   * and retains its development-file behavior.  Production provisioning
+   * supplies the systemd-credential backend explicitly.
+   */
+  keys?: SecureKeyStore;
   /** Offline test seam; never pass this from the CLI. */
   injectedModule?: NotesnookRealCoreModule;
 }>;
@@ -63,10 +69,12 @@ export async function createProductionLiveLoginRuntime(
 ): Promise<LiveLoginRuntime> {
   const normalized = normalizeRuntimeOptions(options);
   const stateDir = normaliseStateDir(normalized.stateDir);
-  const keys = createDevelopmentFileKeyStore({
-    keyPath: `${stateDir}/.d/db.key`,
-    generateIfMissing: true,
-  });
+  const keys =
+    normalized.keys ??
+    createDevelopmentFileKeyStore({
+      keyPath: `${stateDir}/.d/db.key`,
+      generateIfMissing: true,
+    });
 
   const core = await createProductionRuntimeCore({
     stateDir,
@@ -211,6 +219,7 @@ export async function createProductionRuntimeCore(
 type NormalizedRuntimeOptions = Readonly<{
   stateDir: string;
   logger?: Logger;
+  keys?: SecureKeyStore;
   injectedModule?: NotesnookRealCoreModule;
 }>;
 
@@ -227,10 +236,21 @@ function normalizeRuntimeOptions(options: unknown): NormalizedRuntimeOptions {
   if (logger !== undefined && (typeof logger !== "object" || logger === null)) {
     throw new Error("invalid live-login runtime logger");
   }
+  const keys = candidate.keys;
+  if (
+    keys !== undefined &&
+    (typeof keys !== "object" ||
+      keys === null ||
+      Array.isArray(keys) ||
+      typeof (keys as Record<string, unknown>).getDatabaseKey !== "function")
+  ) {
+    throw new Error("invalid live-login runtime key store");
+  }
   const injectedModule = candidate.injectedModule;
   return {
     stateDir,
     ...(logger === undefined ? {} : { logger: logger as Logger }),
+    ...(keys === undefined ? {} : { keys: keys as SecureKeyStore }),
     ...(injectedModule === undefined
       ? {}
       : { injectedModule: injectedModule as NotesnookRealCoreModule }),
