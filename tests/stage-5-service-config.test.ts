@@ -12,7 +12,8 @@
  *      leakage, generic env-override behavior.
  *   2. Strict selection — backend must be the literal
  *      `systemd-credential` id; the development-file id is refused.
- *   3. Read-policy allowlist — only `notes.search` is accepted.
+ *   3. Read-policy allowlist — only the exact ordered four-method tuple
+ *      (`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`) is accepted.
  *   4. Root-ownership seam — the loader can be told to verify the
  *      config file is owned by the current uid (root in the deployed
  *      case) and is not group/world writable; the verifier accepts an
@@ -65,7 +66,7 @@ const VALID_FIXTURE = {
   socketGroup: "nookbridge-clients",
   backend: "systemd-credential",
   credentialName: "nookbridge-db-key",
-  readPolicy: ["notes.search"],
+  readPolicy: ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"],
 } as const;
 
 let workspaceRoot: string;
@@ -156,7 +157,7 @@ describe("Stage 5 strict service configuration", () => {
         socketGroup: "nookbridge-clients",
         backend: "systemd-credential",
         credentialName: "nookbridge-db-key",
-        readPolicy: ["notes.search"],
+        readPolicy: ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"],
       });
     });
 
@@ -179,7 +180,7 @@ describe("Stage 5 strict service configuration", () => {
         socketGroup: "nookbridge-clients",
         backend: "systemd-credential",
         credentialName: "nookbridge-db-key",
-        readPolicy: ["notes.search"],
+        readPolicy: ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"],
       };
       const file = writeJsonConfig("valid-runtime", fixture);
       const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
@@ -304,11 +305,15 @@ describe("Stage 5 strict service configuration", () => {
       expect(result.error.category).toBe("invalid_credential_name");
     });
 
-    it("rejects any readPolicy other than exactly [notes.search]", () => {
+    it("rejects any readPolicy other than the exact four-entry allowlist", () => {
       for (const policy of [
         [],
+        ["notes.search"],
         ["notes.write"],
         ["notes.search", "notes.write"],
+        ["notes.search", "notes.status", "notes.list_notebooks"],
+        ["notes.search", "notes.list_notebooks", "notes.status", "notes.get"],
+        ["notes.search", "notes.status", "notes.list_notebooks", "notes.get", "notes.write"],
         ["notes.search", "anything-else"],
         ["NOTES.SEARCH"],
         "notes.search",
@@ -364,7 +369,7 @@ describe("Stage 5 strict service configuration", () => {
           `"socketGroup":"${VALID_FIXTURE.socketGroup}",` +
           `"backend":"${VALID_FIXTURE.backend}",` +
           `"credentialName":"${VALID_FIXTURE.credentialName}",` +
-          `"readPolicy":["notes.search"],` +
+          `"readPolicy":["notes.search","notes.status","notes.list_notebooks","notes.get"],` +
           `"stateDir":"/another/place"}`,
       );
       const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
