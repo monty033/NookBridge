@@ -5,12 +5,13 @@
  * exposes to Hermes. It is intentionally the *only* module in the
  * `src/mcp/` tree that imports `@modelcontextprotocol/sdk`. It is
  * the only module that registers tools, resources, or prompts,
- * and it is the only module that knows how a tool call is
- * translated to a Stage 5 `notes.search` RPC.
+ * the only module that knows how tool calls are translated to the
+ * four allowlisted read-only RPC methods.
  *
  * Hard rules (Stage 6 slice):
  *
- *   - Exactly one tool is registered: `notesnook_search_notes`.
+ *   - Exactly four tools are registered: the bounded read-only search, status,
+ *     notebook-listing, and note-metadata tools.
  *   - The tool is annotated `readOnlyHint: true` and
  *     `destructiveHint: false`. No mutating tools exist in this
  *     slice; mutating tools are deferred to a later stage with
@@ -55,15 +56,21 @@ const NOOK_MCP_VERSION = "0.0.0-stage.6" as const;
 // Public constants — frozen names that downstream code may import.
 // -----------------------------------------------------------------------
 
-/** The single MVP tool name. Frozen: do NOT change without a
+/** The original search tool name. Frozen: do NOT change without a
  *  decision-record amendment. */
 export const NOOK_MCP_ALLOWED_TOOL_NAME = "notesnook_search_notes" as const;
+export const NOOK_MCP_STATUS_TOOL_NAME = "notesnook_status" as const;
+export const NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME = "notesnook_list_notebooks" as const;
+export const NOOK_MCP_GET_NOTE_TOOL_NAME = "notesnook_get_note" as const;
 
 /** The exhaustive allowlist of valid tool names. The factory
  *  enforces this at registration time so a future contributor
  *  who adds a second `registerTool` call will fail loudly. */
 export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
   NOOK_MCP_ALLOWED_TOOL_NAME,
+  NOOK_MCP_STATUS_TOOL_NAME,
+  NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME,
+  NOOK_MCP_GET_NOTE_TOOL_NAME,
 ]);
 
 /**
@@ -72,12 +79,11 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
  * single source of truth rather than a hand-edited list.
  */
 export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
-  "notesnook_get_note",
   "notesnook_create_note",
   "notesnook_update_note",
   "notesnook_append_note",
   "notesnook_delete_note",
-  "notesnook_list_notebooks",
+
   "notesnook_list_notes",
   "notesnook_sync",
   "notesnook_full_sync",
@@ -94,12 +100,28 @@ export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
  * accept a query that the underlying RPC would reject.
  */
 export const NOOK_MCP_MAX_QUERY_BYTES = 512;
+export const NOOK_MCP_MAX_IDENTIFIER_BYTES = 256;
 
 /** Maximum `limit` we will ever accept, even if a future Stage 6
  *  slice grows the underlying RPC to support one.  Today `limit`
  *  is documented as ignored; we still bound it so a future code
  *  path cannot be widened to an unbounded slice by accident. */
 export const NOOK_MCP_MAX_LIMIT = 64;
+
+function isSafeIdentifier(value: string): boolean {
+  if (value.length === 0) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const allowed =
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      code === 0x2d ||
+      code === 0x5f;
+    if (!allowed) return false;
+  }
+  return true;
+}
 
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
@@ -157,9 +179,47 @@ const SEARCH_TOOL_DEFINITION = Object.freeze({
   annotations: SEARCH_TOOL_ANNOTATIONS,
 }) as unknown as Tool;
 
+const EMPTY_INPUT_SCHEMA = Object.freeze({
+  type: "object",
+  properties: Object.freeze({}),
+  required: Object.freeze([]),
+  additionalProperties: false,
+});
+
+const STATUS_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_STATUS_TOOL_NAME,
+  description: "Return sync status without exposing credentials, paths, or note content.",
+  inputSchema: EMPTY_INPUT_SCHEMA,
+  annotations: SEARCH_TOOL_ANNOTATIONS,
+}) as unknown as Tool;
+
+const LIST_NOTEBOOKS_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME,
+  description: "List notebook identifiers and titles from the local nookd service.",
+  inputSchema: EMPTY_INPUT_SCHEMA,
+  annotations: SEARCH_TOOL_ANNOTATIONS,
+}) as unknown as Tool;
+
+const GET_NOTE_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_GET_NOTE_TOOL_NAME,
+  description: "Return bounded note metadata only; note bodies and attachments are never exposed.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
+    }),
+    required: Object.freeze(["id"]),
+    additionalProperties: false,
+  }),
+  annotations: SEARCH_TOOL_ANNOTATIONS,
+}) as unknown as Tool;
+
 /** Static list of every tool the proxy is allowed to expose. */
 export const NOOK_MCP_TOOL_DEFINITIONS: ReadonlyArray<Tool> = Object.freeze([
   SEARCH_TOOL_DEFINITION,
+  STATUS_TOOL_DEFINITION,
+  LIST_NOTEBOOKS_TOOL_DEFINITION,
+  GET_NOTE_TOOL_DEFINITION,
 ]);
 
 // -----------------------------------------------------------------------
@@ -179,6 +239,11 @@ const searchInputSchema = {
     .max(NOOK_MCP_MAX_LIMIT)
     .optional()
     .describe("Optional upper bound on returned titles (currently ignored)."),
+};
+
+const emptyInputSchema = {};
+const getNoteInputSchema = {
+  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).describe("Opaque note identifier."),
 };
 
 const permissiveCallRequestSchema = z
@@ -234,7 +299,7 @@ export interface NookMcpServerHandle {
  *   1. Constructs an {@link McpServer} with explicit
  *      `capabilities: {}` so no resources / prompts / tools
  *      are advertised except what we register.
- *   2. Registers exactly one tool, `notesnook_search_notes`,
+ *   2. Registers exactly four read-only tools,
  *      with the published JSON Schema + annotations.
  *   3. Returns a handle exposing the registered surface plus a
  *      `callTool` helper for direct invocation.
@@ -267,6 +332,46 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
     ),
   });
 
+  registered.push({
+    name: NOOK_MCP_STATUS_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_STATUS_TOOL_NAME,
+      {
+        title: "Sync status",
+        description: "Return bounded local sync status.",
+        inputSchema: emptyInputSchema,
+        annotations: SEARCH_TOOL_ANNOTATIONS,
+      },
+      async () => invokeStatus(options.client),
+    ),
+  });
+  registered.push({
+    name: NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME,
+      {
+        title: "List notebooks",
+        description: "List bounded notebook metadata.",
+        inputSchema: emptyInputSchema,
+        annotations: SEARCH_TOOL_ANNOTATIONS,
+      },
+      async () => invokeListNotebooks(options.client),
+    ),
+  });
+  registered.push({
+    name: NOOK_MCP_GET_NOTE_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_GET_NOTE_TOOL_NAME,
+      {
+        title: "Get note metadata",
+        description: "Return bounded note metadata without the body.",
+        inputSchema: getNoteInputSchema,
+        annotations: SEARCH_TOOL_ANNOTATIONS,
+      },
+      async (input) => invokeGetNote(options.client, input as GetNoteInput),
+    ),
+  });
+
   // The high-level McpServer dispatcher emits SDK-generated validation and
   // unknown-tool text. Replace only its tools/call handler with the same
   // SDK-backed transport seam, while retaining registerTool's exact schema
@@ -283,10 +388,22 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       if (typeof name !== "string") {
         return toMcpErrorResult("invalid_request");
       }
-      if (name !== NOOK_MCP_ALLOWED_TOOL_NAME) {
+      if (
+        name !== NOOK_MCP_ALLOWED_TOOL_NAME &&
+        name !== NOOK_MCP_STATUS_TOOL_NAME &&
+        name !== NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME &&
+        name !== NOOK_MCP_GET_NOTE_TOOL_NAME
+      ) {
         return toMcpErrorResult("unknown_tool");
       }
-      return invokeSearch(options.client, paramsRecord.arguments as SearchInput);
+      const args = paramsRecord.arguments;
+      if (name === NOOK_MCP_ALLOWED_TOOL_NAME)
+        return invokeSearch(options.client, args as SearchInput);
+      if (name === NOOK_MCP_STATUS_TOOL_NAME)
+        return invokeStatus(options.client, args as Record<string, unknown>);
+      if (name === NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME)
+        return invokeListNotebooks(options.client, args as Record<string, unknown>);
+      return invokeGetNote(options.client, args as GetNoteInput);
     } catch {
       return toMcpErrorResult("invalid_request");
     }
@@ -328,6 +445,88 @@ interface SearchInput {
   query?: unknown;
   limit?: unknown;
 }
+interface GetNoteInput {
+  id?: unknown;
+}
+
+async function invokeStatus(
+  client: NookdSocketClient,
+  input: Record<string, unknown> = {},
+): Promise<CallToolResult> {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).length !== 0
+  )
+    return toMcpErrorResult("invalid_request");
+  const result = await client.status();
+  if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+  try {
+    if (result.envelope.result.kind !== "status") return toMcpErrorResult("service_unavailable");
+    return textResult({
+      kind: "status",
+      lastSynced: result.envelope.result.lastSynced,
+      hasUnsyncedChanges: result.envelope.result.hasUnsyncedChanges,
+    });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+async function invokeListNotebooks(
+  client: NookdSocketClient,
+  input: Record<string, unknown> = {},
+): Promise<CallToolResult> {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).length !== 0
+  )
+    return toMcpErrorResult("invalid_request");
+  const result = await client.listNotebooks();
+  if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+  try {
+    if (result.envelope.result.kind !== "notebooks") return toMcpErrorResult("service_unavailable");
+    return textResult({ kind: "notebooks", notebooks: result.envelope.result.notebooks });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+async function invokeGetNote(
+  client: NookdSocketClient,
+  input: GetNoteInput,
+): Promise<CallToolResult> {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).some((key) => key !== "id")
+  )
+    return toMcpErrorResult("invalid_request");
+  const id = input.id;
+  if (
+    typeof id !== "string" ||
+    !isSafeIdentifier(id) ||
+    id.length > NOOK_MCP_MAX_IDENTIFIER_BYTES ||
+    Buffer.byteLength(id, "utf8") > NOOK_MCP_MAX_IDENTIFIER_BYTES
+  )
+    return toMcpErrorResult("invalid_request");
+  const result = await client.getNote(id);
+  if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+  try {
+    if (result.envelope.result.kind !== "note") return toMcpErrorResult("service_unavailable");
+    return textResult({ kind: "note", note: result.envelope.result.note });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+function textResult(payload: unknown): CallToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(payload) }] };
+}
 
 /**
  * MCP-side tool callback. Validates the input shape and bounds
@@ -357,8 +556,9 @@ async function invokeSearch(
     return toMcpErrorResult(socketFailureToCode(result.code));
   }
   try {
+    if (result.envelope.result.kind !== "search") return toMcpErrorResult("service_unavailable");
     const payload = {
-      kind: result.envelope.result.kind,
+      kind: "search",
       notes: result.envelope.result.notes.map((note) => ({ title: note.title })),
     };
     return {
@@ -384,10 +584,11 @@ async function callToolDirectly(
   name: string,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
-  if (name !== NOOK_MCP_ALLOWED_TOOL_NAME) {
-    return toMcpErrorResult("unknown_tool");
-  }
-  return invokeSearch(client, args as SearchInput);
+  if (name === NOOK_MCP_ALLOWED_TOOL_NAME) return invokeSearch(client, args as SearchInput);
+  if (name === NOOK_MCP_STATUS_TOOL_NAME) return invokeStatus(client, args);
+  if (name === NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME) return invokeListNotebooks(client, args);
+  if (name === NOOK_MCP_GET_NOTE_TOOL_NAME) return invokeGetNote(client, args as GetNoteInput);
+  return toMcpErrorResult("unknown_tool");
 }
 
 interface NormalisedSearchInput {

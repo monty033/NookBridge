@@ -4,9 +4,8 @@
  *
  * These tests cover the contract the Stage 6 slice promises:
  *
- *   - tools/list contains exactly one read-only tool
- *     (`notesnook_search_notes`); no resources, no prompts, no
- *     additional tools.
+ *   - tools/list contains exactly the four read-only tools; no resources
+ *     or prompts.
  *   - A valid `tools/call` translates to a framed `notes.search`
  *     request and returns the title-only results as MCP
  *     `content[].text` JSON.
@@ -121,11 +120,11 @@ function framedResponse(envelope: Record<string, unknown>): { ok: boolean; frame
 }
 
 // -----------------------------------------------------------------------
-// Tool surface — exactly one read-only tool, no others.
+// Tool surface — exactly four read-only tools, no others.
 // -----------------------------------------------------------------------
 
 describe("nook-mcp server surface", () => {
-  it("advertises exactly one tool named notesnook_search_notes", async () => {
+  it("advertises exactly the four Slice 2 read-only tools", async () => {
     const client = new NookdSocketClient({
       socketPath: "/tmp/never-used",
       connect: async () => {
@@ -137,12 +136,16 @@ describe("nook-mcp server surface", () => {
     // The MCP SDK builds the schema straight from `registerTool`,
     // so we walk the registered tool list directly here.
     expect(NOOK_MCP_ALLOWED_TOOL_NAME).toBe("notesnook_search_notes");
-    // Defensive: the implementation exposes a single observable tool.
+    // Defensive: the implementation exposes only the frozen Slice 2 surface.
     const tools = server.tools;
-    expect(tools.length).toBe(1);
-    expect(tools[0]?.name).toBe("notesnook_search_notes");
-    expect(tools[0]?.annotations?.readOnlyHint).toBe(true);
-    expect(tools[0]?.annotations?.destructiveHint).toBe(false);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "notesnook_search_notes",
+      "notesnook_status",
+      "notesnook_list_notebooks",
+      "notesnook_get_note",
+    ]);
+    expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+    expect(tools.every((tool) => tool.annotations?.destructiveHint === false)).toBe(true);
   });
 
   it("does not register prompts or resources", () => {
@@ -345,7 +348,7 @@ describe("notesnook_search_notes — service loss", () => {
     expect(textBlock.text).not.toMatch(/ECONNREFUSED|ENOENT|syscall|address/);
   });
 
-  it("refuses to call any tool other than notesnook_search_notes", async () => {
+  it("refuses to call any unknown tool", async () => {
     let connectCount = 0;
     const client = new NookdSocketClient({
       socketPath: "/tmp/never-used",
@@ -545,9 +548,13 @@ describe("end-to-end SDK smoke test", () => {
       }
       await client.connect(transport);
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(1);
-      expect(tools[0]?.name).toBe("notesnook_search_notes");
-      expect(tools[0]?.annotations?.readOnlyHint).toBe(true);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "notesnook_search_notes",
+        "notesnook_status",
+        "notesnook_list_notebooks",
+        "notesnook_get_note",
+      ]);
+      expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
       const result = await client.callTool({
         name: "notesnook_search_notes",
         arguments: { query: "needle" },
@@ -624,11 +631,10 @@ describe("forbidden module surface", () => {
     // server factory would reject it.  The intent is to fail the
     // build (via a test) rather than silently widen the surface.
     expect(NOOK_MCP_ALLOWED_TOOL_NAME).toBe("notesnook_search_notes");
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_get_note");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_create_note");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_update_note");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_delete_note");
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_list_notebooks");
+
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_sync");
   });
 });

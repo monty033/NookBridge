@@ -16,8 +16,8 @@
  *     before any dynamic import of the pinned real-core package.
  *   - The returned {@link ServiceRuntime} exposes ONLY:
  *       - `readOnly` — the flattened Stage 3 read-only database;
- *       - `search(query)` — the bounded title-only search
- *         capability that the future `notes.search` RPC will use;
+ *       - `search`, `status`, `listNotebooks`, and `noteMetadata` — bounded
+ *         read-only capabilities used by the Slice 2 RPC methods;
  *       - `cleanup()` — the idempotent service-owned teardown hook.
  *     No `Database`, no `user`, no `token`, no `kv`, no
  *     `localWrite`, no `remoteSync`, no `localConflictObserver`,
@@ -38,7 +38,7 @@
  *   returned by the live-login seam.  Calling `cleanup()` closes the
  *   encrypted persistent storage exactly once and is idempotent
  *   across concurrent and serial invocations.  After `cleanup()`
- *   resolves, every search call returns a categorical
+ *   resolves, every capability call returns a categorical
  *   `service_unavailable`-style error.
  */
 
@@ -86,6 +86,32 @@ export interface ServiceRuntime {
    * categorically without ever touching the real-core.
    */
   readonly search: (query: string) => Promise<ReadonlyArray<Readonly<{ title: string }>>>;
+  readonly status: () => Promise<Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean }>>;
+  readonly listNotebooks: () => Promise<
+    ReadonlyArray<
+      Readonly<{
+        id: string;
+        title: string;
+        dateCreated?: number;
+        dateModified?: number;
+      }>
+    >
+  >;
+  readonly noteMetadata: (id: string) => Promise<
+    | Readonly<{
+        id: string;
+        title: string;
+        dateCreated?: number;
+        dateModified?: number;
+        notebookId?: string;
+        pinned?: boolean;
+        favorite?: boolean;
+        localOnly?: boolean;
+        conflicted?: boolean;
+        locked?: boolean;
+      }>
+    | undefined
+  >;
   /**
    * Idempotent cleanup.  Closes the encrypted persistent storage
    * exactly once and is safe to call concurrently and repeatedly.
@@ -190,9 +216,75 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     return hits.map((hit) => Object.freeze({ title: hit.title }));
   };
 
+  const status = async (): Promise<
+    Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean }>
+  > => {
+    if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+    try {
+      const [lastSynced, hasUnsyncedChanges] = await Promise.all([
+        readOnly.lastSynced(),
+        readOnly.hasUnsyncedChanges(),
+      ]);
+      return Object.freeze({ lastSynced, hasUnsyncedChanges });
+    } catch {
+      throw serviceRuntimeError("service runtime status failed");
+    }
+  };
+
+  const listNotebooks = async (): Promise<
+    ReadonlyArray<
+      Readonly<{
+        id: string;
+        title: string;
+        dateCreated?: number;
+        dateModified?: number;
+      }>
+    >
+  > => {
+    if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+    try {
+      return Object.freeze(
+        (await readOnly.listNotebooks()).map((notebook) => Object.freeze({ ...notebook })),
+      );
+    } catch {
+      throw serviceRuntimeError("service runtime notebook listing failed");
+    }
+  };
+
+  const noteMetadata = async (
+    id: string,
+  ): Promise<
+    | Readonly<{
+        id: string;
+        title: string;
+        dateCreated?: number;
+        dateModified?: number;
+        notebookId?: string;
+        pinned?: boolean;
+        favorite?: boolean;
+        localOnly?: boolean;
+        conflicted?: boolean;
+        locked?: boolean;
+      }>
+    | undefined
+  > => {
+    if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+    if (typeof id !== "string" || id.length === 0)
+      throw serviceRuntimeError("service runtime note id is invalid");
+    try {
+      const note = await readOnly.noteMetadata(id);
+      return note === undefined ? undefined : Object.freeze({ ...note });
+    } catch {
+      throw serviceRuntimeError("service runtime note lookup failed");
+    }
+  };
+
   return Object.freeze({
     readOnly,
     search,
+    status,
+    listNotebooks,
+    noteMetadata,
     cleanup: cleanupOnce,
   });
 }

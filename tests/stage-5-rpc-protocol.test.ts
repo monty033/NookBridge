@@ -172,7 +172,9 @@ describe("parseRpcFrame", () => {
 
   it("accepts an escaped control character inside a JSON string", () => {
     const json = '{"id":"a","method":"notes.search","params":{"query":"x\\u0001y"}}';
-    expect(parseRpcFrame(wrapFrame(encode(json))).params.query).toBe("x\u0001y");
+    const request = parseRpcFrame(wrapFrame(encode(json)));
+    if (request.method !== "notes.search") throw new Error("unexpected method");
+    expect(request.params.query).toBe("x\u0001y");
   });
 
   it("rejects a JSON root that is not an object (array)", () => {
@@ -316,6 +318,7 @@ describe("parseRpcFrame", () => {
     const json = `{"id":"a","method":"notes.search","params":{"query":"${boundary}"}}`;
     const req = parseRpcFrame(wrapFrame(encode(json)));
     expect(req.method).toBe("notes.search");
+    if (req.method !== "notes.search") throw new Error("unexpected method");
     expect(req.params.query.length).toBe(STAGE5_RPC_LIMITS.maxQueryBytes);
   });
 
@@ -341,6 +344,7 @@ describe("parseRpcFrame", () => {
     expect(Object.getPrototypeOf(req)).toBeNull();
     expect(req.id).toBe("a");
     expect(req.method).toBe("notes.search");
+    if (req.method !== "notes.search") throw new Error("unexpected method");
     expect(req.params.query).toBe("hello");
   });
 
@@ -1431,7 +1435,8 @@ describe("security regression: closed-boundary intrinsic capture", () => {
       globalThis.Uint8Array = originalUint8Array;
     }
 
-    expect(request?.params.query).toBe("x");
+    expect(request?.method).toBe("notes.search");
+    if (request?.method === "notes.search") expect(request.params.query).toBe("x");
     expect(bytes).toBeInstanceOf(originalUint8Array);
     expect(decode(bytes as Uint8Array).result?.notes).toEqual([{ title: "First" }]);
   });
@@ -1627,7 +1632,8 @@ describe("security regression: closed-boundary intrinsic capture", () => {
       TextDecoder.prototype.decode = originalDecode;
     }
 
-    expect(request?.params.query).toBe("x");
+    expect(request?.method).toBe("notes.search");
+    if (request?.method === "notes.search") expect(request.params.query).toBe("x");
   });
 
   it("detects duplicate keys with the intrinsic hasOwnProperty", () => {

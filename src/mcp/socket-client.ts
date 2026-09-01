@@ -3,10 +3,8 @@
  *
  * The proxy talks to the trusted `nookd` daemon over a permission-
  * controlled Unix-domain socket using the existing Stage 5 framed
- * `notes.search` RPC. This module owns the *transport* layer only;
- * it does NOT parse the RPC envelope (Stage 5 already does that in
- * `rpc-protocol.ts`) and it does NOT inspect the response payload
- * beyond its top-level `ok` flag.
+ * RPC. This module owns the transport and bounded response-decoding
+ * layer; it does not import the service runtime or expose raw records.
  *
  * Hard rules:
  *
@@ -34,8 +32,9 @@ import {
   STAGE5_RPC_LIMITS,
   type RpcErrorCode,
   type RpcNotesSearchParams,
-  type RpcResponseEnvelope,
-  type RpcSearchResult,
+  type RpcAnyResponseEnvelope,
+  type RpcResult,
+  type RpcAnySuccessEnvelope,
   type RpcSuccessEnvelope,
 } from "../service/rpc-protocol.js";
 
@@ -56,7 +55,7 @@ const DEFAULT_IO_TIMEOUT_MS = 5_000;
  * never has to inspect a raw upstream message.
  */
 export type NookdSocketResult =
-  | { readonly ok: true; readonly envelope: RpcSuccessEnvelope }
+  | { readonly ok: true; readonly envelope: RpcAnySuccessEnvelope }
   | { readonly ok: false; readonly code: NookdSocketFailure };
 
 export type NookdSocketFailure =
@@ -131,6 +130,10 @@ export interface NookdSearchRequest extends RpcNotesSearchParams {
   readonly id?: string;
 }
 
+export type NookdSearchResult =
+  | { readonly ok: true; readonly envelope: RpcSuccessEnvelope }
+  | { readonly ok: false; readonly code: NookdSocketFailure };
+
 /**
  * The closed transport seam. Stateless apart from the configured
  * socket path; safe to construct per-call.
@@ -165,22 +168,41 @@ export class NookdSocketClient {
     return this.#socketPath;
   }
 
-  /**
-   * Issue a single `notes.search` RPC against the daemon and
-   * return the closed result. The query is bounded by the
-   * Stage 5 frame budget before any I/O happens.
-   */
-  async search(params: NookdSearchRequest): Promise<NookdSocketResult> {
-    const id = params.id ?? generateRequestId();
+  async search(params: NookdSearchRequest): Promise<NookdSearchResult> {
+    const result = await this.#request("notes.search", params, params.id);
+    if (!result.ok) return result;
+    if (result.envelope.result.kind !== "search") return { ok: false, code: "service_unavailable" };
+    return {
+      ok: true,
+      envelope: result.envelope as unknown as RpcSuccessEnvelope,
+    };
+  }
+
+  async status(): Promise<NookdSocketResult> {
+    return this.#request("notes.status", {});
+  }
+
+  async listNotebooks(): Promise<NookdSocketResult> {
+    return this.#request("notes.list_notebooks", {});
+  }
+
+  async getNote(id: string): Promise<NookdSocketResult> {
+    return this.#request("notes.get", { id });
+  }
+
+  async #request(
+    method: "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get",
+    params: RpcNotesSearchParams | Record<string, never> | { readonly id: string },
+    suppliedId?: string,
+  ): Promise<NookdSocketResult> {
+    const id = suppliedId ?? generateRequestId();
     let frame: Uint8Array;
     try {
-      frame = serializeSearchRequest(id, params);
+      frame = serializeRequest(id, method, params);
     } catch {
       return { ok: false, code: "invalid_request" };
     }
-    if (frame.byteLength > MAX_FRAME_BYTES_ON_WIRE) {
-      return { ok: false, code: "invalid_request" };
-    }
+    if (frame.byteLength > MAX_FRAME_BYTES_ON_WIRE) return { ok: false, code: "invalid_request" };
 
     let socket: Socket;
     try {
@@ -188,18 +210,15 @@ export class NookdSocketClient {
     } catch {
       return { ok: false, code: "service_unavailable" };
     }
-
     try {
       await writeAll(socket, frame);
       const responseFrame = await readFramedResponse(socket, this.#ioTimeoutMs);
-      if (responseFrame.byteLength > MAX_RESPONSE_FRAME_BYTES) {
+      if (responseFrame.byteLength > MAX_RESPONSE_FRAME_BYTES)
         return { ok: false, code: "service_unavailable" };
-      }
-      let response: RpcResponseEnvelope;
+      let response: RpcAnyResponseEnvelope;
       try {
         const json = Buffer.from(responseFrame.subarray(FRAME_PREFIX_BYTES)).toString("utf8");
-        const decoded: unknown = JSON.parse(json);
-        response = decodeResponseEnvelope(decoded);
+        response = decodeResponseEnvelope(JSON.parse(json) as unknown);
       } catch {
         return { ok: false, code: "service_unavailable" };
       }
@@ -221,24 +240,39 @@ export class NookdSocketClient {
  * the Stage 5 `maxQueryBytes` budget so a multi-byte hostile payload
  * is rejected before any allocation happens.
  */
-function serializeSearchRequest(id: string, params: RpcNotesSearchParams): Uint8Array {
+function serializeRequest(
+  id: string,
+  method: "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get",
+  params: RpcNotesSearchParams | Record<string, never> | { readonly id: string },
+): Uint8Array {
   if (typeof id !== "string" || id.length === 0 || id.length > 128 || hasControlCharacter(id)) {
     throw new TypeError("nook-mcp: invalid request id");
   }
-  if (typeof params.query !== "string") {
-    throw new TypeError("nook-mcp: query must be a string");
+  let cleanParams: Record<string, string> | Record<string, never>;
+  if (method === "notes.search") {
+    const query = (params as RpcNotesSearchParams).query;
+    if (typeof query !== "string" || query.length === 0)
+      throw new TypeError("nook-mcp: query is invalid");
+    if (Buffer.byteLength(query, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes)
+      throw new RangeError("nook-mcp: query is too large");
+    cleanParams = { query };
+  } else if (method === "notes.get") {
+    const noteId = (params as { readonly id: string }).id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      Buffer.byteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    )
+      throw new TypeError("nook-mcp: note id is invalid");
+    cleanParams = { id: noteId };
+  } else {
+    if (Object.keys(params).length !== 0)
+      throw new TypeError("nook-mcp: parameterless request has fields");
+    cleanParams = {};
   }
-  if (params.query.length === 0) {
-    throw new TypeError("nook-mcp: query must be non-empty");
-  }
-  if (Buffer.byteLength(params.query, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes) {
-    throw new RangeError("nook-mcp: query exceeds maximum query bytes");
-  }
-  const payload = JSON.stringify({
-    id,
-    method: "notes.search",
-    params: { query: params.query },
-  });
+  const payload = JSON.stringify({ id, method, params: cleanParams });
   const payloadBytes = Buffer.from(payload, "utf8");
   if (payloadBytes.byteLength + FRAME_PREFIX_BYTES > MAX_FRAME_BYTES_ON_WIRE) {
     throw new RangeError("nook-mcp: request exceeds maximum frame bytes");
@@ -327,7 +361,7 @@ function hasExactOwnKeys(value: object, expected: readonly string[]): boolean {
   return expected.every((name) => names.includes(name));
 }
 
-function decodeResponseEnvelope(value: unknown): RpcResponseEnvelope {
+function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error("invalid response");
   const candidate = value as Record<string, unknown>;
@@ -343,39 +377,77 @@ function decodeResponseEnvelope(value: unknown): RpcResponseEnvelope {
       throw new Error("invalid response");
     }
     const resultRecord = result as Record<string, unknown>;
-    if (
-      !hasExactOwnKeys(resultRecord, ["kind", "notes"]) ||
-      resultRecord.kind !== "search" ||
-      !Array.isArray(resultRecord.notes)
-    ) {
-      throw new Error("invalid response");
-    }
-    if (resultRecord.notes.length > STAGE5_RPC_LIMITS.maxSearchHits) {
-      throw new Error("invalid response");
-    }
-    const notes = resultRecord.notes.map((note): { readonly title: string } => {
-      if (
-        typeof note !== "object" ||
-        note === null ||
-        Array.isArray(note) ||
-        !hasExactOwnKeys(note, ["title"])
-      ) {
+    if (resultRecord.kind === "search") {
+      if (!hasExactOwnKeys(resultRecord, ["kind", "notes"]) || !Array.isArray(resultRecord.notes))
         throw new Error("invalid response");
-      }
-      const title = (note as Record<string, unknown>).title;
-      if (
-        typeof title !== "string" ||
-        Buffer.byteLength(title, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes
-      ) {
+      if (resultRecord.notes.length > STAGE5_RPC_LIMITS.maxSearchHits)
         throw new Error("invalid response");
-      }
-      return Object.freeze({ title });
-    });
-    return Object.freeze({
-      id: candidate.id,
-      ok: true,
-      result: Object.freeze({ kind: "search", notes: Object.freeze(notes) }),
-    });
+      const notes = resultRecord.notes.map((note): { readonly title: string } => {
+        if (
+          typeof note !== "object" ||
+          note === null ||
+          Array.isArray(note) ||
+          !hasExactOwnKeys(note, ["title"])
+        )
+          throw new Error("invalid response");
+        const title = (note as Record<string, unknown>).title;
+        if (
+          typeof title !== "string" ||
+          title.length === 0 ||
+          Buffer.byteLength(title, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes ||
+          hasControlCharacter(title)
+        )
+          throw new Error("invalid response");
+        return Object.freeze({ title });
+      });
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "search", notes: Object.freeze(notes) }),
+      });
+    }
+    if (resultRecord.kind === "status") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "lastSynced", "hasUnsyncedChanges"]) ||
+        typeof resultRecord.lastSynced !== "number" ||
+        !Number.isFinite(resultRecord.lastSynced) ||
+        resultRecord.lastSynced < 0 ||
+        typeof resultRecord.hasUnsyncedChanges !== "boolean"
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "status",
+          lastSynced: resultRecord.lastSynced,
+          hasUnsyncedChanges: resultRecord.hasUnsyncedChanges,
+        }),
+      });
+    }
+    if (resultRecord.kind === "notebooks") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "notebooks"]) ||
+        !Array.isArray(resultRecord.notebooks) ||
+        resultRecord.notebooks.length > STAGE5_RPC_LIMITS.maxSearchHits
+      )
+        throw new Error("invalid response");
+      const notebooks = resultRecord.notebooks.map((entry) => decodeNotebook(entry));
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "notebooks", notebooks: Object.freeze(notebooks) }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
+    if (resultRecord.kind === "note") {
+      if (!hasExactOwnKeys(resultRecord, ["kind", "note"])) throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "note", note: decodeNote(resultRecord.note) }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
+    throw new Error("invalid response");
   }
   if (!hasExactOwnKeys(candidate, ["id", "ok", "error"])) {
     throw new Error("invalid response");
@@ -399,6 +471,85 @@ function decodeResponseEnvelope(value: unknown): RpcResponseEnvelope {
   });
 }
 
+function decodeNotebook(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("invalid response");
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "string" ||
+    !isSafeIdentifier(record.id) ||
+    Buffer.byteLength(record.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes
+  )
+    throw new Error("invalid response");
+  if (
+    typeof record.title !== "string" ||
+    record.title.length === 0 ||
+    Buffer.byteLength(record.title, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes ||
+    hasControlCharacter(record.title)
+  )
+    throw new Error("invalid response");
+  const projected: Record<string, unknown> = { id: record.id, title: record.title };
+  for (const key of ["dateCreated", "dateModified"] as const) {
+    if (Object.hasOwn(record, key)) {
+      if (
+        record[key] !== undefined &&
+        (typeof record[key] !== "number" || !Number.isFinite(record[key]) || record[key] < 0)
+      )
+        throw new Error("invalid response");
+      if (record[key] !== undefined) projected[key] = record[key];
+    }
+  }
+  return Object.freeze(projected);
+}
+
+function decodeNote(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("invalid response");
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "string" ||
+    !isSafeIdentifier(record.id) ||
+    Buffer.byteLength(record.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes
+  )
+    throw new Error("invalid response");
+  if (
+    typeof record.title !== "string" ||
+    record.title.length === 0 ||
+    Buffer.byteLength(record.title, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes ||
+    hasControlCharacter(record.title)
+  )
+    throw new Error("invalid response");
+  const projected: Record<string, unknown> = { id: record.id, title: record.title };
+  for (const key of ["dateCreated", "dateModified"] as const) {
+    if (Object.hasOwn(record, key)) {
+      if (
+        record[key] !== undefined &&
+        (typeof record[key] !== "number" || !Number.isFinite(record[key]) || record[key] < 0)
+      )
+        throw new Error("invalid response");
+      if (record[key] !== undefined) projected[key] = record[key];
+    }
+  }
+  if (Object.hasOwn(record, "notebookId")) {
+    if (
+      record.notebookId !== undefined &&
+      (typeof record.notebookId !== "string" ||
+        !isSafeIdentifier(record.notebookId) ||
+        Buffer.byteLength(record.notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes)
+    )
+      throw new Error("invalid response");
+    if (record.notebookId !== undefined) projected.notebookId = record.notebookId;
+  }
+  for (const key of ["pinned", "favorite", "localOnly", "conflicted", "locked"] as const) {
+    if (Object.hasOwn(record, key)) {
+      if (record[key] !== undefined && typeof record[key] !== "boolean")
+        throw new Error("invalid response");
+      if (record[key] !== undefined) projected[key] = record[key];
+    }
+  }
+  return Object.freeze(projected);
+}
+
 function isRpcErrorCode(value: unknown): value is RpcErrorCode {
   return (
     value === "invalid_request" ||
@@ -410,24 +561,42 @@ function isRpcErrorCode(value: unknown): value is RpcErrorCode {
   );
 }
 
-function mapResponseEnvelope(response: RpcResponseEnvelope, expectedId: string): NookdSocketResult {
+function mapResponseEnvelope(
+  response: RpcAnyResponseEnvelope,
+  expectedId: string,
+): NookdSocketResult {
   if (response.id !== expectedId) {
     return { ok: false, code: "service_unavailable" };
   }
   if (response.ok === true) {
-    const envelope = response as RpcSuccessEnvelope;
-    const result = envelope.result as RpcSearchResult;
+    const envelope = response as RpcAnySuccessEnvelope;
+    const result = envelope.result as RpcResult;
     if (
       result === undefined ||
       result === null ||
       typeof result !== "object" ||
-      result.kind !== "search"
+      !["search", "status", "notebooks", "note"].includes(result.kind)
     ) {
       return { ok: false, code: "service_unavailable" };
     }
     return { ok: true, envelope };
   }
   return { ok: false, code: mapRpcErrorCodeToSocketFailure(response.error.code) };
+}
+
+function isSafeIdentifier(value: string): boolean {
+  if (value.length === 0) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const allowed =
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      code === 0x2d ||
+      code === 0x5f;
+    if (!allowed) return false;
+  }
+  return true;
 }
 
 function hasControlCharacter(value: string): boolean {
