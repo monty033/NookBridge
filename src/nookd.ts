@@ -39,6 +39,8 @@ import {
   type NookdServerRuntime,
   type StartNookdServerOptions,
 } from "./service/nookd-server.js";
+import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "./service/service-abuse-bounds.js";
+import { createLogger } from "./logging/logger.js";
 
 const freeze = Object.freeze;
 const defineProperty = Object.defineProperty;
@@ -287,6 +289,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const server = await factories.startServer({
       socketPath: config.socketPath,
       runtime: serverRuntime,
+      abuseBounds: DEFAULT_SERVICE_ABUSE_BOUNDS,
+      auditLogger: createLogger({ bindings: { component: "nookd" } }),
     });
     if (typeof server !== "object" || server === null || isArray(server)) {
       throw new Error("invalid nookd server handle");

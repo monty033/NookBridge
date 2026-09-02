@@ -1858,6 +1858,65 @@ not yet published, deployed, or live-accepted.
 - Timeout, cancellation, audit, and broader abuse-response behavior remain
   separate Stage 7 work and are not claimed here.
 
+## 13.10 Stage 7 Slice 2 — service-side deadlines, cancellation, audit, and abuse response
+
+**Status date:** 2026-09-02 (America/New_York)
+
+**Status: IMPLEMENTED AND VERIFIED OFFLINE.** This slice extends the Stage 7
+service boundary without changing the four-method read-only MCP/RPC surface.
+It is not published, deployed, or live-accepted.
+
+### Delivered implementation
+
+- `nookd` applies a bounded per-request wall-clock deadline. The default is
+  10,000 ms and the hard maximum is 60,000 ms. On expiry it closes the Unix
+  connection and discards the late runtime result; it does not pretend that the
+  Notesnook runtime supports upstream cancellation.
+- Client disconnect and daemon shutdown detach in-flight transport work and
+  prevent late responses. The underlying runtime promise remains owned by its
+  existing runtime contract and is not given a fabricated abort parameter.
+- Connections receive a bounded idle watchdog, including while an incomplete
+  frame is buffered. The default is 30,000 ms and the hard maximum is 300,000
+  ms, closing slowloris-style connections without changing frame parsing or
+  response limits.
+- `service-abuse-bounds.ts` centralizes closed, fail-closed limits: a 120,000
+  ms per-connection aggregate elapsed-time budget, plus a process-scoped token
+  bucket (20 connection admissions/second, burst 10). Each bound has explicit
+  validation and a hard maximum; invalid or hostile option objects are rejected
+  categorically at the daemon boundary.
+- Connection-cap rejection, request timeout, idle closure, aggregate-budget
+  exhaustion, process-admission rejection, request receipt/dispatch, response
+  sent, and connection close emit the closed `rpc.*` audit vocabulary. Records
+  are frozen, null-prototype six-field values containing only categorical event,
+  outcome, method, request-id echo boolean, bounded latency, and peer-credential
+  category. The existing `Logger` is the production sink; logger failures are
+  swallowed and never alter service behavior.
+- Production `nookd` explicitly wires the fixed service-audit logger and default
+  bounds. No request IDs, queries, note metadata, paths, credentials, tokens,
+  upstream errors, or causes cross the audit boundary.
+
+### Verification receipt
+
+- Focused Stage 7/daemon/policy/RPC tests: 96/96 passed.
+- Full offline test suite: 1,020/1,020 tests passed across 37 files.
+- `npm run typecheck`: passed.
+- `npm run lint`: passed.
+- `npm run format:check`: passed.
+- `npm run build`: passed.
+- No live credentials, network authentication, production state, deployment,
+  commit, push, or PR operation was performed for this slice.
+
+### Explicit limits and next stage
+
+- Runtime-level cancellation is not claimed because the existing Notesnook
+  runtime contract has no `AbortSignal` seam. The service boundary cancels
+  transport ownership only; a future runtime-aware cancellation design requires
+  a separate contract and review.
+- The parser-level method union, dispatcher, MCP registrations, title/metadata
+  projection, and write denial behavior remain unchanged.
+- Stage 8 isolation validation and Stage 9 final security-parity/release review
+  remain open. Publication is a separate explicit gate.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.

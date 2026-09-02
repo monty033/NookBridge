@@ -12,10 +12,28 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as scheduleTimeout } from "node:timers";
+import { setTimeout as scheduleTimeout, clearTimeout } from "node:timers";
 
+import {
+  buildServiceAuditRecord,
+  emitServiceAudit,
+  type ServiceAuditEvent,
+  type ServiceAuditOutcome,
+  type ServiceAuditPeerCredentials,
+} from "./service-audit.js";
+import {
+  DEFAULT_SERVICE_ABUSE_BOUNDS,
+  normalizeServiceAbuseBounds,
+  type ServiceAbuseBounds,
+} from "./service-abuse-bounds.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "./rpc-handler.js";
-import { STAGE5_RPC_LIMITS, parseRpcFrame, serializeRpcResponse } from "./rpc-protocol.js";
+import {
+  STAGE5_RPC_LIMITS,
+  parseRpcFrame,
+  serializeRpcResponse,
+  type RpcMethod,
+} from "./rpc-protocol.js";
+import type { Logger } from "../logging/logger.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
@@ -26,6 +44,7 @@ const DEFAULT_MAX_CONNECTIONS = 32;
 const MAX_CONNECTIONS = 128;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
 const MAX_REQUESTS_PER_CONNECTION = 1_024;
+const AUDIT_METHOD_SENTINEL = "notes.search" as const;
 
 /** The deliberately narrow runtime seam owned by the daemon. */
 export type NookdServerRuntime = RpcHandlerRuntimeLike &
@@ -46,6 +65,10 @@ export type StartNookdServerOptions = Readonly<{
   maxConnections?: number;
   /** Maximum number of requests processed on one connection. */
   maxRequestsPerConnection?: number;
+  /** Closed service-side abuse bounds; defaults are applied once at startup. */
+  abuseBounds?: ServiceAbuseBounds;
+  /** Best-effort categorical audit logger. */
+  auditLogger?: Logger;
   /** Entry points may install SIGTERM/SIGINT; tests can disable the hooks. */
   installSignalHandlers?: boolean;
 }>;
@@ -64,6 +87,12 @@ interface ConnectionState {
   requestsHandled: number;
   ended: boolean;
   closed: boolean;
+  closing: boolean;
+  lastActivityMs: number;
+  elapsedMs: number;
+  idleTimer: ReturnType<typeof scheduleTimeout> | undefined;
+  readonly closePromise: Promise<void>;
+  readonly resolveClosed: () => void;
 }
 
 type FrameRead =
@@ -78,29 +107,72 @@ type FrameRead =
 export async function startNookdServer(
   options: StartNookdServerOptions,
 ): Promise<NookdServerHandle> {
-  const normalized = validateOptions(options);
+  const capturedOptions = captureStartOptions(options);
+  const normalized = validateOptions(capturedOptions);
   const existing = await inspectExistingSocketPath(normalized.socketPath);
   if (existing) {
     throw nookdServerError("nookd socket path has an existing entry");
   }
 
-  const server = net.createServer();
   const connections = new Set<ConnectionState>();
   const inFlight = new Set<Promise<void>>();
   let accepting = true;
   let ownedSocketIdentity: { readonly dev: number; readonly ino: number } | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let signalHandlersInstalled = false;
+  let admissionTokens = normalized.abuseBounds.perProcessBurstSize;
+  let admissionRefillMs = Date.now();
+
+  const audit = (
+    event: ServiceAuditEvent,
+    outcome: ServiceAuditOutcome,
+    method: RpcMethod = AUDIT_METHOD_SENTINEL,
+    requestIdEcho = false,
+    latencyMs = 0,
+    peerCredentials: ServiceAuditPeerCredentials = "unknown",
+  ): void => {
+    try {
+      emitServiceAudit(
+        normalized.auditLogger,
+        buildServiceAuditRecord({
+          event,
+          outcome,
+          method,
+          requestIdEcho,
+          latencyMs,
+          peerCredentials,
+        }),
+      );
+    } catch {
+      // Audit is best effort and must never alter transport behaviour.
+    }
+  };
+
+  const admitConnection = (): boolean => {
+    const now = Date.now();
+    const elapsed = Math.max(0, now - admissionRefillMs);
+    if (elapsed > 0) {
+      admissionTokens = Math.min(
+        normalized.abuseBounds.perProcessBurstSize,
+        admissionTokens + (elapsed * normalized.abuseBounds.perProcessRequestsPerSecond) / 1_000,
+      );
+      admissionRefillMs = now;
+    }
+    if (admissionTokens < 1) return false;
+    admissionTokens -= 1;
+    return true;
+  };
 
   const onConnection = (socket: net.Socket): void => {
-    if (!accepting) {
+    if (!accepting || connections.size >= normalized.maxConnections || !admitConnection()) {
+      audit("rpc.connection.admission_rejected", "admission_rejected");
       socket.destroy();
       return;
     }
-    if (connections.size >= normalized.maxConnections) {
-      socket.destroy();
-      return;
-    }
+    let resolveClosed: () => void = () => undefined;
+    const stateResolver = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
     const state: ConnectionState = {
       socket,
       pending: Buffer.alloc(0),
@@ -108,12 +180,20 @@ export async function startNookdServer(
       requestsHandled: 0,
       ended: false,
       closed: false,
+      closing: false,
+      lastActivityMs: Date.now(),
+      elapsedMs: 0,
+      idleTimer: undefined,
+      closePromise: stateResolver,
+      resolveClosed: () => resolveClosed(),
     };
     connections.add(state);
     socket.on("data", (chunk: Buffer): void => {
       if (state.closed || !accepting) return;
+      state.lastActivityMs = Date.now();
+      armIdleTimer(state);
       if (state.pending.length + chunk.length > MAX_PENDING_BYTES) {
-        socket.destroy();
+        destroyConnection(state);
         return;
       }
       state.pending =
@@ -122,18 +202,25 @@ export async function startNookdServer(
     });
     socket.on("end", (): void => {
       state.ended = true;
+      clearIdleTimer(state);
       processConnection(state);
     });
     socket.on("error", (): void => {
-      // Socket errors are transport state, not an API response. Never log or
-      // forward the underlying error because it may contain local details.
+      // The close event normally follows, but unblock the cancellation race
+      // immediately as defense in depth. Never forward the raw error.
       state.closed = true;
+      state.resolveClosed();
     });
     socket.on("close", (): void => {
       state.closed = true;
+      clearIdleTimer(state);
+      state.resolveClosed();
       connections.delete(state);
+      audit("rpc.connection.closed", "ok");
     });
+    armIdleTimer(state);
   };
+  const server = net.createServer();
   server.on("connection", onConnection);
 
   try {
@@ -168,8 +255,9 @@ export async function startNookdServer(
       accepting = false;
       removeSignalHandlers();
       const serverClosed = closeServer(server);
+      for (const state of connections) destroyConnection(state);
+      admissionTokens = 0;
       await waitForInFlight(inFlight, normalized.shutdownTimeoutMs);
-      for (const state of connections) state.socket.destroy();
       await serverClosed;
       await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
       try {
@@ -195,20 +283,58 @@ export async function startNookdServer(
 
   return Object.freeze({ socketPath: normalized.socketPath, shutdown, close: shutdown });
 
+  function clearIdleTimer(state: ConnectionState): void {
+    if (state.idleTimer === undefined) return;
+    clearTimeout(state.idleTimer);
+    state.idleTimer = undefined;
+  }
+
+  function destroyConnection(state: ConnectionState): void {
+    state.closing = true;
+    clearIdleTimer(state);
+    state.socket.destroy();
+  }
+
+  function armIdleTimer(state: ConnectionState): void {
+    clearIdleTimer(state);
+    if (state.closed || state.ended || state.closing) return;
+    state.idleTimer = scheduleTimeout(() => {
+      state.idleTimer = undefined;
+      if (state.closed || state.ended || state.closing) return;
+      const idleForMs = Date.now() - state.lastActivityMs;
+      if (idleForMs < normalized.abuseBounds.connectionIdleTimeoutMs) {
+        armIdleTimer(state);
+        return;
+      }
+      audit("rpc.connection.idle_timeout", "timeout", AUDIT_METHOD_SENTINEL, false, idleForMs);
+      destroyConnection(state);
+    }, normalized.abuseBounds.connectionIdleTimeoutMs);
+  }
+
   function processConnection(state: ConnectionState): void {
-    if (state.processing || state.closed) return;
+    if (state.processing || state.closed || state.closing) return;
     state.processing = true;
     const work = (async (): Promise<void> => {
       try {
-        while (!state.closed) {
-          if (state.requestsHandled >= normalized.maxRequestsPerConnection) {
-            state.socket.destroy();
+        while (!state.closed && !state.closing) {
+          if (
+            state.requestsHandled >= normalized.maxRequestsPerConnection ||
+            state.elapsedMs >= normalized.abuseBounds.perConnectionBudgetMs
+          ) {
+            audit(
+              "rpc.connection.budget_exceeded",
+              "budget_exceeded",
+              AUDIT_METHOD_SENTINEL,
+              false,
+              state.elapsedMs,
+            );
+            destroyConnection(state);
             break;
           }
           const next = takeFrame(state);
           if (next.kind === "incomplete") break;
           if (next.kind === "invalid") {
-            state.socket.destroy();
+            destroyConnection(state);
             break;
           }
           let request;
@@ -217,31 +343,101 @@ export async function startNookdServer(
           } catch {
             // A malformed frame has no trusted request id. The protocol has no
             // nullable-id response envelope, so close without an error body.
-            state.socket.destroy();
+            destroyConnection(state);
             break;
           }
           state.requestsHandled += 1;
-          let response;
-          try {
-            response = await handleRpcRequest(request, normalized.runtime);
-          } catch {
-            state.socket.destroy();
+          const requestStartedMs = Date.now();
+          audit("rpc.request.received", "ok", request.method, request.id.length > 0, 0);
+          let timeoutHandle: ReturnType<typeof scheduleTimeout> | undefined;
+          const timeout = new Promise<"timeout">((resolve) => {
+            timeoutHandle = scheduleTimeout(
+              () => resolve("timeout"),
+              normalized.abuseBounds.requestTimeoutMs,
+            );
+          });
+          const responsePromise = handleRpcRequest(request, normalized.runtime)
+            .then((response) => ({
+              kind: "response" as const,
+              response,
+            }))
+            .catch(() => ({ kind: "handler_failure" as const }));
+          const closed = state.closePromise.then(() => "cancelled" as const);
+          const raced = await Promise.race([responsePromise, timeout, closed]);
+          if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+          const requestElapsedMs = Math.max(0, Date.now() - requestStartedMs);
+          state.elapsedMs += requestElapsedMs;
+          if (raced === "timeout") {
+            audit(
+              "rpc.request.timeout",
+              "timeout",
+              request.method,
+              request.id.length > 0,
+              requestElapsedMs,
+            );
+            destroyConnection(state);
             break;
           }
+          if (raced === "cancelled") break;
+          if (state.elapsedMs >= normalized.abuseBounds.perConnectionBudgetMs) {
+            audit(
+              "rpc.connection.budget_exceeded",
+              "budget_exceeded",
+              request.method,
+              request.id.length > 0,
+              state.elapsedMs,
+            );
+            destroyConnection(state);
+            break;
+          }
+          if (raced.kind === "handler_failure") {
+            audit(
+              "rpc.request.dispatched",
+              "service_unavailable",
+              request.method,
+              request.id.length > 0,
+              requestElapsedMs,
+            );
+            destroyConnection(state);
+            break;
+          }
+          const response = raced.response;
+          if (state.closed || state.closing || state.socket.destroyed) break;
+          const outcome: ServiceAuditOutcome = response.ok ? "ok" : response.error.code;
+          audit(
+            "rpc.request.dispatched",
+            outcome,
+            request.method,
+            request.id.length > 0,
+            requestElapsedMs,
+          );
           let responseFrame: Uint8Array;
           try {
             responseFrame = serializeRpcResponse(response);
           } catch {
             // In particular, do not attempt to serialize a second error when
             // the original response itself exceeded the published bound.
-            state.socket.destroy();
+            destroyConnection(state);
             break;
           }
-          await writeFrame(state.socket, responseFrame);
+          const wrote = await writeFrame(state, responseFrame);
+          if (!wrote) {
+            destroyConnection(state);
+            break;
+          }
+          if (state.closed || state.closing || state.socket.destroyed) break;
+          audit(
+            "rpc.response.sent",
+            outcome,
+            request.method,
+            request.id.length > 0,
+            Math.max(0, Date.now() - requestStartedMs),
+          );
         }
       } finally {
         state.processing = false;
-        if (state.ended && !state.closed) state.socket.destroy();
+        if (state.ended && !state.closed) destroyConnection(state);
+        else if (!state.closed && !state.closing) armIdleTimer(state);
       }
     })();
     inFlight.add(work);
@@ -259,20 +455,56 @@ export async function startNookdServer(
 /** Alias retained for callers that use a factory-style name. */
 export const createNookdServer = startNookdServer;
 
-function validateOptions(
-  options: StartNookdServerOptions,
-): Required<
-  Pick<
-    StartNookdServerOptions,
-    | "socketPath"
-    | "runtime"
-    | "shutdownTimeoutMs"
-    | "maxConnections"
-    | "maxRequestsPerConnection"
-    | "installSignalHandlers"
-  >
-> &
-  Pick<StartNookdServerOptions, "socketMode"> {
+function captureStartOptions(options: StartNookdServerOptions): StartNookdServerOptions {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw nookdServerError("invalid nookd server options");
+  }
+  try {
+    const socketPath = options.socketPath;
+    const runtime = options.runtime;
+    const socketMode = options.socketMode;
+    const shutdownTimeoutMs = options.shutdownTimeoutMs;
+    const maxConnections = options.maxConnections;
+    const maxRequestsPerConnection = options.maxRequestsPerConnection;
+    const abuseBounds = options.abuseBounds;
+    const auditLogger = options.auditLogger;
+    const installSignalHandlers = options.installSignalHandlers;
+    return Object.freeze({
+      socketPath,
+      runtime,
+      ...(socketMode === undefined ? {} : { socketMode }),
+      ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs }),
+      ...(maxConnections === undefined ? {} : { maxConnections }),
+      ...(maxRequestsPerConnection === undefined ? {} : { maxRequestsPerConnection }),
+      ...(abuseBounds === undefined ? {} : { abuseBounds }),
+      ...(auditLogger === undefined ? {} : { auditLogger }),
+      ...(installSignalHandlers === undefined ? {} : { installSignalHandlers }),
+    });
+  } catch {
+    throw nookdServerError("invalid nookd server options");
+  }
+}
+
+type NormalizedStartNookdServerOptions = Omit<
+  StartNookdServerOptions,
+  | "socketMode"
+  | "shutdownTimeoutMs"
+  | "maxConnections"
+  | "maxRequestsPerConnection"
+  | "abuseBounds"
+  | "auditLogger"
+  | "installSignalHandlers"
+> & {
+  readonly socketMode?: number;
+  readonly shutdownTimeoutMs: number;
+  readonly maxConnections: number;
+  readonly maxRequestsPerConnection: number;
+  readonly abuseBounds: ServiceAbuseBounds;
+  readonly auditLogger: Logger | undefined;
+  readonly installSignalHandlers: boolean;
+};
+
+function validateOptions(options: StartNookdServerOptions): NormalizedStartNookdServerOptions {
   if (typeof options !== "object" || options === null || Array.isArray(options)) {
     throw nookdServerError("invalid nookd server options");
   }
@@ -315,6 +547,16 @@ function validateOptions(
   ) {
     throw nookdServerError("invalid nookd request limit");
   }
+  let abuseBounds: ServiceAbuseBounds;
+  try {
+    abuseBounds = normalizeServiceAbuseBounds(options.abuseBounds ?? DEFAULT_SERVICE_ABUSE_BOUNDS);
+  } catch {
+    throw nookdServerError("invalid nookd abuse bounds");
+  }
+  const auditLogger = options.auditLogger;
+  if (auditLogger !== undefined && (typeof auditLogger !== "object" || auditLogger === null)) {
+    throw nookdServerError("invalid nookd audit logger");
+  }
   const installSignalHandlers = options.installSignalHandlers ?? true;
   if (typeof installSignalHandlers !== "boolean") {
     throw nookdServerError("invalid nookd signal-handler option");
@@ -326,6 +568,8 @@ function validateOptions(
     shutdownTimeoutMs,
     maxConnections,
     maxRequestsPerConnection,
+    abuseBounds,
+    auditLogger,
     installSignalHandlers,
   };
 }
@@ -384,26 +628,46 @@ function takeFrame(state: ConnectionState): FrameRead {
   return { kind: "frame", frame };
 }
 
-async function writeFrame(socket: net.Socket, frame: Uint8Array): Promise<void> {
-  if (socket.destroyed) return;
-  await new Promise<void>((resolve) => {
+async function writeFrame(state: ConnectionState, frame: Uint8Array): Promise<boolean> {
+  if (state.closed || state.closing || state.socket.destroyed) return false;
+  return new Promise<boolean>((resolve) => {
     let settled = false;
-    const finish = (): void => {
+    const finish = (success: boolean): void => {
       if (settled) return;
       settled = true;
-      socket.removeListener("error", finish);
-      resolve();
+      state.socket.removeListener("error", onError);
+      resolve(success);
     };
-    socket.once("error", finish);
-    socket.write(frame, finish);
-    if (socket.destroyed) finish();
+    const onError = (): void => finish(false);
+    state.socket.once("error", onError);
+    try {
+      // Keep this state check adjacent to the actual write. There is no await
+      // between this check and socket.write, so shutdown cannot interleave.
+      if (state.closed || state.closing || state.socket.destroyed) {
+        finish(false);
+        return;
+      }
+      state.socket.write(frame, () =>
+        finish(!state.closed && !state.closing && !state.socket.destroyed),
+      );
+    } catch {
+      finish(false);
+    }
   });
 }
 
 async function waitForInFlight(inFlight: Set<Promise<void>>, timeoutMs: number): Promise<void> {
   if (inFlight.size === 0) return;
   const work = Promise.allSettled([...inFlight]).then(() => undefined);
-  await Promise.race([work, new Promise<void>((resolve) => scheduleTimeout(resolve, timeoutMs))]);
+  let timeoutHandle: ReturnType<typeof scheduleTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timeoutHandle = scheduleTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([work, timeout]);
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
 }
 
 function closeServer(server: net.Server): Promise<void> {
