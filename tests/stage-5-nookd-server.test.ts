@@ -32,7 +32,11 @@ const requestBytes = (id: string, query: string): Buffer => {
 
 async function fixture(
   search: NookdServerRuntime["search"],
-  options: { shutdownTimeoutMs?: number } = {},
+  options: {
+    maxConnections?: number;
+    maxRequestsPerConnection?: number;
+    shutdownTimeoutMs?: number;
+  } = {},
 ): Promise<{ handle: NookdServerHandle; socketPath: string; cleanup: ReturnType<typeof vi.fn> }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-server-"));
   tempDirectories.push(directory);
@@ -135,6 +139,26 @@ describe("nookd Unix socket server", () => {
     expect(second).toMatchObject({ id: "second", ok: true });
     expect(maximumActive).toBe(1);
     socket.destroy();
+  });
+
+  it("bounds accepted connections and closes connections above the configured cap", async () => {
+    const { socketPath } = await fixture(async () => [], { maxConnections: 1 });
+    const first = await connect(socketPath);
+    const second = await connect(socketPath);
+
+    await waitForClose(second);
+    expect(first.destroyed).toBe(false);
+    first.destroy();
+  });
+
+  it("bounds requests per connection and closes a connection after its request budget", async () => {
+    const { socketPath } = await fixture(async () => [], { maxRequestsPerConnection: 1 });
+    const socket = await connect(socketPath);
+    socket.write(Buffer.concat([requestBytes("one", "one"), requestBytes("two", "two")]));
+
+    const first = await readFrame(socket);
+    expect(first).toMatchObject({ id: "one", ok: true });
+    await waitForClose(socket);
   });
 
   it("normalizes runtime failures without exposing the upstream error", async () => {

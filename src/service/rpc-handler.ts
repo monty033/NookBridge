@@ -44,6 +44,11 @@ import {
   type RpcListNotebooksResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
+import {
+  authorizeServiceMethod,
+  createReadOnlyServicePolicy,
+  type ServicePolicy,
+} from "./service-policy.js";
 
 // Capture every mutable intrinsic up front so a hostile module
 // loader cannot swap them out from under the handler.  This is
@@ -114,6 +119,15 @@ export interface RpcHandlerRuntimeLike {
 // ---------------------------------------------------------------------------
 
 /**
+ * The single closed readOnly policy the handler consults when no
+ * caller-supplied policy is provided.  Constructed once at module
+ * load so every dispatch shares the same frozen object; tests
+ * that want to exercise a different policy must pass it
+ * explicitly.
+ */
+const DEFAULT_READ_ONLY_POLICY: ServicePolicy = createReadOnlyServicePolicy();
+
+/**
  * Run a single closed `RpcRequest` against the supplied
  * {@link RpcHandlerRuntimeLike} and return a closed
  * {@link RpcAnyResponseEnvelope}.
@@ -129,9 +143,15 @@ export interface RpcHandlerRuntimeLike {
  *     has already validated the id, so echoing it cannot leak data
  *     and silently dropping it would make the response useless.
  *   - Runtime errors collapse to `service_unavailable`; request
- *     shape errors collapse to `invalid_request`.  No raw upstream
- *     detail, `cause`, path, credential label, or note corpus data
- *     crosses the boundary.
+ *     shape errors collapse to `invalid_request`; policy denials
+ *     collapse to `permission_denied`.  No raw upstream detail,
+ *     `cause`, path, credential label, or note corpus data crosses
+ *     the boundary.
+ *   - The active authorization policy defaults to the closed
+ *     readOnly profile.  Callers that need to inject a different
+ *     policy (e.g. tests) can pass an explicit `policy` argument;
+ *     the parser, the method union, and the dispatcher do not
+ *     change either way.
  *
  * The entire body is wrapped in a top-level categorical boundary so
  * any unexpected error from a hostile request Proxy / getter is
@@ -141,6 +161,7 @@ export interface RpcHandlerRuntimeLike {
 export async function handleRpcRequest(
   request: RpcRequest,
   runtime: RpcHandlerRuntimeLike,
+  policy: ServicePolicy = DEFAULT_READ_ONLY_POLICY,
 ): Promise<RpcResponseEnvelope> {
   // Safe-id extraction MUST come first: any later failure must echo
   // back something categorical, and the id itself may be hostile.
@@ -150,6 +171,18 @@ export async function handleRpcRequest(
   try {
     const structural = validateRequestStructurally(request);
     if (structural.kind === "ok") {
+      // Service-side authorization.  The parser has already
+      // narrowed `method` to the closed `RpcMethod` union, so the
+      // policy decision is exercised here as a belt-and-braces
+      // guard: a future write-capable profile (Slice 2+) will
+      // reuse the same seam to admit additional methods without
+      // changing the parser or the dispatcher.  Any policy
+      // denial is converted to a `permission_denied` envelope
+      // before the runtime is touched.
+      const authorization = authorizeServiceMethod(policy, structural.request.method);
+      if (!authorization.allowed) {
+        return buildErrorEnvelope(id, "permission_denied") as unknown as RpcResponseEnvelope;
+      }
       switch (structural.request.method) {
         case "notes.search":
           return (await runNotesSearch(

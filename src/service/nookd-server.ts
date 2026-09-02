@@ -22,6 +22,10 @@ const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
 const MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES_ON_WIRE - FRAME_PREFIX_BYTES;
 const MAX_PENDING_BYTES = MAX_FRAME_BYTES_ON_WIRE * 2;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_CONNECTIONS = 32;
+const MAX_CONNECTIONS = 128;
+const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
+const MAX_REQUESTS_PER_CONNECTION = 1_024;
 
 /** The deliberately narrow runtime seam owned by the daemon. */
 export type NookdServerRuntime = RpcHandlerRuntimeLike &
@@ -38,6 +42,10 @@ export type StartNookdServerOptions = Readonly<{
   socketMode?: number;
   /** Maximum time to let an in-flight handler finish during shutdown. */
   shutdownTimeoutMs?: number;
+  /** Maximum number of simultaneously accepted Unix-socket connections. */
+  maxConnections?: number;
+  /** Maximum number of requests processed on one connection. */
+  maxRequestsPerConnection?: number;
   /** Entry points may install SIGTERM/SIGINT; tests can disable the hooks. */
   installSignalHandlers?: boolean;
 }>;
@@ -53,6 +61,7 @@ interface ConnectionState {
   readonly socket: net.Socket;
   pending: Buffer;
   processing: boolean;
+  requestsHandled: number;
   ended: boolean;
   closed: boolean;
 }
@@ -88,10 +97,15 @@ export async function startNookdServer(
       socket.destroy();
       return;
     }
+    if (connections.size >= normalized.maxConnections) {
+      socket.destroy();
+      return;
+    }
     const state: ConnectionState = {
       socket,
       pending: Buffer.alloc(0),
       processing: false,
+      requestsHandled: 0,
       ended: false,
       closed: false,
     };
@@ -187,6 +201,10 @@ export async function startNookdServer(
     const work = (async (): Promise<void> => {
       try {
         while (!state.closed) {
+          if (state.requestsHandled >= normalized.maxRequestsPerConnection) {
+            state.socket.destroy();
+            break;
+          }
           const next = takeFrame(state);
           if (next.kind === "incomplete") break;
           if (next.kind === "invalid") {
@@ -202,6 +220,7 @@ export async function startNookdServer(
             state.socket.destroy();
             break;
           }
+          state.requestsHandled += 1;
           let response;
           try {
             response = await handleRpcRequest(request, normalized.runtime);
@@ -245,7 +264,12 @@ function validateOptions(
 ): Required<
   Pick<
     StartNookdServerOptions,
-    "socketPath" | "runtime" | "shutdownTimeoutMs" | "installSignalHandlers"
+    | "socketPath"
+    | "runtime"
+    | "shutdownTimeoutMs"
+    | "maxConnections"
+    | "maxRequestsPerConnection"
+    | "installSignalHandlers"
   >
 > &
   Pick<StartNookdServerOptions, "socketMode"> {
@@ -278,6 +302,19 @@ function validateOptions(
   if (!Number.isInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1) {
     throw nookdServerError("invalid nookd shutdown timeout");
   }
+  const maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+  if (!Number.isInteger(maxConnections) || maxConnections < 1 || maxConnections > MAX_CONNECTIONS) {
+    throw nookdServerError("invalid nookd connection limit");
+  }
+  const maxRequestsPerConnection =
+    options.maxRequestsPerConnection ?? DEFAULT_MAX_REQUESTS_PER_CONNECTION;
+  if (
+    !Number.isInteger(maxRequestsPerConnection) ||
+    maxRequestsPerConnection < 1 ||
+    maxRequestsPerConnection > MAX_REQUESTS_PER_CONNECTION
+  ) {
+    throw nookdServerError("invalid nookd request limit");
+  }
   const installSignalHandlers = options.installSignalHandlers ?? true;
   if (typeof installSignalHandlers !== "boolean") {
     throw nookdServerError("invalid nookd signal-handler option");
@@ -287,6 +324,8 @@ function validateOptions(
     runtime: options.runtime,
     ...(options.socketMode === undefined ? {} : { socketMode: options.socketMode }),
     shutdownTimeoutMs,
+    maxConnections,
+    maxRequestsPerConnection,
     installSignalHandlers,
   };
 }
