@@ -1739,6 +1739,125 @@ receipt. Stage 4 may now be planned, but safe writes and bidirectional sync
 remain unimplemented and must not be exercised until their own plan and gates
 are reviewed.
 
+## 13.8 Stage 6 Slice 2 closeout — live read-only MCP acceptance
+
+**Status date:** 2026-09-01 (America/New_York)
+
+**Status: COMPLETE for the bounded Stage 6 Slice 2 scope.** This section is the
+current authoritative status for the slice and supersedes earlier historical
+text in this document that says Stage 6 MCP work, the service boundary, or live
+provisioning is pending. Earlier entries are retained as implementation history,
+not as current blockers.
+
+### Delivered implementation
+
+- The MCP surface is frozen at exactly four read-only tools:
+  `notesnook_status`, `notesnook_list_notebooks`, `notesnook_search_notes`, and
+  `notesnook_get_note`.
+- Results remain bounded and title/metadata-only. Note bodies, arbitrary RPC,
+  direct database access, credentials, and write operations are not exposed.
+- Production provisioning and fetch-only synchronization use the daemon's
+  encrypted state directory and the systemd credential-backed
+  `nookbridge-db-key` key path. The development file-key fallback is not used
+  by production entrypoints.
+- Plaintext Notesnook password and MFA remain TTY-only, in-memory inputs. The
+  persisted authenticated session state is held inside the encrypted client
+  database.
+
+### Source and deployment receipt
+
+- Canonical source merge: `0b05bc33c7276ef008c1d1b2424e600a4e066787`.
+- Nix deployment merge: `7de63ca94f6f3484e41635050d0b0366c8d79259`.
+- Follow-up wrapper fix: `fe349e33674e93a081452c231f2a35d41035a08b`.
+- The wrapper fix supplies `${pkgs.coreutils}/bin` as the transient unit
+  `PATH`, allowing the echo-disabled TTY reader to resolve `stty` under the
+  hardened systemd sandbox. The deployed wrappers were read back after the
+  host rebuild and contained the directive.
+- Nix parsing, flake checks, the NookBridge service check, the required
+  second review, and the deployment validation passed.
+
+### Live acceptance receipt
+
+From a real host TTY, the operator completed the following production flow:
+
+1. stopped `nookd` to release the exclusive encrypted-state lock;
+2. ran interactive `nookbridge-provision` successfully through email, password,
+   and MFA prompts;
+3. ran fetch-only `nookbridge-sync` successfully;
+4. restarted `nookd`.
+
+The provisioning report authenticated successfully, read 41 notebook summaries,
+and passed its read-only sync proof. Subsequent live MCP acceptance verified:
+
+- `notesnook_status`: pass;
+- `notesnook_list_notebooks`: pass;
+- title-fragment search using the operator-supplied canary: pass, one match;
+- metadata lookup using the operator-supplied note canary: pass, found.
+
+`nookd.service` and `hermes-agent.service` were read back as active and healthy
+with zero restarts after acceptance.
+
+### Explicit limits and next stage
+
+- This slice does **not** provide note-body retrieval or note editing. Those
+  capabilities remain outside the frozen Stage 6 read-only contract.
+- Automatic credential recovery is not implemented. An expired or revoked
+  session requires manual TTY provisioning again; the password and MFA must
+  not be persisted to automate that recovery.
+- The broader production MVP is not complete. Stage 7 permission hardening,
+  abuse limits, and audit behavior are the next substantive engineering gate.
+  Formal Stage 8 VM isolation and Stage 9 security-parity/release gates also
+  remain, although the NixOS deployment packaging was delivered early as part
+  of this operational slice.
+
+## 13.9 Stage 7 Slice 1 — service-side readOnly authorization and abuse bounds
+
+**Status date:** 2026-09-01 (America/New_York)
+
+**Status: IMPLEMENTED AND VERIFIED OFFLINE.** This slice hardens the `nookd`
+service boundary without widening the frozen Stage 6 MCP or RPC surface. It is
+not yet published, deployed, or live-accepted.
+
+### Delivered implementation
+
+- `nookd` now consults an explicit, closed `readOnly` service-policy contract
+  before dispatching any parsed RPC request. The policy admits exactly the four
+  existing methods: `notes.search`, `notes.status`, `notes.list_notebooks`, and
+  `notes.get`.
+- The policy seam returns only categorical `permission_denied` decisions for
+  side-effect-shaped candidates such as `notes.create`, `notes.append`,
+  `notes.update`, and `notes.delete`. The request parser remains closed, so
+  those methods are still rejected as `invalid_request` on the wire rather than
+  being added as callable RPC methods.
+- Policy objects, allowlists, and decisions are frozen and null-prototype;
+  hostile policy inspection fails closed without exposing the candidate method.
+- The Unix-socket server now bounds concurrent connection admission to 32 by
+  default (hard maximum 128) and bounds each connection to 64 requests by
+  default (hard maximum 1,024). Existing frame, pending-byte, response, query,
+  hit-count, title, and identifier bounds remain unchanged. Requests on one
+  connection remain serialized, so runtime calls cannot exceed the connection
+  bound.
+
+### Verification receipt
+
+- Focused policy/server/RPC/MCP tests: 71/71 passed.
+- Full offline test suite: 1,006/1,006 tests passed across 36 files.
+- `npm run typecheck`: passed.
+- `npm run lint`: passed.
+- `npm run format:check`: passed.
+- `npm run build`: passed.
+- No live credentials, network authentication, production state, deployment,
+  commit, push, or PR operation was performed for this slice.
+
+### Explicit limits and next stage
+
+- This slice does not add note-body retrieval, create, append, update, delete,
+  arbitrary RPC, MCP tool registration, or write capability.
+- Unknown or side-effecting wire methods remain parser-invalid; a future slice
+  must not widen the parser or dispatcher without a separate decision record.
+- Timeout, cancellation, audit, and broader abuse-response behavior remain
+  separate Stage 7 work and are not claimed here.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
