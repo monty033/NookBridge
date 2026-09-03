@@ -28,6 +28,11 @@ const CONFIG: ServiceConfig = Object.freeze({
   ] as const),
 });
 
+const WRITE_CONFIG: ServiceConfig = Object.freeze({
+  ...CONFIG,
+  readPolicy: Object.freeze(["notes.search", "notes.create", "notes.append"] as const),
+});
+
 const productionKeys: SecureKeyStore = Object.freeze({
   backend: "systemd-credential",
   productionSafe: true,
@@ -100,6 +105,65 @@ describe("bounded nookd startup composition", () => {
     expect(serverOptions?.socketPath).toBe(CONFIG.socketPath);
     expect(serverOptions?.runtime.search).toBeDefined();
     expect(handle.socketPath).toBe(CONFIG.socketPath);
+  });
+
+  it("forwards the selected frozen policy and every optional write capability", async () => {
+    vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
+    const cleanup = vi.fn(async () => undefined);
+    const createNote = vi.fn(async () => ({
+      operation: "create" as const,
+      id: "note-created",
+      titleBytes: 5,
+      contentBytes: 4,
+      localCommitted: true as const,
+      remoteSynced: false as const,
+      pendingSync: true as const,
+    }));
+    const appendNote = vi.fn(async () => ({
+      operation: "append" as const,
+      id: "note-created",
+      contentBytes: 4,
+      localCommitted: true as const,
+      remoteSynced: false as const,
+      pendingSync: true as const,
+    }));
+    const updateNote = vi.fn(async () => ({
+      operation: "update" as const,
+      id: "note-created",
+      appliedFields: ["title"] as const,
+      localCommitted: true as const,
+      remoteSynced: false as const,
+      pendingSync: true as const,
+    }));
+    const runtime = Object.freeze({
+      ...runtimeFixture(cleanup),
+      createNote,
+      appendNote,
+      updateNote,
+    });
+    let serverOptions: StartNookdServerOptions | undefined;
+    const factories = factoriesFixture({
+      loadConfig: vi.fn(() => ({ ok: true as const, config: WRITE_CONFIG })),
+      createRuntime: vi.fn(async () => runtime),
+      startServer: vi.fn(async (options) => {
+        serverOptions = options;
+        return fakeHandle();
+      }),
+    });
+
+    const handle = await startNookd({ configPath: CONFIG_PATH, factories });
+
+    expect(serverOptions?.policy?.profile).toBe("custom");
+    expect(serverOptions?.policy?.allowedMethods).toEqual([
+      "notes.search",
+      "notes.create",
+      "notes.append",
+    ]);
+    expect(Object.isFrozen(serverOptions?.policy)).toBe(true);
+    expect(serverOptions?.runtime.createNote).toBe(createNote);
+    expect(serverOptions?.runtime.appendNote).toBe(appendNote);
+    expect(serverOptions?.runtime.updateNote).toBe(updateNote);
+    await handle.shutdown();
   });
 
   it("rejects an unsafe config returned by the loader seam before runtime construction", async () => {

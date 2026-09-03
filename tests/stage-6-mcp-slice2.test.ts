@@ -89,7 +89,7 @@ afterEach(async () => {
 });
 
 describe("Stage 6 Slice 2 — MCP tool surface", () => {
-  it("advertises exactly the four read-only tools", () => {
+  it("advertises the four read-only tools plus the three bounded writes", () => {
     const client = new NookdSocketClient({
       socketPath: "/tmp/nook-mcp-slice2-never-used.sock",
       connect: async () => {
@@ -102,9 +102,17 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
       "notesnook_status",
       "notesnook_list_notebooks",
       "notesnook_get_note",
+      "notesnook_create_note",
+      "notesnook_append_note",
+      "notesnook_update_note",
     ]);
     expect(handle.tools.map((tool) => tool.name)).toEqual(NOOK_MCP_ALLOWED_TOOL_NAMES);
-    expect(handle.tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+    expect(handle.tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(
+      true,
+    );
+    expect(handle.tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(
+      true,
+    );
     expect(handle.tools.every((tool) => tool.annotations?.destructiveHint === false)).toBe(true);
   });
 

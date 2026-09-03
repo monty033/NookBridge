@@ -1,6 +1,20 @@
 /**
  * Stage 7 Slice 1 — service-side readOnly authorization contract.
  *
+ * Stage 7 Slice 3 amendment — adds the `readWriteNoDelete` and
+ * `custom` profiles that admit `notes.create` end-to-end while
+ * preserving all four read methods and the closed categorical
+ * `permission_denied` denial vocabulary.  `notes.delete` remains
+ * structurally unreachable through any policy factory.
+ *
+ * Stage 7 Slice 3 follow-up — widens `readWriteNoDelete` and the
+ * `custom` allowlist to additionally admit `notes.append` and
+ * `notes.update` end-to-end.  `notes.delete` remains structurally
+ * impossible: it is never present in either the read-write-no-delete
+ * allowlist or the closed universe of `custom` allowable methods,
+ * and the factory drops any caller-supplied instance before
+ * constructing the policy.
+ *
  * This module is the small closed policy seam the Stage 7 Slice 1
  * service-side authorization work introduces.  It is intentionally
  * tiny:
@@ -8,11 +22,16 @@
  *   - Pure: no filesystem, no socket, no daemon, no Notesnook, no
  *     parser, no JSON.  Every export is a pure function of its
  *     arguments and the frozen module-level state.
- *   - Closed: the supported profile vocabulary is exactly one
- *     literal — `"readOnly"`.  The allowed-method tuple is exactly
- *     the four read methods in published order.  Any future
- *     profile (`readWriteNoDelete`, `custom`) is out of scope for
- *     this slice and requires a Stage 7 Slice ≥ 2 amendment.
+ *   - Closed: the supported profile vocabulary is exactly three
+ *     literals — `"readOnly"`, `"readWriteNoDelete"`, and
+ *     `"custom"`.  The `readOnly` allowlist is exactly the four
+ *     read methods in published order.  The `readWriteNoDelete`
+ *     allowlist is the four reads plus `notes.create`.  The
+ *     `custom` allowlist is the configured subset of the four
+ *     reads plus `notes.create`; `notes.delete` is structurally
+ *     refused by every factory regardless of the configured
+ *     argument.  Any future widening requires an explicit
+ *     decision-record amendment.
  *   - Frozen: the policy object, its allowlist tuple, and every
  *     decision record are frozen on a null prototype so a hostile
  *     caller cannot widen the surface, smuggle inherited data, or
@@ -49,7 +68,10 @@ const objectGetPrototypeOf = Object.getPrototypeOf;
 const objectIsFrozen = Object.isFrozen;
 const objectSetPrototypeOf = Object.setPrototypeOf;
 const arrayIsArray = Array.isArray;
+const arrayIndexOf = Array.prototype.indexOf;
+const arrayIncludes = Array.prototype.includes;
 const reflectOwnKeys = Reflect.ownKeys;
+const reflectApply = Reflect.apply;
 
 // ---------------------------------------------------------------------------
 // Closed profile vocabulary.
@@ -57,18 +79,18 @@ const reflectOwnKeys = Reflect.ownKeys;
 
 /**
  * The closed set of permission profiles the service policy engine
- * understands in this slice.  Only `readOnly` is part of the Slice 1
- * contract; any other profile literal would require a Stage 7 Slice
- * ≥ 2 amendment and is rejected at the type level.
+ * understands.  Every literal here is part of the published contract;
+ * any future profile (e.g. `readWriteAll`) requires a Stage 7 Slice
+ * ≥ 4 amendment and is rejected at the type level.
  */
-export type ServicePolicyProfile = "readOnly";
+export type ServicePolicyProfile = "readOnly" | "readWriteNoDelete" | "custom";
 
 /**
  * The published list of supported profile identifiers, frozen so a
  * hostile module mutation cannot widen the public profile catalogue.
  */
 const SERVICE_POLICY_PROFILES_LIST: ReadonlyArray<ServicePolicyProfile> = (() => {
-  const arr: ServicePolicyProfile[] = ["readOnly"];
+  const arr: ServicePolicyProfile[] = ["readOnly", "readWriteNoDelete", "custom"];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<ServicePolicyProfile>;
 })();
@@ -78,24 +100,16 @@ export const SERVICE_POLICY_PROFILES: ReadonlyArray<ServicePolicyProfile> =
 
 /**
  * Narrow a raw string to the closed `ServicePolicyProfile` union.
- * Returns `true` only for the literal `"readOnly"`.  Anything else —
- * case variants, similar-looking strings, the empty string — is
- * `false`.
+ * Returns `true` only for one of the three published literals.
+ * Anything else — case variants, similar-looking strings, the empty
+ * string — is `false`.
  */
 export function isServicePolicyProfile(value: unknown): value is ServicePolicyProfile {
-  return value === "readOnly";
+  return value === "readOnly" || value === "readWriteNoDelete" || value === "custom";
 }
 
 // ---------------------------------------------------------------------------
 // Closed read method allowlist.
-//
-// This tuple is the exact published Stage 6 Slice 2 RPC allowlist,
-// in published order.  It mirrors `SERVICE_CONFIG_READ_POLICY` in
-// the service-config loader but is the *authorization* source of
-// truth, not the configuration schema.  Keeping the two in lockstep
-// is intentional: the deployment cannot ship a config that admits a
-// method the policy would deny, and the policy cannot admit a method
-// the config rejects.
 // ---------------------------------------------------------------------------
 
 const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
@@ -110,8 +124,74 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
 })();
 
+/**
+ * The `readWriteNoDelete` allowlist: the four reads plus the
+ * side-effecting `notes.create`, `notes.append`, and `notes.update`.
+ * `notes.delete` is intentionally absent — delete is never
+ * reachable through any profile in this slice.
+ */
+const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
+  const arr: RpcMethod[] = [
+    "notes.search",
+    "notes.status",
+    "notes.list_notebooks",
+    "notes.get",
+    "notes.create",
+    "notes.append",
+    "notes.update",
+  ];
+  objectSetPrototypeOf(arr, null);
+  return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
+})();
+
+/**
+ * The closed universe of methods any `custom` policy may ever
+ * admit.  `notes.delete` is intentionally absent — a caller that
+ * passes it to `createCustomServicePolicy` is silently dropped
+ * before the policy is constructed.  This is the structural
+ * guarantee that delete is never possible through any policy.
+ *
+ * `notes.append` and `notes.update` are admitted end-to-end by
+ * Slice 3 follow-up; `notes.delete` is structurally absent and
+ * impossible to smuggle in.
+ */
+const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
+  const arr: RpcMethod[] = [
+    "notes.search",
+    "notes.status",
+    "notes.list_notebooks",
+    "notes.get",
+    "notes.create",
+    "notes.append",
+    "notes.update",
+  ];
+  objectSetPrototypeOf(arr, null);
+  return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
+})();
+
+/**
+ * The closed universe of methods the policy engine recognises for
+ * the purposes of structural validation.  The four read methods,
+ * `notes.create`, `notes.append`, and `notes.update` are valid.
+ * Anything else (including `notes.delete`, any future write method
+ * outside the Slice 3 amendment) is unknown to the policy engine
+ * and would always be denied — but it is also never carried in a
+ * custom allowlist because the factory drops anything outside
+ * `CUSTOM_POLICY_ALLOWABLE_METHODS` silently.
+ *
+ * The wire parser is the first line of defence: anything outside
+ * the closed `RpcMethod` union is rejected as `invalid_request`
+ * before reaching the policy seam.
+ */
+function isAllowableCustomMethod(value: string): value is RpcMethod {
+  for (let index = 0; index < CUSTOM_POLICY_ALLOWABLE_METHODS.length; index += 1) {
+    if (CUSTOM_POLICY_ALLOWABLE_METHODS[index] === value) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
-// Policy type and factory.
+// Policy type and factories.
 // ---------------------------------------------------------------------------
 
 /**
@@ -126,14 +206,10 @@ export interface ServicePolicy {
 }
 
 /**
- * Build the canonical `readOnly` service policy.  This is the only
- * factory the Slice 1 contract exposes; any future profile
- * (`readWriteNoDelete`, `custom`) requires a Stage 7 Slice ≥ 2
- * amendment.
- *
- * The returned policy is frozen on a null prototype, with the
- * allowlist tuple frozen too, so a hostile caller cannot widen the
- * surface after construction.
+ * Build the canonical `readOnly` service policy.  The returned
+ * policy is frozen on a null prototype, with the allowlist tuple
+ * frozen too, so a hostile caller cannot widen the surface after
+ * construction.
  */
 export function createReadOnlyServicePolicy(): ServicePolicy {
   const policy = objectCreate(null) as {
@@ -143,6 +219,169 @@ export function createReadOnlyServicePolicy(): ServicePolicy {
   policy.profile = "readOnly";
   policy.allowedMethods = READ_ONLY_ALLOWED_METHODS;
   return objectFreeze(policy) as ServicePolicy;
+}
+
+/**
+ * Build the canonical `readWriteNoDelete` service policy.  The
+ * allowlist is the four reads plus `notes.create`; `notes.delete`
+ * is structurally absent and cannot be admitted by this factory.
+ *
+ * The returned policy is frozen on a null prototype, with the
+ * allowlist tuple frozen too, so a hostile caller cannot widen the
+ * surface after construction.
+ */
+export function createReadWriteNoDeleteServicePolicy(): ServicePolicy {
+  const policy = objectCreate(null) as {
+    profile: ServicePolicyProfile;
+    allowedMethods: ReadonlyArray<RpcMethod>;
+  };
+  policy.profile = "readWriteNoDelete";
+  policy.allowedMethods = READ_WRITE_NO_DELETE_ALLOWED_METHODS;
+  return objectFreeze(policy) as ServicePolicy;
+}
+
+/**
+ * Build a `custom` service policy from a caller-supplied allowlist.
+ *
+ * The contract is:
+ *
+ *   - Only methods in {@link CUSTOM_POLICY_ALLOWABLE_METHODS} are
+ *     admitted.  Anything else — including `notes.delete` and any
+ *     unknown strings, non-strings, empty strings — is silently
+ *     dropped before the policy is constructed.
+ *   - Duplicate entries are deduped while preserving the caller's
+ *     supplied order.
+ *   - The resulting `allowedMethods` tuple is null-prototype and
+ *     frozen, and the policy object is itself frozen on a null
+ *     prototype.
+ *
+ * In particular, `notes.delete` is structurally impossible: even
+ * if a caller passes `["notes.delete"]`, the factory drops it and
+ * the resulting policy allows nothing.
+ */
+export function createCustomServicePolicy(allowedMethods: ReadonlyArray<string>): ServicePolicy {
+  const clean = readCustomAllowlist(allowedMethods);
+  if (clean === undefined) return finishCustomServicePolicy([]);
+  return finishCustomServicePolicy(clean);
+}
+
+function finishCustomServicePolicy(clean: readonly RpcMethod[]): ServicePolicy {
+  // Hand-rolled null-prototype frozen array: a pure `Object.create(null)`
+  // does not pass `Array.isArray`, so we build a real array and then
+  // null the prototype before freezing.
+  const cleanArr: RpcMethod[] = [...clean];
+  objectSetPrototypeOf(cleanArr, null);
+  objectFreeze(cleanArr);
+  const policy = objectCreate(null) as {
+    profile: ServicePolicyProfile;
+    allowedMethods: ReadonlyArray<RpcMethod>;
+  };
+  policy.profile = "custom";
+  policy.allowedMethods = cleanArr as ReadonlyArray<RpcMethod>;
+  return objectFreeze(policy) as ServicePolicy;
+}
+
+/**
+ * Read a custom allowlist through descriptors rather than through indexed
+ * property access.  The public factory is a runtime boundary, so a typed
+ * `ReadonlyArray<string>` may still be a non-array, a Proxy, an oversized
+ * array, or an accessor-backed array at runtime.  Any malformed shape fails
+ * closed to an empty custom policy; unknown method strings are still dropped
+ * so the delete exclusion remains structural.
+ */
+function readCustomAllowlist(value: unknown): RpcMethod[] | undefined {
+  let isArray: boolean;
+  try {
+    isArray = arrayIsArray(value);
+  } catch {
+    return undefined;
+  }
+  if (!isArray || value === null || typeof value !== "object") return undefined;
+
+  try {
+    const prototype = objectGetPrototypeOf(value);
+    if (prototype !== Array.prototype && prototype !== null) return undefined;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== "number" ||
+      !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > CUSTOM_POLICY_ALLOWABLE_METHODS.length
+    ) {
+      return undefined;
+    }
+    const length = lengthDescriptor.value;
+    const keys = reflectOwnKeys(value);
+    if (keys.length !== length + 1 || keys.some((key) => typeof key !== "string")) {
+      return undefined;
+    }
+    const clean: RpcMethod[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
+      if (!keys.includes(key)) return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "string"
+      ) {
+        return undefined;
+      }
+      const candidate = descriptor.value;
+      if (!isAllowableCustomMethod(candidate)) continue;
+      if (reflectApply(arrayIndexOf, clean, [candidate]) !== -1) continue;
+      clean.push(candidate);
+    }
+    return clean;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Select the canonical policy for a validated service-config allowlist.
+ * The legacy four-method list keeps the readOnly identity; the complete
+ * closed universe gets the named readWriteNoDelete identity; all other
+ * bounded lists become a custom policy.  The returned value is always a
+ * module-owned frozen policy, never the caller's array.
+ */
+export function createServicePolicyFromMethods(methods: ReadonlyArray<RpcMethod>): ServicePolicy {
+  if (sameMethods(methods, READ_ONLY_ALLOWED_METHODS)) {
+    return createReadOnlyServicePolicy();
+  }
+  if (sameMethods(methods, READ_WRITE_NO_DELETE_ALLOWED_METHODS)) {
+    return createReadWriteNoDeleteServicePolicy();
+  }
+  return createCustomServicePolicy(methods);
+}
+
+function sameMethods(left: ReadonlyArray<RpcMethod>, right: ReadonlyArray<RpcMethod>): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < right.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * Reconstruct a valid module-owned policy from an untrusted candidate.
+ * This is used by the Unix-server boundary so malformed injected policies
+ * fail closed before requests are admitted.
+ */
+export function narrowServicePolicy(value: unknown): ServicePolicy | undefined {
+  const allowlist = inspectPolicyAllowlist(value);
+  if (allowlist === undefined) return undefined;
+  try {
+    const profile = (value as { readonly profile: unknown }).profile;
+    if (profile === "readOnly") return createReadOnlyServicePolicy();
+    if (profile === "readWriteNoDelete") return createReadWriteNoDeleteServicePolicy();
+    return createCustomServicePolicy(allowlist);
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,19 +417,26 @@ export type ServicePolicyDecision =
  * The candidate is consumed as a `string` rather than the parsed
  * `RpcMethod` union so the policy is also a safe place to
  * experiment with arbitrary hostile method names in tests
- * (e.g. `notes.create`, `notes.delete`).  At runtime the handler
+ * (e.g. `notes.delete`, `notes.append`).  At runtime the handler
  * passes a parsed `RpcMethod`, so the type system still prevents
  * a hostile caller from supplying an unknown method through the
  * normal RPC entry point.
  *
  * Decision rules:
- *   1. If `method` is exactly one of the four read methods in the
- *      allowlist, return `{ allowed: true, method }`.
- *   2. Otherwise — including side-effecting methods, unknown
+ *   1. If the policy is structurally invalid (Proxy trap,
+ *      polluted prototype, non-`readOnly` profile), the decision
+ *      is `{ allowed: false, reason: "permission_denied" }`.
+ *      The policy is treated as hostile; the allowlist is never
+ *      consulted.
+ *   2. If `method` is exactly one of the entries in the active
+ *      policy's allowlist, return
+ *      `{ allowed: true, method: <canonical literal> }`.
+ *   3. Otherwise — including side-effecting methods, unknown
  *      methods, the empty string, non-strings, and lookalike
- *      variants — return `{ allowed: false, reason:
- *      "permission_denied" }`.  The decision record never echoes
- *      the offending method name into the reason.
+ *      variants — return
+ *      `{ allowed: false, reason: "permission_denied" }`.  The
+ *      decision record never echoes the offending method name
+ *      into the reason.
  *
  * The returned decision is frozen on a null prototype so a hostile
  * downstream consumer cannot mutate the result.
@@ -200,11 +446,12 @@ export function authorizeServiceMethod(
   method: string,
 ): ServicePolicyDecision {
   // Defensive: a hostile caller could in principle pass a
-  // non-policy object.  We re-validate the profile and the
-  // allowlist through captured intrinsics, the same pattern the
-  // RPC protocol uses, so a Proxy / inherited-getter trap cannot
+  // non-policy object.  We re-validate the policy's closed shape
+  // through captured intrinsics, the same pattern the RPC
+  // protocol uses, so a Proxy / inherited-getter trap cannot
   // smuggle a widened policy past the boundary.
-  if (!isReadOnlyPolicy(policy)) {
+  const allowlist = inspectPolicyAllowlist(policy);
+  if (allowlist === undefined) {
     const deny = objectCreate(null) as { allowed: false; reason: ServicePolicyDenialReason };
     deny.allowed = false;
     deny.reason = "permission_denied";
@@ -218,17 +465,27 @@ export function authorizeServiceMethod(
     return objectFreeze(deny) as ServicePolicyDecision;
   }
 
-  // O(n) walk over the closed four-element allowlist.  The
-  // allowlist is too small to justify a Set, and a Set would
-  // leak the method names through its iterator / `for..of`
-  // surface during hostile probing.
-  for (let index = 0; index < READ_ONLY_ALLOWED_METHODS.length; index += 1) {
-    const candidate = READ_ONLY_ALLOWED_METHODS[index];
-    if (candidate === method) {
-      const allow = objectCreate(null) as { allowed: true; method: RpcMethod };
-      allow.allowed = true;
-      allow.method = candidate;
-      return objectFreeze(allow) as ServicePolicyDecision;
+  // O(n) walk over the active allowlist.  The allowlist is too
+  // small to justify a Set, and a Set would leak the method names
+  // through its iterator / `for..of` surface during hostile
+  // probing.  Reading the length / index descriptor through the
+  // captured intrinsic indexOf is structurally safe: a Proxy
+  // length getter that throws is normalised by the allowlist
+  // inspector above returning `undefined`, which already denied
+  // the request before we got here.
+  if (reflectApply(arrayIncludes, allowlist, [method])) {
+    // Re-validate the matched entry through a strict ===
+    // comparison against the allowlist so a hostile Proxy that
+    // reported `true` from `Array.prototype.includes` without
+    // actually containing `method` cannot slip a phantom match
+    // past the boundary.
+    for (let index = 0; index < allowlist.length; index += 1) {
+      if (allowlist[index] === method) {
+        const allow = objectCreate(null) as { allowed: true; method: RpcMethod };
+        allow.allowed = true;
+        allow.method = method;
+        return objectFreeze(allow) as ServicePolicyDecision;
+      }
     }
   }
 
@@ -239,36 +496,67 @@ export function authorizeServiceMethod(
 }
 
 /**
- * Narrow a candidate to the canonical readOnly policy shape.
- * Returns `true` only when the candidate is the exact policy
- * object produced by `createReadOnlyServicePolicy` (frozen, null
- * prototype, profile `"readOnly"`, allowlist equal to the closed
- * four).  Any deviation is a hostile or stale policy and is
- * rejected by `authorizeServiceMethod` with a `permission_denied`
- * decision.
+ * Inspect a candidate `ServicePolicy` and return its frozen,
+ * null-prototype allowlist, or `undefined` if the candidate is
+ * not a structurally-valid closed policy object.
+ *
+ * The inspector accepts exactly one of the three published
+ * profiles (`"readOnly"`, `"readWriteNoDelete"`, `"custom"`) and
+ * returns the corresponding canonical allowlist.  Any other
+ * profile literal, a Proxy whose `profile` getter throws, or a
+ * polluted prototype is refused categorically with `undefined`.
+ *
+ * Importantly: the inspector does NOT echo the candidate's own
+ * `allowedMethods` array.  It only validates the candidate's
+ * `profile` field and returns the corresponding canonical
+ * module-owned allowlist, so a hostile policy cannot smuggle a
+ * widened allowlist past the boundary by pretending to be
+ * `readOnly` (or any other profile).
  */
-function isReadOnlyPolicy(value: unknown): value is ServicePolicy {
+function inspectPolicyAllowlist(value: unknown): ReadonlyArray<RpcMethod> | undefined {
   try {
-    if (value === null || typeof value !== "object") return false;
+    if (value === null || typeof value !== "object") return undefined;
     const record = value as Record<string, unknown>;
-    if (!objectIsFrozen(record) || objectGetPrototypeOf(record) !== null) return false;
-    if (reflectOwnKeys(record).length !== 2) return false;
+    if (!objectIsFrozen(record) || objectGetPrototypeOf(record) !== null) return undefined;
+    if (reflectOwnKeys(record).length !== 2) return undefined;
     const profile = record.profile;
-    if (profile !== "readOnly") return false;
-    const allowed = record.allowedMethods;
-    if (
-      !arrayIsArray(allowed) ||
-      !objectIsFrozen(allowed) ||
-      objectGetPrototypeOf(allowed) !== null
-    ) {
-      return false;
+    if (profile === "readOnly") return READ_ONLY_ALLOWED_METHODS;
+    if (profile === "readWriteNoDelete") return READ_WRITE_NO_DELETE_ALLOWED_METHODS;
+    if (profile === "custom") {
+      // Custom policies are validated through their own
+      // allowlist shape.  We must ensure the candidate's tuple
+      // is a real, frozen, null-prototype array of `RpcMethod`
+      // literals before trusting it; otherwise the canonical
+      // custom-pipeline must deny.
+      const allowed = record.allowedMethods;
+      if (
+        !arrayIsArray(allowed) ||
+        !objectIsFrozen(allowed) ||
+        objectGetPrototypeOf(allowed) !== null
+      ) {
+        return undefined;
+      }
+      // Re-walk the candidate tuple via descriptor reads so a
+      // Proxy that fabricates `length` without real entries
+      // cannot pass.  Every entry must be a literal in
+      // CUSTOM_POLICY_ALLOWABLE_METHODS (i.e. one of the four
+      // reads, `notes.create`, `notes.append`, or `notes.update`);
+      // anything else denies.
+      for (let index = 0; index < allowed.length; index += 1) {
+        const entry = allowed[index];
+        if (typeof entry !== "string") return undefined;
+        if (!isAllowableCustomMethod(entry)) return undefined;
+      }
+      // Return the candidate tuple only after every entry has
+      // been validated against the closed universe of
+      // allowable custom methods.  `notes.delete` is
+      // structurally impossible: it is not in
+      // CUSTOM_POLICY_ALLOWABLE_METHODS, so a candidate that
+      // contains it is denied above.
+      return allowed as ReadonlyArray<RpcMethod>;
     }
-    if (allowed.length !== READ_ONLY_ALLOWED_METHODS.length) return false;
-    for (let index = 0; index < allowed.length; index += 1) {
-      if (allowed[index] !== READ_ONLY_ALLOWED_METHODS[index]) return false;
-    }
-    return true;
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }

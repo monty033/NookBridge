@@ -6,17 +6,14 @@
  * `src/mcp/` tree that imports `@modelcontextprotocol/sdk`. It is
  * the only module that registers tools, resources, or prompts,
  * the only module that knows how tool calls are translated to the
- * four allowlisted read-only RPC methods.
+ *     four allowlisted read-only RPC methods and three bounded write methods.
  *
  * Hard rules (Stage 6 slice):
  *
- *   - Exactly four tools are registered: the bounded read-only search, status,
- *     notebook-listing, and note-metadata tools.
- *   - The tool is annotated `readOnlyHint: true` and
- *     `destructiveHint: false`. No mutating tools exist in this
- *     slice; mutating tools are deferred to a later stage with
- *     its own decision-record amendment.
- *   - The tool input schema is a fixed JSON Schema for
+ *   - Exactly seven tools are registered: the four bounded read-only search,
+ *     status, notebook-listing, and note-metadata tools plus create, append,
+ *     and update. No delete tool exists.
+ *   - The search tool input schema is a fixed JSON Schema for
  *     `{ query: string, limit?: number }`. `limit` is optional
  *     and is documented as currently ignored because the
  *     underlying Stage 5 RPC does not support a caller-provided
@@ -62,6 +59,9 @@ export const NOOK_MCP_ALLOWED_TOOL_NAME = "notesnook_search_notes" as const;
 export const NOOK_MCP_STATUS_TOOL_NAME = "notesnook_status" as const;
 export const NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME = "notesnook_list_notebooks" as const;
 export const NOOK_MCP_GET_NOTE_TOOL_NAME = "notesnook_get_note" as const;
+export const NOOK_MCP_CREATE_NOTE_TOOL_NAME = "notesnook_create_note" as const;
+export const NOOK_MCP_APPEND_NOTE_TOOL_NAME = "notesnook_append_note" as const;
+export const NOOK_MCP_UPDATE_NOTE_TOOL_NAME = "notesnook_update_note" as const;
 
 /** The exhaustive allowlist of valid tool names. The factory
  *  enforces this at registration time so a future contributor
@@ -71,6 +71,9 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
   NOOK_MCP_STATUS_TOOL_NAME,
   NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME,
   NOOK_MCP_GET_NOTE_TOOL_NAME,
+  NOOK_MCP_CREATE_NOTE_TOOL_NAME,
+  NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+  NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
 ]);
 
 /**
@@ -79,9 +82,6 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
  * single source of truth rather than a hand-edited list.
  */
 export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
-  "notesnook_create_note",
-  "notesnook_update_note",
-  "notesnook_append_note",
   "notesnook_delete_note",
 
   "notesnook_list_notes",
@@ -100,7 +100,11 @@ export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
  * accept a query that the underlying RPC would reject.
  */
 export const NOOK_MCP_MAX_QUERY_BYTES = 512;
+export const NOOK_MCP_MAX_TITLE_BYTES = 256;
 export const NOOK_MCP_MAX_IDENTIFIER_BYTES = 256;
+export const NOOK_MCP_MAX_CONTENT_BYTES = 512;
+export const NOOK_MCP_MAX_TAGS = 16;
+export const NOOK_MCP_MAX_REVISION_BYTES = 36;
 
 /** Maximum `limit` we will ever accept, even if a future Stage 6
  *  slice grows the underlying RPC to support one.  Today `limit`
@@ -214,12 +218,135 @@ const GET_NOTE_TOOL_DEFINITION = Object.freeze({
   annotations: SEARCH_TOOL_ANNOTATIONS,
 }) as unknown as Tool;
 
+const CREATE_NOTE_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_CREATE_NOTE_TOOL_NAME,
+  description: "Create a note with bounded title, content, and optional notebook identifier.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      title: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_TITLE_BYTES }),
+      content: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_CONTENT_BYTES,
+      }),
+      notebookId: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES,
+      }),
+    }),
+    required: Object.freeze(["title", "content"]),
+    additionalProperties: false,
+  }),
+  annotations: Object.freeze({
+    title: "Create note",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  }),
+}) as unknown as Tool;
+
+const APPEND_NOTE_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+  description: "Append a bounded markdown fragment using an expected note revision.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
+      markdownFragment: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_CONTENT_BYTES,
+      }),
+      expectedRevision: Object.freeze({
+        type: "string",
+        minLength: NOOK_MCP_MAX_REVISION_BYTES,
+        maxLength: NOOK_MCP_MAX_REVISION_BYTES,
+      }),
+    }),
+    required: Object.freeze(["id", "markdownFragment", "expectedRevision"]),
+    additionalProperties: false,
+  }),
+  annotations: Object.freeze({
+    title: "Append to note",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  }),
+}) as unknown as Tool;
+
+const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+  description: "Update bounded note fields using an expected note revision.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
+      expectedRevision: Object.freeze({
+        type: "string",
+        minLength: NOOK_MCP_MAX_REVISION_BYTES,
+        maxLength: NOOK_MCP_MAX_REVISION_BYTES,
+      }),
+      patch: Object.freeze({
+        type: "object",
+        minProperties: 1,
+        maxProperties: 6,
+        properties: Object.freeze({
+          title: Object.freeze({
+            type: "string",
+            minLength: 1,
+            maxLength: NOOK_MCP_MAX_TITLE_BYTES,
+          }),
+          content: Object.freeze({
+            type: "string",
+            minLength: 1,
+            maxLength: NOOK_MCP_MAX_CONTENT_BYTES,
+          }),
+          notebookId: Object.freeze({
+            type: "string",
+            minLength: 1,
+            maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES,
+          }),
+          tags: Object.freeze({
+            type: "array",
+            minItems: 1,
+            maxItems: NOOK_MCP_MAX_TAGS,
+            items: Object.freeze({
+              type: "string",
+              minLength: 1,
+              maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES,
+            }),
+          }),
+          pinned: Object.freeze({ type: "boolean" }),
+          favorite: Object.freeze({ type: "boolean" }),
+        }),
+        additionalProperties: false,
+      }),
+    }),
+    required: Object.freeze(["id", "expectedRevision", "patch"]),
+    additionalProperties: false,
+  }),
+  annotations: Object.freeze({
+    title: "Update note",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  }),
+}) as unknown as Tool;
+
 /** Static list of every tool the proxy is allowed to expose. */
 export const NOOK_MCP_TOOL_DEFINITIONS: ReadonlyArray<Tool> = Object.freeze([
   SEARCH_TOOL_DEFINITION,
   STATUS_TOOL_DEFINITION,
   LIST_NOTEBOOKS_TOOL_DEFINITION,
   GET_NOTE_TOOL_DEFINITION,
+  CREATE_NOTE_TOOL_DEFINITION,
+  APPEND_NOTE_TOOL_DEFINITION,
+  UPDATE_NOTE_TOOL_DEFINITION,
 ]);
 
 // -----------------------------------------------------------------------
@@ -244,6 +371,41 @@ const searchInputSchema = {
 const emptyInputSchema = {};
 const getNoteInputSchema = {
   id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).describe("Opaque note identifier."),
+};
+const createNoteInputSchema = {
+  title: z.string().min(1).max(NOOK_MCP_MAX_TITLE_BYTES),
+  content: z.string().min(1).max(NOOK_MCP_MAX_CONTENT_BYTES),
+  notebookId: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).optional(),
+};
+const appendNoteInputSchema = {
+  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
+  markdownFragment: z.string().min(1).max(NOOK_MCP_MAX_CONTENT_BYTES),
+  expectedRevision: z
+    .string()
+    .length(NOOK_MCP_MAX_REVISION_BYTES)
+    .regex(/^rev_[0-9a-f]{32}$/),
+};
+const updateNoteInputSchema = {
+  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
+  expectedRevision: z
+    .string()
+    .length(NOOK_MCP_MAX_REVISION_BYTES)
+    .regex(/^rev_[0-9a-f]{32}$/),
+  patch: z
+    .object({
+      title: z.string().min(1).max(NOOK_MCP_MAX_TITLE_BYTES).optional(),
+      content: z.string().min(1).max(NOOK_MCP_MAX_CONTENT_BYTES).optional(),
+      notebookId: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).optional(),
+      tags: z
+        .array(z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES))
+        .min(1)
+        .max(NOOK_MCP_MAX_TAGS)
+        .optional(),
+      pinned: z.boolean().optional(),
+      favorite: z.boolean().optional(),
+    })
+    .strict()
+    .refine((patch) => Object.keys(patch).length > 0),
 };
 
 const permissiveCallRequestSchema = z
@@ -371,6 +533,45 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       async (input) => invokeGetNote(options.client, input as GetNoteInput),
     ),
   });
+  registered.push({
+    name: NOOK_MCP_CREATE_NOTE_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_CREATE_NOTE_TOOL_NAME,
+      {
+        title: "Create note",
+        description: "Create a bounded note.",
+        inputSchema: createNoteInputSchema,
+        annotations: CREATE_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
+      },
+      async (input) => invokeCreateNote(options.client, input as CreateNoteInput),
+    ),
+  });
+  registered.push({
+    name: NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+      {
+        title: "Append to note",
+        description: "Append a bounded markdown fragment to a note.",
+        inputSchema: appendNoteInputSchema,
+        annotations: APPEND_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
+      },
+      async (input) => invokeAppendNote(options.client, input as AppendNoteInput),
+    ),
+  });
+  registered.push({
+    name: NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+      {
+        title: "Update note",
+        description: "Update bounded fields on a note.",
+        inputSchema: updateNoteInputSchema,
+        annotations: UPDATE_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
+      },
+      async (input) => invokeUpdateNote(options.client, input as UpdateNoteInput),
+    ),
+  });
 
   // The high-level McpServer dispatcher emits SDK-generated validation and
   // unknown-tool text. Replace only its tools/call handler with the same
@@ -392,7 +593,10 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         name !== NOOK_MCP_ALLOWED_TOOL_NAME &&
         name !== NOOK_MCP_STATUS_TOOL_NAME &&
         name !== NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME &&
-        name !== NOOK_MCP_GET_NOTE_TOOL_NAME
+        name !== NOOK_MCP_GET_NOTE_TOOL_NAME &&
+        name !== NOOK_MCP_CREATE_NOTE_TOOL_NAME &&
+        name !== NOOK_MCP_APPEND_NOTE_TOOL_NAME &&
+        name !== NOOK_MCP_UPDATE_NOTE_TOOL_NAME
       ) {
         return toMcpErrorResult("unknown_tool");
       }
@@ -403,7 +607,13 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         return invokeStatus(options.client, args as Record<string, unknown>);
       if (name === NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME)
         return invokeListNotebooks(options.client, args as Record<string, unknown>);
-      return invokeGetNote(options.client, args as GetNoteInput);
+      if (name === NOOK_MCP_GET_NOTE_TOOL_NAME)
+        return invokeGetNote(options.client, args as GetNoteInput);
+      if (name === NOOK_MCP_CREATE_NOTE_TOOL_NAME)
+        return invokeCreateNote(options.client, args as CreateNoteInput);
+      if (name === NOOK_MCP_APPEND_NOTE_TOOL_NAME)
+        return invokeAppendNote(options.client, args as AppendNoteInput);
+      return invokeUpdateNote(options.client, args as UpdateNoteInput);
     } catch {
       return toMcpErrorResult("invalid_request");
     }
@@ -447,6 +657,260 @@ interface SearchInput {
 }
 interface GetNoteInput {
   id?: unknown;
+}
+interface CreateNoteInput {
+  title?: unknown;
+  content?: unknown;
+  notebookId?: unknown;
+}
+interface AppendNoteInput {
+  id?: unknown;
+  markdownFragment?: unknown;
+  expectedRevision?: unknown;
+}
+interface UpdateNoteInput {
+  id?: unknown;
+  expectedRevision?: unknown;
+  patch?: unknown;
+}
+
+type BoundedWriteResult = Awaited<ReturnType<NookdSocketClient["appendNote"]>>;
+
+async function invokeCreateNote(
+  client: NookdSocketClient,
+  input: CreateNoteInput,
+): Promise<CallToolResult> {
+  let params: { title: string; content: string; notebookId?: string };
+  try {
+    if (!hasExactKeys(input, ["title", "content", "notebookId"], ["title", "content"]))
+      return toMcpErrorResult("invalid_request");
+    const title = input.title;
+    const content = input.content;
+    if (
+      !isBoundedText(title, NOOK_MCP_MAX_TITLE_BYTES) ||
+      !isBoundedText(content, NOOK_MCP_MAX_CONTENT_BYTES)
+    )
+      return toMcpErrorResult("invalid_request");
+    const notebookId = input.notebookId;
+    if (notebookId !== undefined && !isBoundedIdentifier(notebookId))
+      return toMcpErrorResult("invalid_request");
+    params = notebookId === undefined ? { title, content } : { title, content, notebookId };
+  } catch {
+    return toMcpErrorResult("invalid_request");
+  }
+  let result: BoundedWriteResult;
+  try {
+    result = await client.createNote(params);
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+  return projectCreateResult(result);
+}
+
+async function invokeAppendNote(
+  client: NookdSocketClient,
+  input: AppendNoteInput,
+): Promise<CallToolResult> {
+  let params: { id: string; markdownFragment: string; expectedRevision: string };
+  try {
+    if (!hasExactKeys(input, ["id", "markdownFragment", "expectedRevision"]))
+      return toMcpErrorResult("invalid_request");
+    if (
+      !isBoundedIdentifier(input.id) ||
+      !isBoundedText(input.markdownFragment, NOOK_MCP_MAX_CONTENT_BYTES) ||
+      !isRevision(input.expectedRevision)
+    )
+      return toMcpErrorResult("invalid_request");
+    params = {
+      id: input.id,
+      markdownFragment: input.markdownFragment,
+      expectedRevision: input.expectedRevision,
+    };
+  } catch {
+    return toMcpErrorResult("invalid_request");
+  }
+  let result: BoundedWriteResult;
+  try {
+    result = await client.appendNote(params);
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+  return projectAppendResult(result);
+}
+
+async function invokeUpdateNote(
+  client: NookdSocketClient,
+  input: UpdateNoteInput,
+): Promise<CallToolResult> {
+  let params: {
+    id: string;
+    expectedRevision: string;
+    patch: Record<string, unknown>;
+  };
+  try {
+    if (!hasExactKeys(input, ["id", "expectedRevision", "patch"]))
+      return toMcpErrorResult("invalid_request");
+    if (!isBoundedIdentifier(input.id) || !isRevision(input.expectedRevision))
+      return toMcpErrorResult("invalid_request");
+    params = {
+      id: input.id,
+      expectedRevision: input.expectedRevision,
+      patch: normaliseUpdatePatch(input.patch),
+    };
+  } catch {
+    return toMcpErrorResult("invalid_request");
+  }
+  let result: BoundedWriteResult;
+  try {
+    result = await client.updateNote(params as Parameters<NookdSocketClient["updateNote"]>[0]);
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+  return projectUpdateResult(result);
+}
+
+function hasExactKeys(
+  value: unknown,
+  allowed: readonly string[],
+  required: readonly string[] = allowed,
+): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return (
+    Object.getOwnPropertySymbols(record).length === 0 &&
+    keys.every((key) => allowed.includes(key)) &&
+    required.every((key) => Object.hasOwn(record, key))
+  );
+}
+
+function isBoundedText(value: unknown, maxBytes: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxBytes &&
+    Buffer.byteLength(value, "utf8") <= maxBytes &&
+    !hasControlCharacter(value)
+  );
+}
+
+function isBoundedIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    isSafeIdentifier(value) &&
+    value.length <= NOOK_MCP_MAX_IDENTIFIER_BYTES &&
+    Buffer.byteLength(value, "utf8") <= NOOK_MCP_MAX_IDENTIFIER_BYTES
+  );
+}
+
+function isRevision(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length === NOOK_MCP_MAX_REVISION_BYTES &&
+    /^rev_[0-9a-f]{32}$/.test(value)
+  );
+}
+
+function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
+  const allowed = ["title", "content", "notebookId", "tags", "pinned", "favorite"] as const;
+  if (!hasExactKeys(value, allowed, []) || Object.keys(value).length === 0)
+    throw new Error("invalid patch");
+  const patch: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    const field = value[key];
+    if (key === "title" && !isBoundedText(field, NOOK_MCP_MAX_TITLE_BYTES))
+      throw new Error("invalid patch");
+    if (key === "content" && !isBoundedText(field, NOOK_MCP_MAX_CONTENT_BYTES))
+      throw new Error("invalid patch");
+    if (key === "notebookId" && !isBoundedIdentifier(field)) throw new Error("invalid patch");
+    if (key === "tags") {
+      if (!Array.isArray(field) || field.length === 0 || field.length > NOOK_MCP_MAX_TAGS)
+        throw new Error("invalid patch");
+      if (field.some((tag) => !isBoundedText(tag, NOOK_MCP_MAX_IDENTIFIER_BYTES)))
+        throw new Error("invalid patch");
+      patch[key] = [...field];
+      continue;
+    }
+    if ((key === "pinned" || key === "favorite") && typeof field !== "boolean")
+      throw new Error("invalid patch");
+    patch[key] = field;
+  }
+  return patch;
+}
+
+function projectCreateResult(result: BoundedWriteResult): CallToolResult {
+  try {
+    if (!result.ok || result.envelope.result.kind !== "create")
+      return result.ok
+        ? toMcpErrorResult("service_unavailable")
+        : toMcpErrorResult(socketFailureToCode(result.code));
+    const value = result.envelope.result as unknown as Record<string, unknown>;
+    if (
+      !isBoundedIdentifier(value.id) ||
+      !isBoundedCount(value.titleBytes, NOOK_MCP_MAX_TITLE_BYTES) ||
+      !isBoundedCount(value.contentBytes)
+    )
+      return toMcpErrorResult("service_unavailable");
+    return textResult({
+      kind: "create",
+      id: value.id,
+      titleBytes: value.titleBytes,
+      contentBytes: value.contentBytes,
+    });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+function projectAppendResult(result: BoundedWriteResult): CallToolResult {
+  try {
+    if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+    const value = result.envelope.result as unknown as Record<string, unknown>;
+    if (
+      value.kind !== "append" ||
+      !isBoundedIdentifier(value.id) ||
+      !isBoundedCount(value.fragmentBytes)
+    )
+      return toMcpErrorResult("service_unavailable");
+    return textResult({ kind: "append", id: value.id, fragmentBytes: value.fragmentBytes });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+function projectUpdateResult(result: BoundedWriteResult): CallToolResult {
+  try {
+    if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+    const value = result.envelope.result as unknown as Record<string, unknown>;
+    const fields = value.appliedFields;
+    if (
+      value.kind !== "update" ||
+      !isBoundedIdentifier(value.id) ||
+      !Array.isArray(fields) ||
+      fields.length === 0 ||
+      fields.length > 6 ||
+      new Set(fields).size !== fields.length ||
+      fields.some(
+        (field) =>
+          !["title", "content", "notebookId", "tags", "pinned", "favorite"].includes(field),
+      ) ||
+      (Object.hasOwn(value, "contentBytes") && !isBoundedCount(value.contentBytes))
+    )
+      return toMcpErrorResult("service_unavailable");
+    const payload: Record<string, unknown> = {
+      kind: "update",
+      id: value.id,
+      appliedFields: [...fields],
+    };
+    if (Object.hasOwn(value, "contentBytes")) payload.contentBytes = value.contentBytes;
+    return textResult(payload);
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
+function isBoundedCount(value: unknown, maximum = NOOK_MCP_MAX_CONTENT_BYTES): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= maximum;
 }
 
 async function invokeStatus(
@@ -588,6 +1052,12 @@ async function callToolDirectly(
   if (name === NOOK_MCP_STATUS_TOOL_NAME) return invokeStatus(client, args);
   if (name === NOOK_MCP_LIST_NOTEBOOKS_TOOL_NAME) return invokeListNotebooks(client, args);
   if (name === NOOK_MCP_GET_NOTE_TOOL_NAME) return invokeGetNote(client, args as GetNoteInput);
+  if (name === NOOK_MCP_CREATE_NOTE_TOOL_NAME)
+    return invokeCreateNote(client, args as CreateNoteInput);
+  if (name === NOOK_MCP_APPEND_NOTE_TOOL_NAME)
+    return invokeAppendNote(client, args as AppendNoteInput);
+  if (name === NOOK_MCP_UPDATE_NOTE_TOOL_NAME)
+    return invokeUpdateNote(client, args as UpdateNoteInput);
   return toMcpErrorResult("unknown_tool");
 }
 
@@ -644,6 +1114,11 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
       return "invalid_request";
     case "permission_denied":
       return "permission_denied";
+    case "stale_revision":
+    case "conflict":
+      // The MCP vocabulary is intentionally narrower than the write RPC
+      // vocabulary; do not invent a new externally visible category here.
+      return "service_unavailable";
     case "sync_failed":
       return "sync_failed";
     case "vault_locked":

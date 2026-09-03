@@ -28,6 +28,11 @@ import {
 } from "./service-abuse-bounds.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "./rpc-handler.js";
 import {
+  createReadOnlyServicePolicy,
+  narrowServicePolicy,
+  type ServicePolicy,
+} from "./service-policy.js";
+import {
   STAGE5_RPC_LIMITS,
   parseRpcFrame,
   serializeRpcResponse,
@@ -57,6 +62,8 @@ export type StartNookdServerOptions = Readonly<{
   socketPath: string;
   /** The bounded service runtime; no raw Notesnook handle is accepted here. */
   runtime: NookdServerRuntime;
+  /** The frozen service-side authorization policy; defaults to readOnly. */
+  policy?: ServicePolicy;
   /** Optional socket permission bits, applied after a successful bind. */
   socketMode?: number;
   /** Maximum time to let an in-flight handler finish during shutdown. */
@@ -356,7 +363,7 @@ export async function startNookdServer(
               normalized.abuseBounds.requestTimeoutMs,
             );
           });
-          const responsePromise = handleRpcRequest(request, normalized.runtime)
+          const responsePromise = handleRpcRequest(request, normalized.runtime, normalized.policy)
             .then((response) => ({
               kind: "response" as const,
               response,
@@ -462,6 +469,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
   try {
     const socketPath = options.socketPath;
     const runtime = options.runtime;
+    const policy = options.policy;
     const socketMode = options.socketMode;
     const shutdownTimeoutMs = options.shutdownTimeoutMs;
     const maxConnections = options.maxConnections;
@@ -472,6 +480,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
     return Object.freeze({
       socketPath,
       runtime,
+      ...(policy === undefined ? {} : { policy }),
       ...(socketMode === undefined ? {} : { socketMode }),
       ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs }),
       ...(maxConnections === undefined ? {} : { maxConnections }),
@@ -496,6 +505,7 @@ type NormalizedStartNookdServerOptions = Omit<
   | "installSignalHandlers"
 > & {
   readonly socketMode?: number;
+  readonly policy: ServicePolicy;
   readonly shutdownTimeoutMs: number;
   readonly maxConnections: number;
   readonly maxRequestsPerConnection: number;
@@ -524,6 +534,11 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   ) {
     throw nookdServerError("invalid nookd runtime");
   }
+  const policy =
+    options.policy === undefined
+      ? createReadOnlyServicePolicy()
+      : narrowServicePolicy(options.policy);
+  if (policy === undefined) throw nookdServerError("invalid nookd service policy");
   if (
     options.socketMode !== undefined &&
     (!Number.isInteger(options.socketMode) || options.socketMode < 0 || options.socketMode > 0o777)
@@ -564,6 +579,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   return {
     socketPath: options.socketPath,
     runtime: options.runtime,
+    policy,
     ...(options.socketMode === undefined ? {} : { socketMode: options.socketMode }),
     shutdownTimeoutMs,
     maxConnections,

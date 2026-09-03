@@ -47,6 +47,17 @@ import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookRealCoreModule } from "../core/notesnook-core-adapter.js";
+import type {
+  AppendNoteCommand,
+  CreateNoteCommand,
+  UpdateNoteCommand,
+} from "../core/notesnook-write-contract.js";
+import {
+  isNotesnookWriteAdapterError,
+  type AppendNoteResult,
+  type CreateNoteResult,
+  type UpdateNoteResult,
+} from "../core/notesnook-write-adapter.js";
 import {
   createProductionRuntimeCore,
   type ProductionRuntimeCore,
@@ -112,6 +123,12 @@ export interface ServiceRuntime {
       }>
     | undefined
   >;
+  /** Optional bounded local note creation capability. */
+  readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
+  /** Optional bounded local note append capability. */
+  readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
+  /** Optional bounded local note update capability. */
+  readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
   /**
    * Idempotent cleanup.  Closes the encrypted persistent storage
    * exactly once and is safe to call concurrently and repeatedly.
@@ -279,12 +296,71 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
+  const localWrite = core.handle.localWrite;
+  const createNote =
+    localWrite === undefined
+      ? undefined
+      : async (command: CreateNoteCommand): Promise<CreateNoteResult> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            const result = await localWrite.createNote(command);
+            if (result.operation !== "create") {
+              throw serviceRuntimeError("service runtime note creation failed");
+            }
+            return result;
+          } catch (error) {
+            if (isServiceRuntimeError(error)) throw error;
+            throw serviceRuntimeError("service runtime note creation failed");
+          }
+        };
+
+  const appendNote =
+    localWrite === undefined
+      ? undefined
+      : async (command: AppendNoteCommand): Promise<AppendNoteResult> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            const result = await localWrite.appendNote(command);
+            if (result.operation !== "append") {
+              throw serviceRuntimeError("service runtime note append failed");
+            }
+            return result;
+          } catch (error) {
+            if (isServiceRuntimeError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error)) throw error;
+            throw serviceRuntimeError("service runtime write failed");
+          }
+        };
+
+  const updateNote =
+    localWrite === undefined
+      ? undefined
+      : async (command: UpdateNoteCommand): Promise<UpdateNoteResult> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            const result = await localWrite.updateNote(
+              command as unknown as Parameters<typeof localWrite.updateNote>[0],
+            );
+            if (result.operation !== "update") {
+              throw serviceRuntimeError("service runtime note update failed");
+            }
+            return result;
+          } catch (error) {
+            if (isServiceRuntimeError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error)) throw error;
+            throw serviceRuntimeError("service runtime write failed");
+          }
+        };
+
   return Object.freeze({
     readOnly,
     search,
     status,
     listNotebooks,
     noteMetadata,
+    ...(createNote === undefined ? {} : { createNote }),
+    ...(appendNote === undefined ? {} : { appendNote }),
+    ...(updateNote === undefined ? {} : { updateNote }),
     cleanup: cleanupOnce,
   });
 }

@@ -58,11 +58,40 @@ and U+007F before socket I/O. Raw socket errors, paths, causes, credentials, IDs
 and note bodies do not cross the MCP boundary. MCP protocol data stays on
 stdout; diagnostics are fixed categorical messages on stderr.
 
-Writes, synchronization controls (`full`/`send`), authentication, Vault,
-administration, generic dispatch, filesystem tools, resources, prompts, TCP,
-HTTP, and direct Notesnook/database imports are not part of this slice. The
-source-side Slice 2 proxy does not add a daemon policy change; deployment must
-allow the four RPC methods explicitly before the new tools can work live.
+The Stage 6 baseline did not include writes, synchronization controls
+(`full`/`send`), authentication, Vault, administration, generic dispatch,
+filesystem tools, resources, prompts, TCP, HTTP, or direct
+Notesnook/database imports. Stage 7 Slice 3 adds only the three bounded local
+write methods documented below; all other surfaces remain absent.
 
-Declarative Hermes/Nix wiring is a separate follow-up after this source-side
-proxy is independently reviewed and merged.
+The production daemon now selects its bounded service policy from the
+root-owned service configuration. Existing four-method configurations remain
+read-only; write-capable configurations can select only the closed create,
+append, and update methods.
+
+## Stage 7 Slice 3 addendum: bounded write tools
+
+Stage 6 remains the read-only baseline. Stage 7 Slice 3 adds three explicitly
+bounded write tools while preserving the Stage 6 transport and isolation model:
+
+- `notesnook_create_note` — required bounded `title` and `content`, with an
+  optional bounded `notebookId`; transport: `notes.create`.
+- `notesnook_append_note` — bounded `id`, Markdown fragment, and opaque expected
+  revision; transport: `notes.append`.
+- `notesnook_update_note` — bounded `id`, expected revision, and a non-empty
+  closed patch containing only `title`, `content`, `notebookId`, `tags`,
+  `pinned`, or `favorite`; transport: `notes.update`.
+
+The current MCP surface therefore contains exactly seven tools: the four
+Stage 6 read tools plus these three writes. There is still no delete tool;
+`notes.delete` is absent from the RPC method union and every MCP allowlist.
+The `readOnly` profile admits only reads. `readWriteNoDelete` admits create,
+append, and update in addition to reads. `custom` remains an explicit closed
+allowlist selected by service configuration.
+
+Write results are projected to bounded identifiers, byte counts, and applied
+field names. Raw note content, patches, adapter errors, internal lifecycle
+flags, credentials, and revision values are not returned. Stale-revision,
+conflict, vault-locked, and sync-failed outcomes remain categorical; no
+automatic conflict resolution or synchronization is performed by the MCP
+proxy.

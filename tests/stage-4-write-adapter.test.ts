@@ -35,8 +35,11 @@ import {
 } from "../src/core/notesnook-write-adapter.js";
 import {
   isNotesnookWriteContractError,
+  type AppendNoteCommand,
+  type CreateNoteCommand,
   type NotesnookRevisionToken,
   type NotesnookWriteErrorCode,
+  type UpdateNoteCommand,
 } from "../src/core/notesnook-write-contract.js";
 
 // ---------------------------------------------------------------------------
@@ -463,6 +466,31 @@ describe("Stage 4 write adapter — createNote", () => {
     expect(database.calls.notebookAdd).toHaveLength(0);
   });
 
+  it("snapshots stateful create command getters before codec and database calls", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+    let titleReads = 0;
+    let contentReads = 0;
+    const command = {
+      get title(): string {
+        titleReads += 1;
+        return titleReads === 1 ? "first title" : CANARY;
+      },
+      get content(): string {
+        contentReads += 1;
+        return contentReads === 1 ? "first body" : CANARY;
+      },
+    } as unknown as CreateNoteCommand;
+
+    await adapter.createNote(command);
+
+    expect(titleReads).toBe(1);
+    expect(contentReads).toBe(1);
+    expect(codec.encodeCalls).toEqual(["first body"]);
+    expect(database.calls.add[0]?.title).toBe("first title");
+  });
+
   it("rejects creation when a notebookId is supplied but the notebook does not exist", async () => {
     const database = createFakeDatabase();
     const codec = htmlCodec();
@@ -541,6 +569,53 @@ describe("Stage 4 write adapter — createNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — appendNote", () => {
+  it("snapshots a stateful append fragment before the codec call", async () => {
+    const { adapter, database, codec } = (() => {
+      const note: FakeNote = {
+        id: NOTE_ID,
+        title: "Journal",
+        contentId: "content-1",
+        pinned: false,
+        favorite: false,
+        conflicted: false,
+        locked: false,
+        dateEdited: 1_700_000_000_000,
+      };
+      const stored: FakeContent = {
+        id: "content-1",
+        noteId: NOTE_ID,
+        type: "html",
+        data: "<p>existing</p>",
+      };
+      const database = createFakeDatabase({
+        notes: new Map([[NOTE_ID, note]]),
+        content: new Map([[stored.id, stored]]),
+      });
+      const codec = htmlCodec();
+      return {
+        adapter: createNotesnookWriteAdapter({ source: database, codec }),
+        database,
+        codec,
+      };
+    })();
+    let fragmentReads = 0;
+    const command = {
+      id: NOTE_ID,
+      get markdownFragment(): string {
+        fragmentReads += 1;
+        return fragmentReads === 1 ? "first fragment" : CANARY;
+      },
+      expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+    } as unknown as AppendNoteCommand;
+
+    await adapter.appendNote(command);
+
+    expect(fragmentReads).toBe(1);
+    expect(codec.appendCalls).toBe(1);
+    expect(database.calls.contentUpdate[0]?.partial.data).toContain("first fragment");
+    expect(database.calls.contentUpdate[0]?.partial.data).not.toContain(CANARY);
+  });
+
   function setupAppendable(): {
     adapter: NotesnookWriteAdapter;
     database: ReturnType<typeof createFakeDatabase>;
@@ -837,6 +912,53 @@ describe("Stage 4 write adapter — appendNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — updateNote", () => {
+  it("snapshots stateful update patch values before database mutation", async () => {
+    const { adapter, database } = (() => {
+      const note: FakeNote = {
+        id: NOTE_ID,
+        title: "Original",
+        contentId: "content-1",
+        pinned: false,
+        favorite: false,
+        conflicted: false,
+        locked: false,
+        dateEdited: 1_700_000_000_000,
+      };
+      const stored: FakeContent = {
+        id: "content-1",
+        noteId: NOTE_ID,
+        type: "html",
+        data: "<p>original</p>",
+      };
+      const database = createFakeDatabase({
+        notes: new Map([[NOTE_ID, note]]),
+        content: new Map([[stored.id, stored]]),
+      });
+      return {
+        adapter: createNotesnookWriteAdapter({ source: database, codec: htmlCodec() }),
+        database,
+      };
+    })();
+    let titleReads = 0;
+    const patch = {
+      get title(): string {
+        titleReads += 1;
+        return titleReads === 1 ? "first title" : CANARY;
+      },
+    };
+    const command = {
+      id: NOTE_ID,
+      patch,
+      expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+    } as unknown as UpdateNoteCommand;
+
+    await adapter.updateNote(command);
+
+    expect(titleReads).toBe(1);
+    expect(database.calls.update[0]?.partial.title).toBe("first title");
+    expect(database.calls.update[0]?.partial.title).not.toBe(CANARY);
+  });
+
   function setupUpdatable(seed?: Partial<FakeNote>): {
     adapter: NotesnookWriteAdapter;
     database: ReturnType<typeof createFakeDatabase>;

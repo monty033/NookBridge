@@ -17,7 +17,7 @@ import {
   loadServiceConfig,
   SERVICE_CONFIG_BACKEND,
   SERVICE_CONFIG_CREDENTIAL_NAME,
-  SERVICE_CONFIG_READ_POLICY,
+  SERVICE_CONFIG_ALLOWED_METHODS,
   type LoadServiceConfigOptions,
   type LoadServiceConfigResult,
   type ServiceConfig,
@@ -41,6 +41,8 @@ import {
 } from "./service/nookd-server.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "./service/service-abuse-bounds.js";
 import { createLogger } from "./logging/logger.js";
+import type { RpcMethod } from "./service/rpc-protocol.js";
+import { createServicePolicyFromMethods, type ServicePolicy } from "./service/service-policy.js";
 
 const freeze = Object.freeze;
 const defineProperty = Object.defineProperty;
@@ -61,7 +63,6 @@ export {
   SERVICE_CONFIG_BACKEND,
   SERVICE_CONFIG_CREDENTIAL_NAME,
   SERVICE_CONFIG_ERROR_CATEGORIES,
-  SERVICE_CONFIG_READ_POLICY,
   ServiceConfigError,
   checkServiceConfig,
   formatCheckReport,
@@ -75,6 +76,8 @@ export {
   type ServiceConfigStat,
 } from "./config/service-config.js";
 
+export { SERVICE_CONFIG_READ_POLICY } from "./config/service-config.js";
+
 export type NookdOutputStream = Readonly<{ write: (chunk: string) => unknown }>;
 export type NookdCliOutput = Readonly<{
   stdout: NookdOutputStream;
@@ -82,7 +85,12 @@ export type NookdCliOutput = Readonly<{
 }>;
 
 export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
-  Partial<Pick<ServiceRuntime, "status" | "listNotebooks" | "noteMetadata">>;
+  Partial<
+    Pick<
+      ServiceRuntime,
+      "status" | "listNotebooks" | "noteMetadata" | "createNote" | "appendNote" | "updateNote"
+    >
+  >;
 
 /** Narrow seams for testing composition without replacing production defaults. */
 export type NookdStartupFactories = Readonly<{
@@ -206,6 +214,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   }
 
   let config: ServiceConfig;
+  let policy: ServicePolicy;
   try {
     const loaded =
       configOptions === undefined
@@ -218,6 +227,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     // config object (hostile getters, wrong backend/credential labels,
     // non-canonical paths, etc.) into createRuntime / startServer.
     config = narrowLoadedServiceConfig(loaded);
+    policy = createServicePolicyFromMethods(config.readPolicy);
   } catch {
     throw startupError("configuration", "nookd configuration startup failed");
   }
@@ -246,6 +256,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let status: NookdStartupRuntime["status"];
   let listNotebooks: NookdStartupRuntime["listNotebooks"];
   let noteMetadata: NookdStartupRuntime["noteMetadata"];
+  let createNote: NookdStartupRuntime["createNote"];
+  let appendNote: NookdStartupRuntime["appendNote"];
+  let updateNote: NookdStartupRuntime["updateNote"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"];
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -256,13 +269,19 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedStatus = runtime.status;
     const capturedListNotebooks = runtime.listNotebooks;
     const capturedNoteMetadata = runtime.noteMetadata;
+    const capturedCreateNote = runtime.createNote;
+    const capturedAppendNote = runtime.appendNote;
+    const capturedUpdateNote = runtime.updateNote;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
       typeof capturedCleanup !== "function" ||
       (capturedStatus !== undefined && typeof capturedStatus !== "function") ||
       (capturedListNotebooks !== undefined && typeof capturedListNotebooks !== "function") ||
-      (capturedNoteMetadata !== undefined && typeof capturedNoteMetadata !== "function")
+      (capturedNoteMetadata !== undefined && typeof capturedNoteMetadata !== "function") ||
+      (capturedCreateNote !== undefined && typeof capturedCreateNote !== "function") ||
+      (capturedAppendNote !== undefined && typeof capturedAppendNote !== "function") ||
+      (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function")
     ) {
       throw new Error("invalid service runtime");
     }
@@ -270,6 +289,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     status = capturedStatus;
     listNotebooks = capturedListNotebooks;
     noteMetadata = capturedNoteMetadata;
+    createNote = capturedCreateNote;
+    appendNote = capturedAppendNote;
+    updateNote = capturedUpdateNote;
     runtimeCleanup = capturedCleanup;
   } catch {
     throw startupError("runtime", "nookd runtime startup failed");
@@ -281,6 +303,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(status === undefined ? {} : { status }),
     ...(listNotebooks === undefined ? {} : { listNotebooks }),
     ...(noteMetadata === undefined ? {} : { noteMetadata }),
+    ...(createNote === undefined ? {} : { createNote }),
+    ...(appendNote === undefined ? {} : { appendNote }),
+    ...(updateNote === undefined ? {} : { updateNote }),
     cleanup,
   });
 
@@ -289,6 +314,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const server = await factories.startServer({
       socketPath: config.socketPath,
       runtime: serverRuntime,
+      policy,
       abuseBounds: DEFAULT_SERVICE_ABUSE_BOUNDS,
       auditLogger: createLogger({ bindings: { component: "nookd" } }),
     });
@@ -431,12 +457,16 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
   if (!isSafeSocketGroupToken(socketGroup)) {
     throw new Error("invalid service config");
   }
-  if (readPolicy.length !== SERVICE_CONFIG_READ_POLICY.length) {
+  if (readPolicy.length === 0 || readPolicy.length > SERVICE_CONFIG_ALLOWED_METHODS.length) {
     throw new Error("invalid service config");
   }
   for (let index = 0; index < readPolicy.length; index += 1) {
-    if (readPolicy[index] !== SERVICE_CONFIG_READ_POLICY[index]) {
+    const method = readPolicy[index];
+    if (typeof method !== "string" || !isAllowedServiceMethod(method)) {
       throw new Error("invalid service config");
+    }
+    for (let previous = 0; previous < index; previous += 1) {
+      if (readPolicy[previous] === method) throw new Error("invalid service config");
     }
   }
 
@@ -446,7 +476,7 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
     socketGroup,
     backend: SERVICE_CONFIG_BACKEND,
     credentialName: SERVICE_CONFIG_CREDENTIAL_NAME,
-    readPolicy: SERVICE_CONFIG_READ_POLICY,
+    readPolicy,
   });
 }
 
@@ -480,21 +510,38 @@ function captureStringField(record: Record<PropertyKey, unknown>, key: string): 
 function captureReadPolicyField(
   record: Record<PropertyKey, unknown>,
   key: string,
-): readonly unknown[] {
+): readonly RpcMethod[] {
   const value = safeGet(record, key);
   if (!isArray(value)) throw new Error("invalid service config");
   const length = value.length;
-  if (length !== SERVICE_CONFIG_READ_POLICY.length) throw new Error("invalid service config");
+  if (length === 0 || length > SERVICE_CONFIG_ALLOWED_METHODS.length) {
+    throw new Error("invalid service config");
+  }
 
-  const captured: unknown[] = [];
+  const captured: RpcMethod[] = [];
   for (let index = 0; index < length; index += 1) {
+    let candidate: unknown;
     try {
-      captured[index] = value[index];
+      candidate = value[index];
     } catch {
       throw new Error("invalid service config");
     }
+    if (typeof candidate !== "string" || !isAllowedServiceMethod(candidate)) {
+      throw new Error("invalid service config");
+    }
+    for (let previous = 0; previous < index; previous += 1) {
+      if (captured[previous] === candidate) throw new Error("invalid service config");
+    }
+    captured[index] = candidate;
   }
-  return captured;
+  return freeze(captured);
+}
+
+function isAllowedServiceMethod(value: string): value is RpcMethod {
+  for (let index = 0; index < SERVICE_CONFIG_ALLOWED_METHODS.length; index += 1) {
+    if (SERVICE_CONFIG_ALLOWED_METHODS[index] === value) return true;
+  }
+  return false;
 }
 
 function isCanonicalAbsolutePath(value: string, allowedRoot: string): boolean {

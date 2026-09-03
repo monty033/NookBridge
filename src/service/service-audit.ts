@@ -35,6 +35,8 @@ export type ServiceAuditOutcome =
   | "invalid_request"
   | "permission_denied"
   | "service_unavailable"
+  | "stale_revision"
+  | "conflict"
   | "sync_failed"
   | "vault_locked"
   | "not_found"
@@ -69,6 +71,8 @@ export const SERVICE_AUDIT_OUTCOMES = objectFreeze([
   "invalid_request",
   "permission_denied",
   "service_unavailable",
+  "stale_revision",
+  "conflict",
   "sync_failed",
   "vault_locked",
   "not_found",
@@ -204,7 +208,10 @@ function isMethod(value: unknown): value is RpcMethod {
     value === "notes.search" ||
     value === "notes.status" ||
     value === "notes.list_notebooks" ||
-    value === "notes.get"
+    value === "notes.get" ||
+    value === "notes.create" ||
+    value === "notes.append" ||
+    value === "notes.update"
   );
 }
 function isPeerCredentials(value: unknown): value is ServiceAuditPeerCredentials {
