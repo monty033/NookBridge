@@ -45,6 +45,7 @@ const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
 const MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES_ON_WIRE - FRAME_PREFIX_BYTES;
 const MAX_PENDING_BYTES = MAX_FRAME_BYTES_ON_WIRE * 2;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_SOCKET_MODE = 0o770;
 const DEFAULT_MAX_CONNECTIONS = 32;
 const MAX_CONNECTIONS = 128;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
@@ -64,7 +65,7 @@ export type StartNookdServerOptions = Readonly<{
   runtime: NookdServerRuntime;
   /** The frozen service-side authorization policy; defaults to readOnly. */
   policy?: ServicePolicy;
-  /** Optional socket permission bits, applied after a successful bind. */
+  /** Optional socket permission bits, applied after a successful bind. Defaults to 0770. */
   socketMode?: number;
   /** Maximum time to let an in-flight handler finish during shutdown. */
   shutdownTimeoutMs?: number;
@@ -580,7 +581,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     socketPath: options.socketPath,
     runtime: options.runtime,
     policy,
-    ...(options.socketMode === undefined ? {} : { socketMode: options.socketMode }),
+    socketMode: options.socketMode ?? DEFAULT_SOCKET_MODE,
     shutdownTimeoutMs,
     maxConnections,
     maxRequestsPerConnection,

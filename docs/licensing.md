@@ -1,8 +1,7 @@
-# NookBridge — licensing inventory (Stage 0)
+# NookBridge — licensing inventory (Stage 9 review baseline)
 
-This is the Stage 0 license inventory required by the implementation
-plan's Stage 0 gate (`docs/implementation-plan-v1.5.md`, "License
-inventory"). It exists for two reasons:
+This is the current license inventory for the implementation plan's release
+and distribution gates. It exists for two reasons:
 
 1. To make the license posture of every dependency NookBridge pulls in
    visible at a glance.
@@ -67,16 +66,17 @@ re-evaluated separately. Stage 0 explicitly rules this out.
 | Package | Version | License | Notes |
 |---|---|---|---|
 | `@notesnook/crypto` | `2.1.3` | GPL-3.0-or-later | Upstream Argon2id password-grant derivation used by live authentication. |
+| `@modelcontextprotocol/sdk` | `1.30.0` | MIT | Hermes-facing MCP protocol implementation. |
+| `@streetwriters/kysely` | `0.27.4` | MIT | Pinned database query/type support used by the client boundary. |
 | `better-sqlite3-multiple-ciphers` | `11.5.0` | MIT | Encrypted SQLite driver; required by `@notesnook/core` at the pinned commit. |
 | `sqlite-better-trigram` | `0.0.3` | Public Domain (per upstream `package.json`) | Trigram tokenizer for FTS5; required by `@notesnook/core`. |
-| `sqlite-regex` | `0.2.4-alpha.1` | see npm registry | Regex extension; required by `@notesnook/core`. |
-| `sqlite3-fts5-html` | `0.0.4` | see npm registry | HTML tokenizer for FTS5; required by `@notesnook/core`. |
+| `sqlite-regex` | `0.2.4-alpha.1` | MIT OR Apache-2.0 | License field from the committed lockfile. |
+| `sqlite3-fts5-html` | `0.0.4` | Public Domain | License field from the committed lockfile. |
 
 The license fields for `sqlite-regex` and `sqlite3-fts5-html` are
-verified from their npm-registry `package.json` blobs at the pinned
-versions. Stage 1 will inline those values into this table by reading
-the resolved lockfile entries (`package-lock.json` will be committed
-in Stage 1; Stage 0 ships the runtime pin only).
+recorded from the committed `package-lock.json` entries at the pinned
+versions. The complete transitive tree still requires a separate
+pre-distribution export and human review.
 
 ## Build / dev dependencies (`package.json` `devDependencies`)
 
@@ -110,12 +110,20 @@ third party — the following must be true:
    function: either remove the transitive or escalate the choice to a
    documented architectural decision.
 3. The root `LICENSE` file remains GPL-3.0-or-later text.
-4. `package.json` `license` and `SPDX-License-Identifier` fields are
-   unchanged from this Stage 0 baseline.
+4. `package.json` `license` and `SPDX-License-Identifier` fields remain
+   GPL-3.0-or-later.
 5. The `docs/upstream-contract.md` "pinned internal core vs stable SDK"
    distinction is re-evaluated against any new upstream statement.
 
-## Stage 0 → Stage 1 deltas
+## Stage 9 release status
+
+The committed `package-lock.json` contains exact direct dependency versions and
+license fields for the current internal Nix deployment candidate. A complete
+transitive license export and human review have not yet been run, so the public
+distribution gate remains **open**. NookBridge is currently `private: true`;
+no public npm, Docker, or Nix channel artifact is claimed.
+
+## Historical Stage 0 → Stage 1 deltas
 
 Stage 1 adds `@notesnook/core` as an explicit runtime dependency in
 `package.json`. When it does, this document must be updated with:
