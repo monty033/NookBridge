@@ -90,6 +90,13 @@ afterEach(async () => {
 });
 
 describe("nookd Unix socket server", () => {
+  it("applies the restricted client-group socket mode by default", async () => {
+    const { socketPath } = await fixture(async () => []);
+    const socketStat = await stat(socketPath);
+
+    expect(socketStat.mode & 0o777).toBe(0o770);
+  });
+
   it("serves the allowed notes.search operation with a title-only response", async () => {
     const { socketPath } = await fixture(async (query) => [{ title: `hit:${query}` }]);
     const socket = await connect(socketPath);

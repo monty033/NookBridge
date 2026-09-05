@@ -74,6 +74,26 @@ export function isLocked(stateDir: string): boolean {
   return HELD.has(canonical);
 }
 
+/**
+ * Return whether a lock file currently exists on disk for `stateDir`.
+ *
+ * This is the non-mutating equivalent of {@link tryAcquireLock} and
+ * is intended for read-only inspection paths (e.g. the Stage 9
+ * recovery readiness probe) that need to detect an active holder
+ * without acquiring the lock themselves.  Callers MUST treat a
+ * positive result as authoritative for "another process is currently
+ * using this state directory" and refuse mutation accordingly.
+ */
+export function lockFileExists(stateDir: string): boolean {
+  const canonical = resolve(lockPath(stateDir));
+  try {
+    return existsSync(canonical);
+  } catch {
+    // Unknown filesystem state is unsafe for mutation; fail closed.
+    return true;
+  }
+}
+
 export function releaseLock(stateDir: string): boolean {
   const canonical = resolve(lockPath(stateDir));
   const held = HELD.get(canonical);

@@ -539,3 +539,56 @@ absent.
   real account, or live Notesnook write was used.
 - **Residual boundary:** the production write-capable profile is source-side
   and configuration-driven; deployment must explicitly select that policy.
+
+## Stage 9 production-MVP gate — initial fail-closed assessment (2026-09-05)
+
+This is an assessment receipt, not a release approval. It records the first
+Stage 9 review against merged source tree `1f433a421881031c407d84ab977ffda57d72c99c`.
+The source tree is unchanged by the assessment; the deployment repository is
+separate and still pins the prior source revision.
+
+- **Source identity:** local review tree `5810e27` and merged upstream tree
+  `1f433a42` have identical tree `2844e008f850951ed0aa2bd09680bd3178cf8de5`.
+- **Offline verification:** `nix develop --offline --command just check` PASS;
+  41 test files and 1,111 tests; typecheck, lint, format, build, and diff checks
+  PASS.
+- **Independent review:** delegation `deleg_82935060`, source review and
+  deployment-parity audit, **FAIL closed**. No credentials, authentication,
+  synchronization, or live writes were used.
+- **Deployment parity:** `nix-config` still pins `9df0c341`; the active service
+  remains the four-method read-only policy. The merged write-capable source is
+  not deployed and no write policy was enabled.
+- **Security boundary:** the deployed Nix unit enforces the client-group socket
+  boundary with `User=nookbridge`, `Group=nookbridge-clients`, `UMask=0007`,
+  AF_UNIX-only networking, and restricted state paths. The daemon now also
+  applies mode `0770` by default after binding. Group ownership remains an
+  explicit deployment/systemd responsibility; the audit field
+  `peerCredentials=unknown` is not treated as authorization evidence.
+- **Gate 9 status:** **NOT PASSED**. Required clean-VM/target-host evidence,
+  RT-1..RT-10 transcripts, controlled plaintext-canary scan, corruption
+  recovery drill, exact release-pin compatibility receipt, and final license
+  review remain outstanding.
+- **Residual blockers:** source/deployment pin update; non-destructive recovery
+  workflow; canary and adversarial evidence; dependency/license ledger review;
+  and a fresh review after the socket-mode hardening change.
+- **Scope decision:** production remains read-only. Enabling
+  `readWriteNoDelete` is a separate, explicitly reviewed deployment change and
+  is not part of this gate.
+
+## Stage 9 remediation candidate — socket hardening and evidence bundle (2026-09-05)
+
+- **Source change:** `nookd` now applies socket mode `0770` by default after a
+  successful bind; an explicit caller-supplied mode remains validated and
+  supported. A regression test observes the actual filesystem mode.
+- **Evidence artifacts:** `docs/stage-9-red-team.md`,
+  `docs/stage-9-canary.md`, `docs/stage-9-recovery.md`,
+  `docs/stage-9-dependencies.md`, and the lockfile-derived
+  `docs/stage-9-production-licenses.csv`.
+- **Verification:** offline full gate PASS — 41 test files, 1,112 tests;
+  typecheck, lint, format, build, and diff checks PASS. Nix structural and
+  isolation checks PASS against the currently pinned merged source.
+- **Independent status:** this candidate requires a fresh review after the
+  remediation diff. It is not merged or deployed.
+- **Open blockers:** target-host canary; non-destructive recovery workflow and
+  VM drill; final release/license human review; merge of the source candidate;
+  and a subsequent Nix pin update to that reviewed merge.

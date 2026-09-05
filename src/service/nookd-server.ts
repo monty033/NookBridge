@@ -8,7 +8,8 @@
  */
 
 import { Buffer } from "node:buffer";
-import { chmod, lstat, unlink } from "node:fs/promises";
+import { chmodSync } from "node:fs";
+import { lstat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -45,6 +46,7 @@ const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
 const MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES_ON_WIRE - FRAME_PREFIX_BYTES;
 const MAX_PENDING_BYTES = MAX_FRAME_BYTES_ON_WIRE * 2;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_SOCKET_MODE = 0o770;
 const DEFAULT_MAX_CONNECTIONS = 32;
 const MAX_CONNECTIONS = 128;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
@@ -64,7 +66,7 @@ export type StartNookdServerOptions = Readonly<{
   runtime: NookdServerRuntime;
   /** The frozen service-side authorization policy; defaults to readOnly. */
   policy?: ServicePolicy;
-  /** Optional socket permission bits, applied after a successful bind. */
+  /** Optional socket permission bits, applied after a successful bind. Defaults to 0770. */
   socketMode?: number;
   /** Maximum time to let an in-flight handler finish during shutdown. */
   shutdownTimeoutMs?: number;
@@ -231,17 +233,10 @@ export async function startNookdServer(
   server.on("connection", onConnection);
 
   try {
-    await listenOnUnixSocket(server, normalized.socketPath);
+    await listenOnUnixSocket(server, normalized.socketPath, normalized.socketMode);
     const bound = await lstat(normalized.socketPath);
     if (!bound.isSocket()) throw nookdServerError("nookd did not create a Unix socket");
     ownedSocketIdentity = { dev: bound.dev, ino: bound.ino };
-    if (normalized.socketMode !== undefined) {
-      try {
-        await chmod(normalized.socketPath, normalized.socketMode);
-      } catch {
-        throw nookdServerError("nookd socket permissions could not be applied");
-      }
-    }
   } catch (error) {
     server.close();
     await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
@@ -504,7 +499,7 @@ type NormalizedStartNookdServerOptions = Omit<
   | "auditLogger"
   | "installSignalHandlers"
 > & {
-  readonly socketMode?: number;
+  readonly socketMode: number;
   readonly policy: ServicePolicy;
   readonly shutdownTimeoutMs: number;
   readonly maxConnections: number;
@@ -580,7 +575,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     socketPath: options.socketPath,
     runtime: options.runtime,
     policy,
-    ...(options.socketMode === undefined ? {} : { socketMode: options.socketMode }),
+    socketMode: options.socketMode ?? DEFAULT_SOCKET_MODE,
     shutdownTimeoutMs,
     maxConnections,
     maxRequestsPerConnection,
@@ -617,20 +612,35 @@ function isFileNotFound(error: unknown): boolean {
   );
 }
 
-async function listenOnUnixSocket(server: net.Server, socketPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const onError = (): void => {
-      server.removeListener("listening", onListening);
-      reject(nookdServerError("nookd Unix socket could not be created"));
-    };
-    const onListening = (): void => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(socketPath);
-  });
+async function listenOnUnixSocket(
+  server: net.Server,
+  socketPath: string,
+  socketMode: number,
+): Promise<void> {
+  const previousUmask = process.umask(0o777 ^ socketMode);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (): void => {
+        server.removeListener("listening", onListening);
+        reject(nookdServerError("nookd Unix socket could not be created"));
+      };
+      const onListening = (): void => {
+        server.removeListener("error", onError);
+        try {
+          chmodSync(socketPath, socketMode);
+        } catch {
+          reject(nookdServerError("nookd socket permissions could not be applied"));
+          return;
+        }
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(socketPath);
+    });
+  } finally {
+    process.umask(previousUmask);
+  }
 }
 
 function takeFrame(state: ConnectionState): FrameRead {

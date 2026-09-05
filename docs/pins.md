@@ -1,8 +1,8 @@
-# NookBridge — pinned versions (Stage 0)
+# NookBridge — pinned versions (Stage 9 review baseline)
 
 This file is the single human-readable record of every external version
 NookBridge pins in `package.json` and `flake.nix`. It is the source of
-truth for the Stage 0 compatibility-tuple gate.
+truth for the compatibility-tuple and release-review gates.
 
 **Do not edit one without editing the others.** If a value changes here,
 the corresponding value in `package.json`, `flake.lock`, `src/index.ts`,
@@ -31,10 +31,12 @@ provenance instead.
 | sqlite-better-trigram | `0.0.3` | `package.json` (`dependencies`) |
 | sqlite-regex | `0.2.4-alpha.1` | `package.json` (`dependencies`) |
 | sqlite3-fts5-html | `0.0.4` | `package.json` (`dependencies`) |
+| `@modelcontextprotocol/sdk` | `1.30.0` | `package.json` (`dependencies`) |
+| `@streetwriters/kysely` | `0.27.4` | `package.json` (`dependencies`) |
 
-Versions above are taken from the `@notesnook/core@8.1.3` `devDependencies`
-block, since Notesnook's own E2E test harness is the practical
-integration blueprint. They were validated together in Stage -1.
+The runtime rows above reflect exact versions in `package.json`; the SQLite
+extension versions were originally validated against the `@notesnook/core@8.1.3`
+devDependencies block.
 
 ## Build / tooling
 
@@ -66,9 +68,12 @@ during Stage 0; any refresh must be a deliberate, reviewed commit.
 
 | Item | Value |
 |---|---|
-| NookBridge baseline version | `0.0.0-stage.0` (`STAGE_0_VERSION` in `src/index.ts`) |
-| Branch | `stage-0-baseline` |
-| Base merge commit | `49bd24bf69e9cf4d7a572989d331262e0ea56f4c` (the docs-bootstrap merge of PR #1 into `main`) |
+| Source candidate under Stage 9 review | `94ad5c0a` (socket-mode hardening and evidence ledger) |
+| NookBridge source revision currently pinned by deployment | `1f433a421881031c407d84ab977ffda57d72c99c` (merged PR #46) |
+| Branch | `main` |
+| Package version | `0.0.0-stage.0` (`private: true`; internal Nix artifact, not a public release) |
 
-The bridge does not yet have a real semver — Stage 0 is the
-reproducibility baseline, not a released version.
+The bridge does not yet have a public semver release. The Nix deployment
+remains pinned to the merged Stage 7 Slice 3 source until the separate source
+remediation is reviewed, merged, and repinned. Public distribution remains
+blocked on the licensing and release-identity review.

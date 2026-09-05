@@ -31,6 +31,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
+import { inspectEncryptedSqlite } from "../storage/sqlite-storage.js";
 
 export type CheckStatus = "pass" | "fail" | "warn";
 
@@ -65,8 +66,8 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   // 2. State directory permissions.
   checks.push(checkStateDir(opts.stateDir));
 
-  // 3. DB decrypt round-trip.
-  checks.push(await checkDbDecrypt(opts.stateDir, opts.dbPath, opts.dbKey));
+  // 3. DB decrypt/integrity inspection; this path must remain non-mutating.
+  checks.push(checkDbDecrypt(opts.dbPath, opts.dbKey));
 
   // 4. Endpoint (optional).
   if (opts.endpoint) {
@@ -150,41 +151,19 @@ function checkStateDir(stateDir: string): Check {
   return { id: "state-perms", status: "pass", message: `state dir mode is 0o${mode}` };
 }
 
-async function checkDbDecrypt(
-  stateDir: string,
-  dbPath: string,
-  dbKey: string | undefined,
-): Promise<Check> {
-  if (!existsSync(dbPath)) {
-    return {
-      id: "db-decrypt",
-      status: "fail",
-      message: `database file missing: ${dbPath} (stateDir=${stateDir})`,
-    };
-  }
+function checkDbDecrypt(dbPath: string, dbKey: string | undefined): Check {
   if (!dbKey) {
     return { id: "db-decrypt", status: "warn", message: "no key provided, skipping decrypt probe" };
   }
-  try {
-    const { SqliteStorage } = await import("../storage/sqlite-storage.js");
-    const sq = new SqliteStorage({ dbPath, key: dbKey });
-    try {
-      sq.exec("CREATE TABLE IF NOT EXISTS doctor_probe (token TEXT NOT NULL);");
-      sq.run("INSERT INTO doctor_probe(token) VALUES(?);", ["stage1-ok"]);
-      const row = sq.get<{ token: string }>("SELECT token FROM doctor_probe LIMIT 1");
-      if (!row || row.token !== "stage1-ok") {
-        return { id: "db-decrypt", status: "fail", message: "round-trip mismatch" };
-      }
-      return { id: "db-decrypt", status: "pass", message: "encrypted DB opens and round-trips" };
-    } finally {
-      sq.close();
-    }
-  } catch (err) {
-    return {
-      id: "db-decrypt",
-      status: "fail",
-      message: `open/decrypt failed: ${(err as Error).message} (stateDir=${stateDir})`,
-    };
+  switch (inspectEncryptedSqlite({ dbPath, key: dbKey }).status) {
+    case "healthy":
+      return { id: "db-decrypt", status: "pass", message: "encrypted DB integrity check passed" };
+    case "missing":
+      return { id: "db-decrypt", status: "fail", message: "database file missing" };
+    case "corrupt":
+      return { id: "db-decrypt", status: "fail", message: "database integrity check failed" };
+    case "unreadable":
+      return { id: "db-decrypt", status: "fail", message: "database could not be inspected" };
   }
 }
 
