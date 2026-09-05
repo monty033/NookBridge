@@ -242,7 +242,8 @@ export class NotesnookWriteAdapter {
     // pure slice so every input field is re-validated against the
     // closed set, including hostile-getter defence.  Nothing the
     // adapter does can bypass that boundary.
-    const plan = planCreateNote(command);
+    const snapshot = snapshotCreateCommand(command);
+    const plan = planCreateNote(snapshot);
     const titleBytes = Buffer.byteLength(plan.title, "utf8");
 
     // Step 2 — notebook membership is allowlisted and explicit.  We
@@ -265,8 +266,7 @@ export class NotesnookWriteAdapter {
     // injected codec.  Any throw is normalised to `unsupported_content`.
     // The contract only stores byte counts here; the raw Markdown is
     // never concatenated into the stored content slot.
-    const rawContent = (command as { content: string }).content;
-    const encoded = this.#encodeMarkdown(rawContent);
+    const encoded = this.#encodeMarkdown(snapshot.content);
 
     // Step 4 — perform the local mutation.  We catch every upstream
     // throw and rewrite it to a categorical failure.  The adapter
@@ -340,7 +340,8 @@ export class NotesnookWriteAdapter {
    * into the stored content slot; only the codec output is written.
    */
   async appendNote(command: AppendNoteCommand): Promise<AppendNoteResult> {
-    const plan = planAppendNote(command);
+    const snapshot = snapshotAppendCommand(command);
+    const plan = planAppendNote(snapshot);
 
     // Re-read immediately before mutation; a hostile getter on the
     // stored note is normalised to `invalid_input` and never reaches
@@ -367,7 +368,7 @@ export class NotesnookWriteAdapter {
       next = this.#codec.appendMarkdownToStoredContent({
         storedType: stored.type,
         storedData: stored.data,
-        markdownFragment: command.markdownFragment,
+        markdownFragment: snapshot.markdownFragment,
       });
     } catch {
       throw adapterError(
@@ -401,13 +402,14 @@ export class NotesnookWriteAdapter {
    * patch are never touched.
    */
   async updateNote(command: UpdateNoteCommand): Promise<UpdateNoteResult> {
-    const plan = planUpdateNote(command);
+    const snapshot = snapshotUpdateCommand(command);
+    const plan = planUpdateNote(snapshot);
 
     // Re-read immediately before mutation.
     const observed = await this.#readNoteFreshly(plan.id);
     this.#assertCanWrite(observed, plan.expectedRevision);
 
-    const patch = command.patch;
+    const patch = snapshot.patch;
 
     // Step A — metadata fields.  Every field is explicitly allowlisted.
     const metadataFields: NotesnookUpdatePatchField[] = [];
@@ -630,6 +632,138 @@ export function createNotesnookWriteAdapter(
   options: NotesnookWriteAdapterOptions,
 ): NotesnookWriteAdapter {
   return new NotesnookWriteAdapter(options);
+}
+
+// ---------------------------------------------------------------------------
+// Command snapshots.
+//
+// The pure plan functions validate values, but their compact plan shapes do
+// not retain every value needed by the mutation path (for example, create
+// content or an update title).  Snapshot the caller boundary first, then
+// validate that immutable snapshot.  This makes each caller getter run once
+// and ensures no later await can expose a changed command or patch.
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_PATCH_FIELDS: ReadonlyArray<NotesnookUpdatePatchField> = [
+  "title",
+  "content",
+  "notebookId",
+  "tags",
+  "pinned",
+  "favorite",
+];
+
+function snapshotCreateCommand(command: CreateNoteCommand): CreateNoteCommand {
+  const record = command as unknown as Record<string, unknown>;
+  const title = snapshotProperty(record, "title");
+  const content = snapshotProperty(record, "content");
+  const notebookId = snapshotProperty(record, "notebookId");
+  const tags = snapshotArray(snapshotProperty(record, "tags"));
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  snapshot.title = title;
+  snapshot.content = content;
+  if (notebookId !== undefined) snapshot.notebookId = notebookId;
+  if (tags !== undefined) snapshot.tags = tags;
+  return Object.freeze(snapshot) as unknown as CreateNoteCommand;
+}
+
+function snapshotAppendCommand(command: AppendNoteCommand): AppendNoteCommand {
+  const record = command as unknown as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  snapshot.id = snapshotProperty(record, "id");
+  snapshot.markdownFragment = snapshotProperty(record, "markdownFragment");
+  snapshot.expectedRevision = snapshotProperty(record, "expectedRevision");
+  return Object.freeze(snapshot) as unknown as AppendNoteCommand;
+}
+
+function snapshotUpdateCommand(command: UpdateNoteCommand): UpdateNoteCommand {
+  const record = command as unknown as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  snapshot.id = snapshotProperty(record, "id");
+  snapshot.patch = snapshotPatch(snapshotProperty(record, "patch"));
+  snapshot.expectedRevision = snapshotProperty(record, "expectedRevision");
+  return Object.freeze(snapshot) as unknown as UpdateNoteCommand;
+}
+
+function snapshotProperty(record: Record<string, unknown>, key: string): unknown {
+  try {
+    return Reflect.get(record, key, record);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: command accessor rejected");
+  }
+}
+
+function snapshotPatch(value: unknown): unknown {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: update patch rejected");
+  }
+  if (value === null || typeof value !== "object" || isArray) return value;
+
+  const source = value as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  let keys: PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(source);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: update patch rejected");
+  }
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+    } catch {
+      throw adapterError("invalid_input", "Notesnook write adapter: update patch rejected");
+    }
+    if (descriptor?.enumerable !== true) continue;
+    // Preserve the plan's unsupported-field rejection without invoking an
+    // attacker-controlled getter for a field the contract will reject.
+    if (!SNAPSHOT_PATCH_FIELDS.includes(key as NotesnookUpdatePatchField)) {
+      Object.defineProperty(snapshot, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: undefined,
+      });
+      continue;
+    }
+    const captured = snapshotProperty(source, key);
+    snapshot[key] = key === "tags" ? snapshotArray(captured) : captured;
+  }
+  return Object.freeze(snapshot);
+}
+
+function snapshotArray(value: unknown): unknown {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: array value rejected");
+  }
+  if (!isArray) return value;
+
+  let length: number;
+  try {
+    length = (value as { readonly length: number }).length;
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: array value rejected");
+  }
+  // Let the contract plan produce the categorical bounds error.  Valid
+  // arrays are copied by direct indexed reads so no iterator/species hook is
+  // invoked, and the copy is immutable before it is passed to the plan.
+  if (!Number.isSafeInteger(length) || length < 0 || length > 16) return value;
+  const copy: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    try {
+      copy.push(Reflect.get(value as object, String(index), value));
+    } catch {
+      throw adapterError("invalid_input", "Notesnook write adapter: array value rejected");
+    }
+  }
+  return Object.freeze(copy);
 }
 
 // ---------------------------------------------------------------------------

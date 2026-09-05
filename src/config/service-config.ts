@@ -46,6 +46,7 @@
 
 import { constants as fsConstants, lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import type { RpcMethod } from "../service/rpc-protocol.js";
 
 /**
  * The fixed canonical backend id from the Stage 5 service-boundary
@@ -71,6 +72,20 @@ export const SERVICE_CONFIG_READ_POLICY = Object.freeze([
   "notes.list_notebooks",
   "notes.get",
 ] as const);
+
+/**
+ * Closed service-policy method universe. This mirrors the published
+ * RpcMethod union and deliberately excludes `notes.delete`.
+ */
+export const SERVICE_CONFIG_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = Object.freeze([
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+]);
 
 /**
  * Closed category vocabulary for {@link ServiceConfigError}.
@@ -129,7 +144,8 @@ export interface ServiceConfig {
   readonly socketGroup: string;
   readonly backend: typeof SERVICE_CONFIG_BACKEND;
   readonly credentialName: typeof SERVICE_CONFIG_CREDENTIAL_NAME;
-  readonly readPolicy: typeof SERVICE_CONFIG_READ_POLICY;
+  /** A non-empty, duplicate-free subset of the closed RpcMethod universe. */
+  readonly readPolicy: ReadonlyArray<RpcMethod>;
 }
 
 /**
@@ -255,8 +271,9 @@ export function loadServiceConfig(
  *     name grammar);
  *   - `backend` is the literal `systemd-credential`;
  *   - `credentialName` is the literal `nookbridge-db-key`;
- *   - `readPolicy` is the tuple `["notes.search", "notes.status",
- *     "notes.list_notebooks", "notes.get"]` in order;
+ *   - `readPolicy` is a non-empty, duplicate-free subset of the
+ *     closed RpcMethod universe.  The legacy four-method tuple remains
+ *     valid; write methods are accepted only from that same universe.
  *   - no credential-path, env-override, dev-backend, or generic
  *     passthrough field slipped through the strict walk.
  */
@@ -417,16 +434,12 @@ function validateFields(
   }
 
   const readPolicy = parsed.readPolicy;
-  if (
-    !Array.isArray(readPolicy) ||
-    readPolicy.length !== SERVICE_CONFIG_READ_POLICY.length ||
-    readPolicy.some((value, index) => value !== SERVICE_CONFIG_READ_POLICY[index])
-  ) {
+  if (!Array.isArray(readPolicy) || !isValidReadPolicy(readPolicy)) {
     return {
       ok: false,
       error: new ServiceConfigError(
         "invalid_read_policy",
-        "service config readPolicy must be the closed allowlist",
+        "service config readPolicy must be a closed non-empty allowlist",
       ),
     };
   }
@@ -482,15 +495,39 @@ function validateFields(
     };
   }
 
+  const configReadPolicy =
+    readPolicy.length === SERVICE_CONFIG_READ_POLICY.length &&
+    readPolicy.every((value, index) => value === SERVICE_CONFIG_READ_POLICY[index])
+      ? SERVICE_CONFIG_READ_POLICY
+      : Object.freeze(readPolicy.slice() as RpcMethod[]);
   const config: ServiceConfig = Object.freeze({
     stateDir,
     socketPath,
     socketGroup,
     backend,
     credentialName,
-    readPolicy: SERVICE_CONFIG_READ_POLICY,
+    readPolicy: configReadPolicy,
   });
   return { ok: true, config };
+}
+
+function isValidReadPolicy(value: readonly unknown[]): value is readonly RpcMethod[] {
+  if (value.length === 0 || value.length > SERVICE_CONFIG_ALLOWED_METHODS.length) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const method = value[index];
+    if (typeof method !== "string" || !isAllowedServiceMethod(method)) return false;
+    for (let previous = 0; previous < index; previous += 1) {
+      if (value[previous] === method) return false;
+    }
+  }
+  return true;
+}
+
+function isAllowedServiceMethod(value: string): value is RpcMethod {
+  for (let index = 0; index < SERVICE_CONFIG_ALLOWED_METHODS.length; index += 1) {
+    if (SERVICE_CONFIG_ALLOWED_METHODS[index] === value) return true;
+  }
+  return false;
 }
 
 /**

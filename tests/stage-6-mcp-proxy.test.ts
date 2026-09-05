@@ -124,7 +124,7 @@ function framedResponse(envelope: Record<string, unknown>): { ok: boolean; frame
 // -----------------------------------------------------------------------
 
 describe("nook-mcp server surface", () => {
-  it("advertises exactly the four Slice 2 read-only tools", async () => {
+  it("advertises the four Slice 2 reads plus the three bounded writes", async () => {
     const client = new NookdSocketClient({
       socketPath: "/tmp/never-used",
       connect: async () => {
@@ -143,8 +143,12 @@ describe("nook-mcp server surface", () => {
       "notesnook_status",
       "notesnook_list_notebooks",
       "notesnook_get_note",
+      "notesnook_create_note",
+      "notesnook_append_note",
+      "notesnook_update_note",
     ]);
-    expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+    expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+    expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
     expect(tools.every((tool) => tool.annotations?.destructiveHint === false)).toBe(true);
   });
 
@@ -553,8 +557,12 @@ describe("end-to-end SDK smoke test", () => {
         "notesnook_status",
         "notesnook_list_notebooks",
         "notesnook_get_note",
+        "notesnook_create_note",
+        "notesnook_append_note",
+        "notesnook_update_note",
       ]);
-      expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+      expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+      expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
       const result = await client.callTool({
         name: "notesnook_search_notes",
         arguments: { query: "needle" },
@@ -631,8 +639,6 @@ describe("forbidden module surface", () => {
     // server factory would reject it.  The intent is to fail the
     // build (via a test) rather than silently widen the surface.
     expect(NOOK_MCP_ALLOWED_TOOL_NAME).toBe("notesnook_search_notes");
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_create_note");
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_update_note");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_delete_note");
 
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_sync");

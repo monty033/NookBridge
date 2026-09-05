@@ -27,6 +27,7 @@
  * an unparsed object directly cannot smuggle data through.
  */
 
+import { Buffer } from "node:buffer";
 import {
   STAGE5_RPC_LIMITS,
   type RpcErrorEnvelope,
@@ -34,6 +35,9 @@ import {
   type RpcNotesGetRequest,
   type RpcNotesListNotebooksRequest,
   type RpcNotesStatusRequest,
+  type RpcNotesCreateRequest,
+  type RpcNotesAppendRequest,
+  type RpcNotesUpdateRequest,
   type RpcMethod,
   type RpcRequest,
   type RpcAnyResponseEnvelope,
@@ -42,8 +46,21 @@ import {
   type RpcSearchResult,
   type RpcStatusResult,
   type RpcListNotebooksResult,
+  type RpcCreatedNoteResult,
+  type RpcAppendNoteResult,
+  type RpcUpdateNoteResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
+import type {
+  CreateNoteCommand,
+  AppendNoteCommand,
+  UpdateNoteCommand,
+} from "../core/notesnook-write-contract.js";
+import type {
+  CreateNoteResult,
+  AppendNoteResult,
+  UpdateNoteResult,
+} from "../core/notesnook-write-adapter.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
@@ -65,6 +82,7 @@ const reflectApply = Reflect.apply;
 const arrayIsArray = Array.isArray;
 const numberIsFinite = Number.isFinite;
 const mathFloor = Math.floor;
+const bufferByteLength = Buffer.byteLength;
 
 // ---------------------------------------------------------------------------
 // Public runtime contract.
@@ -112,6 +130,9 @@ export interface RpcHandlerRuntimeLike {
       }>
     | undefined
   >;
+  readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
+  readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
+  readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +179,15 @@ const DEFAULT_READ_ONLY_POLICY: ServicePolicy = createReadOnlyServicePolicy();
  * normalised to a categorical envelope with a safe id — never a raw
  * throw crossing the handler boundary.
  */
-export async function handleRpcRequest(
-  request: RpcRequest,
+type RpcHandlerResponse<T extends RpcRequest> = T extends RpcNotesSearchRequest
+  ? RpcResponseEnvelope
+  : RpcAnyResponseEnvelope;
+
+export async function handleRpcRequest<T extends RpcRequest>(
+  request: T,
   runtime: RpcHandlerRuntimeLike,
   policy: ServicePolicy = DEFAULT_READ_ONLY_POLICY,
-): Promise<RpcResponseEnvelope> {
+): Promise<RpcHandlerResponse<T>> {
   // Safe-id extraction MUST come first: any later failure must echo
   // back something categorical, and the id itself may be hostile.
   // We extract id here so the categorical wrapper below sees a
@@ -181,7 +206,7 @@ export async function handleRpcRequest(
       // before the runtime is touched.
       const authorization = authorizeServiceMethod(policy, structural.request.method);
       if (!authorization.allowed) {
-        return buildErrorEnvelope(id, "permission_denied") as unknown as RpcResponseEnvelope;
+        return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
       }
       switch (structural.request.method) {
         case "notes.search":
@@ -189,33 +214,51 @@ export async function handleRpcRequest(
             structural.request,
             runtime,
             id,
-          )) as unknown as RpcResponseEnvelope;
+          )) as unknown as RpcHandlerResponse<T>;
         case "notes.status":
           return (await runNotesStatus(
             structural.request,
             runtime,
             id,
-          )) as unknown as RpcResponseEnvelope;
+          )) as unknown as RpcHandlerResponse<T>;
         case "notes.list_notebooks":
           return (await runNotesListNotebooks(
             structural.request,
             runtime,
             id,
-          )) as unknown as RpcResponseEnvelope;
+          )) as unknown as RpcHandlerResponse<T>;
         case "notes.get":
           return (await runNotesGet(
             structural.request,
             runtime,
             id,
-          )) as unknown as RpcResponseEnvelope;
+          )) as unknown as RpcHandlerResponse<T>;
+        case "notes.create":
+          return (await runNotesCreate(
+            structural.request,
+            runtime,
+            id,
+          )) as unknown as RpcHandlerResponse<T>;
+        case "notes.append":
+          return (await runNotesAppend(
+            structural.request,
+            runtime,
+            id,
+          )) as unknown as RpcHandlerResponse<T>;
+        case "notes.update":
+          return (await runNotesUpdate(
+            structural.request,
+            runtime,
+            id,
+          )) as unknown as RpcHandlerResponse<T>;
       }
     }
-    return buildErrorEnvelope(id, structural.code) as unknown as RpcResponseEnvelope;
+    return buildErrorEnvelope(id, structural.code) as unknown as RpcHandlerResponse<T>;
   } catch {
     // The two helpers above are themselves hardened, but a hostile
     // Proxy / getter may still raise from a path the defence did not
     // cover.  Treat any such escape as a structural request failure.
-    return buildErrorEnvelope(id, "invalid_request") as unknown as RpcResponseEnvelope;
+    return buildErrorEnvelope(id, "invalid_request") as unknown as RpcHandlerResponse<T>;
   }
 }
 
@@ -256,7 +299,10 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod !== "notes.search" &&
     rawMethod !== "notes.status" &&
     rawMethod !== "notes.list_notebooks" &&
-    rawMethod !== "notes.get"
+    rawMethod !== "notes.get" &&
+    rawMethod !== "notes.create" &&
+    rawMethod !== "notes.append" &&
+    rawMethod !== "notes.update"
   ) {
     return { kind: "err", code: "invalid_request" };
   }
@@ -286,6 +332,123 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     }
     params = objectCreate(null) as Record<string, unknown>;
     params.id = rawNoteId;
+  } else if (rawMethod === "notes.create") {
+    if (
+      !hasExactKeys(paramKeys, ["title", "content"]) &&
+      !hasExactKeys(paramKeys, ["title", "content", "notebookId"])
+    ) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    const rawTitle = readOwnStringField(rawParams, "title");
+    const rawContent = readOwnStringField(rawParams, "content");
+    if (
+      rawTitle === undefined ||
+      rawTitle.length === 0 ||
+      rawTitle.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
+      bufferByteLength(rawTitle, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes ||
+      hasControlCharacter(rawTitle) ||
+      rawContent === undefined ||
+      rawContent.length === 0 ||
+      rawContent.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      bufferByteLength(rawContent, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(rawContent)
+    ) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    params = objectCreate(null) as Record<string, unknown>;
+    params.title = rawTitle;
+    params.content = rawContent;
+    if (paramKeys.length === 3) {
+      const rawNotebookId = readOwnStringField(rawParams, "notebookId");
+      if (
+        rawNotebookId === undefined ||
+        rawNotebookId.length === 0 ||
+        rawNotebookId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        bufferByteLength(rawNotebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(rawNotebookId)
+      ) {
+        return { kind: "err", code: "invalid_request" };
+      }
+      params.notebookId = rawNotebookId;
+    }
+  } else if (rawMethod === "notes.append") {
+    if (!hasExactKeys(paramKeys, ["id", "markdownFragment", "expectedRevision"])) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    const rawNoteId = readOwnStringField(rawParams, "id");
+    const rawFragment = readOwnStringField(rawParams, "markdownFragment");
+    const rawRevision = readOwnStringField(rawParams, "expectedRevision");
+    if (
+      !isBoundedRpcIdentifier(rawNoteId) ||
+      rawFragment === undefined ||
+      rawFragment.length === 0 ||
+      rawFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      bufferByteLength(rawFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(rawFragment) ||
+      !isRevisionToken(rawRevision)
+    ) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    params = objectCreate(null) as Record<string, unknown>;
+    params.id = rawNoteId;
+    params.markdownFragment = rawFragment;
+    params.expectedRevision = rawRevision;
+  } else if (rawMethod === "notes.update") {
+    if (!hasExactKeys(paramKeys, ["id", "expectedRevision", "patch"])) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    const rawNoteId = readOwnStringField(rawParams, "id");
+    const rawRevision = readOwnStringField(rawParams, "expectedRevision");
+    const rawPatch = readOwnObjectField(rawParams, "patch");
+    if (
+      !isBoundedRpcIdentifier(rawNoteId) ||
+      !isRevisionToken(rawRevision) ||
+      rawPatch === undefined
+    ) {
+      return { kind: "err", code: "invalid_request" };
+    }
+
+    const patchKeys = Object.keys(rawPatch);
+    if (patchKeys.length === 0) return { kind: "err", code: "invalid_request" };
+    const patch = objectCreate(null) as Record<string, unknown>;
+    for (const key of patchKeys) {
+      if (
+        key !== "title" &&
+        key !== "content" &&
+        key !== "notebookId" &&
+        key !== "tags" &&
+        key !== "pinned" &&
+        key !== "favorite"
+      ) {
+        return { kind: "err", code: "invalid_request" };
+      }
+      const value = readOwnDataField(rawPatch, key);
+      if (value === undefined) return { kind: "err", code: "invalid_request" };
+      if (key === "title") {
+        if (!isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxTitleBytes)) {
+          return { kind: "err", code: "invalid_request" };
+        }
+      } else if (key === "content") {
+        if (!isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxQueryBytes)) {
+          return { kind: "err", code: "invalid_request" };
+        }
+      } else if (key === "notebookId") {
+        if (!isBoundedRpcIdentifier(value)) return { kind: "err", code: "invalid_request" };
+      } else if (key === "tags") {
+        const cleanTags = normaliseRpcTags(value);
+        if (cleanTags === undefined) return { kind: "err", code: "invalid_request" };
+        patch.tags = cleanTags;
+        continue;
+      } else if (typeof value !== "boolean") {
+        return { kind: "err", code: "invalid_request" };
+      }
+      patch[key] = value;
+    }
+    objectFreeze(patch);
+    params = objectCreate(null) as Record<string, unknown>;
+    params.id = rawNoteId;
+    params.expectedRevision = rawRevision;
+    params.patch = patch;
   } else {
     if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
     params = objectCreate(null) as Record<string, unknown>;
@@ -323,6 +486,82 @@ function hasControlCharacter(value: string): boolean {
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;
+}
+
+const revisionTokenPattern = /^rev_[0-9a-f]{32}$/;
+const APPEND_UPDATE_ERROR_CODES = [
+  "stale_revision",
+  "conflict",
+  "vault_locked",
+  "sync_failed",
+] as const;
+type AppendUpdateErrorCode = (typeof APPEND_UPDATE_ERROR_CODES)[number];
+
+function isRevisionToken(value: string | undefined): value is string {
+  return value !== undefined && revisionTokenPattern.test(value);
+}
+
+function isBoundedRpcText(value: unknown, maxBytes: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxBytes &&
+    bufferByteLength(value, "utf8") <= maxBytes &&
+    !hasControlCharacter(value)
+  );
+}
+
+function isBoundedRpcIdentifier(value: unknown): value is string {
+  return isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxIdentifierBytes);
+}
+
+function readOwnDataField(record: Record<string, unknown>, key: string): unknown | undefined {
+  try {
+    const descriptor = objectGetOwnPropertyDescriptor(record, key);
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    return descriptor.value;
+  } catch {
+    return undefined;
+  }
+}
+
+function normaliseRpcTags(value: unknown): readonly string[] | undefined {
+  try {
+    if (!arrayIsArray(value)) return undefined;
+    const lengthDescriptor = objectGetOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== "number" ||
+      !numberIsFinite(lengthDescriptor.value) ||
+      mathFloor(lengthDescriptor.value) !== lengthDescriptor.value ||
+      lengthDescriptor.value <= 0 ||
+      lengthDescriptor.value > 16
+    ) {
+      return undefined;
+    }
+    const tags: string[] = [];
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const entry = readOwnDataField(value as unknown as Record<string, unknown>, String(index));
+      if (!isBoundedRpcIdentifier(entry)) return undefined;
+      tags.push(entry);
+    }
+    objectSetPrototypeOf(tags, null);
+    return objectFreeze(tags);
+  } catch {
+    return undefined;
+  }
+}
+
+function mapRuntimeError(error: unknown, id: string): RpcAnyResponseEnvelope | undefined {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) {
+    return undefined;
+  }
+  const code = readOwnStringField(error as Record<string, unknown>, "code");
+  if (code === undefined || !(APPEND_UPDATE_ERROR_CODES as readonly string[]).includes(code)) {
+    return undefined;
+  }
+  return buildErrorEnvelope(id, code as AppendUpdateErrorCode);
 }
 
 /**
@@ -391,6 +630,90 @@ function extractRequestId(input: unknown): string {
   } catch {
     return "";
   }
+}
+
+async function runNotesCreate(
+  request: RpcNotesCreateRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "createNote");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+
+  const commandRecord = objectCreate(null) as Record<string, unknown>;
+  commandRecord.title = request.params.title;
+  commandRecord.content = request.params.content;
+  if (request.params.notebookId !== undefined) {
+    commandRecord.notebookId = request.params.notebookId;
+  }
+  const command = objectFreeze(commandRecord) as unknown as CreateNoteCommand;
+
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [command]);
+  } catch {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+
+  const result = normaliseCreatedNoteResult(raw);
+  if (result === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  return buildResultSuccessEnvelope(id, result);
+}
+
+async function runNotesAppend(
+  request: RpcNotesAppendRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "appendNote");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+
+  const commandRecord = objectCreate(null) as Record<string, unknown>;
+  commandRecord.id = request.params.id;
+  commandRecord.markdownFragment = request.params.markdownFragment;
+  commandRecord.expectedRevision = request.params.expectedRevision;
+  const command = objectFreeze(commandRecord) as unknown as AppendNoteCommand;
+
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [command]);
+  } catch (error) {
+    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
+  }
+  const result = normaliseAppendedNoteResult(raw);
+  if (result === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  return buildResultSuccessEnvelope(id, result);
+}
+
+async function runNotesUpdate(
+  request: RpcNotesUpdateRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "updateNote");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+
+  const patchRecord = objectCreate(null) as Record<string, unknown>;
+  const parsedPatch = request.params.patch;
+  for (const field of ["title", "content", "notebookId", "tags", "pinned", "favorite"] as const) {
+    const value = readOwnDataField(parsedPatch as Record<string, unknown>, field);
+    if (value !== undefined) patchRecord[field] = value;
+  }
+  const commandRecord = objectCreate(null) as Record<string, unknown>;
+  commandRecord.id = request.params.id;
+  commandRecord.expectedRevision = request.params.expectedRevision;
+  commandRecord.patch = objectFreeze(patchRecord);
+  const command = objectFreeze(commandRecord) as unknown as UpdateNoteCommand;
+
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [command]);
+  } catch (error) {
+    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
+  }
+  const result = normaliseUpdatedNoteResult(raw);
+  if (result === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  return buildResultSuccessEnvelope(id, result);
 }
 
 async function runNotesStatus(
@@ -492,7 +815,7 @@ async function runNotesGet(
 
 function readRuntimeMethod(
   runtime: RpcHandlerRuntimeLike,
-  key: "status" | "listNotebooks" | "noteMetadata",
+  key: "status" | "listNotebooks" | "noteMetadata" | "createNote" | "appendNote" | "updateNote",
 ): ((...args: unknown[]) => unknown) | undefined {
   try {
     const descriptor = objectGetOwnPropertyDescriptor(runtime, key);
@@ -556,6 +879,112 @@ function normaliseNotebook(value: unknown): Record<string, unknown> | undefined 
   return objectFreeze(output);
 }
 
+function normaliseCreatedNoteResult(value: unknown): RpcCreatedNoteResult | undefined {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (readOwnStringField(record, "operation") !== "create") return undefined;
+  const noteId = readOwnStringField(record, "id");
+  const titleBytes = readOwnNumberField(record, "titleBytes");
+  const contentBytes = readOwnNumberField(record, "contentBytes");
+  if (
+    noteId === undefined ||
+    noteId.length === 0 ||
+    noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    bufferByteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    hasControlCharacter(noteId) ||
+    titleBytes === undefined ||
+    contentBytes === undefined
+  ) {
+    return undefined;
+  }
+  return objectFreeze(
+    objectCreate(null, {
+      kind: { value: "create", enumerable: true, configurable: false, writable: false },
+      id: { value: noteId, enumerable: true, configurable: false, writable: false },
+      titleBytes: {
+        value: titleBytes,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      contentBytes: {
+        value: contentBytes,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+    }),
+  ) as RpcCreatedNoteResult;
+}
+
+function normaliseAppendedNoteResult(value: unknown): RpcAppendNoteResult | undefined {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (readOwnStringField(record, "operation") !== "append") return undefined;
+  const id = readOwnStringField(record, "id");
+  const fragmentBytes = readOwnNumberField(record, "contentBytes");
+  if (
+    id === undefined ||
+    id.length === 0 ||
+    id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    bufferByteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    hasControlCharacter(id) ||
+    fragmentBytes === undefined
+  ) {
+    return undefined;
+  }
+  return objectFreeze(
+    objectCreate(null, {
+      kind: { value: "append", enumerable: true, configurable: false, writable: false },
+      id: { value: id, enumerable: true, configurable: false, writable: false },
+      fragmentBytes: {
+        value: fragmentBytes,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+    }),
+  ) as RpcAppendNoteResult;
+}
+
+function normaliseUpdatedNoteResult(value: unknown): RpcUpdateNoteResult | undefined {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (readOwnStringField(record, "operation") !== "update") return undefined;
+  const id = readOwnStringField(record, "id");
+  const fields = readOwnDataField(record, "appliedFields");
+  if (
+    id === undefined ||
+    id.length === 0 ||
+    id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    bufferByteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    hasControlCharacter(id) ||
+    !arrayIsArray(fields) ||
+    fields.length === 0 ||
+    fields.length > 6
+  ) {
+    return undefined;
+  }
+  const allowed = ["title", "content", "notebookId", "tags", "pinned", "favorite"];
+  const cleanFields: string[] = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = readOwnDataField(fields as unknown as Record<string, unknown>, String(index));
+    if (typeof field !== "string" || !allowed.includes(field) || cleanFields.includes(field)) {
+      return undefined;
+    }
+    cleanFields.push(field);
+  }
+  objectSetPrototypeOf(cleanFields, null);
+  objectFreeze(cleanFields);
+  const contentBytes = readOwnNumberField(record, "contentBytes");
+  const result = objectCreate(null) as Record<string, unknown>;
+  result.kind = "update";
+  result.id = id;
+  result.appliedFields = cleanFields;
+  if (contentBytes !== undefined) result.contentBytes = contentBytes;
+  return objectFreeze(result) as unknown as RpcUpdateNoteResult;
+}
+
 function normaliseNoteMetadata(value: unknown): Record<string, unknown> | undefined {
   if (value === null || typeof value !== "object" || arrayIsArray(value)) return undefined;
   const record = value as Record<string, unknown>;
@@ -600,7 +1029,10 @@ function buildResultSuccessEnvelope(
   result:
     | RpcStatusResult
     | RpcListNotebooksResult
-    | { readonly kind: "note"; readonly note: Record<string, unknown> },
+    | { readonly kind: "note"; readonly note: Record<string, unknown> }
+    | RpcCreatedNoteResult
+    | RpcAppendNoteResult
+    | RpcUpdateNoteResult,
 ): RpcAnyResponseEnvelope {
   return objectFreeze(
     objectCreate(null, {
@@ -854,6 +1286,8 @@ function buildErrorEnvelope(
     | "invalid_request"
     | "permission_denied"
     | "service_unavailable"
+    | "stale_revision"
+    | "conflict"
     | "sync_failed"
     | "vault_locked"
     | "not_found",
@@ -862,6 +1296,8 @@ function buildErrorEnvelope(
     invalid_request: "Invalid request",
     permission_denied: "Permission denied",
     service_unavailable: "Service unavailable",
+    stale_revision: "Stale revision",
+    conflict: "Conflict",
     sync_failed: "Sync failed",
     vault_locked: "Vault locked",
     not_found: "Not found",

@@ -32,6 +32,9 @@ import {
   STAGE5_RPC_LIMITS,
   type RpcErrorCode,
   type RpcNotesSearchParams,
+  type RpcNotesCreateParams,
+  type RpcNotesAppendParams,
+  type RpcNotesUpdateParams,
   type RpcAnyResponseEnvelope,
   type RpcResult,
   type RpcAnySuccessEnvelope,
@@ -41,6 +44,8 @@ import {
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
 const MAX_RESPONSE_FRAME_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
+const ARRAY_PROTOTYPE = Array.prototype;
+const OBJECT_PROTOTYPE = Object.prototype;
 
 /** Default connect / read timeout. Kept short to surface a closed
  *  socket quickly rather than leaving Hermes waiting. */
@@ -63,6 +68,8 @@ export type NookdSocketFailure =
   | "invalid_request"
   | "permission_denied"
   | "sync_failed"
+  | "stale_revision"
+  | "conflict"
   | "vault_locked"
   | "not_found";
 
@@ -80,6 +87,10 @@ function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure 
       return "permission_denied";
     case "service_unavailable":
       return "service_unavailable";
+    case "stale_revision":
+      return "stale_revision";
+    case "conflict":
+      return "conflict";
     case "sync_failed":
       return "sync_failed";
     case "vault_locked":
@@ -190,9 +201,34 @@ export class NookdSocketClient {
     return this.#request("notes.get", { id });
   }
 
+  async createNote(params: RpcNotesCreateParams): Promise<NookdSocketResult> {
+    return this.#request("notes.create", params);
+  }
+
+  async appendNote(params: RpcNotesAppendParams): Promise<NookdSocketResult> {
+    return this.#request("notes.append", params);
+  }
+
+  async updateNote(params: RpcNotesUpdateParams): Promise<NookdSocketResult> {
+    return this.#request("notes.update", params);
+  }
+
   async #request(
-    method: "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get",
-    params: RpcNotesSearchParams | Record<string, never> | { readonly id: string },
+    method:
+      | "notes.search"
+      | "notes.status"
+      | "notes.list_notebooks"
+      | "notes.get"
+      | "notes.create"
+      | "notes.append"
+      | "notes.update",
+    params:
+      | RpcNotesSearchParams
+      | RpcNotesCreateParams
+      | RpcNotesAppendParams
+      | RpcNotesUpdateParams
+      | Record<string, never>
+      | { readonly id: string },
     suppliedId?: string,
   ): Promise<NookdSocketResult> {
     const id = suppliedId ?? generateRequestId();
@@ -242,13 +278,26 @@ export class NookdSocketClient {
  */
 function serializeRequest(
   id: string,
-  method: "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get",
-  params: RpcNotesSearchParams | Record<string, never> | { readonly id: string },
+  method:
+    | "notes.search"
+    | "notes.status"
+    | "notes.list_notebooks"
+    | "notes.get"
+    | "notes.create"
+    | "notes.append"
+    | "notes.update",
+  params:
+    | RpcNotesSearchParams
+    | RpcNotesCreateParams
+    | RpcNotesAppendParams
+    | RpcNotesUpdateParams
+    | Record<string, never>
+    | { readonly id: string },
 ): Uint8Array {
   if (typeof id !== "string" || id.length === 0 || id.length > 128 || hasControlCharacter(id)) {
     throw new TypeError("nook-mcp: invalid request id");
   }
-  let cleanParams: Record<string, string> | Record<string, never>;
+  let cleanParams: Record<string, unknown> | Record<string, never>;
   if (method === "notes.search") {
     const query = (params as RpcNotesSearchParams).query;
     if (typeof query !== "string" || query.length === 0)
@@ -267,12 +316,58 @@ function serializeRequest(
     )
       throw new TypeError("nook-mcp: note id is invalid");
     cleanParams = { id: noteId };
+  } else if (method === "notes.create") {
+    const create = params as RpcNotesCreateParams;
+    if (
+      typeof create.title !== "string" ||
+      create.title.length === 0 ||
+      Buffer.byteLength(create.title, "utf8") > 256 ||
+      hasControlCharacter(create.title) ||
+      typeof create.content !== "string" ||
+      create.content.length === 0 ||
+      Buffer.byteLength(create.content, "utf8") > 512 ||
+      hasControlCharacter(create.content) ||
+      (create.notebookId !== undefined &&
+        (!isSafeIdentifier(create.notebookId) ||
+          Buffer.byteLength(create.notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes))
+    ) {
+      throw new TypeError("nook-mcp: create parameters are invalid");
+    }
+    cleanParams =
+      create.notebookId === undefined
+        ? { title: create.title, content: create.content }
+        : { title: create.title, content: create.content, notebookId: create.notebookId };
+  } else if (method === "notes.append") {
+    const append = params as RpcNotesAppendParams;
+    if (
+      !isSafeIdentifier(append.id) ||
+      Buffer.byteLength(append.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      typeof append.markdownFragment !== "string" ||
+      append.markdownFragment.length === 0 ||
+      Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(append.markdownFragment) ||
+      typeof append.expectedRevision !== "string" ||
+      !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision)
+    ) {
+      throw new TypeError("nook-mcp: append parameters are invalid");
+    }
+    cleanParams = {
+      id: append.id,
+      markdownFragment: append.markdownFragment,
+      expectedRevision: append.expectedRevision,
+    };
+  } else if (method === "notes.update") {
+    cleanParams = snapshotUpdateParams(params);
   } else {
     if (Object.keys(params).length !== 0)
       throw new TypeError("nook-mcp: parameterless request has fields");
     cleanParams = {};
   }
-  const payload = JSON.stringify({ id, method, params: cleanParams });
+  const envelope = Object.create(null) as Record<string, unknown>;
+  envelope.id = id;
+  envelope.method = method;
+  envelope.params = cleanParams;
+  const payload = JSON.stringify(envelope);
   const payloadBytes = Buffer.from(payload, "utf8");
   if (payloadBytes.byteLength + FRAME_PREFIX_BYTES > MAX_FRAME_BYTES_ON_WIRE) {
     throw new RangeError("nook-mcp: request exceeds maximum frame bytes");
@@ -284,6 +379,221 @@ function serializeRequest(
   frame[3] = payloadBytes.byteLength & 0xff;
   payloadBytes.copy(frame, FRAME_PREFIX_BYTES);
   return frame;
+}
+
+/**
+ * Validate and project the update request without ever serializing caller
+ * objects.  In particular, descriptor reads reject accessors and copy only
+ * primitive allowlisted values, so JSON.stringify cannot invoke a caller's
+ * getter or toJSON hook after validation.
+ */
+function snapshotUpdateParams(value: unknown): Record<string, unknown> {
+  const values = readExactDataProperties(value, ["id", "expectedRevision", "patch"]);
+  const id = values.id;
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    Buffer.byteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    !isSafeIdentifier(id)
+  ) {
+    throw new TypeError("nook-mcp: update parameters are invalid");
+  }
+  const expectedRevision = values.expectedRevision;
+  if (
+    typeof expectedRevision !== "string" ||
+    expectedRevision.length === 0 ||
+    !/^rev_[0-9a-f]{32}$/.test(expectedRevision)
+  ) {
+    throw new TypeError("nook-mcp: update parameters are invalid");
+  }
+
+  const output = Object.create(null) as Record<string, unknown>;
+  output.id = id;
+  output.expectedRevision = expectedRevision;
+  output.patch = snapshotUpdatePatch(values.patch);
+  return Object.freeze(output);
+}
+
+function readExactDataProperties(
+  value: unknown,
+  expected: readonly string[],
+): Record<string, unknown> {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw new TypeError("nook-mcp: update parameters are invalid");
+  }
+  if (value === null || typeof value !== "object" || isArray) {
+    throw new TypeError("nook-mcp: update parameters are invalid");
+  }
+  const record = value as object;
+  try {
+    const prototype = Object.getPrototypeOf(record);
+    if (prototype !== OBJECT_PROTOTYPE && prototype !== null) {
+      throw new TypeError("nook-mcp: update parameters are invalid");
+    }
+    const names = Object.getOwnPropertyNames(record);
+    if (Object.getOwnPropertySymbols(record).length !== 0 || names.length !== expected.length) {
+      throw new TypeError("nook-mcp: update parameters are invalid");
+    }
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of expected) {
+      if (!names.includes(key)) throw new TypeError("nook-mcp: update parameters are invalid");
+      const descriptor = Object.getOwnPropertyDescriptor(record, key);
+      if (descriptor === undefined || descriptor.enumerable !== true || !("value" in descriptor)) {
+        throw new TypeError("nook-mcp: update parameters are invalid");
+      }
+      result[key] = descriptor.value;
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "nook-mcp: update parameters are invalid") {
+      throw error;
+    }
+    throw new TypeError("nook-mcp: update parameters are invalid");
+  }
+}
+
+function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  if (value === null || typeof value !== "object" || isArray) {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  const patch = value as object;
+  let names: string[];
+  try {
+    const prototype = Object.getPrototypeOf(patch);
+    if (prototype !== OBJECT_PROTOTYPE && prototype !== null) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    names = Object.getOwnPropertyNames(patch);
+    if (Object.getOwnPropertySymbols(patch).length !== 0 || names.length === 0) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "nook-mcp: update patch is invalid") {
+      throw error;
+    }
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+
+  const output = Object.create(null) as Record<string, unknown>;
+  for (const key of names) {
+    if (!isUpdatePatchField(key)) throw new TypeError("nook-mcp: update patch is invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(patch, key);
+    if (descriptor === undefined || descriptor.enumerable !== true || !("value" in descriptor)) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    const raw = descriptor.value;
+    if (key === "tags") {
+      output[key] = snapshotUpdateTags(raw);
+    } else if (key === "title") {
+      output[key] = requireBoundedSocketString(raw, 256, false);
+    } else if (key === "content") {
+      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxQueryBytes, false);
+    } else if (key === "notebookId") {
+      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxIdentifierBytes, true);
+    } else if (typeof raw !== "boolean") {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    } else {
+      output[key] = raw;
+    }
+  }
+  return Object.freeze(output);
+}
+
+function isUpdatePatchField(value: string): boolean {
+  return (
+    value === "title" ||
+    value === "content" ||
+    value === "notebookId" ||
+    value === "tags" ||
+    value === "pinned" ||
+    value === "favorite"
+  );
+}
+
+function requireBoundedSocketString(value: unknown, maxBytes: number, identifier: boolean): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxBytes) {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  if (Buffer.byteLength(value, "utf8") > maxBytes || hasControlCharacter(value)) {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  if (identifier && !isSafeIdentifier(value)) {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  return value;
+}
+
+function snapshotUpdateTags(value: unknown): readonly string[] {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+  if (!isArray) throw new TypeError("nook-mcp: update patch is invalid");
+  const array = value as object;
+  let length: number;
+  let names: string[];
+  try {
+    const prototype = Object.getPrototypeOf(array);
+    if (prototype !== ARRAY_PROTOTYPE && prototype !== null) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(array, "length");
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== "number"
+    ) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    length = lengthDescriptor.value;
+    if (!Number.isSafeInteger(length) || length === 0 || length > 16) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    names = Object.getOwnPropertyNames(array);
+    if (Object.getOwnPropertySymbols(array).length !== 0 || names.length !== length + 1) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "nook-mcp: update patch is invalid") {
+      throw error;
+    }
+    throw new TypeError("nook-mcp: update patch is invalid");
+  }
+
+  const output: string[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    if (!names.includes(key)) throw new TypeError("nook-mcp: update patch is invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(array, key);
+    if (descriptor === undefined || descriptor.enumerable !== true || !("value" in descriptor)) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    const entry = descriptor.value;
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      Buffer.byteLength(entry, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(entry)
+    ) {
+      throw new TypeError("nook-mcp: update patch is invalid");
+    }
+    output.push(entry);
+  }
+  Object.setPrototypeOf(output, null);
+  return Object.freeze(output);
 }
 
 async function writeAll(socket: Socket, frame: Uint8Array): Promise<void> {
@@ -447,9 +757,95 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         result: Object.freeze({ kind: "note", note: decodeNote(resultRecord.note) }),
       }) as unknown as RpcAnyResponseEnvelope;
     }
-    throw new Error("invalid response");
-  }
-  if (!hasExactOwnKeys(candidate, ["id", "ok", "error"])) {
+    if (resultRecord.kind === "create") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "id", "titleBytes", "contentBytes"]) ||
+        typeof resultRecord.id !== "string" ||
+        !isSafeIdentifier(resultRecord.id) ||
+        Buffer.byteLength(resultRecord.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        typeof resultRecord.titleBytes !== "number" ||
+        !Number.isInteger(resultRecord.titleBytes) ||
+        resultRecord.titleBytes < 0 ||
+        resultRecord.titleBytes > 256 ||
+        typeof resultRecord.contentBytes !== "number" ||
+        !Number.isInteger(resultRecord.contentBytes) ||
+        resultRecord.contentBytes < 0 ||
+        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "create",
+          id: resultRecord.id,
+          titleBytes: resultRecord.titleBytes,
+          contentBytes: resultRecord.contentBytes,
+        }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
+    if (resultRecord.kind === "append") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "id", "fragmentBytes"]) ||
+        typeof resultRecord.id !== "string" ||
+        !isSafeIdentifier(resultRecord.id) ||
+        Buffer.byteLength(resultRecord.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        typeof resultRecord.fragmentBytes !== "number" ||
+        !Number.isFinite(resultRecord.fragmentBytes) ||
+        resultRecord.fragmentBytes < 0 ||
+        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "append",
+          id: resultRecord.id,
+          fragmentBytes: resultRecord.fragmentBytes,
+        }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
+    if (resultRecord.kind === "update") {
+      const hasContentBytes = Object.hasOwn(resultRecord, "contentBytes");
+      const fields = resultRecord.appliedFields;
+      if (
+        !hasExactOwnKeys(
+          resultRecord,
+          hasContentBytes
+            ? ["kind", "id", "appliedFields", "contentBytes"]
+            : ["kind", "id", "appliedFields"],
+        ) ||
+        typeof resultRecord.id !== "string" ||
+        !isSafeIdentifier(resultRecord.id) ||
+        Buffer.byteLength(resultRecord.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        !Array.isArray(fields) ||
+        fields.length === 0 ||
+        fields.length > 6 ||
+        new Set(fields).size !== fields.length ||
+        fields.some(
+          (field) =>
+            !["title", "content", "notebookId", "tags", "pinned", "favorite"].includes(field),
+        ) ||
+        (hasContentBytes &&
+          (typeof resultRecord.contentBytes !== "number" ||
+            !Number.isFinite(resultRecord.contentBytes) ||
+            resultRecord.contentBytes < 0 ||
+            resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes))
+      )
+        throw new Error("invalid response");
+      const updateResult: Record<string, unknown> = {
+        kind: "update",
+        id: resultRecord.id,
+        appliedFields: Object.freeze([...fields]),
+      };
+      if (hasContentBytes) updateResult.contentBytes = resultRecord.contentBytes;
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze(updateResult),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
     throw new Error("invalid response");
   }
   const error = candidate.error;
@@ -555,6 +951,8 @@ function isRpcErrorCode(value: unknown): value is RpcErrorCode {
     value === "invalid_request" ||
     value === "permission_denied" ||
     value === "service_unavailable" ||
+    value === "stale_revision" ||
+    value === "conflict" ||
     value === "sync_failed" ||
     value === "vault_locked" ||
     value === "not_found"
@@ -575,7 +973,7 @@ function mapResponseEnvelope(
       result === undefined ||
       result === null ||
       typeof result !== "object" ||
-      !["search", "status", "notebooks", "note"].includes(result.kind)
+      !["search", "status", "notebooks", "note", "create", "append", "update"].includes(result.kind)
     ) {
       return { ok: false, code: "service_unavailable" };
     }

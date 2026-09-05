@@ -1,17 +1,16 @@
 /**
- * Stage 7 Slice 1 — service-side readOnly authorization contract.
+ * Stage 7 Slice 1/3 — service-side permission authorization contract.
  *
  * This suite exercises the small closed policy contract introduced for
- * Stage 7 Slice 1.  It is intentionally focused on the *policy seam*
+ * Stage 7 Slice 1 and Slice 3.  It is intentionally focused on the *policy seam*
  * itself, not on parser or handler integration.  Integration is
  * verified separately by re-running the existing Stage 5 RPC handler
  * suite, which must continue to pass unchanged.
  *
  * The contract pinned here:
  *
- *   1. The only supported permission profile is the literal
- *      `"readOnly"`.  No other profile is part of the closed contract;
- *      the factory refuses anything else at the type level.
+ *   1. The supported permission profiles are the literals
+ *      `"readOnly"`, `"readWriteNoDelete"`, and `"custom"`.
  *   2. The four current read methods — `notes.search`,
  *      `notes.status`, `notes.list_notebooks`, `notes.get` — are the
  *      only methods the `readOnly` policy admits.  Each of them
@@ -32,9 +31,7 @@
  *      vocabulary, not a free-form string.
  *
  * The policy is intentionally a *closed* tuple: any future widening
- * (e.g. `readWriteNoDelete`) requires a Stage 7 Slice ≥ 2 amendment
- * and an explicit decision record.  This test pins the closed
- * posture for the current slice.
+ * requires a later Stage 7 amendment and an explicit decision record.
  */
 
 import { describe, expect, it } from "vitest";
@@ -53,8 +50,12 @@ import {
 // ---------------------------------------------------------------------------
 
 describe("service policy — closed profile vocabulary", () => {
-  it("exposes exactly the readOnly profile in the published profile list", () => {
-    expect(SERVICE_POLICY_PROFILES).toEqual(["readOnly"]);
+  it("exposes exactly the three supported profiles in the published profile list", () => {
+    expect(Array.from(SERVICE_POLICY_PROFILES)).toEqual([
+      "readOnly",
+      "readWriteNoDelete",
+      "custom",
+    ]);
   });
 
   it("accepts the literal 'readOnly' as a supported profile", () => {
@@ -62,8 +63,8 @@ describe("service policy — closed profile vocabulary", () => {
   });
 
   it("rejects every other profile string as not a supported profile", () => {
-    expect(isServicePolicyProfile("readWriteNoDelete")).toBe(false);
-    expect(isServicePolicyProfile("custom")).toBe(false);
+    expect(isServicePolicyProfile("readWriteNoDelete")).toBe(true);
+    expect(isServicePolicyProfile("custom")).toBe(true);
     expect(isServicePolicyProfile("")).toBe(false);
     expect(isServicePolicyProfile("readonly")).toBe(false);
     expect(isServicePolicyProfile("READONLY")).toBe(false);

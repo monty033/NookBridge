@@ -130,10 +130,94 @@ export interface RpcNotesGetParams {
 }
 
 /**
- * The closed set of allowed RPC methods for the Stage 6 Slice 2
- * read-only surface.
+ * Bounded `notes.create` params.  The closed surface is exactly
+ * `title`, `content`, and the optional `notebookId`.  Tags, MIME,
+ * attachments, color, pin state, and every other upstream
+ * field are intentionally absent — they are reachable only
+ * through future dedicated methods and never through the
+ * bounded `notes.create` envelope.
+ *
+ * Title and content are bounded by the published
+ * {@link STAGE5_RPC_LIMITS} cap (`maxTitleBytes`,
+ * `maxQueryBytes` used as a generic content-byte cap).
  */
-export type RpcMethod = "notes.search" | "notes.status" | "notes.list_notebooks" | "notes.get";
+export interface RpcNotesCreateParams {
+  readonly title: string;
+  readonly content: string;
+  readonly notebookId?: string;
+}
+
+/**
+ * Bounded `notes.append` params.  The closed surface is exactly
+ * `id`, `markdownFragment`, and `expectedRevision`.  The revision
+ * is a well-formed opaque token (the format is published by the
+ * Stage 4 write contract) — anything else is rejected
+ * categorically.  Body, raw stored content, internal flags,
+ * tag relations, and every other upstream field are
+ * intentionally absent; they are reachable only through future
+ * dedicated methods.
+ */
+export interface RpcNotesAppendParams {
+  readonly id: string;
+  readonly markdownFragment: string;
+  readonly expectedRevision: string;
+}
+
+/**
+ * The closed set of patch field names the wire protocol
+ * admits inside a `notes.update` envelope.  This is the
+ * same allowlist the Stage 4 update contract publishes —
+ * `deleted`, `locked`, `password`, `force`, `readonly`, and
+ * every other field are outside the contract and fail closed
+ * with `invalid_request`.
+ */
+export type RpcNotesUpdatePatchField =
+  | "title"
+  | "content"
+  | "notebookId"
+  | "tags"
+  | "pinned"
+  | "favorite";
+
+/**
+ * Bounded patch object for `notes.update`.  At least one field
+ * must be present.  Values are bounded by the same Stage 5
+ * limits the create / append envelopes use.
+ */
+export interface RpcNotesUpdatePatch {
+  readonly title?: string;
+  readonly content?: string;
+  readonly notebookId?: string;
+  readonly tags?: readonly string[];
+  readonly pinned?: boolean;
+  readonly favorite?: boolean;
+}
+
+/**
+ * Bounded `notes.update` params.  The closed surface is exactly
+ * `id`, `expectedRevision`, and `patch`.  No other fields may
+ * cross the wire.
+ */
+export interface RpcNotesUpdateParams {
+  readonly id: string;
+  readonly expectedRevision: string;
+  readonly patch: RpcNotesUpdatePatch;
+}
+
+/**
+ * The closed set of allowed RPC methods.  Slice 3 widens the
+ * union with `notes.append` and `notes.update`.  `notes.delete`
+ * remains absent and is rejected by the wire parser as
+ * `invalid_request`.
+ */
+export type RpcMethod =
+  | "notes.search"
+  | "notes.status"
+  | "notes.list_notebooks"
+  | "notes.get"
+  | "notes.create"
+  | "notes.append"
+  | "notes.update";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -159,11 +243,32 @@ export interface RpcNotesGetRequest {
   readonly params: RpcNotesGetParams;
 }
 
+export interface RpcNotesCreateRequest {
+  readonly id: string;
+  readonly method: "notes.create";
+  readonly params: RpcNotesCreateParams;
+}
+
+export interface RpcNotesAppendRequest {
+  readonly id: string;
+  readonly method: "notes.append";
+  readonly params: RpcNotesAppendParams;
+}
+
+export interface RpcNotesUpdateRequest {
+  readonly id: string;
+  readonly method: "notes.update";
+  readonly params: RpcNotesUpdateParams;
+}
+
 export type RpcRequest =
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
   | RpcNotesListNotebooksRequest
-  | RpcNotesGetRequest;
+  | RpcNotesGetRequest
+  | RpcNotesCreateRequest
+  | RpcNotesAppendRequest
+  | RpcNotesUpdateRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -215,11 +320,54 @@ export interface RpcGetNoteResult {
   readonly note: RpcNoteMetadata;
 }
 
+/**
+ * The closed success-result shape for `notes.create`.  Only the
+ * canonical note identifier and bounded byte counts cross the
+ * boundary; the runtime's internal flags (localCommitted,
+ * remoteSynced, pendingSync, operation, contentBytes flags, etc.)
+ * are intentionally not projected.
+ */
+export interface RpcCreatedNoteResult {
+  readonly kind: "create";
+  readonly id: string;
+  readonly titleBytes: number;
+  readonly contentBytes: number;
+}
+
+/**
+ * The closed success-result shape for `notes.append`.  Only the
+ * canonical note identifier and the bounded fragment byte count
+ * cross the boundary; raw fragment text, stored content, internal
+ * flags, and revision details are intentionally not projected.
+ */
+export interface RpcAppendNoteResult {
+  readonly kind: "append";
+  readonly id: string;
+  readonly fragmentBytes: number;
+}
+
+/**
+ * The closed success-result shape for `notes.update`.  Only the
+ * canonical note identifier, the sorted list of applied field
+ * names, and the optional bounded content byte count cross the
+ * boundary.  Raw patch values, internal flags, and revision
+ * details are intentionally not projected.
+ */
+export interface RpcUpdateNoteResult {
+  readonly kind: "update";
+  readonly id: string;
+  readonly appliedFields: ReadonlyArray<RpcNotesUpdatePatchField>;
+  readonly contentBytes?: number;
+}
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
   | RpcListNotebooksResult
-  | RpcGetNoteResult;
+  | RpcGetNoteResult
+  | RpcCreatedNoteResult
+  | RpcAppendNoteResult
+  | RpcUpdateNoteResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -243,6 +391,8 @@ export type RpcErrorCode =
   | "invalid_request"
   | "permission_denied"
   | "service_unavailable"
+  | "stale_revision"
+  | "conflict"
   | "sync_failed"
   | "vault_locked"
   | "not_found";
@@ -252,6 +402,8 @@ const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
 rpcErrorMessages.invalid_request = "Invalid request";
 rpcErrorMessages.permission_denied = "Permission denied";
 rpcErrorMessages.service_unavailable = "Service unavailable";
+rpcErrorMessages.stale_revision = "Stale revision";
+rpcErrorMessages.conflict = "Conflict";
 rpcErrorMessages.sync_failed = "Sync failed";
 rpcErrorMessages.vault_locked = "Vault locked";
 rpcErrorMessages.not_found = "Not found";
@@ -533,7 +685,10 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.search" &&
     method !== "notes.status" &&
     method !== "notes.list_notebooks" &&
-    method !== "notes.get"
+    method !== "notes.get" &&
+    method !== "notes.create" &&
+    method !== "notes.append" &&
+    method !== "notes.update"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -584,6 +739,235 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
+  } else if (method === "notes.create") {
+    // Closed params surface: exactly one of the two published
+    // shapes.  Either { title, content } or
+    // { title, content, notebookId }.  Tags, MIME, attachments,
+    // and every other upstream field are rejected categorically.
+    if (
+      !keysAreExactly(paramKeys, ["title", "content"]) &&
+      !keysAreExactly(paramKeys, ["title", "content", "notebookId"])
+    ) {
+      throw rpcProtocolError("rpc protocol: create params have unexpected fields");
+    }
+    const title = paramsRecord.title;
+    if (
+      typeof title !== "string" ||
+      title.length === 0 ||
+      title.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
+      utf8ByteLength(title, STAGE5_RPC_LIMITS.maxTitleBytes) > STAGE5_RPC_LIMITS.maxTitleBytes ||
+      hasControlCharacter(title)
+    ) {
+      throw rpcProtocolError("rpc protocol: request create title is invalid");
+    }
+    const content = paramsRecord.content;
+    if (
+      typeof content !== "string" ||
+      content.length === 0 ||
+      content.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      utf8ByteLength(content, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(content)
+    ) {
+      throw rpcProtocolError("rpc protocol: request create content is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.title = title;
+    paramsObj.content = content;
+    if (paramKeys.length === 3) {
+      const notebookId = paramsRecord.notebookId;
+      if (
+        typeof notebookId !== "string" ||
+        notebookId.length === 0 ||
+        notebookId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(notebookId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(notebookId)
+      ) {
+        throw rpcProtocolError("rpc protocol: request create notebookId is invalid");
+      }
+      paramsObj.notebookId = notebookId;
+    }
+  } else if (method === "notes.append") {
+    // Closed params surface: exactly { id, markdownFragment,
+    // expectedRevision } in any object-key order.  Anything
+    // else — body, content, tag lists, force flags — is rejected
+    // categorically.  The revision token must match the closed
+    // `rev_<32 hex chars>` format published by the Stage 4 write
+    // contract.
+    if (!keysAreExactly(paramKeys, ["id", "markdownFragment", "expectedRevision"])) {
+      throw rpcProtocolError("rpc protocol: append params have unexpected fields");
+    }
+    const noteId = paramsRecord.id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    ) {
+      throw rpcProtocolError("rpc protocol: request append note id is invalid");
+    }
+    const markdownFragment = paramsRecord.markdownFragment;
+    if (
+      typeof markdownFragment !== "string" ||
+      markdownFragment.length === 0 ||
+      markdownFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxQueryBytes) >
+        STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(markdownFragment)
+    ) {
+      throw rpcProtocolError("rpc protocol: request append markdown fragment is invalid");
+    }
+    const expectedRevision = paramsRecord.expectedRevision;
+    if (
+      typeof expectedRevision !== "string" ||
+      expectedRevision.length === 0 ||
+      !isWellFormedRevisionToken(expectedRevision)
+    ) {
+      throw rpcProtocolError("rpc protocol: request append revision token is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+    paramsObj.markdownFragment = markdownFragment;
+    paramsObj.expectedRevision = expectedRevision;
+  } else if (method === "notes.update") {
+    // Closed params surface: exactly { id, expectedRevision, patch }.
+    // The patch must itself be a closed object whose keys are a
+    // non-empty subset of the Stage 4 update allowlist.  Any other
+    // field — `deleted`, `locked`, `force`, `password`, `readonly` —
+    // is rejected categorically.
+    if (!keysAreExactly(paramKeys, ["id", "expectedRevision", "patch"])) {
+      throw rpcProtocolError("rpc protocol: update params have unexpected fields");
+    }
+    const noteId = paramsRecord.id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    ) {
+      throw rpcProtocolError("rpc protocol: request update note id is invalid");
+    }
+    const expectedRevision = paramsRecord.expectedRevision;
+    if (
+      typeof expectedRevision !== "string" ||
+      expectedRevision.length === 0 ||
+      !isWellFormedRevisionToken(expectedRevision)
+    ) {
+      throw rpcProtocolError("rpc protocol: request update revision token is invalid");
+    }
+    const patchRecord = paramsRecord.patch;
+    if (patchRecord === null || typeof patchRecord !== "object" || arrayIsArray(patchRecord)) {
+      throw rpcProtocolError("rpc protocol: request update patch is invalid");
+    }
+    const patchObj = objectCreate(null) as Record<string, unknown>;
+    const patchKeys = objectKeys(patchRecord);
+    if (patchKeys.length === 0) {
+      throw rpcProtocolError("rpc protocol: request update patch is empty");
+    }
+    const ALLOWED_PATCH_FIELDS_READONLY: ReadonlyArray<string> = [
+      "title",
+      "content",
+      "notebookId",
+      "tags",
+      "pinned",
+      "favorite",
+    ];
+    for (let index = 0; index < patchKeys.length; index += 1) {
+      const key = patchKeys[index] as string;
+      if (!arrayContains(ALLOWED_PATCH_FIELDS_READONLY, key)) {
+        throw rpcProtocolError("rpc protocol: update patch has unsupported field");
+      }
+    }
+    if (patchRecord.title !== undefined) {
+      const value = patchRecord.title;
+      if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
+        utf8ByteLength(value, STAGE5_RPC_LIMITS.maxTitleBytes) > STAGE5_RPC_LIMITS.maxTitleBytes ||
+        hasControlCharacter(value)
+      ) {
+        throw rpcProtocolError("rpc protocol: update patch title is invalid");
+      }
+      patchObj.title = value;
+    }
+    if (patchRecord.content !== undefined) {
+      const value = patchRecord.content;
+      if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        utf8ByteLength(value, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        hasControlCharacter(value)
+      ) {
+        throw rpcProtocolError("rpc protocol: update patch content is invalid");
+      }
+      patchObj.content = value;
+    }
+    if (patchRecord.notebookId !== undefined) {
+      const value = patchRecord.notebookId;
+      if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(value, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(value)
+      ) {
+        throw rpcProtocolError("rpc protocol: update patch notebookId is invalid");
+      }
+      patchObj.notebookId = value;
+    }
+    if (patchRecord.tags !== undefined) {
+      const value = patchRecord.tags;
+      if (!arrayIsArray(value)) {
+        throw rpcProtocolError("rpc protocol: update patch tags is invalid");
+      }
+      // Closed tag bound: max 16 entries, each bounded by the
+      // published identifier cap.  Anything else is rejected.
+      if (value.length === 0 || value.length > 16) {
+        throw rpcProtocolError("rpc protocol: update patch tags count is invalid");
+      }
+      const tagArr: string[] = [];
+      for (let tagIndex = 0; tagIndex < value.length; tagIndex += 1) {
+        const entry = value[tagIndex] as unknown;
+        if (
+          typeof entry !== "string" ||
+          entry.length === 0 ||
+          entry.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+          utf8ByteLength(entry, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+            STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+          hasControlCharacter(entry)
+        ) {
+          throw rpcProtocolError("rpc protocol: update patch tag entry is invalid");
+        }
+        tagArr.push(entry);
+      }
+      objectSetPrototypeOf(tagArr, null);
+      objectFreeze(tagArr);
+      patchObj.tags = tagArr;
+    }
+    if (patchRecord.pinned !== undefined) {
+      if (typeof patchRecord.pinned !== "boolean") {
+        throw rpcProtocolError("rpc protocol: update patch pinned is invalid");
+      }
+      patchObj.pinned = patchRecord.pinned;
+    }
+    if (patchRecord.favorite !== undefined) {
+      if (typeof patchRecord.favorite !== "boolean") {
+        throw rpcProtocolError("rpc protocol: update patch favorite is invalid");
+      }
+      patchObj.favorite = patchRecord.favorite;
+    }
+    objectFreeze(patchObj);
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+    paramsObj.expectedRevision = expectedRevision;
+    paramsObj.patch = patchObj;
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");
@@ -805,6 +1189,173 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const resultPayload = objectCreate(null) as { kind: "note"; note: Record<string, JsonValue> };
       resultPayload.kind = "note";
       resultPayload.note = cleanNote;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "create") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "titleBytes", "contentBytes"],
+        "rpc protocol: create result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 4 ||
+        !keysAreExactly(resultKeys, ["kind", "id", "titleBytes", "contentBytes"])
+      ) {
+        throw rpcProtocolError("rpc protocol: create result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "created note id");
+      preflightResponseStringField(noteId, rawSum);
+      if (
+        !isNonNegativeFiniteNumber(resultRecord.titleBytes) ||
+        resultRecord.titleBytes > STAGE5_RPC_LIMITS.maxTitleBytes ||
+        !isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
+        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      ) {
+        throw rpcProtocolError("rpc protocol: create result byte counts are invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "create";
+        id: string;
+        titleBytes: number;
+        contentBytes: number;
+      };
+      resultPayload.kind = "create";
+      resultPayload.id = noteId;
+      resultPayload.titleBytes = resultRecord.titleBytes;
+      resultPayload.contentBytes = resultRecord.contentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "append") {
+      // Closed success-result shape: exactly { kind, id,
+      // fragmentBytes }.  No body, no raw stored content, no
+      // internal flags, no revision tokens cross the boundary.
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "fragmentBytes"],
+        "rpc protocol: append result has unexpected fields",
+      );
+      if (resultKeys.length !== 3 || !keysAreExactly(resultKeys, ["kind", "id", "fragmentBytes"])) {
+        throw rpcProtocolError("rpc protocol: append result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "appended note id");
+      preflightResponseStringField(noteId, rawSum);
+      if (
+        !isNonNegativeFiniteNumber(resultRecord.fragmentBytes) ||
+        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      ) {
+        throw rpcProtocolError("rpc protocol: append result fragmentBytes is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "append";
+        id: string;
+        fragmentBytes: number;
+      };
+      resultPayload.kind = "append";
+      resultPayload.id = noteId;
+      resultPayload.fragmentBytes = resultRecord.fragmentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "update") {
+      // Closed success-result shape: exactly { kind, id,
+      // appliedFields, contentBytes? }.  Raw patch values,
+      // internal flags, and revision tokens are never projected.
+      // The optional contentBytes field is only present when the
+      // patch contains a content update — otherwise it is
+      // intentionally omitted so the success envelope stays minimal.
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "appliedFields", "contentBytes"],
+        "rpc protocol: update result has unexpected fields",
+      );
+      // Validate the exact own-key shape: the three required keys
+      // must be present, and contentBytes may additionally be
+      // present.  Anything else — duplicate/unknown fields — is
+      // rejected categorically.
+      const requiredKeys: ReadonlyArray<string> = ["kind", "id", "appliedFields"];
+      if (!keysAreExactly(resultKeys, requiredKeys)) {
+        const hasAllRequired =
+          arrayContains(resultKeys, "kind") &&
+          arrayContains(resultKeys, "id") &&
+          arrayContains(resultKeys, "appliedFields") &&
+          resultKeys.length <= 4;
+        if (!hasAllRequired) {
+          throw rpcProtocolError("rpc protocol: update result has unexpected fields");
+        }
+        // Allow the optional contentBytes fourth key.
+        if (
+          resultKeys.length !== 4 ||
+          !arrayContains(resultKeys, "contentBytes") ||
+          !keysAreExactly(resultKeys, ["kind", "id", "appliedFields", "contentBytes"])
+        ) {
+          throw rpcProtocolError("rpc protocol: update result has unexpected fields");
+        }
+      }
+      const noteId = resultRecord.id;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "updated note id");
+      preflightResponseStringField(noteId, rawSum);
+      // appliedFields must be a non-empty bounded array whose every
+      // entry is one of the closed update patch allowlist names.
+      // No duplicate/unknown entries cross the boundary.
+      const appliedFields = resultRecord.appliedFields;
+      if (
+        appliedFields === undefined ||
+        !arrayIsArray(appliedFields) ||
+        appliedFields.length === 0 ||
+        appliedFields.length > 6
+      ) {
+        throw rpcProtocolError("rpc protocol: update result appliedFields is invalid");
+      }
+      const APPLIED_FIELDS_ALLOWLIST: ReadonlyArray<string> = [
+        "title",
+        "content",
+        "notebookId",
+        "tags",
+        "pinned",
+        "favorite",
+      ];
+      const cleanAppliedFields: string[] = [];
+      for (let index = 0; index < appliedFields.length; index += 1) {
+        if (!reflectApply(objectHasOwnProperty, appliedFields, [index])) {
+          throw rpcProtocolError(
+            "rpc protocol: update result appliedFields must contain only own numeric entries",
+          );
+        }
+        const entry = appliedFields[index] as unknown;
+        if (
+          typeof entry !== "string" ||
+          !arrayContains(APPLIED_FIELDS_ALLOWLIST, entry) ||
+          arrayContains(cleanAppliedFields, entry)
+        ) {
+          throw rpcProtocolError("rpc protocol: update result appliedFields entry is invalid");
+        }
+        cleanAppliedFields.push(entry);
+      }
+      objectSetPrototypeOf(cleanAppliedFields, null);
+      objectFreeze(cleanAppliedFields);
+      const resultPayload = objectCreate(null) as {
+        kind: "update";
+        id: string;
+        appliedFields: ReadonlyArray<string>;
+        contentBytes?: number;
+      };
+      resultPayload.kind = "update";
+      resultPayload.id = noteId;
+      resultPayload.appliedFields = cleanAppliedFields;
+      if (
+        resultRecord.contentBytes !== undefined &&
+        (!isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
+          resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes)
+      ) {
+        throw rpcProtocolError("rpc protocol: update result contentBytes is invalid");
+      }
+      if (resultRecord.contentBytes !== undefined) {
+        resultPayload.contentBytes = resultRecord.contentBytes;
+      }
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
     throw rpcProtocolError("rpc protocol: result kind is not allowed");
@@ -1421,4 +1972,45 @@ function hasControlCharacter(value: string): boolean {
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;
+}
+
+/**
+ * Defensive check for an opaque Notesnook revision token as published by the
+ * Stage 4 write contract.
+ *
+ * The token is structurally `rev_` followed by exactly 32 lowercase
+ * hexadecimal characters — the truncated SHA-256 of the observed note
+ * revision state.  It is treated as opaque: it is a digest, never a
+ * counter, never a path, and never a credential label, so any deviation
+ * from the literal shape is rejected categorically at the wire
+ * boundary.
+ *
+ * This helper is intentionally permissive about its inputs: any
+ * non-string / wrong-shape / wrong-length value returns `false`
+ * without throwing.  A hostile Proxy that throws from `String.length`
+ * is also tolerated — the helper only ever inspects the value
+ * through typed access, never through a method call that could
+ * trigger a `Symbol.match` trap.
+ */
+function isWellFormedRevisionToken(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  // Cheap O(1) prefix check, then walk the suffix byte-by-byte so a
+  // hostile Proxy / throwing getter on a single character cannot
+  // smuggle data past the boundary.
+  if (value.length !== 36) return false;
+  if (
+    reflectApply(stringCharCodeAt, value, [0]) !== 0x72 ||
+    reflectApply(stringCharCodeAt, value, [1]) !== 0x65 ||
+    reflectApply(stringCharCodeAt, value, [2]) !== 0x76 ||
+    reflectApply(stringCharCodeAt, value, [3]) !== 0x5f
+  ) {
+    return false;
+  }
+  for (let index = 4; index < 36; index += 1) {
+    const code = reflectApply(stringCharCodeAt, value, [index]);
+    const isDecimal = code >= 0x30 && code <= 0x39;
+    const isLowerHex = code >= 0x61 && code <= 0x66;
+    if (!isDecimal && !isLowerHex) return false;
+  }
+  return true;
 }

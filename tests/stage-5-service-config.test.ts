@@ -305,15 +305,36 @@ describe("Stage 5 strict service configuration", () => {
       expect(result.error.category).toBe("invalid_credential_name");
     });
 
-    it("rejects any readPolicy other than the exact four-entry allowlist", () => {
+    it("accepts the legacy four-entry readPolicy and bounded write-capable subsets", () => {
+      for (const policy of [
+        VALID_FIXTURE.readPolicy,
+        ["notes.search", "notes.create"],
+        ["notes.append", "notes.update"],
+        [
+          "notes.search",
+          "notes.status",
+          "notes.list_notebooks",
+          "notes.get",
+          "notes.create",
+          "notes.append",
+          "notes.update",
+        ],
+      ]) {
+        const file = writeJsonConfig("valid-write-policy", mutate({ readPolicy: policy }));
+        const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error("unreachable");
+        expect(result.config.readPolicy).toEqual(policy);
+        expect(Object.isFrozen(result.config.readPolicy)).toBe(true);
+      }
+    });
+
+    it("rejects readPolicy entries outside the closed RpcMethod universe", () => {
       for (const policy of [
         [],
-        ["notes.search"],
         ["notes.write"],
-        ["notes.search", "notes.write"],
-        ["notes.search", "notes.status", "notes.list_notebooks"],
-        ["notes.search", "notes.list_notebooks", "notes.status", "notes.get"],
-        ["notes.search", "notes.status", "notes.list_notebooks", "notes.get", "notes.write"],
+        ["notes.delete"],
+        ["notes.search", "notes.delete"],
         ["notes.search", "anything-else"],
         ["NOTES.SEARCH"],
         "notes.search",
@@ -324,6 +345,17 @@ describe("Stage 5 strict service configuration", () => {
         if (result.ok) throw new Error("unreachable");
         expect(result.error.category).toBe("invalid_read_policy");
       }
+    });
+
+    it("rejects duplicate readPolicy entries instead of widening by normalization", () => {
+      const file = writeJsonConfig("duplicate-read-policy", {
+        ...VALID_FIXTURE,
+        readPolicy: ["notes.search", "notes.search"],
+      });
+      const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error.category).toBe("invalid_read_policy");
     });
 
     it("rejects unknown top-level fields", () => {

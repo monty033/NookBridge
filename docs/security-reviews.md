@@ -496,3 +496,46 @@ checkpoint remains explicitly deferred.
   security, secret provisioning, and deployment isolation — remains deferred
   to a separately authorized review. This fix removes a local initialization
   defect only; it is not evidence that live authentication is safe or enabled.
+
+## Chronological ledger — Stage 7 Slice 3 bounded write surface (2026-09-03)
+
+This entry records the profile-aware, delete-free `notes.create`,
+`notes.append`, and `notes.update` surface across the RPC protocol, service
+policy/runtime, Unix-socket client/server, and MCP proxy. Authentication,
+synchronization, delete, generic dispatch, and live account operations remain
+absent.
+
+- **Scope:** `src/config/service-config.ts`, `src/core/notesnook-write-adapter.ts`,
+  `src/mcp/nook-mcp-server.ts`, `src/mcp/socket-client.ts`, `src/nookd.ts`,
+  `src/service/nookd-server.ts`, `src/service/rpc-handler.ts`,
+  `src/service/rpc-protocol.ts`, `src/service/service-audit.ts`,
+  `src/service/service-policy.ts`, `src/service/service-runtime.ts`,
+  `docs/stage-6-mcp-proxy.md`, and the corresponding Stage 4–7 regression tests.
+- **Authorization:** `readOnly` admits the four read methods;
+  `readWriteNoDelete` admits the four reads plus create/append/update;
+  `custom` admits only a bounded duplicate-free subset of that closed universe.
+  `notes.delete` is absent from config validation, policy factories, the RPC
+  union/parser/dispatcher, socket transport, and MCP registration.
+- **Boundary controls:** requests and responses use closed shapes, bounded
+  strings/arrays/numeric byte counts, categorical errors, and safe projections.
+  Adapter commands and socket update patches are snapshotted before mutation
+  or JSON serialization, preventing stateful getters and `toJSON` hooks from
+  changing validated values or crossing the boundary.
+- **Production wiring:** the daemon constructs the selected frozen policy from
+  root-owned configuration, forwards it through the Unix server to the RPC
+  handler, and captures only the bounded runtime capabilities for create,
+  append, and update.
+- **Verification:** `nix develop --offline --command just check` PASS —
+  41 test files, 1,111 tests; typecheck, lint, format, build, and
+  `git diff --check` PASS. Focused repair suites also passed, including 171
+  config/startup/policy/write tests.
+- **Independent review:** delegation `deleg_616393e1`, fresh review of the
+  complete unstaged diff, **PASS** with empty `security_concerns` and
+  `logic_errors`. One non-blocking consistency suggestion remains: the
+  `createNote` runtime wrapper could preserve adapter-specific errors like
+  append/update do; this is not required for the current closed error
+  vocabulary.
+- **Live exercise:** not performed. No credentials, authentication, sync,
+  real account, or live Notesnook write was used.
+- **Residual boundary:** the production write-capable profile is source-side
+  and configuration-driven; deployment must explicitly select that policy.
