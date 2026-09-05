@@ -24,6 +24,8 @@
  *   3  auth credential-collection failure (EOF, malformed, etc.)
  */
 
+import { Buffer } from "node:buffer";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 
@@ -52,6 +54,12 @@ import {
   runConflictCommand,
 } from "./core/notesnook-conflict-admin.js";
 import { createStdioPrompt } from "./auth/secret-input.js";
+import {
+  formatRecoverCommandResult,
+  formatRecoverLocalStateHelp,
+  parseRecoverLocalStateCommand,
+  runRecoverLocalState,
+} from "./operator/recover-local-state.js";
 
 type Args = {
   stateDir?: string;
@@ -60,6 +68,7 @@ type Args = {
   syncArgs?: readonly string[];
   writeArgs?: readonly string[];
   conflictsArgs?: readonly string[];
+  recoverArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -76,9 +85,10 @@ function normalizeCliArgv(argv: unknown): string[] {
 function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   const [, , subcommand, ...rest] = argv;
   const args: Args = {};
-  // `auth` and `sync` are sealed subcommand trees: their options are
-  // parsed by the per-subcommand parser, not the top-level one.  Pass
-  // `rest` through verbatim so that forbidden flags (e.g. `--password`)
+  // `auth`, `sync`, `write`, `conflicts`, and `recover-local-state`
+  // are sealed subcommand trees: their options are parsed by the
+  // per-subcommand parser, not the top-level one.  Pass `rest`
+  // through verbatim so that forbidden flags (e.g. `--password`)
   // reach the subcommand parser and surface as a parse error rather
   // than being silently consumed.
   if (subcommand === "auth") {
@@ -95,6 +105,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "conflicts") {
     args.conflictsArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "recover-local-state") {
+    args.recoverArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -146,6 +160,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "conflicts") {
     return runConflicts(args);
   }
+  if (subcommand === "recover-local-state") {
+    return runRecover(args);
+  }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
@@ -183,6 +200,94 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
   return 0;
+}
+
+/**
+ * Dispatch the bounded local-state recovery tree without constructing the
+ * normal live runtime or creating a missing state directory.
+ */
+async function runRecover(args: Args): Promise<number> {
+  const rawArgs = args.recoverArgs ?? [];
+  const commandArgs: string[] = [];
+  let stateDir: string | undefined;
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const current = rawArgs[i];
+    if (current === undefined) {
+      process.stderr.write("nookctl: recover-local-state: invalid command input\n");
+      return 2;
+    }
+    if (current === "--state-dir") {
+      const value = rawArgs[i + 1];
+      if (value === undefined || value.startsWith("-") || stateDir !== undefined) {
+        process.stderr.write("nookctl: recover-local-state: invalid command input\n");
+        return 2;
+      }
+      stateDir = value;
+      i += 1;
+      continue;
+    }
+    commandArgs.push(current);
+  }
+
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: recover-local-state: invalid command environment\n");
+    return 2;
+  }
+  const parsed = parseRecoverLocalStateCommand(commandArgs, environment);
+  if (parsed.kind === "error") {
+    process.stderr.write(`nookctl: ${parsed.message}\n`);
+    return parsed.exitCode;
+  }
+  if (parsed.command.kind === "help") {
+    process.stdout.write(formatRecoverLocalStateHelp());
+    return 0;
+  }
+
+  const effectiveStateDir = resolve(
+    stateDir ?? environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"),
+  );
+  const dbPath = resolve(join(effectiveStateDir, "nookbridge.db"));
+  const dbKey =
+    parsed.command.kind === "inspect" || parsed.command.kind === "reinitialize"
+      ? readExistingKeyWithoutMutation(resolve(join(effectiveStateDir, ".d/db.key")))
+      : undefined;
+  const result = await runRecoverLocalState({
+    argv: commandArgs,
+    env: environment,
+    stateDir: effectiveStateDir,
+    dbPath,
+    ...(dbKey === undefined ? {} : { dbKey }),
+  });
+  process.stdout.write(`${formatRecoverCommandResult(result)}\n`);
+  return result.kind === "error" ? result.exitCode : 0;
+}
+
+/** Read an existing development key without mkdir/chmod or following links. */
+function readExistingKeyWithoutMutation(keyPath: string): string | undefined {
+  let fd = -1;
+  try {
+    fd = openSync(keyPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 4096) return undefined;
+    const bytes = Buffer.alloc(stat.size);
+    const read = readSync(fd, bytes, 0, stat.size, 0);
+    if (read !== stat.size) return undefined;
+    const key = bytes.toString("utf8").trim();
+    return key.length > 0 ? key : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== -1) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
 }
 
 /**
