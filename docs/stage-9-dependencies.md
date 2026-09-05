@@ -1,7 +1,7 @@
 # Stage 9 dependency and licensing evidence
 
 Date: 2026-09-05
-Source revision: `ef5f53d040f5791a37e3761a09c5e42d9e4a4889`
+Source candidate under review: `94ad5c0a`
 
 ## Lockfile-derived production inventory
 
@@ -31,9 +31,13 @@ Direct runtime license summaries remain in `docs/licensing.md`.
 
 - `nix develop --offline --command just check`: **PASS** — 41 test files,
   1,112 tests; typecheck, lint, format, build, and diff checks pass.
-- `nix flake check --no-build`: **PASS**.
-- `nix build --no-link .#checks.x86_64-linux.nookbridge-service`: **PASS**.
-- `nix build --no-link .#checks.x86_64-linux.nookbridge-isolation`: **PASS**.
+- The following checks were run in the separate `nix-config` repository against
+  its then-current source pin `1f433a421881031c407d84ab977ffda57d72c99c`, not
+  against this source candidate: `nix flake check --no-build`,
+  `nix build --no-link .#checks.x86_64-linux.nookbridge-service`, and
+  `nix build --no-link .#checks.x86_64-linux.nookbridge-isolation` — **PASS**.
+- Those external results must be rerun after the reviewed source is merged and
+  the deployment pin is updated.
 
 ## Release status
 

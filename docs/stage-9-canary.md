@@ -3,14 +3,20 @@
 Status: **PASS WITH FOLLOW-UP — release blocked**
 
 Date: 2026-09-05
-Source under review: `ef5f53d040f5791a37e3761a09c5e42d9e4a4889`
-Deployment source currently pinned: `9df0c341` before the separate pin PR
+Source candidate under review: `94ad5c0a`
+Deployment/source used by the external VM baseline: `1f433a421881031c407d84ab977ffda57d72c99c`
 
-## Clean-VM canary
+The VM evidence below was produced from `/var/lib/hermes/workspace/nix-config`
+on the separate pin branch, not from this source repository. It is baseline
+evidence only and does not substantiate the source candidate until the pin is
+updated and the checks are rerun.
+
+## External clean-VM baseline
 
 Command:
 
 ```text
+cd /var/lib/hermes/workspace/nix-config
 nix build --no-link .#checks.x86_64-linux.nookbridge-isolation
 ```
 
@@ -49,5 +55,6 @@ Required target-host receipt:
 
 ## Decision
 
-The clean-VM result is insufficient for release approval until the target-host
-canary is run against the reviewed source pin.
+The external baseline result is insufficient for release approval until the
+source pin is updated, the VM check is rerun against the reviewed candidate,
+and the target-host canary is run against that same pin.

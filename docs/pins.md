@@ -68,10 +68,12 @@ during Stage 0; any refresh must be a deliberate, reviewed commit.
 
 | Item | Value |
 |---|---|
-| NookBridge source revision | `1f433a421881031c407d84ab977ffda57d72c99c` (merged PR #46) |
+| Source candidate under Stage 9 review | `94ad5c0a` (socket-mode hardening and evidence ledger) |
+| NookBridge source revision currently pinned by deployment | `1f433a421881031c407d84ab977ffda57d72c99c` (merged PR #46) |
 | Branch | `main` |
 | Package version | `0.0.0-stage.0` (`private: true`; internal Nix artifact, not a public release) |
 
-The bridge does not yet have a public semver release. The current artifact is
-an internal, private Nix deployment candidate; public distribution remains
+The bridge does not yet have a public semver release. The Nix deployment
+remains pinned to the merged Stage 7 Slice 3 source until the separate source
+remediation is reviewed, merged, and repinned. Public distribution remains
 blocked on the licensing and release-identity review.

@@ -16,7 +16,7 @@
  * upstream's job once `@notesnook/core` is a runtime dependency.
  */
 
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
 import Database, { type Database as DatabaseType } from "better-sqlite3-multiple-ciphers";
 
@@ -178,6 +178,55 @@ export class SqliteStorage {
       this.db.close();
     } catch {
       /* best-effort */
+    }
+  }
+}
+
+export type EncryptedSqliteInspection =
+  | { status: "healthy" }
+  | { status: "missing" }
+  | { status: "corrupt" }
+  | { status: "unreadable" };
+
+/**
+ * Inspect an existing encrypted database without creating or modifying state.
+ * This is intentionally separate from SqliteStorage, whose writable handle
+ * hardens files and is reserved for normal service ownership.
+ */
+export function inspectEncryptedSqlite(options: {
+  dbPath: string;
+  key: string;
+}): EncryptedSqliteInspection {
+  try {
+    const stat = lstatSync(options.dbPath);
+    if (!stat.isFile()) return { status: "unreadable" };
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return { status: "missing" };
+    return { status: "unreadable" };
+  }
+
+  let db: DatabaseType | undefined;
+  try {
+    db = new Database(options.dbPath, { readonly: true, fileMustExist: true });
+    db.pragma("cipher='sqlcipher'");
+    db.pragma(`key="${escapeKey(options.key)}"`);
+    const rows = db.pragma("integrity_check(100)") as unknown;
+    if (!Array.isArray(rows) || rows.length === 0) return { status: "corrupt" };
+    const healthy = rows.every(
+      (row: unknown) =>
+        typeof row === "object" &&
+        row !== null &&
+        "integrity_check" in row &&
+        (row as { integrity_check?: unknown }).integrity_check === "ok",
+    );
+    return healthy ? { status: "healthy" } : { status: "corrupt" };
+  } catch {
+    return { status: "unreadable" };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // The inspection result is already categorical; never leak close errors.
     }
   }
 }

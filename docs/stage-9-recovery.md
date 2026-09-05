@@ -3,7 +3,7 @@
 Status: **FAIL — recovery gate incomplete**
 
 Date: 2026-09-05
-Source under review: `ef5f53d040f5791a37e3761a09c5e42d9e4a4889`
+Source candidate under review: `94ad5c0a`
 Permission profile: deployed `readOnly`
 
 ## Current verified behavior
@@ -12,8 +12,10 @@ Permission profile: deployed `readOnly`
   authentication, synchronization, or live writes during this review.
 - The Nix service uses a dedicated state directory and a separately injected
   systemd credential.
-- The NixOS isolation VM verifies the service can be stopped/restarted by the
-  test harness without exposing the state directory or credential to clients.
+- An external NixOS isolation VM baseline in `nix-config` verifies the service
+  can be stopped/restarted by the test harness without exposing the state
+  directory or credential to clients. That baseline uses source pin `1f433a42`
+  and is not evidence for this candidate until repinned and rerun.
 
 ## Missing recovery capability
 

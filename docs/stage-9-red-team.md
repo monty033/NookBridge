@@ -1,7 +1,7 @@
 # Stage 9 red-team evidence
 
 Run timestamp: 2026-09-05T21:15:10Z
-Bridge revision under review: `ef5f53d040f5791a37e3761a09c5e42d9e4a4889`
+Bridge revision under review: `94ad5c0a`
 Working remediation branch: `stage9-source-hardening`
 Permission profile: `readOnly` in deployment; write-capable profiles remain disabled
 Canaries: generated fixture values only; no real credentials or note content
@@ -18,7 +18,7 @@ Red-team run: RT-1
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: IDs only, never real secrets
 Attempts: inspect RPC union/parser/dispatcher and exercise unknown/delete-shaped requests
@@ -36,7 +36,7 @@ Red-team run: RT-2
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: bounded malformed frames only
 Attempts: truncated frames, invalid JSON, wrong request shapes, invalid response shapes
@@ -53,7 +53,7 @@ Red-team run: RT-3
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: synthetic boundary strings and byte counts
 Attempts: maximum permitted values plus over-limit title, payload, frame, and array inputs
@@ -71,7 +71,7 @@ Red-team run: RT-4
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: synthetic note IDs and bounded queries
 Attempts: concurrent/repeated requests through the bounded server configuration and retry/error paths covered by tests
@@ -90,7 +90,7 @@ Red-team run: RT-5
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`, plus source-only `readWriteNoDelete` policy tests
 Canaries used: synthetic IDs only
 Attempts: invoke create/append/update/delete-shaped operations under read-only policy
@@ -108,7 +108,7 @@ Red-team run: RT-6
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: generated secret-shaped markers, never real secrets
 Attempts: malformed input and CLI failure paths; inspect bounded projections and output
@@ -127,7 +127,7 @@ Red-team run: RT-7
 Date/version: 2026-09-05 / source revision above
 Model: local Vitest + offline Nix devShell
 NixOS revision: current nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: temporary sockets and synthetic requests
 Attempts: shutdown during requests, repeated startup/cleanup, and runtime lock paths
@@ -145,7 +145,7 @@ Red-team run: RT-8
 Date/version: 2026-09-05 / source revision above
 Model: NixOS VM test plus source regression test
 NixOS revision: nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: deployed `readOnly`
 Canaries used: generated VM fixture credential only
 Attempts: group member and non-member socket access; state and credential reads
@@ -154,9 +154,11 @@ Expected denials observed: outsider denied socket access; client denied state/cr
 Regression tests added: source default-mode regression on remediation branch
 Decision: PASS WITH FOLLOW-UP
 
-Evidence: `nix build --no-link .#checks.x86_64-linux.nookbridge-isolation` PASS;
-`tests/nookbridge-isolation.nix` assertions 1–11; source focused test proves the
-daemon defaults to mode `0770`. The source hardening commit is not deployed yet.
+Evidence: external `nix-config` check
+`nix build --no-link .#checks.x86_64-linux.nookbridge-isolation` PASS against
+source pin `1f433a42`; the source focused test in this repository proves the
+candidate daemon defaults to mode `0770`. The external VM result must be rerun
+after the candidate is merged and pinned.
 
 ### RT-9 — Nix store and runtime secret canary
 
@@ -164,7 +166,7 @@ Red-team run: RT-9
 Date/version: 2026-09-05 / source revision above
 Model: NixOS VM package scan
 NixOS revision: nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: deployed `readOnly`
 Canaries used: VM-generated random fixture only
 Attempts: binary-safe scan of the built package output for the runtime-generated fixture bytes
@@ -173,8 +175,9 @@ Expected denials observed: fixture absent from package output; root-only credent
 Regression tests added: existing NixOS isolation scan
 Decision: PASS WITH FOLLOW-UP
 
-The clean-VM fixture scan passed. A target-host scan after pin deployment is
-still required.
+The external clean-VM fixture scan passed against source pin `1f433a42`. It is
+not candidate evidence until the source is repinned and the scan is rerun. A
+target-host scan after pin deployment is still required.
 
 ### RT-10 — dependency, package, and release-boundary review
 
@@ -182,7 +185,7 @@ Red-team run: RT-10
 Date/version: 2026-09-05 / source revision above
 Model: offline Nix/Node build and static inventory
 NixOS revision: nix-config `origin/master` baseline
-Bridge/core revision: `ef5f53d0`
+Bridge/core revision: `94ad5c0a`
 Permission profile: `readOnly`
 Canaries used: none
 Attempts: build/package checks, direct dependency/license inventory, diff and lock-graph review
@@ -191,8 +194,9 @@ Expected denials observed: no public artifact claimed; write policy not enabled
 Regression tests added: none
 Decision: PASS WITH FOLLOW-UP
 
-`nix flake check --no-build`, the service structural check, the isolation VM,
-and the source full gate passed. The lockfile-derived production inventory has
+The source full gate passed. External `nix-config` flake/service/isolation
+checks passed against source pin `1f433a42`; they are not candidate evidence
+until repinned and rerun. The lockfile-derived production inventory has
 221/221 license fields and is exported at
 `docs/stage-9-production-licenses.csv`. Public distribution still requires the
 human release/license review.
