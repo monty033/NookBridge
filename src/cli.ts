@@ -66,6 +66,7 @@ import {
   formatNotesResult,
   parseNotesCommand,
   runNotesCommand,
+  MAX_NOTES_EDIT_STDIN_BYTES,
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
@@ -321,11 +322,16 @@ async function runNotes(args: Args): Promise<number> {
 
   const searchQuery =
     parsed.command.kind === "search" ? readBoundedNotesStdin(MAX_NOTES_QUERY_BYTES) : undefined;
+  const editInput =
+    parsed.command.kind === "edit" ? readBoundedNotesStdin(MAX_NOTES_EDIT_STDIN_BYTES) : undefined;
+  const undoInput = parsed.command.kind === "undo" ? readBoundedNotesStdin(256) : undefined;
   let cleanup: (() => void | Promise<void>) | undefined;
   const result = await runNotesCommand({
     argv,
     env: environment,
     ...(searchQuery === undefined ? {} : { searchQuery }),
+    ...(editInput === undefined ? {} : { editInput }),
+    ...(undoInput === undefined ? {} : { undoInput }),
     createRuntime: async () => {
       const injected = _internal.notesRuntimeFactory;
       if (injected !== undefined) return injected();
@@ -348,7 +354,8 @@ async function runNotes(args: Args): Promise<number> {
   });
   try {
     process.stdout.write(formatNotesResult(result));
-    return result.kind === "error" ? result.exitCode : 0;
+    if (result.kind === "error") return result.exitCode;
+    return result.kind === "invalid-input" ? 2 : 0;
   } finally {
     if (cleanup !== undefined) {
       try {
