@@ -37,6 +37,8 @@ import {
   MAX_NOTES_QUERY_BYTES,
   parseNotesCommand,
   parseNotesSearchQuery,
+  parseNotesEditStdin,
+  parseNotesUndoStdin,
   formatNotesHelp,
   formatNotesResult,
   runNotesCommand,
@@ -750,6 +752,27 @@ describe("parseNotesCommand — malformed input guard", () => {
   });
 });
 
+describe("bounded edit and undo stdin envelopes", () => {
+  it("accepts only the closed edit JSON envelope", () => {
+    expect(
+      parseNotesEditStdin(JSON.stringify({ content: "body", undoToken: "unt_token" })),
+    ).toEqual({
+      content: "body",
+      undoToken: "unt_token",
+    });
+    expect(
+      parseNotesEditStdin(JSON.stringify({ content: "body", undoToken: "rev_bad", extra: 1 })),
+    ).toBeUndefined();
+    expect(parseNotesEditStdin("body")).toBeUndefined();
+  });
+
+  it("accepts one optional trailing newline for an opaque undo token only", () => {
+    expect(parseNotesUndoStdin("unt_token\n")).toBe("unt_token");
+    expect(parseNotesUndoStdin(" unt_token\n")).toBeUndefined();
+    expect(parseNotesUndoStdin("unt_token\n\n")).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Runner: bounded seam, runtime factory gating, categorical results.
 // ---------------------------------------------------------------------------
@@ -890,6 +913,7 @@ describe("runNotesCommand — runtime factory gating", () => {
       argv: ["edit", "--handle", "hnd_ok_12345678", APPROVE_EDIT_FLAG, "--stdin"],
       env: {},
       createRuntime: factory,
+      editInput: JSON.stringify({ content: "new", undoToken: "unt_token" }),
     });
     expect(factory).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("updated");
@@ -907,6 +931,7 @@ describe("runNotesCommand — runtime factory gating", () => {
       argv: ["undo", APPROVE_EDIT_FLAG, "--stdin"],
       env: {},
       createRuntime: factory,
+      undoInput: "unt_token",
     });
     expect(factory).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("undone");

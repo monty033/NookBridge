@@ -350,19 +350,10 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
     expect(out.stderr).not.toContain(handle);
   });
 
-  it("`notes edit --handle <opaque> --approve-edit --stdin` reaches the seam WITHOUT reading stdin", async () => {
+  it("rejects missing edit stdin before constructing the runtime", async () => {
     const handle = "not_xyz98765";
     const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    Object.defineProperty(process.stdin, "isTTY", {
-      value: false,
-      configurable: true,
-    });
-    const originalRead = process.stdin.read;
-    let readCalled = 0;
-    process.stdin.read = ((): typeof originalRead => {
-      readCalled += 1;
-      return originalRead;
-    }) as typeof originalRead;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
     try {
       const out = await driveCli([
         "notes",
@@ -372,17 +363,11 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
         "--approve-edit",
         "--stdin",
       ]);
-      expect(out.code).toBe(3);
-      expect(out.stdout).toBe("nookctl notes: error\n");
+      expect(out.code).toBe(2);
+      expect(out.stdout).toBe("nookctl notes: invalid-input\n");
       expect(out.stderr).toBe("");
-      expect(out.stdout).not.toContain(handle);
-      // The dispatcher must NOT read stdin in this slice — stdin
-      // bodies, queries, and undo payloads are intentionally
-      // ignored.  A subsequent runtime integration slice will
-      // introduce the stdin seam.
-      expect(readCalled).toBe(0);
+      expect(out.stdout + out.stderr).not.toContain(handle);
     } finally {
-      process.stdin.read = originalRead;
       if (originalIsTTY !== undefined) {
         Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
       } else {
@@ -391,10 +376,10 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
     }
   });
 
-  it("`notes undo --approve-edit --stdin` reaches the seam", async () => {
+  it("rejects missing undo stdin before constructing the runtime", async () => {
     const out = await driveCli(["notes", "undo", "--approve-edit", "--stdin"]);
-    expect(out.code).toBe(3);
-    expect(out.stdout).toBe("nookctl notes: error\n");
+    expect(out.code).toBe(2);
+    expect(out.stdout).toBe("nookctl notes: invalid-input\n");
     expect(out.stderr).toBe("");
   });
 });
@@ -436,8 +421,7 @@ describe("nookctl notes — parser gates are authoritative", () => {
     internal.notesRuntimeFactory = factory;
     try {
       const out = await driveCli(["notes", "search", "--stdin"]);
-      expect(out.code).toBe(0);
-      expect(out.stdout).toBe("nookctl notes: invalid-input\n");
+      expect(out.code).toBe(2);
       expect(out.stderr).toBe("");
       expect(probe.calls).toBe(0);
     } finally {

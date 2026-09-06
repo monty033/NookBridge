@@ -72,6 +72,47 @@ const OPAQUE_VALUE_MAX_LENGTH = 128;
  * than the bounded bodies it queries against.
  */
 export const MAX_NOTES_QUERY_BYTES = 4 * 1024 * 1024;
+/** Maximum edit envelope size, including a bounded JSON token field. */
+export const MAX_NOTES_EDIT_STDIN_BYTES = MAX_NOTES_QUERY_BYTES + 1024;
+
+export type NotesEditStdin = Readonly<{ content: string; undoToken: string }>;
+
+export function parseNotesEditStdin(value: unknown): NotesEditStdin | undefined {
+  if (
+    typeof value !== "string" ||
+    new TextEncoder().encode(value).byteLength > MAX_NOTES_EDIT_STDIN_BYTES
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      Object.keys(record).length !== 2 ||
+      typeof record.content !== "string" ||
+      typeof record.undoToken !== "string"
+    ) {
+      return undefined;
+    }
+    if (new TextEncoder().encode(record.content).byteLength > MAX_NOTES_QUERY_BYTES)
+      return undefined;
+    if (!isBoundedOpaqueValue(record.undoToken)) return undefined;
+    return { content: record.content, undoToken: record.undoToken };
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseNotesUndoStdin(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
+  return isBoundedOpaqueValue(token) ? token : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Forbidden carriers.
@@ -285,8 +326,12 @@ export interface NotesCommandRuntime {
     readonly limit?: number;
   }) => Promise<NotesCategoricalResult>;
   readonly get: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
-  readonly edit: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
-  readonly undo: () => Promise<NotesCategoricalResult>;
+  readonly edit: (command: {
+    readonly handle: string;
+    readonly content: string;
+    readonly undoToken: string;
+  }) => Promise<NotesCategoricalResult>;
+  readonly undo: (command: { readonly token: string }) => Promise<NotesCategoricalResult>;
 }
 
 /**
@@ -336,6 +381,10 @@ export type RunNotesCommandOptions = Readonly<{
    * without the runtime ever being constructed.
    */
   readonly searchQuery?: unknown;
+  /** Bounded JSON edit envelope read from stdin. */
+  readonly editInput?: unknown;
+  /** Bounded opaque undo token read from stdin. */
+  readonly undoInput?: unknown;
   /**
    * Constructed ONLY after the parser, the credential-carrier policy,
    * and the explicit approval gate have all passed.
@@ -896,6 +945,17 @@ export async function runNotesCommand(
     validatedQuery = queryVerdict.query;
   }
 
+  let validatedEdit: NotesEditStdin | undefined;
+  let validatedUndo: string | undefined;
+  if (command.kind === "edit") {
+    validatedEdit = parseNotesEditStdin(normalized.editInput);
+    if (validatedEdit === undefined) return { kind: "invalid-input" };
+  }
+  if (command.kind === "undo") {
+    validatedUndo = parseNotesUndoStdin(normalized.undoInput);
+    if (validatedUndo === undefined) return { kind: "invalid-input" };
+  }
+
   // The runtime factory is constructed ONLY after parse + approval
   // gate have both passed.  Read-only commands (`browse`, `search`,
   // `get`) are ungated but they still go through this single seam.
@@ -928,9 +988,13 @@ export async function runNotesCommand(
       case "get":
         return await runtime.get({ handle: command.handle });
       case "edit":
-        return await runtime.edit({ handle: command.handle });
+        return await runtime.edit({
+          handle: command.handle,
+          content: (validatedEdit as NotesEditStdin).content,
+          undoToken: (validatedEdit as NotesEditStdin).undoToken,
+        });
       case "undo":
-        return await runtime.undo();
+        return await runtime.undo({ token: validatedUndo as string });
     }
   } catch {
     // Any runtime throw collapses to the closed categorical `error`.

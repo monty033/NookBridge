@@ -393,13 +393,16 @@ export class NotesUndoJournal {
    * validated against the bounded opaque grammar.  Ciphertext
    * (never plaintext) is written to the store.
    */
-  async record(command: {
-    readonly handle: string;
-    readonly revision: string;
-    readonly title: string;
-    readonly content: string;
-    readonly metadata: Readonly<Record<string, string>>;
-  }): Promise<NotesUndoJournalResult> {
+  async record(
+    command: {
+      readonly handle: string;
+      readonly revision: string;
+      readonly title: string;
+      readonly content: string;
+      readonly metadata: Readonly<Record<string, string>>;
+    },
+    suppliedToken?: string,
+  ): Promise<NotesUndoJournalResult> {
     const validated = validateRecordCommand(command);
     if (validated.kind === "error") return validated.error;
 
@@ -409,7 +412,7 @@ export class NotesUndoJournal {
     // fixed categorical `invalid-input` outcome.
     let token: string;
     try {
-      token = this.#tokenFactory();
+      token = suppliedToken ?? this.#tokenFactory();
     } catch {
       return invalidInputError();
     }

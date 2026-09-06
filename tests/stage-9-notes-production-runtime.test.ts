@@ -84,12 +84,14 @@ describe("Stage 9 production read-only notes composition", () => {
       createNotesOpaqueHandleCodec("stable local database key"),
     );
 
-    await expect(runtime.edit({ handle: "not_handle" })).resolves.toEqual({
+    await expect(
+      runtime.edit({ handle: "not_handle", content: "body", undoToken: "unt_token" }),
+    ).resolves.toEqual({
       kind: "error",
       exitCode: 3,
       message: "nookctl notes: runtime unavailable",
     });
-    await expect(runtime.undo()).resolves.toEqual({
+    await expect(runtime.undo({ token: "unt_token" })).resolves.toEqual({
       kind: "error",
       exitCode: 3,
       message: "nookctl notes: runtime unavailable",
