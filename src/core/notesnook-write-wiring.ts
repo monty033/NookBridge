@@ -799,7 +799,8 @@ function mapNote(value: unknown, requestedId: string): NotesnookWriteNoteMetadat
   const pinned = requireOwnProperty(record, "pinned", "invalid_input");
   const favorite = requireOwnProperty(record, "favorite", "invalid_input");
   const conflicted = requireOwnProperty(record, "conflicted", "invalid_input");
-  const locked = requireOwnProperty(record, "locked", "invalid_input");
+  const lockedProperty = readOwnProperty(record, "locked", "invalid_input");
+  const locked = lockedProperty.present ? lockedProperty.value : false;
   const dateEdited = requireOwnProperty(record, "dateEdited", "invalid_input");
   if (
     typeof pinned !== "boolean" ||

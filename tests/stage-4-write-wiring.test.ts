@@ -642,6 +642,26 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     expect(observed.tags).toEqual([TAG_ID]);
   });
 
+  it("defaults an omitted upstream locked flag to false", async () => {
+    const note = {
+      id: NOTE_ID,
+      title: "Unlocked without deprecated flag",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      dateEdited: 1_700_000_000_000,
+    } as unknown as FakeNoteRecord;
+    const runtime = createFakeRuntime({
+      notes: new Map([[NOTE_ID, note]]),
+    });
+    const seam = bindNotesnookWriteRuntime(runtime);
+
+    await expect(seam.note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: false,
+    });
+  });
+
   it("binds note() to the runtime object so a thief cannot detach it", async () => {
     const runtime = createFakeRuntime();
     const seam = bindNotesnookWriteRuntime(runtime);
@@ -2398,15 +2418,7 @@ describe("Stage 4 write wiring — final identifier and record-boundary regressi
       locked: false,
       dateEdited: 1,
     };
-    for (const field of [
-      "id",
-      "title",
-      "pinned",
-      "favorite",
-      "conflicted",
-      "locked",
-      "dateEdited",
-    ]) {
+    for (const field of ["id", "title", "pinned", "favorite", "conflicted", "dateEdited"]) {
       const own = { ...valid };
       const inheritedValue = own[field];
       delete own[field];
@@ -2420,12 +2432,14 @@ describe("Stage 4 write wiring — final identifier and record-boundary regressi
 
     const optionalRecord = Object.assign(
       Object.create({
+        locked: true,
         contentId: "inherited-content",
         notebookId: "inherited-notebook",
         tags: [TAG_ID],
       }),
       valid,
     );
+    delete optionalRecord.locked;
     const runtime = createFakeRuntime();
     (runtime.notes as unknown as { note: (id: string) => Promise<unknown> }).note = async () =>
       optionalRecord;
