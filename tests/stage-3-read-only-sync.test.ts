@@ -44,6 +44,24 @@ function createFakeDatabase(): NotesnookReadOnlyDatabase & {
         ignored: "not exposed",
       } as unknown as { id: string; title: string; dateCreated: number },
     ],
+    listNotes: async () =>
+      [
+        {
+          id: "note-1",
+          title: "A note",
+          dateCreated: 200,
+          locked: false,
+          body: "not exposed",
+          internalSecret: "not exposed",
+        },
+        {
+          id: "locked-note",
+          title: "Locked note",
+          locked: true,
+          body: "not exposed",
+          internalSecret: "not exposed",
+        },
+      ] as unknown as Array<{ id: string; title: string }>,
     noteMetadata: async (id) =>
       ({
         id,
@@ -86,6 +104,7 @@ describe("NotesnookReadOnlyAdapter", () => {
       "status",
       "sync",
       "listNotebooks",
+      "listNotes",
       "noteMetadata",
       "readNoteBody",
       "search",
@@ -100,6 +119,10 @@ describe("NotesnookReadOnlyAdapter", () => {
     });
     await expect(adapter.listNotebooks()).resolves.toEqual([
       { id: "notebook-1", title: "Work", dateCreated: 100 },
+    ]);
+    await expect(adapter.listNotes()).resolves.toEqual([
+      { id: "note-1", title: "A note", dateCreated: 200, locked: false },
+      { id: "locked-note", title: "Locked note", locked: true },
     ]);
     await expect(adapter.noteMetadata("note-1")).resolves.toEqual({
       id: "note-1",
@@ -229,6 +252,7 @@ describe("NotesnookReadOnlyAdapter", () => {
 function createFakeLiveDatabase(
   options: {
     noteSearchIds?: string[];
+    noteListIds?: string[];
     notebookSearchIds?: string[];
     extraNotes?: Array<Readonly<Record<string, unknown>> & { id: string; title: string }>;
     conflictMarker?: "present" | "absent";
@@ -298,7 +322,10 @@ function createFakeLiveDatabase(
       all: { ids: async () => ["nb-1"] },
       notebook: async (id: string) => notebooks.get(id),
     },
-    notes: { note: async (id: string) => notes.get(id) },
+    notes: {
+      all: { ids: async () => options.noteListIds ?? ["note-1"] },
+      note: async (id: string) => notes.get(id),
+    },
     content: { findByNoteId: async (id: string) => contents.get(id) },
     lookup: {
       notes: async () => searchResults(options.noteSearchIds ?? ["note-1"]),
@@ -749,13 +776,14 @@ describe("Stage 3 production projection and sync gate", () => {
   });
 
   it("flattens pinned-core-shaped APIs without exposing raw managers or bodies", async () => {
-    const database = createFakeLiveDatabase();
+    const database = createFakeLiveDatabase({ noteListIds: ["note-1", "locked-note"] });
     const readOnly = flattenLiveDatabaseToReadOnly(database);
 
     expect(Object.keys(readOnly).sort()).toEqual([
       "hasUnsyncedChanges",
       "lastSynced",
       "listNotebooks",
+      "listNotes",
       "noteMetadata",
       "search",
       "sync",
@@ -763,6 +791,16 @@ describe("Stage 3 production projection and sync gate", () => {
     await expect(readOnly.sync({ type: "fetch" })).resolves.toBe(true);
     await expect(readOnly.listNotebooks()).resolves.toEqual([
       { id: "nb-1", title: "Work", dateModified: 11 },
+    ]);
+    await expect(readOnly.listNotes()).resolves.toEqual([
+      { id: "note-1", title: "A note", dateModified: 22, notebookId: "nb-1" },
+      {
+        id: "locked-note",
+        title: "Locked title must stay internal",
+        dateModified: 24,
+        conflicted: false,
+        locked: true,
+      },
     ]);
     await expect(readOnly.noteMetadata("note-1")).resolves.toEqual({
       id: "note-1",

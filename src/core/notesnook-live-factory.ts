@@ -714,6 +714,10 @@ function guardReadOnlyProjection(
       ensureOpen();
       return readOnly.listNotebooks();
     },
+    listNotes: async () => {
+      ensureOpen();
+      return readOnly.listNotes();
+    },
     noteMetadata: async (id: string) => {
       ensureOpen();
       return readOnly.noteMetadata(id);
