@@ -69,6 +69,13 @@ import {
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
+import {
+  formatTreeHelp,
+  formatTreeResult,
+  parseTreeCommand,
+  runTreeCommand,
+  type TreeCommandRuntime,
+} from "./operator/tree-cli.js";
 
 type Args = {
   stateDir?: string;
@@ -79,6 +86,7 @@ type Args = {
   conflictsArgs?: readonly string[];
   recoverArgs?: readonly string[];
   notesArgs?: readonly string[];
+  treeArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -123,6 +131,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "notes") {
     args.notesArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "tree") {
+    args.treeArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -180,6 +192,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "notes") {
     return runNotes(args);
   }
+  if (subcommand === "tree") {
+    return runTree(args);
+  }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
@@ -217,6 +232,66 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
   return 0;
+}
+
+/**
+ * Dispatch the bounded operator-only tree without creating state or opening
+ * Notesnook. Help and parse failures are runtime-free; list receives the
+ * resolved state directory through a per-call factory closure.
+ */
+async function runTree(args: Args): Promise<number> {
+  const rawArgs = args.treeArgs ?? [];
+  const commandArgs: string[] = [];
+  let stateDir: string | undefined;
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const current = rawArgs[i];
+    if (current === undefined) {
+      process.stderr.write("nookctl tree: invalid command input\n");
+      return 2;
+    }
+    if (current === "--state-dir") {
+      const value = rawArgs[i + 1];
+      if (value === undefined || value.startsWith("-") || stateDir !== undefined) {
+        process.stderr.write("nookctl tree: invalid command input\n");
+        return 2;
+      }
+      stateDir = value;
+      i += 1;
+      continue;
+    }
+    commandArgs.push(current);
+  }
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl tree: invalid command environment\n");
+    return 2;
+  }
+  const parsed = parseTreeCommand(commandArgs, environment);
+  if (parsed.kind === "error") {
+    process.stderr.write(`${parsed.message}\n`);
+    return parsed.exitCode;
+  }
+  if (parsed.command.kind === "help") {
+    process.stdout.write(formatTreeHelp());
+    return 0;
+  }
+  const effectiveStateDir =
+    stateDir ?? environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state");
+  const result = await runTreeCommand({
+    argv: commandArgs,
+    env: environment,
+    stateDir: effectiveStateDir,
+    createRuntime: async (runtimeStateDir) => {
+      const injected = _internal.treeRuntimeFactory;
+      if (injected !== undefined) return injected(runtimeStateDir);
+      const { createTreeRuntime } = await import("./operator/tree-runtime.js");
+      return createTreeRuntime();
+    },
+  });
+  process.stdout.write(formatTreeResult(result));
+  return result.kind === "error" ? result.exitCode : 0;
 }
 
 /**
@@ -748,6 +823,7 @@ function printHelp(): void {
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
       "  nookctl notes <help|browse|search|get|edit|undo>",
+      "  nookctl tree <help|list>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -782,5 +858,6 @@ export const _internal: {
     runtime: NotesCommandRuntime;
     cleanup: () => void | Promise<void>;
   }>;
+  treeRuntimeFactory?: (stateDir: string) => TreeCommandRuntime | Promise<TreeCommandRuntime>;
 } = { dirname, join };
 export { formatAuthHelp, parseAuthCommand };
