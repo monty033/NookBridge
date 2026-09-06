@@ -25,9 +25,10 @@
  *     ids and then fetch each one through `notebooks.notebook(id)`
  *     so the projection can coerce each result through the narrow
  *     {@link NotesnookReadOnlyNotebookSummary} shape.
- *   - `Database.notes: Notes` → `notes.note(id): Promise<Note |
- *     undefined>` for per-id metadata reads.  Note bodies / encrypted
- *     content / attachments are intentionally not part of the seam.
+ *   - `Database.notes: Notes` → `notes.all.ids()` for the bounded note
+ *     list, followed by `notes.note(id): Promise<Note | undefined>` for
+ *     per-id metadata reads.  Note bodies / encrypted content /
+ *     attachments are intentionally not part of the seam.
  *   - `Database.lookup: Lookup` → `lookup.notes(query)` /
  *     `lookup.notebooks(query)` returning `SearchResults<Note>` /
  *     `SearchResults<Notebook>`.  We use `.ids()` to obtain the
@@ -219,7 +220,6 @@ export function flattenLiveDatabaseToReadOnly(
   // `@notesnook/core@8.1.3` d.ts, `Notebooks.all` is a getter that
   // returns a `FilteredSelector<Notebook>` (with `ids()` and `items()`).
   const notebooksAll = readFilteredSelector(notebooks, "notebooks.all", "Notebooks");
-
   // Capture the lookup methods once.  Per the d.ts, `Lookup.notes`
   // and `Lookup.notebooks` return `SearchResults<Note>` /
   // `SearchResults<Notebook>` whose `.ids()` yields `string[]`.
@@ -329,6 +329,38 @@ export function flattenLiveDatabaseToReadOnly(
         if (summary !== undefined) summaries.push(summary);
       }
       return summaries as never;
+    },
+
+    listNotes: async (): Promise<
+      NotesnookReadOnlyDatabase["listNotes"] extends () => Promise<infer R> ? R : never
+    > => {
+      const notesAll = readFilteredSelector(notes, "notes.all", "Notes");
+      const ids = await readFilteredSelectorIds(notesAll, "notes.all.ids");
+      const metadata: Array<{
+        readonly id: string;
+        readonly title: string;
+        readonly dateCreated?: number;
+        readonly dateModified?: number;
+        readonly notebookId?: string;
+        readonly pinned?: boolean;
+        readonly favorite?: boolean;
+        readonly localOnly?: boolean;
+        readonly conflicted?: boolean;
+        readonly locked?: boolean;
+      }> = [];
+      for (const id of ids) {
+        const note = await callThrough(
+          noteFn,
+          [id],
+          "Notesnook read-only projection: notes.note rejected",
+        );
+        if (note === undefined || note === null) continue;
+        const noteMetadata = coerceUpstreamNoteToMetadata(note);
+        if (noteMetadata === undefined) continue;
+        const locked = await readLockedState(contentFindByNoteIdFn, id);
+        metadata.push(locked === true ? { ...noteMetadata, locked: true } : noteMetadata);
+      }
+      return metadata as never;
     },
 
     noteMetadata: async (

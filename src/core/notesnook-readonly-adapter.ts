@@ -14,7 +14,7 @@
  * plug an opened `Database` into.  It deliberately:
  *
  *   - exposes a CLOSED read-only surface (`status`, `sync("fetch")`,
- *     `listNotebooks`, `getNoteMetadata`, `search`);
+ *     `listNotebooks`, `listNotes`, `getNoteMetadata`, `search`);
  *   - uses an INJECTED structural seam so tests run offline against
  *     deterministic fakes with no real Database, no real network, no
  *     real account;
@@ -161,6 +161,7 @@ export interface NotesnookReadOnlyDatabase {
     force?: boolean;
   }) => Promise<boolean>;
   readonly listNotebooks: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
+  readonly listNotes: () => Promise<NotesnookReadOnlyNoteMetadata[]>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }
@@ -286,6 +287,23 @@ export class NotesnookReadOnlyAdapter {
         throw error;
       }
       throw readOnlyAdapterError("Notesnook read-only adapter: failed to list notebooks");
+    }
+  }
+
+  /**
+   * List note metadata.  No body, no content, and no raw upstream
+   * records are exposed; each result is coerced to the closed metadata
+   * shape above.
+   */
+  async listNotes(): Promise<NotesnookReadOnlyNoteMetadata[]> {
+    try {
+      const raw = await this.#safeCall("listNotes", () => this.#database.listNotes());
+      return raw.map(coerceNoteMetadata);
+    } catch (error) {
+      if (isNotesnookAdapterError(error) || isReadOnlyAdapterError(error)) {
+        throw error;
+      }
+      throw readOnlyAdapterError("Notesnook read-only adapter: failed to list notes");
     }
   }
 
@@ -454,6 +472,7 @@ function validateReadOnlyDatabase(value: unknown): NotesnookReadOnlyDatabase {
     "hasUnsyncedChanges",
     "sync",
     "listNotebooks",
+    "listNotes",
     "noteMetadata",
     "search",
   ];

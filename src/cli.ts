@@ -25,6 +25,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { TextDecoder } from "node:util";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -60,6 +61,14 @@ import {
   parseRecoverLocalStateCommand,
   runRecoverLocalState,
 } from "./operator/recover-local-state.js";
+import {
+  formatNotesHelp,
+  formatNotesResult,
+  parseNotesCommand,
+  runNotesCommand,
+  MAX_NOTES_QUERY_BYTES,
+  type NotesCommandRuntime,
+} from "./operator/notes-cli.js";
 
 type Args = {
   stateDir?: string;
@@ -69,6 +78,7 @@ type Args = {
   writeArgs?: readonly string[];
   conflictsArgs?: readonly string[];
   recoverArgs?: readonly string[];
+  notesArgs?: readonly string[];
 };
 
 function normalizeCliArgv(argv: unknown): string[] {
@@ -109,6 +119,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "recover-local-state") {
     args.recoverArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "notes") {
+    args.notesArgs = rest.slice();
     return { subcommand, args };
   }
   for (let i = 0; i < rest.length; i++) {
@@ -163,6 +177,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "recover-local-state") {
     return runRecover(args);
   }
+  if (subcommand === "notes") {
+    return runNotes(args);
+  }
   if (subcommand !== "doctor") {
     process.stderr.write("nookctl: unknown subcommand; use `nookctl help`\n");
     printHelp();
@@ -200,6 +217,102 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
   return 0;
+}
+
+/**
+ * Dispatch the bounded operator notes tree. Help and bare invocation remain
+ * runtime-free; valid read-only commands construct the production Notesnook
+ * capability only after parsing and bounded stdin validation.
+ */
+async function runNotes(args: Args): Promise<number> {
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl: invalid command input\n");
+    return 2;
+  }
+
+  const argv = args.notesArgs ?? [];
+  const parsed = parseNotesCommand(argv, environment);
+  if (parsed.kind === "error") {
+    process.stderr.write(`nookctl: ${parsed.message}\n`);
+    return parsed.exitCode;
+  }
+  if (parsed.command.kind === "help") {
+    process.stdout.write(formatNotesHelp());
+    return 0;
+  }
+
+  const searchQuery =
+    parsed.command.kind === "search" ? readBoundedNotesStdin(MAX_NOTES_QUERY_BYTES) : undefined;
+  let cleanup: (() => void | Promise<void>) | undefined;
+  const result = await runNotesCommand({
+    argv,
+    env: environment,
+    ...(searchQuery === undefined ? {} : { searchQuery }),
+    createRuntime: async () => {
+      const injected = _internal.notesRuntimeFactory;
+      if (injected !== undefined) return injected();
+      const stateDir = resolve(
+        environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"),
+      );
+      const injectedProduction = _internal.notesProductionRuntimeFactory;
+      const production =
+        injectedProduction === undefined
+          ? await (async () => {
+              const { createProductionNotesRuntime } = await import(
+                "./operator/notes-production-runtime.js"
+              );
+              return createProductionNotesRuntime({ stateDir });
+            })()
+          : await injectedProduction(stateDir);
+      cleanup = production.cleanup;
+      return production.runtime;
+    },
+  });
+  try {
+    process.stdout.write(formatNotesResult(result));
+    return result.kind === "error" ? result.exitCode : 0;
+  } finally {
+    if (cleanup !== undefined) {
+      try {
+        await cleanup();
+      } catch {
+        // Cleanup is deliberately categorical and never changes command output.
+      }
+    }
+  }
+}
+
+function readBoundedNotesStdin(maxBytes: number): string | undefined {
+  let stat;
+  try {
+    stat = fstatSync(0);
+    if (stat.isCharacterDevice() && process.stdin.isTTY) return undefined;
+  } catch {
+    return undefined;
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const remaining = maxBytes - total;
+      const chunk = Buffer.alloc(Math.min(64 * 1024, remaining));
+      const read = readSync(0, chunk, 0, chunk.length, null);
+      if (read === 0) break;
+      total += read;
+      chunks.push(chunk.subarray(0, read));
+    }
+    if (total === maxBytes) {
+      const extra = Buffer.alloc(1);
+      if (readSync(0, extra, 0, 1, null) > 0) return undefined;
+    }
+    if (total === 0) return undefined;
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -634,6 +747,7 @@ function printHelp(): void {
       "  nookctl sync <status|read-only|help>",
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
+      "  nookctl notes <help|browse|search|get|edit|undo>",
       "",
       "Options:",
       "  --state-dir <path>    where encrypted state lives",
@@ -660,5 +774,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
 // Convenience re-export for tests that exercise the CLI in-process
 // without spawning a child process.
-export const _internal = { dirname, join };
+export const _internal: {
+  readonly dirname: typeof dirname;
+  readonly join: typeof join;
+  notesRuntimeFactory?: () => NotesCommandRuntime | Promise<NotesCommandRuntime>;
+  notesProductionRuntimeFactory?: (stateDir: string) => Promise<{
+    runtime: NotesCommandRuntime;
+    cleanup: () => void | Promise<void>;
+  }>;
+} = { dirname, join };
 export { formatAuthHelp, parseAuthCommand };
