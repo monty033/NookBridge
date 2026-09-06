@@ -117,6 +117,33 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     ).toEqual(["content", "favorite", "notebookId", "pinned", "tags", "title"]);
   });
 
+  it("returns the opaque revision from bounded note metadata", async () => {
+    const client = makeClient();
+    Object.defineProperty(client, "getNote", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue({
+        ok: true,
+        envelope: {
+          id: "rpc-get-1",
+          ok: true,
+          result: {
+            kind: "note",
+            note: { id: "note-1", title: "Title", revision: REVISION },
+          },
+        },
+      }),
+    });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_get_note", { id: "note-1" });
+
+    expect(result.isError).toBeFalsy();
+    expect(payload(result)).toEqual({
+      kind: "note",
+      note: { id: "note-1", title: "Title", revision: REVISION },
+    });
+  });
+
   it("calls typed write methods and projects only safe bounded results", async () => {
     const client = makeClient();
     const createNote = client.createNote as ReturnType<typeof vi.fn>;

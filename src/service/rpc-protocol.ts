@@ -305,6 +305,7 @@ export interface RpcListNotebooksResult {
 export interface RpcNoteMetadata {
   readonly id: string;
   readonly title: string;
+  readonly revision?: string;
   readonly dateCreated?: number;
   readonly dateModified?: number;
   readonly notebookId?: string;
@@ -1536,6 +1537,7 @@ function normaliseNoteResult(
     [
       "id",
       "title",
+      "revision",
       "dateCreated",
       "dateModified",
       "notebookId",
@@ -1554,9 +1556,16 @@ function normaliseNoteResult(
   assertBoundedString(record.title, STAGE5_RPC_LIMITS.maxTitleBytes, "note title");
   preflightResponseStringField(record.id, rawSum);
   preflightResponseStringField(record.title, rawSum);
+  if (record.revision !== undefined) {
+    if (!isWellFormedRevisionToken(record.revision)) {
+      throw rpcProtocolError("rpc protocol: note revision token is invalid");
+    }
+    preflightResponseStringField(record.revision as string, rawSum);
+  }
   const clean = objectCreate(null) as Record<string, JsonValue>;
   clean.id = record.id;
   clean.title = record.title;
+  if (record.revision !== undefined) clean.revision = record.revision;
   const dateCreated = validateOptionalMetadataNumber(record, "dateCreated");
   const dateModified = validateOptionalMetadataNumber(record, "dateModified");
   if (dateCreated !== undefined) clean.dateCreated = dateCreated;

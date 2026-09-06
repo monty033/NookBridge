@@ -78,10 +78,14 @@
  */
 
 import {
+  createReadOnlyRevisionToken,
   isNotesnookReadOnlyAdapterError,
   type NotesnookReadOnlyDatabase,
+  type NotesnookReadOnlyNoteMetadata,
 } from "./notesnook-readonly-adapter.js";
 import type { NotesnookLiveDatabase } from "./notesnook-core-adapter.js";
+
+type ReadOnlyRevisionToken = NonNullable<NotesnookReadOnlyNoteMetadata["revision"]>;
 
 // ---------------------------------------------------------------------------
 // Allowlisted sync types.
@@ -377,7 +381,7 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: notes.note rejected",
       );
       if (note === undefined || note === null) return undefined as never;
-      const metadata = coerceUpstreamNoteToMetadata(note);
+      const metadata = coerceUpstreamNoteToMetadata(note, true);
       if (metadata === undefined) return undefined as never;
       const locked = await readLockedState(contentFindByNoteIdFn, id);
       return (locked === true ? { ...metadata, locked: true } : metadata) as never;
@@ -772,10 +776,14 @@ function coerceUpstreamNotebookToSummary(value: unknown):
  * content / attachment metadata are intentionally absent from the
  * narrow seam.
  */
-function coerceUpstreamNoteToMetadata(value: unknown):
+function coerceUpstreamNoteToMetadata(
+  value: unknown,
+  includeRevision = false,
+):
   | {
       readonly id: string;
       readonly title: string;
+      readonly revision?: ReadOnlyRevisionToken;
       readonly dateCreated?: number;
       readonly dateModified?: number;
       readonly notebookId?: string;
@@ -793,6 +801,7 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   let title: unknown;
   let dateCreated: unknown;
   let dateModified: unknown;
+  let dateEdited: unknown;
   let notebookId: unknown;
   let pinned: unknown;
   let favorite: unknown;
@@ -803,6 +812,7 @@ function coerceUpstreamNoteToMetadata(value: unknown):
     title = record.title;
     dateCreated = record.dateCreated;
     dateModified = record.dateModified ?? record.dateEdited;
+    dateEdited = record.dateEdited;
     // `notebooks` is a deprecated `NotebookReference[]` on the
     // upstream `Note`.  We surface the FIRST id as `notebookId`
     // (a single notebook metadata) so the closed shape remains
@@ -833,6 +843,7 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   const out: {
     readonly id: string;
     readonly title: string;
+    readonly revision?: ReadOnlyRevisionToken;
     readonly dateCreated?: number;
     readonly dateModified?: number;
     readonly notebookId?: string;
@@ -847,6 +858,21 @@ function coerceUpstreamNoteToMetadata(value: unknown):
   }
   if (typeof dateModified === "number" && Number.isFinite(dateModified) && dateModified >= 0) {
     (out as { dateModified?: number }).dateModified = dateModified;
+  }
+  if (
+    includeRevision &&
+    typeof dateEdited === "number" &&
+    Number.isFinite(dateEdited) &&
+    dateEdited >= 0
+  ) {
+    try {
+      (out as { revision?: ReadOnlyRevisionToken }).revision = createReadOnlyRevisionToken(
+        id,
+        dateEdited,
+      );
+    } catch {
+      throw projectionError("Notesnook read-only projection: note revision token rejected");
+    }
   }
   if (typeof notebookId === "string" && notebookId.length > 0) {
     (out as { notebookId?: string }).notebookId = notebookId;
