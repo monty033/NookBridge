@@ -6,6 +6,7 @@
  * future live runner is allowed to exercise native sync.
  */
 
+import { TextDecoder } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -23,6 +24,10 @@ import {
   runSyncCommand,
 } from "../src/core/notesnook-sync-admin.js";
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
+import { serializeRpcResponse, type RpcNotesGetRequest } from "../src/service/rpc-protocol.js";
+import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -136,6 +141,36 @@ describe("NotesnookReadOnlyAdapter", () => {
     await expect(adapter.search("note")).resolves.toEqual([
       { id: "note-1", title: "A note", source: "note" },
     ]);
+  });
+
+  it("preserves supplied opaque revisions and rejects malformed revisions", async () => {
+    const validSource = createFakeDatabase();
+    (validSource as { noteMetadata: NotesnookReadOnlyDatabase["noteMetadata"] }).noteMetadata =
+      async (id) =>
+        ({
+          id,
+          title: "A note",
+          revision: "rev_00000000000000000000000000000001",
+        }) as never;
+    const validAdapter = createNotesnookReadOnlyAdapter({ source: validSource });
+    await expect(validAdapter.noteMetadata("note-1")).resolves.toMatchObject({
+      revision: "rev_00000000000000000000000000000001",
+    });
+
+    const displayOnlySource = createFakeDatabase();
+    (
+      displayOnlySource as { noteMetadata: NotesnookReadOnlyDatabase["noteMetadata"] }
+    ).noteMetadata = async (id) => ({ id, title: "A note", dateModified: 220 }) as never;
+    const displayOnlyAdapter = createNotesnookReadOnlyAdapter({ source: displayOnlySource });
+    await expect(displayOnlyAdapter.noteMetadata("note-1")).resolves.not.toHaveProperty("revision");
+
+    const malformedSource = createFakeDatabase();
+    (malformedSource as { noteMetadata: NotesnookReadOnlyDatabase["noteMetadata"] }).noteMetadata =
+      async (id) => ({ id, title: "A note", revision: "not-a-revision" }) as never;
+    const malformedAdapter = createNotesnookReadOnlyAdapter({ source: malformedSource });
+    await expect(malformedAdapter.noteMetadata("note-1")).rejects.toMatchObject({
+      message: "Notesnook read-only adapter: note revision token is invalid",
+    });
   });
 
   it("returns stable categorical body-access errors without exposing content", async () => {
@@ -362,6 +397,7 @@ describe("Stage 3 production projection and sync gate", () => {
       id: "conflict-note",
       title: privateTitle,
       dateModified: 23,
+      revision: createRevisionToken({ id: "conflict-note", dateEdited: 23 }),
     });
 
     const detectingCleanup = vi.fn(async () => undefined);
@@ -807,6 +843,7 @@ describe("Stage 3 production projection and sync gate", () => {
       title: "A note",
       dateModified: 22,
       notebookId: "nb-1",
+      revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
     });
     await expect(readOnly.search("note")).resolves.toEqual([
       { id: "note-1", title: "A note", source: "note" },
@@ -867,5 +904,83 @@ describe("Stage 3 production projection and sync gate", () => {
       }),
     ).resolves.toMatchObject({ kind: "report", subcommand: "status" });
     expect(statusSource.syncCalls).toEqual([]);
+  });
+});
+
+describe("read-only revision RPC chain", () => {
+  it("carries the live projection revision through adapter, handler, and wire serialization", async () => {
+    const live = createFakeLiveDatabase({
+      extraNotes: [
+        { id: "revision-note", title: "Revision note", dateEdited: 22, dateModified: 220 },
+      ],
+    });
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const runtime = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+    };
+    const request: RpcNotesGetRequest = {
+      id: "rpc-get-1",
+      method: "notes.get",
+      params: { id: "revision-note" },
+    };
+
+    const response = await handleRpcRequest(
+      request,
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.note.revision).toBe(
+      createRevisionToken({ id: "revision-note", dateEdited: 22 }),
+    );
+
+    const frame = serializeRpcResponse(response);
+    const wire = JSON.parse(new TextDecoder().decode(frame.subarray(4))) as {
+      result?: { note?: Record<string, unknown> };
+    };
+    expect(wire.result?.note?.revision).toBe(
+      createRevisionToken({ id: "revision-note", dateEdited: 22 }),
+    );
+    expect(JSON.stringify(wire)).not.toContain("secret body");
+  });
+
+  it("does not mint a revision from live display-only dateModified", async () => {
+    const live = createFakeLiveDatabase({
+      extraNotes: [{ id: "display-only-note", title: "Display only", dateModified: 220 }],
+    });
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+
+    await expect(adapter.noteMetadata("display-only-note")).resolves.not.toHaveProperty("revision");
+  });
+
+  it("rejects non-string revisions at the RPC boundary", async () => {
+    const request: RpcNotesGetRequest = {
+      id: "rpc-get-invalid-revision",
+      method: "notes.get",
+      params: { id: "note-1" },
+    };
+    const runtime = {
+      search: async () => [],
+      noteMetadata: async () => ({ id: "note-1", title: "A note", revision: null }) as never,
+    };
+
+    await expect(
+      handleRpcRequest(request, runtime, createReadWriteNoDeleteServicePolicy()),
+    ).resolves.toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+  });
+
+  it("converts revision derivation failures into a categorical projection error", async () => {
+    const id = "x".repeat(129);
+    const readOnly = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({ extraNotes: [{ id, title: "Too long", dateEdited: 22 }] }),
+    );
+
+    await expect(readOnly.noteMetadata(id)).rejects.toMatchObject({
+      message: "Notesnook read-only projection: note revision token rejected",
+    });
   });
 });

@@ -49,6 +49,7 @@
  */
 
 import { isNotesnookAdapterError } from "./notesnook-core-adapter.js";
+import { createRevisionToken, type NotesnookRevisionToken } from "./notesnook-write-contract.js";
 
 // ---------------------------------------------------------------------------
 // Allowlisted read-only record shapes.
@@ -79,6 +80,7 @@ export interface NotesnookReadOnlyNotebookSummary {
 export interface NotesnookReadOnlyNoteMetadata {
   readonly id: string;
   readonly title: string;
+  readonly revision?: NotesnookRevisionToken;
   readonly dateCreated?: number;
   readonly dateModified?: number;
   readonly notebookId?: string;
@@ -87,6 +89,19 @@ export interface NotesnookReadOnlyNoteMetadata {
   readonly localOnly?: boolean;
   readonly conflicted?: boolean;
   readonly locked?: boolean;
+}
+
+const READ_ONLY_REVISION_TOKEN_PATTERN = /^rev_[0-9a-f]{32}$/;
+
+/**
+ * Derive the opaque revision handle used by the metadata-only read seam.
+ * The read-only projection never imports the mutation contract directly.
+ */
+export function createReadOnlyRevisionToken(
+  id: string,
+  dateEdited: number,
+): NotesnookRevisionToken {
+  return createRevisionToken({ id, dateEdited });
 }
 
 /**
@@ -590,11 +605,23 @@ function coerceNoteMetadata(value: unknown): NotesnookReadOnlyNoteMetadata {
   if (record.locked !== undefined && typeof record.locked !== "boolean") {
     throw readOnlyAdapterError("Notesnook read-only adapter: note lock marker is invalid");
   }
+  const dateModified = typeof record.dateModified === "number" ? record.dateModified : undefined;
+  const suppliedRevision = record.revision;
+  if (
+    suppliedRevision !== undefined &&
+    (typeof suppliedRevision !== "string" ||
+      !READ_ONLY_REVISION_TOKEN_PATTERN.test(suppliedRevision))
+  ) {
+    throw readOnlyAdapterError("Notesnook read-only adapter: note revision token is invalid");
+  }
   return {
     id: record.id,
     title: record.title,
     ...(typeof record.dateCreated === "number" ? { dateCreated: record.dateCreated } : {}),
-    ...(typeof record.dateModified === "number" ? { dateModified: record.dateModified } : {}),
+    ...(dateModified === undefined ? {} : { dateModified }),
+    ...(suppliedRevision !== undefined
+      ? { revision: suppliedRevision as NotesnookRevisionToken }
+      : {}),
     ...(typeof record.notebookId === "string" ? { notebookId: record.notebookId } : {}),
     ...(typeof record.pinned === "boolean" ? { pinned: record.pinned } : {}),
     ...(typeof record.favorite === "boolean" ? { favorite: record.favorite } : {}),

@@ -916,6 +916,14 @@ function decodeNote(value: unknown): Readonly<Record<string, unknown>> {
   )
     throw new Error("invalid response");
   const projected: Record<string, unknown> = { id: record.id, title: record.title };
+  if (Object.hasOwn(record, "revision")) {
+    if (
+      record.revision !== undefined &&
+      (typeof record.revision !== "string" || !/^rev_[0-9a-f]{32}$/.test(record.revision))
+    )
+      throw new Error("invalid response");
+    if (record.revision !== undefined) projected.revision = record.revision;
+  }
   for (const key of ["dateCreated", "dateModified"] as const) {
     if (Object.hasOwn(record, key)) {
       if (

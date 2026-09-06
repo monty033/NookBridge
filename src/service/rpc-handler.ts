@@ -119,6 +119,7 @@ export interface RpcHandlerRuntimeLike {
     | Readonly<{
         id: string;
         title: string;
+        revision?: string;
         dateCreated?: number;
         dateModified?: number;
         notebookId?: string;
@@ -990,6 +991,18 @@ function normaliseNoteMetadata(value: unknown): Record<string, unknown> | undefi
   const record = value as Record<string, unknown>;
   const id = readOwnStringField(record, "id");
   const title = readOwnStringField(record, "title");
+  let revision: string | undefined;
+  try {
+    const revisionDescriptor = objectGetOwnPropertyDescriptor(record, "revision");
+    if (revisionDescriptor !== undefined) {
+      if (!("value" in revisionDescriptor) || typeof revisionDescriptor.value !== "string") {
+        return undefined;
+      }
+      revision = revisionDescriptor.value;
+    }
+  } catch {
+    return undefined;
+  }
   if (
     id === undefined ||
     title === undefined ||
@@ -998,12 +1011,14 @@ function normaliseNoteMetadata(value: unknown): Record<string, unknown> | undefi
     id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
     title.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
     hasControlCharacter(id) ||
-    hasControlCharacter(title)
+    hasControlCharacter(title) ||
+    (revision !== undefined && !isRevisionToken(revision))
   )
     return undefined;
   const output = objectCreate(null) as Record<string, unknown>;
   output.id = id;
   output.title = title;
+  if (revision !== undefined) output.revision = revision;
   for (const key of ["dateCreated", "dateModified"] as const) {
     const value = readOwnNumberField(record, key);
     if (value !== undefined) output[key] = value;

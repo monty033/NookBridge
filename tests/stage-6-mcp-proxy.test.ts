@@ -119,6 +119,51 @@ function framedResponse(envelope: Record<string, unknown>): { ok: boolean; frame
   return { ok: envelope.ok === true, frame };
 }
 
+describe("nookd socket client — note revision projection", () => {
+  it("preserves a valid revision token through the real framed socket path", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "note",
+          note: {
+            id: "note-1",
+            title: "Title",
+            revision: "rev_00000000000000000000000000000001",
+          },
+        },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.getNote("note-1");
+
+    expect(result.ok).toBe(true);
+    if (result.ok && result.envelope.result.kind === "note") {
+      expect(result.envelope.result.note.revision).toBe("rev_00000000000000000000000000000001");
+    }
+  });
+
+  it("fails closed when the framed note metadata has a malformed revision", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Title", revision: "REVISION_LEAK" },
+        },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.getNote("note-1");
+
+    expect(result).toEqual({ ok: false, code: "service_unavailable" });
+  });
+});
+
 // -----------------------------------------------------------------------
 // Tool surface — exactly four read-only tools, no others.
 // -----------------------------------------------------------------------

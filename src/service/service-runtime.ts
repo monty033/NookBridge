@@ -112,6 +112,7 @@ export interface ServiceRuntime {
     | Readonly<{
         id: string;
         title: string;
+        revision?: string;
         dateCreated?: number;
         dateModified?: number;
         notebookId?: string;
@@ -274,6 +275,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     | Readonly<{
         id: string;
         title: string;
+        revision?: string;
         dateCreated?: number;
         dateModified?: number;
         notebookId?: string;
