@@ -592,3 +592,42 @@ separate and still pins the prior source revision.
 - **Open blockers:** target-host canary; non-destructive recovery workflow and
   VM drill; final release/license human review; merge of the source candidate;
   and a subsequent Nix pin update to that reviewed merge.
+
+## Stage 9 source gate — bounded operator tree and notes edit/undo (2026-09-06)
+
+This entry records the source-only closure of the Stage 9 §13.11 implementation
+surface after PR #51 merged. It is not a VM receipt or production approval.
+
+- **Source identity:** PR #51 merged to `upstream/main` at
+  `909ec4a9d19eac2adf7a1a9bbeac573d82caee69`; the reviewed source branch was
+  `openclaw:feat/stage9-notes-edit-undo`.
+- **Scope:** bounded operator `tree` CLI, notes browse/search/get contracts,
+  and the operator notes edit/undo runtime. The changed source/test surface
+  contains no MCP, RPC, service-policy, sync, auth, or delete capability.
+- **Edit/undo controls:** exact `--approve-edit --stdin` gating; closed edit
+  JSON `{content, undoToken}`; opaque token validation; optimistic revision
+  precondition; predicted next revision; encrypted `NBV1` preimage; bounded
+  expiry; stale-undo conflict; internal metadata stripping; consumed/expired
+  cleanup; categorical output only.
+- **Verification:** focused edit/undo and CLI tests PASS; full offline suite
+  **1,491/1,491 across 50 files**; typecheck, lint, format, build, and
+  `git diff --check` PASS.
+- **Independent review:** delegation `deleg_60b6619d`, exact current source
+  slice, **PASS** with no security concerns or blocking logic errors. The
+  review noted only non-blocking defensive nits concerning remove/undo TOCTOU,
+  token-collision categorization, and a named stdin bound.
+- **Source status:** **PASS**.
+- **VM status:** **OPEN**. Existing `docs/stage-9-canary.md` evidence is an
+  older source/pin baseline and is not reused as proof for this merge. A new
+  clean VM drill must use the reviewed deployment pin and exercise service
+  identity, socket/state/credential boundaries, bounded tree output, note
+  browse/read, approved edit, stale-revision conflict, undo, cleanup, and
+  negative-containment output checks.
+- **Production status:** **OPEN**. No credentials, live account, sync
+  transport, rebuild, target-host canary, or live write was used. Production
+  edit/undo remains unavailable because the current live read-only projection
+  does not prove a safe note-body/revision source.
+- **Decision:** close the source implementation gate only; keep VM and
+  production gates fail-closed.
+
+Canonical source receipt: `docs/stage-9-source-evidence.md`.

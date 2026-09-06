@@ -1919,18 +1919,17 @@ It is not published, deployed, or live-accepted.
 
 ## 13.11 Stage 9 Plan Addition — bounded CLI filetree and notes browse/edit
 
-**Status date:** 2026-09-05 (UTC)
+**Status date:** 2026-09-06 (UTC)
 
-**Status: PLANNED — NOT IMPLEMENTED.** This entry is a design and release
-contract only. It does not claim source implementation, VM evidence, a deployed
-pin, or production acceptance.
+**Status: SOURCE IMPLEMENTED AND VERIFIED OFFLINE; VM AND PRODUCTION GATES OPEN.**
 
-**Source baseline anchor:** the Stage 9 recovery/source-hardening candidate was
-merged through PR #47 at `3689c20364cbbdd9c9dfb5418a8bf8c178ed07db`, with the
-reviewed recovery content originating at `58dd2b15d83ec8461d6a53ea93fcb10563d495a5`.
-The feature described here must be implemented in a new reviewed source slice;
-this plan entry must not be treated as evidence that the merged source already
-contains it.
+This entry is the source contract and gate record for the merged Stage 9
+operator implementation. It does not claim VM evidence, a deployed pin, or
+production acceptance.
+
+**Source baseline anchor:** the Stage 9 operator source is merged through PR #51
+at `909ec4a9d19eac2adf7a1a9bbeac573d82caee69`. The source evidence receipt is
+`docs/stage-9-source-evidence.md`; the VM and production gates remain separate.
 
 ### Goal
 
@@ -2147,11 +2146,11 @@ Before source implementation can be marked complete, tests must prove:
 
 The feature has three independent status gates:
 
-1. **Source implementation gate — open:** TDD RED/GREEN tests for parser,
-   dispatcher, filetree boundary, closed formatter, RPC allowlist, revision
-   conflict, approval gate, and encrypted undo; then typecheck, lint, format,
-   build, focused tests, full suite, and an independent security review of the
-   exact staged snapshot.
+1. **Source implementation gate — closed:** the bounded parser, dispatcher,
+   filetree boundary, closed formatter, RPC allowlist, revision conflict,
+   approval gate, and encrypted undo are implemented and covered by tests;
+   typecheck, lint, format, build, focused tests, full suite, and an
+   independent security review of the exact source snapshot passed.
 2. **VM drill gate — open:** clean disposable VM evidence for service identity,
    state/socket permissions, protected-artifact refusal, bounded tree output,
    note browse/read, approved edit, stale-revision conflict, undo, cleanup, and
