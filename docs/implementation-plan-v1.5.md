@@ -1917,6 +1917,275 @@ It is not published, deployed, or live-accepted.
 - Stage 8 isolation validation and Stage 9 final security-parity/release review
   remain open. Publication is a separate explicit gate.
 
+## 13.11 Stage 9 Plan Addition — bounded CLI filetree and notes browse/edit
+
+**Status date:** 2026-09-05 (UTC)
+
+**Status: PLANNED — NOT IMPLEMENTED.** This entry is a design and release
+contract only. It does not claim source implementation, VM evidence, a deployed
+pin, or production acceptance.
+
+**Source baseline anchor:** the Stage 9 recovery/source-hardening candidate was
+merged through PR #47 at `3689c20364cbbdd9c9dfb5418a8bf8c178ed07db`, with the
+reviewed recovery content originating at `58dd2b15d83ec8461d6a53ea93fcb10563d495a5`.
+The feature described here must be implemented in a new reviewed source slice;
+this plan entry must not be treated as evidence that the merged source already
+contains it.
+
+### Goal
+
+Add a human-facing `nookctl` CLI tree that provides:
+
+1. a bounded, navigable view of approved local application artifacts; and
+2. browse, read, and edit operations for Notesnook notes.
+
+The feature must remain an operator/CLI capability. It must not turn the
+Hermes-facing MCP/RPC boundary into a filesystem browser, add arbitrary local
+filesystem access, or introduce a second Notesnook storage implementation.
+
+### Permission profiles
+
+The implementation must enumerate and test these profiles explicitly:
+
+| Profile | Filetree | Note browse/read | Note edit | Default |
+|---|---:|---:|---:|---:|
+| `operator` | yes, metadata-only | yes | yes, approval-gated | **yes** |
+| `user-read` | no | yes | no | no |
+| `user-write` | no | yes | yes, approval-gated | no |
+| `mcp` | no | unchanged existing tools only | unchanged existing tools only | no change |
+
+For this Stage 9 slice, `operator` is the only enabled profile. `user-read` and
+`user-write` are vocabulary reserved for a separately reviewed policy expansion;
+they must not be silently enabled by CLI implementation. The filetree is never
+available through MCP.
+
+### Exact command surface
+
+The dispatcher must add a separately named, operator-only CLI tree alongside the
+existing `auth`, `sync`, `write`, `conflicts`, and `recover-local-state` trees.
+The initial grammar is intentionally narrow:
+
+```text
+nookctl tree help
+nookctl tree list
+nookctl tree list --handle <opaque-handle> --cursor <opaque-cursor> --limit <1..100>
+nookctl notes help
+nookctl notes browse [--cursor <opaque-cursor>] [--limit <1..100>]
+nookctl notes search --stdin [--cursor <opaque-cursor>] [--limit <1..100>]
+nookctl notes get --handle <opaque-handle>
+nookctl notes edit --handle <opaque-handle> --approve-edit --stdin
+nookctl notes undo --approve-edit --stdin
+```
+
+Rules:
+
+- `help` is always read-only and ungated.
+- Bare `tree`, `notes`, and read commands are read-only.
+- `notes edit` and `notes undo` require the exact approval flag and exact
+  positional/option shape; extra, duplicate, reordered, path-shaped, or
+  flag-shaped values are rejected before runtime construction.
+- Queries, replacement note content, and undo-token input arrive through bounded
+  stdin only. Note bodies, queries, credentials, keys, paths, revisions, and
+  tokens must not be accepted through argv or environment variables.
+- The first implementation must not add an arbitrary `--editor` command
+  option. An external-editor handoff is a separate design gate because editor
+  paths, temporary files, crash recovery, and plaintext residue require their
+  own security contract.
+- Handles, cursors, and undo tokens are opaque, bounded, non-path identifiers;
+  they are not raw database IDs or filesystem paths and must expire or be scoped
+  to the owning CLI operation where practical.
+- `notes.delete` remains structurally absent. No command may synthesize deletion
+  through another method.
+
+### Filetree contract
+
+`tree list` is a metadata-only view over an explicit allowlist of application
+artifacts. It is not a raw recursive dump of `/var/lib/nookbridge` and must
+never expose database, key, credential, socket, or arbitrary-path contents.
+The v1 allowlist is intentionally narrow and must be enumerated in source and
+review evidence before implementation is accepted:
+
+- the virtual state-root metadata entry;
+- the application-owned `.recovery-quarantine` container and bounded opaque
+  quarantine-entry metadata, without exposing preserved file names or contents;
+- any additional named application metadata entry only after it is added to the
+  allowlist, plan, and dedicated tests; and
+- no database, `.d`, credential, socket, lock, temporary, or unknown entry.
+
+Until a concrete additional entry is explicitly allowlisted, it is categorized
+as `unknown` and is not browsed. The implementation must:
+
+- use the existing configured state-root boundary and refuse symlink escapes,
+  traversal aliases, non-directory roots, unbounded depth, unbounded entry
+  counts, and unbounded metadata sizes;
+- return bounded entry records with categorical fields such as opaque handle,
+  entry kind, safe display label, bounded size, mode class, owner class, and
+  child-count/page information; never return absolute paths, numeric service
+  identities, key labels, credential filenames, raw SQLite filenames, or file
+  bytes;
+- refuse or categorize protected entries (`database`, `credential`, `socket`,
+  `lock`, and `unknown`) without reading their contents;
+- remain read-only even when the state directory is missing, locked, corrupt,
+  or concurrently changing;
+- use a stable opaque cursor/handle scheme rather than allowing a caller to
+  submit an arbitrary filesystem path; and
+- emit a categorical audit event without names, paths, sizes that identify
+  private state, or native filesystem errors.
+
+The tree must not open the encrypted database or bypass `nookd` merely to make
+filesystem browsing convenient. Note content is accessed through the existing
+note runtime/RPC path, not by reading database files.
+
+### Notes browse/edit contract
+
+The notes CLI composes the existing closed method universe only:
+
+```text
+notes.search
+notes.status
+notes.list_notebooks
+notes.get
+notes.create
+notes.append
+notes.update
+```
+
+No new RPC/MCP/auth/sync/transport method is permitted for this feature, and
+`notes.delete` remains absent. The CLI adapter may add pagination, opaque
+handles, stdin framing, and categorical formatting, but those are local CLI
+concerns rather than new wire capabilities.
+
+In the current source contract, `notes.get` returns bounded note metadata, not
+note body content. The first implementation must keep `notes get` metadata-only
+unless it proves that an existing local operator runtime method already returns
+bounded content without changing the RPC/MCP method universe. Body browsing is
+therefore an explicit source gate: no invented `notes.get-content` method, no
+raw database read, and no MCP widening. Editing may use the existing bounded
+`notes.create`, `notes.append`, and `notes.update` capability only.
+
+Read operations may return bounded, explicitly requested note metadata or note
+content. Output must be byte-bounded and must not leak credentials, keys,
+filesystem paths, raw database errors, stack traces, upstream causes, or
+unrequested note bodies. Logs and audit records remain categorical and must not
+repeat titles, queries, bodies, IDs, or revision tokens.
+
+Edits must:
+
+- require `--approve-edit` and bounded stdin content;
+- use the existing optimistic-concurrency/revision contract;
+- refuse stale or ambiguous handles before mutation;
+- preserve the no-delete invariant;
+- report only a closed result such as `updated`, `conflict`, `denied`,
+  `invalid-input`, `locked`, or `error`; and
+- never claim remote sync completion unless the existing sync contract actually
+  proves it. A local update result and a later sync result remain distinct.
+
+The undo path is an explicit, separately tested inverse update, not deletion.
+Before accepting an edit, the implementation must either use a proven upstream
+revision/history facility or store a bounded encrypted preimage through the
+existing encrypted state routines. A plaintext undo file, plaintext editor
+buffer retained in state, or unbounded edit history is prohibited. `notes undo`
+requires an opaque expiring token, the same approval gate, the original revision
+precondition, and a categorical result. If encrypted preimage storage cannot be
+proven, the edit feature remains blocked rather than shipping without a safe
+undo story.
+
+### Closed result schemas
+
+The public CLI formatter must return only closed categorical unions. The precise
+TypeScript names may follow the implementation, but the shape must be
+semantically equivalent to:
+
+```text
+TreeResult =
+  { kind: "help", text: fixed-help }
+| { kind: "page", entries: bounded-entry-records, next: opaque-or-null }
+| { kind: "empty" }
+| { kind: "denied" | "invalid-input" | "locked" | "missing" | "error" }
+
+NotesResult =
+  { kind: "help", text: fixed-help }
+| { kind: "page", notes: bounded-note-metadata, next: opaque-or-null }
+| { kind: "note", content: bounded-requested-content }
+| { kind: "updated" | "undone" }
+| { kind: "conflict" | "denied" | "invalid-input" | "locked" | "error" }
+```
+
+All unknown filesystem, storage, RPC, editor, and upstream failures collapse to
+fixed categorical results. No `cause`, path, key, note body, query, title,
+identifier, or native error string crosses the formatter boundary.
+
+### Fail-closed requirements
+
+Before source implementation can be marked complete, tests must prove:
+
+- default and help paths are read-only and do not construct mutation/runtime
+  handles;
+- exact approval flags are required for edit and undo, with duplicate/extra/
+  reordered/oversized/flag-shaped arguments rejected;
+- credential, key, body, query, path, revision, and token carriers are refused
+  through argv and environment before state access;
+- filetree traversal cannot escape the configured root through symlinks,
+  `..`, alternate spellings, or concurrent replacement;
+- depth, page, entry, byte, title, content, and cursor limits are enforced;
+- lock and unknown filesystem state fail closed without deleting or changing
+  locks, databases, quarantine entries, or unexpected files;
+- protected state artifacts are categorized without content reads;
+- the seven-method RPC allowlist is unchanged and `notes.delete` is absent from
+  the parser, dispatcher, adapter, and MCP capability; tests may mention it
+  only as a rejected-input negative case;
+- stale note revisions produce a categorical conflict without a partial update;
+- edit and undo output contains none of the supplied content, query, title,
+  path, key, identifier, revision, or upstream error text;
+- audit records are fixed categorical events and do not become a side channel;
+- undo preimages, if used, are encrypted, bounded, expiring, and cleaned up
+  without recursive deletion or plaintext residue; and
+- source docs distinguish implemented source behavior from VM and production
+  evidence.
+
+### Verification gates
+
+The feature has three independent status gates:
+
+1. **Source implementation gate — open:** TDD RED/GREEN tests for parser,
+   dispatcher, filetree boundary, closed formatter, RPC allowlist, revision
+   conflict, approval gate, and encrypted undo; then typecheck, lint, format,
+   build, focused tests, full suite, and an independent security review of the
+   exact staged snapshot.
+2. **VM drill gate — open:** clean disposable VM evidence for service identity,
+   state/socket permissions, protected-artifact refusal, bounded tree output,
+   note browse/read, approved edit, stale-revision conflict, undo, cleanup, and
+   negative-containment output checks. VM evidence must use the reviewed source
+   and deployment pin, not an unpinned working tree.
+3. **Production gate — open:** merged source and Nix pin, privileged rebuild
+   handoff, target-host read-only canary first, then a separately approved edit
+   canary using disposable or explicitly authorized note data. Capture complete
+   stdout and stderr, verify no paths/keys/content/native causes leak, verify
+   rollback/undo, and record local-update versus remote-sync outcomes
+   separately.
+
+Documentation must label each row as `source`, `VM`, or `production`; a passing
+source test or clean VM does not close the production gate.
+
+### Planned file and test scope
+
+Likely source changes are limited to the existing CLI dispatcher and a newly
+isolated operator adapter, plus tests and this plan/evidence documentation:
+
+- `src/cli.ts` — command-tree registration and strict argument boundary;
+- `src/operator/` — filetree metadata adapter, notes CLI adapter, bounded
+  handles/cursors, closed result formatter, and encrypted undo seam;
+- existing RPC/client adapter files only if composition can be proven without
+  widening the method universe;
+- `tests/` — parser/dispatcher, traversal, output redaction, approval,
+  concurrency, allowlist, undo, and integration regression tests;
+- `docs/` — source evidence and separate VM/production gate receipts.
+
+No Nix deployment or MCP registration change is implied by this plan entry.
+Any request to expose the feature through MCP, add a new RPC method, add an
+external editor, or relax the operator-only profile requires a new decision
+record and fresh security review.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
