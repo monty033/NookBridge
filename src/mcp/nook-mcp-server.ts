@@ -62,6 +62,7 @@ export const NOOK_MCP_GET_NOTE_TOOL_NAME = "notesnook_get_note" as const;
 export const NOOK_MCP_CREATE_NOTE_TOOL_NAME = "notesnook_create_note" as const;
 export const NOOK_MCP_APPEND_NOTE_TOOL_NAME = "notesnook_append_note" as const;
 export const NOOK_MCP_UPDATE_NOTE_TOOL_NAME = "notesnook_update_note" as const;
+export const NOOK_MCP_SYNC_TOOL_NAME = "notesnook_sync" as const;
 
 /** The exhaustive allowlist of valid tool names. The factory
  *  enforces this at registration time so a future contributor
@@ -74,6 +75,7 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
   NOOK_MCP_CREATE_NOTE_TOOL_NAME,
   NOOK_MCP_APPEND_NOTE_TOOL_NAME,
   NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+  NOOK_MCP_SYNC_TOOL_NAME,
 ]);
 
 /**
@@ -85,7 +87,6 @@ export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
   "notesnook_delete_note",
 
   "notesnook_list_notes",
-  "notesnook_sync",
   "notesnook_full_sync",
   "notesnook_send_sync",
   "notesnook_unlock_vault",
@@ -338,6 +339,19 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
   }),
 }) as unknown as Tool;
 
+const SYNC_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_SYNC_TOOL_NAME,
+  description: "Explicitly request the approval-gated outbound sync coordinator.",
+  inputSchema: EMPTY_INPUT_SCHEMA,
+  annotations: Object.freeze({
+    title: "Sync notes",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  }),
+}) as unknown as Tool;
+
 /** Static list of every tool the proxy is allowed to expose. */
 export const NOOK_MCP_TOOL_DEFINITIONS: ReadonlyArray<Tool> = Object.freeze([
   SEARCH_TOOL_DEFINITION,
@@ -347,6 +361,7 @@ export const NOOK_MCP_TOOL_DEFINITIONS: ReadonlyArray<Tool> = Object.freeze([
   CREATE_NOTE_TOOL_DEFINITION,
   APPEND_NOTE_TOOL_DEFINITION,
   UPDATE_NOTE_TOOL_DEFINITION,
+  SYNC_TOOL_DEFINITION,
 ]);
 
 // -----------------------------------------------------------------------
@@ -572,6 +587,19 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       async (input) => invokeUpdateNote(options.client, input as UpdateNoteInput),
     ),
   });
+  registered.push({
+    name: NOOK_MCP_SYNC_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_SYNC_TOOL_NAME,
+      {
+        title: "Sync notes",
+        description: "Explicitly request the approval-gated outbound sync coordinator.",
+        inputSchema: emptyInputSchema,
+        annotations: SYNC_TOOL_DEFINITION.annotations as ToolAnnotations,
+      },
+      async (input) => invokeRequestSync(options.client, input as Record<string, unknown>),
+    ),
+  });
 
   // The high-level McpServer dispatcher emits SDK-generated validation and
   // unknown-tool text. Replace only its tools/call handler with the same
@@ -596,7 +624,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         name !== NOOK_MCP_GET_NOTE_TOOL_NAME &&
         name !== NOOK_MCP_CREATE_NOTE_TOOL_NAME &&
         name !== NOOK_MCP_APPEND_NOTE_TOOL_NAME &&
-        name !== NOOK_MCP_UPDATE_NOTE_TOOL_NAME
+        name !== NOOK_MCP_UPDATE_NOTE_TOOL_NAME &&
+        name !== NOOK_MCP_SYNC_TOOL_NAME
       ) {
         return toMcpErrorResult("unknown_tool");
       }
@@ -988,6 +1017,44 @@ async function invokeGetNote(
   }
 }
 
+async function invokeRequestSync(
+  client: NookdSocketClient,
+  input: Record<string, unknown> = {},
+): Promise<CallToolResult> {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).length !== 0
+  )
+    return toMcpErrorResult("invalid_request");
+  let result: Awaited<ReturnType<NookdSocketClient["requestSync"]>>;
+  try {
+    result = await client.requestSync();
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+  if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+  try {
+    const value = result.envelope.result;
+    if (
+      value.kind !== "sync" ||
+      (value.status !== "idle" && value.status !== "synced") ||
+      typeof value.pendingSync !== "boolean" ||
+      !isBoundedCount(value.attempts, 8)
+    )
+      return toMcpErrorResult("service_unavailable");
+    return textResult({
+      kind: "sync",
+      status: value.status,
+      pendingSync: value.pendingSync,
+      attempts: value.attempts,
+    });
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
+}
+
 function textResult(payload: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(payload) }] };
 }
@@ -1058,6 +1125,7 @@ async function callToolDirectly(
     return invokeAppendNote(client, args as AppendNoteInput);
   if (name === NOOK_MCP_UPDATE_NOTE_TOOL_NAME)
     return invokeUpdateNote(client, args as UpdateNoteInput);
+  if (name === NOOK_MCP_SYNC_TOOL_NAME) return invokeRequestSync(client, args);
   return toMcpErrorResult("unknown_tool");
 }
 

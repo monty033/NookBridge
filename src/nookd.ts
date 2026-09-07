@@ -88,7 +88,13 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
   Partial<
     Pick<
       ServiceRuntime,
-      "status" | "listNotebooks" | "noteMetadata" | "createNote" | "appendNote" | "updateNote"
+      | "status"
+      | "listNotebooks"
+      | "noteMetadata"
+      | "createNote"
+      | "appendNote"
+      | "updateNote"
+      | "requestSync"
     >
   >;
 
@@ -259,6 +265,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let createNote: NookdStartupRuntime["createNote"];
   let appendNote: NookdStartupRuntime["appendNote"];
   let updateNote: NookdStartupRuntime["updateNote"];
+  let requestSync: NookdStartupRuntime["requestSync"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"];
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -272,6 +279,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedCreateNote = runtime.createNote;
     const capturedAppendNote = runtime.appendNote;
     const capturedUpdateNote = runtime.updateNote;
+    const capturedRequestSync = runtime.requestSync;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
@@ -281,7 +289,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedNoteMetadata !== undefined && typeof capturedNoteMetadata !== "function") ||
       (capturedCreateNote !== undefined && typeof capturedCreateNote !== "function") ||
       (capturedAppendNote !== undefined && typeof capturedAppendNote !== "function") ||
-      (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function")
+      (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function") ||
+      (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function")
     ) {
       throw new Error("invalid service runtime");
     }
@@ -292,6 +301,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     createNote = capturedCreateNote;
     appendNote = capturedAppendNote;
     updateNote = capturedUpdateNote;
+    requestSync = capturedRequestSync;
     runtimeCleanup = capturedCleanup;
   } catch {
     throw startupError("runtime", "nookd runtime startup failed");
@@ -306,6 +316,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
+    ...(requestSync === undefined ? {} : { requestSync }),
     cleanup,
   });
 

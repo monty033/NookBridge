@@ -213,6 +213,10 @@ export class NookdSocketClient {
     return this.#request("notes.update", params);
   }
 
+  async requestSync(): Promise<NookdSocketResult> {
+    return this.#request("notes.sync", {});
+  }
+
   async #request(
     method:
       | "notes.search"
@@ -221,7 +225,8 @@ export class NookdSocketClient {
       | "notes.get"
       | "notes.create"
       | "notes.append"
-      | "notes.update",
+      | "notes.update"
+      | "notes.sync",
     params:
       | RpcNotesSearchParams
       | RpcNotesCreateParams
@@ -285,7 +290,8 @@ function serializeRequest(
     | "notes.get"
     | "notes.create"
     | "notes.append"
-    | "notes.update",
+    | "notes.update"
+    | "notes.sync",
   params:
     | RpcNotesSearchParams
     | RpcNotesCreateParams
@@ -846,6 +852,28 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         result: Object.freeze(updateResult),
       }) as unknown as RpcAnyResponseEnvelope;
     }
+    if (resultRecord.kind === "sync") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "status", "pendingSync", "attempts"]) ||
+        (resultRecord.status !== "idle" && resultRecord.status !== "synced") ||
+        typeof resultRecord.pendingSync !== "boolean" ||
+        typeof resultRecord.attempts !== "number" ||
+        !Number.isSafeInteger(resultRecord.attempts) ||
+        resultRecord.attempts < 0 ||
+        resultRecord.attempts > 8
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "sync",
+          status: resultRecord.status,
+          pendingSync: resultRecord.pendingSync,
+          attempts: resultRecord.attempts,
+        }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
     throw new Error("invalid response");
   }
   const error = candidate.error;
@@ -981,7 +1009,9 @@ function mapResponseEnvelope(
       result === undefined ||
       result === null ||
       typeof result !== "object" ||
-      !["search", "status", "notebooks", "note", "create", "append", "update"].includes(result.kind)
+      !["search", "status", "notebooks", "note", "create", "append", "update", "sync"].includes(
+        result.kind,
+      )
     ) {
       return { ok: false, code: "service_unavailable" };
     }

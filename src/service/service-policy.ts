@@ -125,8 +125,9 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 })();
 
 /**
- * The `readWriteNoDelete` allowlist: the four reads plus the
- * side-effecting `notes.create`, `notes.append`, and `notes.update`.
+ * The `readWriteNoDelete` allowlist: the four reads plus
+ * the side-effecting `notes.create`, `notes.append`, `notes.update`,
+ * and explicitly approval-gated `notes.sync` method.
  * `notes.delete` is intentionally absent — delete is never
  * reachable through any profile in this slice.
  */
@@ -139,6 +140,7 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
+    "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
@@ -151,9 +153,9 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
  * before the policy is constructed.  This is the structural
  * guarantee that delete is never possible through any policy.
  *
- * `notes.append` and `notes.update` are admitted end-to-end by
- * Slice 3 follow-up; `notes.delete` is structurally absent and
- * impossible to smuggle in.
+ * `notes.append`, `notes.update`, and the explicitly approval-gated
+ * `notes.sync` method are admitted end-to-end; `notes.delete` is
+ * structurally absent and impossible to smuggle in.
  */
 const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
   const arr: RpcMethod[] = [
@@ -164,6 +166,7 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
+    "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
@@ -172,9 +175,10 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
 /**
  * The closed universe of methods the policy engine recognises for
  * the purposes of structural validation.  The four read methods,
- * `notes.create`, `notes.append`, and `notes.update` are valid.
+ * `notes.create`, `notes.append`, `notes.update`, and explicitly
+ * approval-gated `notes.sync` are valid.
  * Anything else (including `notes.delete`, any future write method
- * outside the Slice 3 amendment) is unknown to the policy engine
+ * outside the published amendment) is unknown to the policy engine
  * and would always be denied — but it is also never carried in a
  * custom allowlist because the factory drops anything outside
  * `CUSTOM_POLICY_ALLOWABLE_METHODS` silently.

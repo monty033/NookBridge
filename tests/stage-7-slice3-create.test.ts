@@ -196,6 +196,7 @@ describe("service policy — custom method allowlist", () => {
       "notes.get",
       "notes.create",
       "notes.append",
+      "notes.sync",
       "notes.update",
       "notes.delete",
     ];
