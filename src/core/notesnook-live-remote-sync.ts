@@ -9,6 +9,7 @@
  */
 
 import { NotesnookWriteContractError } from "./notesnook-write-contract.js";
+import { withMutex } from "./notesnook-database-mutex.js";
 import type {
   SyncCoordinatorResult,
   SyncExecutor,
@@ -174,20 +175,36 @@ export interface NotesnookLiveRemoteSyncCapability {
  * Wrap a coordinator as the explicit remote-sync capability. The caller gets
  * no executor, options, Database, or syncer; lifecycle validation happens
  * before the coordinator can invoke live code.
+ *
+ * When a database identity is supplied, every `requestSync()` call funnels
+ * through the per-Database mutex so a remote drain can never interleave with
+ * a local mutation (or with another remote-sync capability bound to the
+ * same database).  Without a database identity the capability falls back to
+ * the coordinator's own single-flight policy, which still gates against
+ * concurrent remote drains but does not serialise against mutations.
  */
 export function createLiveRemoteSyncCapability(
   requestSync: () => Promise<SyncCoordinatorResult>,
   ensureOpen: LiveRemoteSyncEnsureOpen,
+  database?: object,
 ): NotesnookLiveRemoteSyncCapability {
   if (typeof requestSync !== "function" || typeof ensureOpen !== "function") {
+    failInvalidInput();
+  }
+  if (
+    database !== undefined &&
+    (typeof database !== "object" || database === null || Array.isArray(database))
+  ) {
     failInvalidInput();
   }
   return Object.freeze({
     requestSync: async () => {
       try {
         ensureOpen();
-        const result = await requestSync();
-        return normalizeCoordinatorResult(result);
+        const run = () => requestSync().then(normalizeCoordinatorResult);
+        const result =
+          database === undefined ? await run() : await withMutex(database, "remote:sync", run);
+        return result;
       } catch {
         failSync();
       }

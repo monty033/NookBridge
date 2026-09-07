@@ -321,13 +321,18 @@ export async function createNotesnookLiveCoreFactory(
             });
             return projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
               coordinator: sharedCoordinator,
+              database: db as unknown as object,
             });
           })()
         : undefined;
     const remoteSync =
       localWrite === undefined || sharedCoordinator === undefined
         ? undefined
-        : createLiveRemoteSyncCapability(() => sharedCoordinator!.requestSync(), ensureOpen);
+        : createLiveRemoteSyncCapability(
+            () => sharedCoordinator!.requestSync(),
+            ensureOpen,
+            db as unknown as object,
+          );
     // Stage 5: the local-conflict observer is built from the same opened
     // database but only over the structural `notes.conflicted.ids()` /
     // `notes.note(id)` shape.  It is optional so legacy injected auth-only

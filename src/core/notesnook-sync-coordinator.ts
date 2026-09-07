@@ -103,6 +103,16 @@ export type SyncLocalCommitResult = Readonly<{
   readonly pendingSync: true;
 }>;
 
+/**
+ * Pre-flight capacity check used by the composition before invoking a
+ * local mutation.  When the queue is below the bound, the composition
+ * proceeds; when at the bound, the composition refuses the mutation
+ * so the local commit cannot land without a durable marker.
+ */
+export type SyncCapacityResult =
+  | Readonly<{ readonly kind: "accept" }>
+  | Readonly<{ readonly kind: "full"; readonly capacity: number }>;
+
 /** Result of a single-flight drain request. */
 export type SyncCoordinatorResult =
   | Readonly<{
@@ -249,6 +259,24 @@ export class SyncCoordinator {
       remoteSynced: false as const,
       pendingSync: true as const,
     });
+  }
+
+  /**
+   * Reject `requestSync` while the queue is at the published maximum.
+   *
+   * The composition refuses to start a new local mutation if the
+   * pending queue is full, so a mutation that would commit without a
+   * durable marker is impossible (P1-3).  When the queue is below the
+   * bound, this method returns `accept`; the caller proceeds.
+   *
+   * The capacity check is purely metadata and does not consult the
+   * remote service.
+   */
+  checkCapacity(): SyncCapacityResult {
+    if (this.#pending.length >= MAX_PENDING_MARKERS) {
+      return Object.freeze({ kind: "full" as const, capacity: MAX_PENDING_MARKERS });
+    }
+    return Object.freeze({ kind: "accept" as const });
   }
 
   /** Return a defensive, frozen copy of the bounded queue markers. */

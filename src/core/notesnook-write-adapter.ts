@@ -262,6 +262,13 @@ export class NotesnookWriteAdapter {
       }
     }
 
+    // Validate every desired tag before encoding or mutating.  This is
+    // the create transaction's preflight boundary: an unknown tag must
+    // not leave a note behind after `notesAdd` succeeds.
+    if (plan.tags !== undefined) {
+      await this.#validateTags(plan.tags);
+    }
+
     // Step 3 — translate Markdown to the stored representation via the
     // injected codec.  Any throw is normalised to `unsupported_content`.
     // The contract only stores byte counts here; the raw Markdown is
@@ -297,13 +304,6 @@ export class NotesnookWriteAdapter {
 
     if (plan.tags && plan.tags.length > 0) {
       for (const tagId of plan.tags) {
-        const tagExists = await this.#safe("tagExists", () => this.#database.tagExists(tagId));
-        if (tagExists !== true) {
-          throw adapterError(
-            "invalid_input",
-            "Notesnook write adapter: tag reference is not recognised",
-          );
-        }
         try {
           await this.#safe("relationAdd", () =>
             this.#database.relationAdd({ fromId: id, toId: tagId, type: "tag" }),
@@ -420,6 +420,30 @@ export class NotesnookWriteAdapter {
       metadataFields.push(field);
     }
 
+    // Complete all read-only validation before the first mutator.  In
+    // particular, every desired tag is checked before notesUpdate or
+    // relationRemove can change the note.
+    if (patch.tags !== undefined) {
+      await this.#validateTags(patch.tags ?? []);
+    }
+
+    let preparedContent: NotesnookStoredContent | undefined;
+    if (plan.patchFields.includes("content")) {
+      const newContent = patch.content as string;
+      contentBytes = Buffer.byteLength(newContent, "utf8");
+      const stored = await this.#safe("contentFindByNoteId", () =>
+        this.#database.contentFindByNoteId(plan.id),
+      );
+      if (stored === undefined) {
+        throw adapterError(
+          "unsupported_content",
+          "Notesnook write adapter: stored content is not available",
+        );
+      }
+      const encoded = this.#encodeMarkdown(newContent);
+      preparedContent = { type: stored.type, data: encoded.data };
+    }
+
     if (metadataFields.length > 0) {
       const partialForNotes: Record<string, unknown> = {};
       for (const field of metadataFields) {
@@ -500,13 +524,6 @@ export class NotesnookWriteAdapter {
         }
         for (const tagId of desired) {
           if (existing.some((rel) => rel.type === "tag" && rel.toId === tagId)) continue;
-          const tagExists = await this.#safe("tagExists", () => this.#database.tagExists(tagId));
-          if (tagExists !== true) {
-            throw adapterError(
-              "invalid_input",
-              "Notesnook write adapter: tag reference is not recognised",
-            );
-          }
           try {
             await this.#safe("relationAdd", () =>
               this.#database.relationAdd({ fromId: plan.id, toId: tagId, type: "tag" }),
@@ -518,28 +535,16 @@ export class NotesnookWriteAdapter {
       }
     }
 
-    // Step B — content field.  Re-read the stored content slot and
-    // route through the codec.  Preserves the original stored type
-    // because the seam-bound runtime expects a single ContentItem type
-    // per note; the codec output's data is what we write, pinned to
-    // the existing slot type.
-    if (plan.patchFields.includes("content")) {
-      const newContent = patch.content as string;
-      contentBytes = Buffer.byteLength(newContent, "utf8");
-      const stored = await this.#safe("contentFindByNoteId", () =>
-        this.#database.contentFindByNoteId(plan.id),
-      );
-      if (stored === undefined) {
-        throw adapterError(
-          "unsupported_content",
-          "Notesnook write adapter: stored content is not available",
-        );
-      }
-      const encoded = this.#encodeMarkdown(newContent);
-      const pinned: NotesnookStoredContent = { type: stored.type, data: encoded.data };
+    // Step B — content field.  The content was read and encoded during
+    // preflight, before any metadata mutator.  Only the write itself
+    // remains here.
+    if (preparedContent !== undefined) {
       try {
         await this.#safe("contentUpdateByNoteId", () =>
-          this.#database.contentUpdateByNoteId({ type: pinned.type, data: pinned.data }, plan.id),
+          this.#database.contentUpdateByNoteId(
+            { type: preparedContent.type, data: preparedContent.data },
+            plan.id,
+          ),
         );
       } catch {
         throw adapterError("sync_failed", "Notesnook write adapter: content update failed");
@@ -571,6 +576,18 @@ export class NotesnookWriteAdapter {
   // -------------------------------------------------------------------------
   // Internals.
   // -------------------------------------------------------------------------
+
+  async #validateTags(tagIds: readonly string[]): Promise<void> {
+    for (const tagId of tagIds) {
+      const exists = await this.#safe("tagExists", () => this.#database.tagExists(tagId));
+      if (exists !== true) {
+        throw adapterError(
+          "invalid_input",
+          "Notesnook write adapter: tag reference is not recognised",
+        );
+      }
+    }
+  }
 
   #encodeMarkdown(markdown: string): NotesnookStoredContent {
     try {

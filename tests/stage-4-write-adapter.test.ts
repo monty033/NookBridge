@@ -562,6 +562,25 @@ describe("Stage 4 write adapter — createNote", () => {
       type: "tag",
     });
   });
+
+  it("rejects every unknown create tag before creating the note", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const code = await codeOfAsync(() =>
+      adapter.createNote({
+        title: "Tagged",
+        content: "body",
+        tags: [TAG_ID],
+      }),
+    );
+
+    expect(code).toBe("invalid_input");
+    expect(database.calls.add).toHaveLength(0);
+    expect(database.calls.relationAdd).toHaveLength(0);
+    expect(codec.encodeCalls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -993,6 +1012,23 @@ describe("Stage 4 write adapter — updateNote", () => {
     });
     return { adapter, database, codec, note };
   }
+
+  it("rejects an unknown replacement tag before changing note metadata", async () => {
+    const { adapter, database } = setupUpdatable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { tags: [TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("invalid_input");
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.relationAdd).toHaveLength(0);
+  });
 
   it("applies only the allowed patch fields and preserves fields outside the patch", async () => {
     const { adapter, database, codec } = setupUpdatable({
