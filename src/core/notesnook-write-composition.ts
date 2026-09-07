@@ -1065,7 +1065,12 @@ function freezeSealed<T extends object>(shape: T): T {
 }
 
 function freezeArrayAsSealed<T>(values: readonly T[]): readonly T[] {
-  const result = Object.create(null) as unknown as T[];
+  // Start with a real Array so Array.isArray() remains true at downstream
+  // boundaries, then remove its inherited surface before exposing it.  A
+  // null prototype preserves the closure-hygiene guarantee while retaining
+  // the standard array brand required by consumers such as the RPC handler.
+  const result = [] as unknown as T[];
+  Object.setPrototypeOf(result, null);
   for (let index = 0; index < values.length; index++) {
     Object.defineProperty(result as unknown as object, String(index), {
       configurable: false,
