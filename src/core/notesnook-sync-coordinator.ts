@@ -115,18 +115,18 @@ export type SyncCoordinatorResult =
     }>
   | Readonly<{
       readonly status: "synced";
-      readonly localCommitted: true;
+      readonly localCommitted: boolean;
       readonly remoteSynced: true;
-      readonly pendingSync: false;
+      readonly pendingSync: boolean;
       readonly attempts: number;
       readonly startedAt: number;
     }>
   | Readonly<{
       readonly status: "failed";
       readonly errorCode: "sync_failed";
-      readonly localCommitted: true;
+      readonly localCommitted: boolean;
       readonly remoteSynced: false;
-      readonly pendingSync: true;
+      readonly pendingSync: boolean;
       readonly attempts: number;
       readonly startedAt: number;
     }>;
@@ -275,18 +275,8 @@ export class SyncCoordinator {
 
   async #drain(): Promise<SyncCoordinatorResult> {
     const startedAt = safeNow(this.#now);
-    if (this.#pending.length === 0) {
-      return Object.freeze({
-        status: "idle" as const,
-        localCommitted: false as const,
-        remoteSynced: false as const,
-        pendingSync: false as const,
-        attempts: 0 as const,
-        startedAt,
-      });
-    }
-
     const batch = Object.freeze(this.#pending.map(copyMarker));
+    const localCommitted = batch.length > 0;
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt++) {
       let response: SyncExecutorResult;
       try {
@@ -295,42 +285,50 @@ export class SyncCoordinator {
         ]) as unknown;
         response = (await raw) as SyncExecutorResult;
       } catch {
-        if (attempt === this.#maxAttempts) return failedResult(attempt, startedAt);
+        if (attempt === this.#maxAttempts) {
+          return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
+        }
         const slept = await this.#wait(backoffDelay(this.#baseDelayMs, attempt));
-        if (!slept) return failedResult(attempt, startedAt);
+        if (!slept)
+          return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
         continue;
       }
 
       const parsed = parseExecutorResult(response);
-      if (parsed.status === "failed") return failedResult(attempt, startedAt);
+      if (parsed.status === "failed") {
+        return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
+      }
       if (parsed.status === "retry") {
-        if (attempt === this.#maxAttempts) return failedResult(attempt, startedAt);
+        if (attempt === this.#maxAttempts) {
+          return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
+        }
         const delay =
           parsed.retryAfterMs === undefined
             ? backoffDelay(this.#baseDelayMs, attempt)
             : Math.min(parsed.retryAfterMs, this.#retryAfterCapMs);
         const slept = await this.#wait(delay);
-        if (!slept) return failedResult(attempt, startedAt);
+        if (!slept)
+          return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
         continue;
       }
 
       try {
         this.#removeBatch(batch);
       } catch {
-        return failedResult(attempt, startedAt);
+        return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
       }
       return Object.freeze({
         status: "synced" as const,
-        localCommitted: true as const,
+        localCommitted,
         remoteSynced: true as const,
-        pendingSync: false as const,
+        pendingSync: this.#pending.length > 0,
         attempts: attempt,
         startedAt,
       });
     }
 
     // The loop is bounded by #maxAttempts; this is only a type-level guard.
-    return failedResult(this.#maxAttempts, startedAt);
+    return failedResult(this.#maxAttempts, startedAt, localCommitted, this.#pending.length > 0);
   }
 
   async #wait(delayMs: number): Promise<boolean> {
@@ -537,13 +535,18 @@ function backoffDelay(baseDelayMs: number, attempt: number): number {
   return Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** (attempt - 1));
 }
 
-function failedResult(attempts: number, startedAt: number): SyncCoordinatorResult {
+function failedResult(
+  attempts: number,
+  startedAt: number,
+  localCommitted: boolean,
+  pendingSync: boolean,
+): SyncCoordinatorResult {
   return Object.freeze({
     status: "failed" as const,
     errorCode: "sync_failed" as const,
-    localCommitted: true as const,
+    localCommitted,
     remoteSynced: false as const,
-    pendingSync: true as const,
+    pendingSync,
     attempts,
     startedAt,
   });

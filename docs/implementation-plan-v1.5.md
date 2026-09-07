@@ -10,7 +10,7 @@
 | Recommended implementation | TypeScript / Node.js                           |
 | Project license            | GPL-3.0-or-later                               |
 | Research cutoff            | August 26, 2026                                |
-| Document status            | Design plan / implementation roadmap, v1.5     |
+| Document status            | Design plan / implementation roadmap, v1.6     |
 
 > Purpose: define a low-risk, testable path from a small feasibility probe to a reliable headless Notesnook client for Linux that can read, search, create, update, and eventually access attachments on behalf of Hermes without materially weakening Notesnook's desktop-client security model. NixOS is the reference and first production deployment; generic Linux and Docker are supported portability targets. The plan deliberately separates development proofs from the first deployable MVP so the project can stop early if Notesnook core behavior on the reference NixOS host proves unsuitable.
 
@@ -127,7 +127,7 @@ permissions:
 ## 1.4 Explicit non-goals for the MVP
 
 - Deleting notes or notebooks.
-- Automatic conflict resolution or silent last-write-wins behavior implemented by the bridge.
+- Bridge-implemented conflict resolution or silent last-write-wins behavior. Notesnook core remains the authority for native sync/conflict behavior; NookBridge only controls authorization, lifecycle, serialization, bounded retries, and result projection.
 - Private Vault unlocking/management. Locked-note discovery/read behavior is defined explicitly in Section 4.8, but the bridge does not accept, store, or expose a Vault-unlock credential or tool in the MVP.
 - Attachment upload/download or content extraction.
 - Semantic/vector search.
@@ -597,6 +597,7 @@ Objective: add create/append/update behavior with guardrails before adding the p
 - Implement `createNote`, `appendNote`, and controlled `updateNote` in the application layer.
 - Every replace/update accepts `expectedRevision`; reject stale mutations unless an explicit future policy allows force.
 - After a write, report local commit and remote sync separately; enqueue synchronization through `SyncCoordinator` rather than issuing an unconditional immediate upstream sync per mutation.
+- An explicit approved synchronization request must invoke Notesnook core's native full sync even when NookBridge has no local pending markers, so remote-only edits/deletions can be fetched. The bridge must not reimplement conflict resolution; it must serialize the core call, preserve the no-delete MCP/RPC boundary, and return bounded categorical status.
 - Do not expose delete; keep remove APIs inaccessible outside upstream/core tests.
 - Build formatting round-trip fixtures before full replacement is considered safe.
 
@@ -606,6 +607,7 @@ Objective: add create/append/update behavior with guardrails before adding the p
 | Append | Append structured Markdown without dropping existing content. |
 | Stale write | Revision A update after remote revision B is rejected/conflicted. |
 | Offline write | Local commit is marked pending rather than falsely remote-synced; later sync completes. |
+| Remote-only reconciliation | Delete/edit a canary on a separate Notesnook client, invoke the explicit bridge sync with an empty local pending queue, and verify the bridge reflects Notesnook core's result without a bridge-side conflict algorithm. |
 | Burst writes | A rapid append/update sequence is coalesced/serialized and does not produce one uncontrolled upstream sync per mutation. |
 | Throttling | Simulated 429/Retry-After/transient failures trigger bounded backoff without busy-looping or losing pending state. |
 | Round trip | Formatting fixtures survive with agreed normalization and no silent data loss. |

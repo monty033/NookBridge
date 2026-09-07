@@ -215,6 +215,54 @@ describe("Stage 4 live remote executor", () => {
     expect(Object.isFrozen(normalized)).toBe(true);
   });
 
+  it("normalizes a remote-only success without inventing a local commit", async () => {
+    const capability = createLiveRemoteSyncCapability(
+      () =>
+        Promise.resolve({
+          status: "synced" as const,
+          localCommitted: false as const,
+          remoteSynced: true as const,
+          pendingSync: false as const,
+          attempts: 1,
+          startedAt: 1,
+        }),
+      () => undefined,
+    );
+
+    await expect(capability.requestSync()).resolves.toEqual({
+      status: "synced",
+      localCommitted: false,
+      remoteSynced: true,
+      pendingSync: false,
+      attempts: 1,
+      startedAt: 1,
+    });
+  });
+
+  it("preserves pending work when a local commit follows the remote sync", async () => {
+    const capability = createLiveRemoteSyncCapability(
+      () =>
+        Promise.resolve({
+          status: "synced" as const,
+          localCommitted: false as const,
+          remoteSynced: true as const,
+          pendingSync: true as const,
+          attempts: 1,
+          startedAt: 1,
+        }),
+      () => undefined,
+    );
+
+    await expect(capability.requestSync()).resolves.toEqual({
+      status: "synced",
+      localCommitted: false,
+      remoteSynced: true,
+      pendingSync: true,
+      attempts: 1,
+      startedAt: 1,
+    });
+  });
+
   it("checks lifecycle before invoking the coordinator capability", async () => {
     let open = true;
     let calls = 0;

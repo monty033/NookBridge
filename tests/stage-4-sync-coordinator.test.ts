@@ -106,6 +106,46 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
     ]);
   });
 
+  it("runs the native sync executor when an explicit request has no local markers", async () => {
+    const requests: unknown[] = [];
+    const executor: SyncExecutor = async (request) => {
+      requests.push(request);
+      return { status: "confirmed" };
+    };
+    const coordinator = new SyncCoordinator({ executor, now: () => 1000 });
+
+    await expect(coordinator.requestSync()).resolves.toMatchObject({
+      status: "synced",
+      localCommitted: false,
+      remoteSynced: true,
+      pendingSync: false,
+      attempts: 1,
+      startedAt: 1000,
+    });
+    expect(requests).toEqual([{ pending: [] }]);
+    expect(coordinator.snapshot()).toEqual({ pending: [] });
+  });
+
+  it("reports a local write that arrives during remote-only sync as still pending", async () => {
+    const gate = deferred<{ readonly status: "confirmed" }>();
+    const coordinator = new SyncCoordinator({
+      executor: () => gate.promise,
+    });
+
+    const syncing = coordinator.requestSync();
+    coordinator.recordLocalCommit(commit("create"));
+    gate.resolve({ status: "confirmed" });
+
+    await expect(syncing).resolves.toMatchObject({
+      status: "synced",
+      localCommitted: false,
+      remoteSynced: true,
+      pendingSync: true,
+      attempts: 1,
+    });
+    expect(coordinator.snapshot().pending).toHaveLength(1);
+  });
+
   it("coalesces concurrent requests into one in-flight executor call", async () => {
     const gate = deferred<{ readonly status: "confirmed" }>();
     let calls = 0;

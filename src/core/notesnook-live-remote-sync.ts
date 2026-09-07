@@ -78,15 +78,16 @@ function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
 
   if (
     status === "synced" &&
-    localCommitted === true &&
+    typeof localCommitted === "boolean" &&
     remoteSynced === true &&
-    pendingSync === false
+    typeof pendingSync === "boolean" &&
+    attempts >= 1
   ) {
     return Object.freeze({
       status: "synced" as const,
-      localCommitted: true as const,
+      localCommitted,
       remoteSynced: true as const,
-      pendingSync: false as const,
+      pendingSync,
       attempts,
       startedAt,
     });
@@ -96,16 +97,17 @@ function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
   if (
     status === "failed" &&
     errorCode === "sync_failed" &&
-    localCommitted === true &&
+    typeof localCommitted === "boolean" &&
     remoteSynced === false &&
-    pendingSync === true
+    typeof pendingSync === "boolean" &&
+    attempts >= 1
   ) {
     return Object.freeze({
       status: "failed" as const,
       errorCode: "sync_failed" as const,
-      localCommitted: true as const,
+      localCommitted,
       remoteSynced: false as const,
-      pendingSync: true as const,
+      pendingSync,
       attempts,
       startedAt,
     });
