@@ -124,11 +124,13 @@ The source pass does not close either operational gate.
 - The VM drill must exercise the reviewed deployment pin and include bounded
   tree output, note browse/read, approved edit, stale-revision conflict, undo,
   cleanup, and negative-containment output checks.
-- The production gate must keep the deployed policy read-only until a separate
-  authorization enables any write-capable canary. Local update and remote sync
-  outcomes must be recorded separately.
+- The following constraints describe this historical source-gate snapshot; the
+  current deployed policy and evidence are recorded in the addendum below.
+- The historical production gate kept the deployed policy read-only until a
+  separate authorization enabled any write-capable canary. Local update and
+  remote sync outcomes must be recorded separately.
 
-## Next gate order
+## Historical next gate order (superseded by the current-pin addendum)
 
 1. Update the Nix consumer pin to this merged source revision only after the VM
    drill input is prepared.
@@ -137,3 +139,35 @@ The source pass does not close either operational gate.
 3. Run the target-host read-only canary after the reviewed pin is deployed.
 4. Treat any production edit canary as a separate explicit authorization and
    receipt; do not infer it from source or VM success.
+
+## Current deployed-pin addendum (2026-09-07)
+
+This addendum supersedes neither the historical receipts above nor their
+fail-closed decisions. It records fresh evidence for the deployed source and
+keeps the remaining Stage 9 gates explicit.
+
+- **Source identity:** upstream `main` / NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0` (PR #59 merge). The Nix consumer pin is nix-config PR #302 merge `1ec85850aad321fe339fe215b8d0b18e20f5e701`, from pin-change head `fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`.
+- **Fresh source gates:** in a clean detached worktree at `9260c6c507db02555046a905d8e7d77ad74865f0`, `nix develop --offline --command just check` passed: **51 test files, 1,512 tests**, typecheck, lint, format, build, `git diff --check`, and `git diff --cached --check`.
+- **Fresh isolation VM:** `cd /var/lib/hermes/workspace/nix-config && nix build --no-link .#checks.x86_64-linux.nookbridge-isolation` passed against the merged `9260c6c507db02555046a905d8e7d77ad74865f0` pin. This is the first current-pin VM receipt; the older `1f433a42` baseline is not reused.
+- **Deployed policy:** production is `readWriteNoDelete`, not `readOnly`. The exposed surface remains closed and has no `notes.delete`; create, append, update, and approval-gated sync are the intended bounded capabilities.
+- **Target-host runtime evidence:** `nookd`, `hermes-agent`, and `hermes-dashboard` are active on `/nix/store/gsg2b1x4pjpgprwfb6s4kqclqa9hm83d-nookbridge-0.0.0-stage.0`; installed service-config validation passed; the Unix socket is `nookbridge:nookbridge-clients` mode `0770`; deployed stdio MCP initialize/tools/list/tools/call passed.
+- **Live remote-reconciliation canary:** an agent-created disposable note was synced, deleted on the phone, then reconciled with `notesnook_sync` (`synced`, `pendingSync:false`, `attempts:1`); exact-title `notesnook_search_notes` returned **0 hits**. This proves the remote-deletion path, not the full Stage 9 security gate.
+
+### Current status and remaining blockers
+
+| Gate | Current status |
+| --- | --- |
+| Source parity at deployed pin | **PASS** — fresh 1,512-test receipt above |
+| Current-pin isolation VM | **PASS** |
+| Target-host runtime and remote-deletion canary | **PASS WITH FOLLOW-UP** |
+| Red-team coverage for outbound sync/reconcile and deployed `readWriteNoDelete` policy | **OPEN** — not yet rerun on `9260c6c507db02555046a905d8e7d77ad74865f0` |
+| Target-host resource-soak coverage (RT-4) | **OPEN** |
+| Target-host plaintext-canary scans (RT-6/RT-9) | **OPEN** |
+| Target-host outsider/state/credential recheck (RT-8) | **OPEN** |
+| Recovery VM/throwaway-state drill | **OPEN** |
+| Post-recovery target-host policy/no-delete checks | **OPEN** |
+| Dependency/license human review | **OPEN** |
+
+**Stage 9 production-MVP decision: NOT CLOSED.** The current source, VM, and
+remote-reconciliation evidence are fresh, but the red-team, recovery, and
+licensing gates remain fail-closed.
