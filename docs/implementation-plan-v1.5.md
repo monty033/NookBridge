@@ -2187,6 +2187,193 @@ Any request to expose the feature through MCP, add a new RPC method, add an
 external editor, or relax the operator-only profile requires a new decision
 record and fresh security review.
 
+## 13.12 Stage 9.5 — Astra full-codebase review and P1/P2 remediation plan
+
+**Status date:** 2026-09-07 (America/New_York)
+**Reviewer:** `gpt-6-astra` (xhigh), independent read-only review
+**Snapshot reviewed:** `097d6d6e69533569fc0f13ec7292634f005f2785` (upstream/main)
+**Review record:** the captured review is reproduced verbatim at
+`docs/stage-9-5-astra-review-output.txt`; the exact invocation prompt is
+preserved at `docs/stage-9-5-astra-review-prompt.txt`. Both files live in
+the repository so the review can be re-checked against the same snapshot
+without depending on `/tmp` artifacts.
+
+**Verdict:** Not ready for Stage 9 closure, routine writable use, or public
+release. Strong architectural foundations and broad test scaffolding exist;
+several integration defects prevent the production MVP gate from closing.
+No P0 was established; ten P1 and six P2 findings are listed below.
+
+### Plan-versus-code parity reset
+
+The current plan records several stage closeouts as "implemented and verified
+offline". The Astra review establishes that some of those statements are
+stronger than the implementation supports. The closeouts stay as
+implementation history. The following table records what each closeout does
+**not** close at this snapshot. The four PRs listed later in this section
+are designed to close a subset of these gaps — the P1 and P2 items
+explicitly assigned to each row. They do **not** close every gap. The
+Stage 9 production gate, privileged scans, long-duration stress, the
+dependency inventory against the shipped artifact, the live race
+follow-ups, and the production-shape recovery drill all remain separate
+Stage 9 acceptance work and are **not** closed by the four PRs.
+
+| Closeout | Currently records | Does NOT close at this snapshot |
+|---|---|---|
+| Stage 4 write surface | create/append/update/sync implemented | Concurrency serialization, mutation atomicity, authoritative Vault check, content-fidelity gate, real retry timing |
+| Stage 7 Slice 1/2 | service-side policy, deadlines, audit | Production retry timing, runtime-operation ownership, fetch rejection lifecycle, closed error vocabulary reaching MCP |
+| Stage 9 operator | CLI filetree + notes browse/edit offline implemented | Production-shape recovery drill, operator read paths use daemon credential backend, pagination/limit semantics, single-caller unhandled-rejection safety, large-corpus read-side resource bounds |
+| Stage 9 red-team | RT-11, RT-4 bounded evidence | Live race follow-ups, privileged RT-6/RT-8/RT-9 scans, long-duration RT-4, dependency inventory against the shipped artifact (not just the lockfile) |
+
+**Scope discipline:** The four PRs in the remediation table below close only
+the P1 and P2 items explicitly assigned to each row; they do not close the
+Stage 9 production gate. Privileged scans, long-duration stress, the
+dependency inventory against the shipped artifact, the live race
+follow-ups, and the production-shape recovery drill remain separate Stage 9
+acceptance work.
+
+### P1 findings (release blockers; must close before Stage 9 gate)
+
+1. **P1-1 — Write/sync mutex does not serialize across connections.**
+   `notesnook-write-composition.ts:1222` increments `localDepth` but does not
+   queue or reject another local mutation. `notesnook-live-factory.ts:326`
+   exposes `requestSync()` directly, bypassing the composition's write
+   check. Two append requests can read the same revision and overwrite one
+   another's result; sync can interleave with mutation. Violates §4.4.
+2. **P1-2 — Write-side Vault check reads the wrong record.**
+   `notesnook-write-wiring.ts:795` reads `note.locked`, defaulting absent to
+   `false`. The read projection reads `content.findByNoteId(id).locked` in
+   `notesnook-readonly-projection.ts:907`. Absent `note.locked` plus true
+   `content.locked` passes the adapter's gate. The test
+   "defaults an omitted upstream `locked` flag to false" encodes the unsafe
+   assumption.
+3. **P1-3 — Mutation sequence is not atomic.**
+   Creation happens before tag validation/notebook attachment finish.
+   Update applies metadata before content validation/encoding finishes.
+   Tag replacement removes existing relations before validating every desired
+   tag. A separate commit gap: `SyncCoordinator.recordLocalCommit` rejects
+   marker 65 **after** mutation, leaving committed state without a marker.
+4. **P1-4 — Production retry delays are no-ops.**
+   `notesnook-sync-coordinator.ts:134` defines
+   `const DEFAULT_SLEEP: SyncSleep = async () => undefined`. Production
+   never supplies a different implementation. `createLiveRemoteSyncExecutor`
+   maps every thrown failure to `retry`, with no Retry-After conveyance,
+   no minimum interval, no persistent-versus-transient classification.
+5. **P1-5 — Transport cancellation releases bounds while runtime work
+   continues.** `nookd-server.ts:361` races timeout/disconnect at the
+   transport layer only. `inFlight` does not retain ownership of the
+   underlying runtime operation; shutdown can reach runtime cleanup while
+   detached operations still access the database.
+6. **P1-6 — Production errors lose stale/conflict/Vault semantics.**
+   `notesnook-write-composition.ts:242` rebuilds adapter failures, but
+   `service-runtime.ts:326` preserves adapter errors and
+   `socketFailureToCode` (in `nook-mcp-server.ts`) deliberately maps both
+   stale and conflict to `service_unavailable`.
+7. **P1-7 — Full replacement lacks the required fidelity gate.**
+   `NotesnookWriteAdapter.updateNote` replaces stored content without
+   verifying supported-construct coverage. Markdown tables, checklists,
+   attachment placeholders, and internal links can become paragraph text
+   without refusal.
+8. **P1-8 — Operator read commands can create or change state.**
+   `createProductionNotesRuntime` constructs the development file keystore
+   with `generateIfMissing: true` and then opens a mutable initialization
+   runtime. The doctor dispatcher calls `ensureStateDir` and constructs
+   the development keystore before diagnostics, permitting directory and
+   permission changes during a read-only diagnostic.
+9. **P1-9 — Recovery does not recover the production state layout.**
+   The recovery dispatcher selects development `nookbridge.db` and
+   `.d/db.key`. Production uses `nookbridge-storage.db`, `notesnook.db`,
+   `notesnook-logs.db`, and systemd credentials. `runReinitialize` refuses
+   any database whose integrity is not healthy, preserves only one main
+   database file without the WAL/SHM bundle, and creates an empty SQLite
+   file without proving resync.
+10. **P1-10 — A failed fetch can create an unhandled rejection.**
+    `NotesnookReadOnlyAdapter.sync` stores `attempt.finally(...)` in
+    `#syncInFlight`. A single rejecting call leaves the stored
+    `.finally(...)` promise without a handler, which can terminate the
+    process.
+
+11. **P1-5a — Read-side query limits are not pushed into the source query.**
+    `notesnook-readonly-projection.ts:408` collects every matching ID and
+    reads every corresponding record before the response layer limits
+    output. Small responses do not imply bounded processing; a large
+    corpus still triggers full enumeration. This finding is **not** a
+    separate Astra P-number; it is the read-side resource half of the
+    reviewer's P1-5 observation, split out for PR assignment to PR-65 so
+    that transport-cancellation and read-side-resource bounds can land in
+    one focused PR.
+
+### P2 findings (improvements; safe follow-up unless the gated feature is enabled)
+
+1. **Real pagination and useful discovery.** `notes-read-runtime.ts:290`
+   validates cursors but ignores them. MCP search ignores `limit`. Strip
+   of note IDs needed for get/update.
+2. **Undo durability and retention.** `notes-edit-runtime.ts:131` removes
+   the preimage on ambiguous outcomes. `notes-undo-journal.ts:396` uses
+   non-atomic get-then-put with no capacity bound. Production edit/undo
+   is correctly disabled today.
+3. **Socket deadlines cover the whole operation.** `socket-client.ts:240`
+   starts its response timer after connect+write. Default 5 s vs. daemon
+   10 s request deadline; gap between connect and response.
+4. **Deployment-path checks.** `service-config.ts:219` reads before
+   validating identity/ownership; `socketGroup` not applied/checked;
+   ancestor ownership/containment not established.
+5. **Reduce contract duplication and stale scaffolding.**
+6. **Optional dependencies in the release inventory.** The Stage 9
+   dependencies file excludes every `optional` entry; the lockfile ships
+   237 non-dev entries and the inventory contains 221.
+
+### Recommended remediation PR sequence
+
+The remediation is a four-PR sequence. Each PR is independently gated,
+focused, and small enough for one reviewer pass; together they close all
+ten P1 and the relevant P2s.
+
+| PR | Scope | Closes |
+|---|---|---|
+| **PR-63 — concurrency + atomicity** | Add a single-owner database mutex; serialize every revision observation, mutation, and synchronization path through it. Make mutation atomic: preflight validation, then single upstream transaction, then durable pending-marker reconciliation with explicit commit-vs-error semantics. | P1-1, P1-3 |
+| **PR-64 — Vault, fidelity, error vocabulary** | Replace the `note.locked` adapter check with the authoritative `content.locked` projection. Add a supported-construct fidelity gate that refuses replacement on unsupported constructs. Carry a closed semantic error vocabulary (stale, conflict, vault, invalid, unsupported, service_unavailable) through composition → service runtime → RPC → socket client → MCP. | P1-2, P1-7, P1-6 |
+| **PR-65 — retry timing + transport ownership + fetch rejection + read-side query limits** | Implement real backoff with jitter, minimum interval, bounded retry budget, Retry-After conveyance, and persistent-versus-transient classification. Make `inFlight` track runtime operations to settlement. Publish a single finalized fetch promise. Push the search/list limits into the source query at `notesnook-readonly-projection.ts:408`; do not invent upstream cancellation where none exists; add large-corpus validation. | P1-4, P1-5, P1-10, P1-5a (unbounded read-side resource finding) |
+| **PR-66 — operator opening + recovery + P2 follow-ups** | Operator read commands use the daemon's credential backend; doctor is non-mutating. Recovery handles the production database bundle (`nookbridge-storage.db`, `notesnook.db`, `notesnook-logs.db`) with WAL/SHM sidecar preservation, exclusive ownership, and crash checkpoints. Pagination, socket deadlines, deployment-path checks, and the optional-dependency inventory land in the same PR because they share the operator/runtime surface. | P1-8, P1-9, P2-1, P2-3, P2-4, P2-6 |
+
+PR-63 must land first; PR-64, PR-65, and PR-66 can land in parallel after.
+
+### Plan refinements incorporated from the review
+
+- §4.4 (concurrency model) must explicitly require **one owner**, not just
+  "a coordinator/mutex". PR-63 implements that owner.
+- §4.3 (canonical content) must require **demonstrated supported-construct
+  coverage** before replacement is allowed. PR-64 implements that gate.
+- §4.8 (Private Vault) must read **the authoritative content lock marker**
+  on every mutation, not the optional `note.locked` field. PR-64 fixes the
+  adapter.
+- §3.6 (synchronization policy) must specify **real backoff with jitter,
+  minimum interval, retry budget, Retry-After, persistent-versus-transient
+  classification**. PR-65 implements that policy.
+- §3.5 (persistence layout) must name **the production database bundle**
+  and require recovery to handle sidecars, exclusive ownership, and
+  crash checkpoints. PR-66 implements that recovery.
+- §6.2 (permission model) must require **read-only operator commands to
+  use the daemon credential backend**, never `generateIfMissing`.
+  PR-66 fixes the operator opening.
+- §6.1 (MCP tool list) must enumerate **the eight closed methods**
+  consistently across all documents; older references to four or seven
+  methods are stale.
+- §10.3 (corruption-recovery policy) must require **fail-closed drills
+  against production-shape fixtures**, not healthy single-file fixtures.
+
+### Reviewer notes preserved
+
+The Astra review observed that several closeouts document tests at the
+injected seam rather than at the production composition. Examples it
+cited: write fixtures placing Vault state on the note and manufacturing
+revision advancement; retry fixtures replacing production timing; RPC
+fixtures bypassing composition error normalization; cancellation tests
+asserting dropped responses rather than ownership of continuing work;
+recovery fixtures using a healthy single database. The plan requires
+that future closeouts distinguish **source** evidence from **VM** evidence
+from **production** evidence; a passing focused suite is supporting
+evidence, not approval. This section does not relax that requirement.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.

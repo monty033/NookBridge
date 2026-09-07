@@ -1,0 +1,65 @@
+Reproducible prompt for the Stage 9.5 Astra review recorded in
+`docs/implementation-plan-v1.5.md` §13.12.
+
+Snapshot:
+- Commit: 097d6d6e69533569fc0f13ec7292634f005f2785
+- Repository: /tmp/NookBridge-astra-review (detached HEAD on upstream/main)
+
+Invocation:
+
+```
+npx --yes @openai/codex@0.153.4 \
+  --ask-for-approval never exec \
+  --sandbox read-only \
+  -m gpt-6-astra \
+  -c model_reasoning_effort=xhigh \
+  -c model_context_window=200000 \
+  -c model_max_output_tokens=32000 \
+  "$(cat /tmp/astra-full-review-prompt.txt)" \
+  > /tmp/astra-full-review-output.txt 2> /tmp/astra-full-review-stderr.txt
+```
+
+Review prompt:
+
+```
+You are the named reviewer for a comprehensive, independent, READ-ONLY review of the NookBridge repository.
+
+Exact reviewer contract:
+- Model: gpt-6-astra
+- This is a full implementation-plan plus codebase review, not a narrow diff review.
+- Snapshot commit: 097d6d6e69533569fc0f13ec7292634f005f2785
+- Repository: /tmp/NookBridge-astra-review
+- Primary plan: docs/implementation-plan-v1.5.md
+- Current upstream/main includes merged PRs through PR #62.
+
+Do not modify files, create commits, push, deploy, or change system/user configuration. Use only local repository contents. You may run read-only inspection commands and existing tests if dependencies are already available, but do not install dependencies or mutate the worktree. If a test/build cannot run, say so explicitly. Do not treat prior reviews, documentation claims, or task summaries as proof; inspect the implementation and tests directly.
+
+Review the entire codebase and the implementation plan. Assess all of the following:
+
+1. Code quality: correctness, architecture, maintainability, type safety, error handling, validation, concurrency, resource lifecycle, security boundaries, secret/state handling, API/MCP contracts, and operational reliability.
+2. Testing quality: meaningful behavioral coverage, integration/e2e realism, negative/boundary cases, determinism, fixture quality, live-contract gaps, and whether tests could pass while the shipped runtime is wrong.
+3. Plan quality: completeness, sequencing, acceptance criteria, threat model, evidence requirements, operational/deployment assumptions, and whether the plan is internally consistent and still actionable.
+4. Plan-versus-code parity: identify implemented, partially implemented, stale, unsupported, or undocumented requirements. Distinguish source-test evidence, VM evidence, and live target-host evidence.
+5. Stage/release risk: identify anything that should block release, anything that is safe follow-up, and claims in docs that are stronger than the code or receipts justify.
+6. Recommendations: prioritized P0/P1/P2 improvements, each with concrete file paths or plan sections, rationale, and suggested validation. Include plan changes separately from code/test changes.
+
+Required report format:
+- Executive verdict
+- Scope and evidence actually inspected
+- Strengths
+- Critical findings (P0)
+- High-priority findings (P1)
+- Lower-priority improvements (P2)
+- Testing assessment and missing tests
+- Implementation-plan assessment and proposed edits
+- Release-readiness assessment
+- Prioritized next actions
+
+Be specific: cite file paths, symbols, test names, and plan headings where possible. Do not invent execution results. End with a concise overall assessment of code quality, testing quality, plan quality, and release readiness.
+```
+
+Capture the resulting JSON/text stream to
+`/tmp/astra-full-review-output.txt`. The recorded review at
+`docs/implementation-plan-v1.5.md` §13.12 was produced from the
+`/tmp/astra-full-review-output.txt` file created by this prompt against
+the same snapshot.
