@@ -160,7 +160,7 @@ keeps the remaining Stage 9 gates explicit.
 | Source parity at deployed pin | **PASS** — fresh 1,512-test receipt above |
 | Current-pin isolation VM | **PASS** |
 | Target-host runtime and remote-deletion canary | **PASS WITH FOLLOW-UP** |
-| Red-team coverage for outbound sync/reconcile and deployed `readWriteNoDelete` policy | **PASS WITH FOLLOW-UP** — allowlist/denial/sync probes and 104 focused tests pass; live create/append/update race follow-up remains |
+| Red-team coverage for outbound sync/reconcile and deployed `readWriteNoDelete` policy | **PASS WITH FOLLOW-UP** — allowlist/denial/sync probes, 104 focused tests, and live create/append/update plus phone-deletion reconciliation pass; separate local-write race remains |
 | Target-host resource-soak coverage (RT-4) | **PASS WITH FOLLOW-UP** — 100-request bounded soak; long-duration study remains |
 | Target-host plaintext-canary scans (RT-6/RT-9) | **PASS WITH FOLLOW-UP** — zero hits in service-owned store/runtime roots; protected state/log scan remains |
 | Target-host outsider/state/credential recheck (RT-8) | **OPEN** — agent cannot launch a non-member identity; privileged rerun required |

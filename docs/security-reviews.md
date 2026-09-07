@@ -663,8 +663,9 @@ production recovery gates.
   calls were absent/denied; malformed and oversized requests returned bounded
   categorical errors; explicit empty-queue sync returned `synced`,
   `pendingSync:false`, `attempts:1`; six focused suites passed **104 tests**.
-  A new live create/append/update race was not run because cleanup would require
-  another phone-side canary operation. **PASS WITH FOLLOW-UP.**
+  The live create/append/update sequence and phone-side deletion reconciliation
+  now pass on the deployed runtime. The separate local-write race remains
+  unexercised. **PASS WITH FOLLOW-UP.**
 - **RT-4:** 100 rapid synthetic searches completed in 522 ms; 20 succeeded and
   80 returned the same `service_unavailable` response; RSS delta was 1,152 KiB,
   FD delta zero, and stderr empty. **PASS WITH FOLLOW-UP**, not a long-duration

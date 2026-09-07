@@ -246,10 +246,10 @@ Observed current-pin results:
 
 Unexpected successes: 0.
 Regression tests added: none; existing focused suites passed.
-Decision: **PASS WITH FOLLOW-UP**. A new live create/append/update sequence and
-local-write race were not run because cleanup would require another phone-side
-canary operation. The existing authorized phone-side deletion canary remains
-separate operational evidence, not a substitute for those adversarial cases.
+Decision: **PASS WITH FOLLOW-UP**. The live create/append/update sequence and
+phone-side deletion reconciliation now pass on the deployed runtime. The
+separate local-write race remains unexercised; the phone-side deletion canary
+is recorded in `docs/stage-9-canary.md`.
 
 ## Current-pin operational scan addendum (2026-09-07)
 
