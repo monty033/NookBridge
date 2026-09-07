@@ -40,6 +40,7 @@ import {
   SERVICE_POLICY_PROFILES,
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
+  createReadWriteNoDeleteServicePolicy,
   isServicePolicyProfile,
   type ServicePolicy,
   type ServicePolicyDecision,
@@ -226,6 +227,28 @@ describe("service policy — decision record invariants", () => {
 
     expect(() => authorizeServiceMethod(hostilePolicy, "notes.search")).not.toThrow();
     expect(authorizeServiceMethod(hostilePolicy, "notes.search")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Outbound sync admission — explicit side-effecting method.
+// ---------------------------------------------------------------------------
+
+describe("service policy — outbound sync admission", () => {
+  it("admits notes.sync only under readWriteNoDelete", () => {
+    const policy = createReadWriteNoDeleteServicePolicy();
+    expect(policy.allowedMethods).toContain("notes.sync");
+    expect(authorizeServiceMethod(policy, "notes.sync")).toEqual({
+      allowed: true,
+      method: "notes.sync",
+    });
+  });
+
+  it("keeps notes.sync denied under readOnly", () => {
+    expect(authorizeServiceMethod(createReadOnlyServicePolicy(), "notes.sync")).toEqual({
       allowed: false,
       reason: "permission_denied",
     });

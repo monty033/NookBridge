@@ -122,6 +122,7 @@ export interface RpcNotesSearchParams {
 }
 
 export type RpcNotesStatusParams = Record<string, never>;
+export type RpcNotesSyncParams = Record<string, never>;
 
 export type RpcNotesListNotebooksParams = Record<string, never>;
 
@@ -217,7 +218,8 @@ export type RpcMethod =
   | "notes.get"
   | "notes.create"
   | "notes.append"
-  | "notes.update";
+  | "notes.update"
+  | "notes.sync";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -261,6 +263,12 @@ export interface RpcNotesUpdateRequest {
   readonly params: RpcNotesUpdateParams;
 }
 
+export interface RpcNotesSyncRequest {
+  readonly id: string;
+  readonly method: "notes.sync";
+  readonly params: RpcNotesSyncParams;
+}
+
 export type RpcRequest =
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
@@ -268,7 +276,8 @@ export type RpcRequest =
   | RpcNotesGetRequest
   | RpcNotesCreateRequest
   | RpcNotesAppendRequest
-  | RpcNotesUpdateRequest;
+  | RpcNotesUpdateRequest
+  | RpcNotesSyncRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -361,6 +370,13 @@ export interface RpcUpdateNoteResult {
   readonly contentBytes?: number;
 }
 
+export interface RpcSyncResult {
+  readonly kind: "sync";
+  readonly status: "idle" | "synced";
+  readonly pendingSync: boolean;
+  readonly attempts: number;
+}
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
@@ -368,7 +384,8 @@ export type RpcResult =
   | RpcGetNoteResult
   | RpcCreatedNoteResult
   | RpcAppendNoteResult
-  | RpcUpdateNoteResult;
+  | RpcUpdateNoteResult
+  | RpcSyncResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -689,7 +706,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.get" &&
     method !== "notes.create" &&
     method !== "notes.append" &&
-    method !== "notes.update"
+    method !== "notes.update" &&
+    method !== "notes.sync"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -1357,6 +1375,45 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       if (resultRecord.contentBytes !== undefined) {
         resultPayload.contentBytes = resultRecord.contentBytes;
       }
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "sync") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "status", "pendingSync", "attempts"],
+        "rpc protocol: sync result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 4 ||
+        !keysAreExactly(resultKeys, ["kind", "status", "pendingSync", "attempts"])
+      ) {
+        throw rpcProtocolError("rpc protocol: sync result has unexpected fields");
+      }
+      const status = resultRecord.status;
+      if (status !== "idle" && status !== "synced") {
+        throw rpcProtocolError("rpc protocol: sync result status is invalid");
+      }
+      if (typeof resultRecord.pendingSync !== "boolean") {
+        throw rpcProtocolError("rpc protocol: sync result pendingSync is invalid");
+      }
+      if (
+        !isNonNegativeFiniteNumber(resultRecord.attempts) ||
+        !Number.isSafeInteger(resultRecord.attempts) ||
+        resultRecord.attempts > 8
+      ) {
+        throw rpcProtocolError("rpc protocol: sync result attempts is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "sync";
+        status: "idle" | "synced";
+        pendingSync: boolean;
+        attempts: number;
+      };
+      resultPayload.kind = "sync";
+      resultPayload.status = status;
+      resultPayload.pendingSync = resultRecord.pendingSync;
+      resultPayload.attempts = resultRecord.attempts;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
     throw rpcProtocolError("rpc protocol: result kind is not allowed");

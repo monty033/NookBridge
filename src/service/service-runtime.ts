@@ -18,9 +18,12 @@
  *       - `readOnly` — the flattened Stage 3 read-only database;
  *       - `search`, `status`, `listNotebooks`, and `noteMetadata` — bounded
  *         read-only capabilities used by the Slice 2 RPC methods;
+ *       - optional bounded local note writes;
+ *       - optional approval-gated `requestSync()` backed by the existing
+ *         remote-sync coordinator;
  *       - `cleanup()` — the idempotent service-owned teardown hook.
- *     No `Database`, no `user`, no `token`, no `kv`, no
- *     `localWrite`, no `remoteSync`, no `localConflictObserver`,
+ *     No `Database`, no `user`, no `token`, no `kv`, no raw
+ *     `localWrite`, no raw `remoteSync`, no `localConflictObserver`,
  *     no `providerFactory`, no credentials, no bodies, no mutators,
  *     and no generic core-method dispatch is reachable through this
  *     boundary.
@@ -130,6 +133,10 @@ export interface ServiceRuntime {
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   /** Optional bounded local note update capability. */
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  /** Optional approval-gated outbound synchronization capability. */
+  readonly requestSync?: () => Promise<
+    Readonly<{ status: "idle" | "synced" | "failed"; pendingSync: boolean; attempts: number }>
+  >;
   /**
    * Idempotent cleanup.  Closes the encrypted persistent storage
    * exactly once and is safe to call concurrently and repeatedly.
@@ -354,6 +361,25 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           }
         };
 
+  const remoteSync = core.handle.remoteSync;
+  const requestSync =
+    remoteSync === undefined
+      ? undefined
+      : async (): Promise<
+          Readonly<{
+            status: "idle" | "synced" | "failed";
+            pendingSync: boolean;
+            attempts: number;
+          }>
+        > => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            return await remoteSync.requestSync();
+          } catch {
+            throw serviceRuntimeError("service runtime sync failed");
+          }
+        };
+
   return Object.freeze({
     readOnly,
     search,
@@ -363,6 +389,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
+    ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,
   });
 }

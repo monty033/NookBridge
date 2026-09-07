@@ -38,6 +38,7 @@ import {
   type RpcNotesCreateRequest,
   type RpcNotesAppendRequest,
   type RpcNotesUpdateRequest,
+  type RpcNotesSyncRequest,
   type RpcMethod,
   type RpcRequest,
   type RpcAnyResponseEnvelope,
@@ -49,6 +50,7 @@ import {
   type RpcCreatedNoteResult,
   type RpcAppendNoteResult,
   type RpcUpdateNoteResult,
+  type RpcSyncResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
 import type {
@@ -134,6 +136,13 @@ export interface RpcHandlerRuntimeLike {
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  readonly requestSync?: () => Promise<
+    Readonly<{
+      status: "idle" | "synced" | "failed";
+      pendingSync: boolean;
+      attempts: number;
+    }>
+  >;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +261,12 @@ export async function handleRpcRequest<T extends RpcRequest>(
             runtime,
             id,
           )) as unknown as RpcHandlerResponse<T>;
+        case "notes.sync":
+          return (await runNotesSync(
+            structural.request,
+            runtime,
+            id,
+          )) as unknown as RpcHandlerResponse<T>;
       }
     }
     return buildErrorEnvelope(id, structural.code) as unknown as RpcHandlerResponse<T>;
@@ -303,7 +318,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod !== "notes.get" &&
     rawMethod !== "notes.create" &&
     rawMethod !== "notes.append" &&
-    rawMethod !== "notes.update"
+    rawMethod !== "notes.update" &&
+    rawMethod !== "notes.sync"
   ) {
     return { kind: "err", code: "invalid_request" };
   }
@@ -450,6 +466,9 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params.id = rawNoteId;
     params.expectedRevision = rawRevision;
     params.patch = patch;
+  } else if (rawMethod === "notes.sync") {
+    if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
+    params = objectCreate(null) as Record<string, unknown>;
   } else {
     if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
     params = objectCreate(null) as Record<string, unknown>;
@@ -717,6 +736,54 @@ async function runNotesUpdate(
   return buildResultSuccessEnvelope(id, result);
 }
 
+async function runNotesSync(
+  _request: RpcNotesSyncRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "requestSync");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, []);
+  } catch (error) {
+    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (raw === null || typeof raw !== "object" || arrayIsArray(raw)) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const record = raw as Record<string, unknown>;
+  const status = readOwnStringField(record, "status");
+  const pendingSync = readOwnBooleanField(record, "pendingSync");
+  const attempts = readOwnNumberField(record, "attempts");
+  if (
+    (status !== "idle" && status !== "synced" && status !== "failed") ||
+    pendingSync === undefined ||
+    attempts === undefined ||
+    !Number.isSafeInteger(attempts) ||
+    attempts < 0 ||
+    attempts > 8
+  ) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (status === "failed") return buildErrorEnvelope(id, "sync_failed");
+  const result = objectFreeze(
+    objectCreate(null, {
+      kind: { value: "sync", enumerable: true, configurable: false, writable: false },
+      status: { value: status, enumerable: true, configurable: false, writable: false },
+      pendingSync: {
+        value: pendingSync,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      attempts: { value: attempts, enumerable: true, configurable: false, writable: false },
+    }),
+  ) as RpcSyncResult;
+  return buildResultSuccessEnvelope(id, result);
+}
+
 async function runNotesStatus(
   _request: RpcNotesStatusRequest,
   runtime: RpcHandlerRuntimeLike,
@@ -816,7 +883,14 @@ async function runNotesGet(
 
 function readRuntimeMethod(
   runtime: RpcHandlerRuntimeLike,
-  key: "status" | "listNotebooks" | "noteMetadata" | "createNote" | "appendNote" | "updateNote",
+  key:
+    | "status"
+    | "listNotebooks"
+    | "noteMetadata"
+    | "createNote"
+    | "appendNote"
+    | "updateNote"
+    | "requestSync",
 ): ((...args: unknown[]) => unknown) | undefined {
   try {
     const descriptor = objectGetOwnPropertyDescriptor(runtime, key);
@@ -1047,7 +1121,8 @@ function buildResultSuccessEnvelope(
     | { readonly kind: "note"; readonly note: Record<string, unknown> }
     | RpcCreatedNoteResult
     | RpcAppendNoteResult
-    | RpcUpdateNoteResult,
+    | RpcUpdateNoteResult
+    | RpcSyncResult,
 ): RpcAnyResponseEnvelope {
   return objectFreeze(
     objectCreate(null, {

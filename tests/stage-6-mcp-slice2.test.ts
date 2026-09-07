@@ -105,6 +105,7 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
       "notesnook_create_note",
       "notesnook_append_note",
       "notesnook_update_note",
+      "notesnook_sync",
     ]);
     expect(handle.tools.map((tool) => tool.name)).toEqual(NOOK_MCP_ALLOWED_TOOL_NAMES);
     expect(handle.tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(

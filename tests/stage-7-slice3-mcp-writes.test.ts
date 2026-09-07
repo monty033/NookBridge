@@ -65,9 +65,10 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
       "notesnook_create_note",
       "notesnook_append_note",
       "notesnook_update_note",
+      "notesnook_sync",
     ]);
     expect(server.tools.map((tool) => tool.name)).toEqual(NOOK_MCP_ALLOWED_TOOL_NAMES);
-    expect(server.tools).toHaveLength(7);
+    expect(server.tools).toHaveLength(8);
     expect(server.tools.map((tool) => tool.name)).not.toContain("notes.delete");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_delete_note");
   });

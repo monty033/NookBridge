@@ -191,6 +191,7 @@ describe("nook-mcp server surface", () => {
       "notesnook_create_note",
       "notesnook_append_note",
       "notesnook_update_note",
+      "notesnook_sync",
     ]);
     expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
@@ -207,6 +208,33 @@ describe("nook-mcp server surface", () => {
     const server = buildNookMcpServer({ client });
     expect(server.prompts.length).toBe(0);
     expect(server.resources.length).toBe(0);
+  });
+});
+
+describe("notesnook_sync — approval-gated outbound path", () => {
+  it("sends notes.sync with empty params and projects categorical status", async () => {
+    const observed: string[] = [];
+    const socketPath = await startFakeDaemon((request) => {
+      observed.push(`${request.method}:${JSON.stringify(request.params)}`);
+      return framedResponse({
+        id: request.id,
+        ok: true,
+        result: { kind: "sync", status: "synced", pendingSync: false, attempts: 1 },
+      });
+    });
+    const server = buildNookMcpServer({ client: new NookdSocketClient({ socketPath }) });
+
+    const result = await server.callTool("notesnook_sync", {});
+
+    expect(result.isError).toBeFalsy();
+    expect(observed).toEqual(["notes.sync:{}"]);
+    const textBlock = result.content[0] as { type: string; text: string };
+    expect(JSON.parse(textBlock.text)).toEqual({
+      kind: "sync",
+      status: "synced",
+      pendingSync: false,
+      attempts: 1,
+    });
   });
 });
 
@@ -605,6 +633,7 @@ describe("end-to-end SDK smoke test", () => {
         "notesnook_create_note",
         "notesnook_append_note",
         "notesnook_update_note",
+        "notesnook_sync",
       ]);
       expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
       expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
@@ -685,8 +714,8 @@ describe("forbidden module surface", () => {
     // build (via a test) rather than silently widen the surface.
     expect(NOOK_MCP_ALLOWED_TOOL_NAME).toBe("notesnook_search_notes");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_delete_note");
-
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_sync");
+    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_full_sync");
+    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_send_sync");
   });
 });
 
