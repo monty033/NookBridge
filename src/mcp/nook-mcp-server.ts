@@ -642,7 +642,9 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         return invokeCreateNote(options.client, args as CreateNoteInput);
       if (name === NOOK_MCP_APPEND_NOTE_TOOL_NAME)
         return invokeAppendNote(options.client, args as AppendNoteInput);
-      return invokeUpdateNote(options.client, args as UpdateNoteInput);
+      if (name === NOOK_MCP_UPDATE_NOTE_TOOL_NAME)
+        return invokeUpdateNote(options.client, args as UpdateNoteInput);
+      return invokeRequestSync(options.client, args as Record<string, unknown>);
     } catch {
       return toMcpErrorResult("invalid_request");
     }
