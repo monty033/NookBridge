@@ -12,8 +12,9 @@
  *      leakage, generic env-override behavior.
  *   2. Strict selection — backend must be the literal
  *      `systemd-credential` id; the development-file id is refused.
- *   3. Read-policy allowlist — only the exact ordered four-method tuple
- *      (`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`) is accepted.
+ *   3. Read-policy allowlist — the legacy exact ordered four-method tuple
+ *      remains accepted, and the deployed outbound-sync tuple additionally
+ *      accepts the bounded `notes.sync` method.
  *   4. Root-ownership seam — the loader can be told to verify the
  *      config file is owned by the current uid (root in the deployed
  *      case) and is not group/world writable; the verifier accepts an
@@ -159,6 +160,27 @@ describe("Stage 5 strict service configuration", () => {
         credentialName: "nookbridge-db-key",
         readPolicy: ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"],
       });
+    });
+
+    it("accepts the deployed outbound-sync policy", () => {
+      const fixture = {
+        ...VALID_FIXTURE,
+        readPolicy: [
+          "notes.search",
+          "notes.status",
+          "notes.list_notebooks",
+          "notes.get",
+          "notes.create",
+          "notes.append",
+          "notes.update",
+          "notes.sync",
+        ],
+      };
+      const file = writeJsonConfig("valid-outbound-sync", fixture);
+      const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
+      expect(result.config.readPolicy).toEqual(fixture.readPolicy);
     });
 
     it("uses the production lstat path without a test seam", () => {

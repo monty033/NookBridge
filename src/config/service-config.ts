@@ -18,8 +18,9 @@
  *     non-empty safe socket-group token, the fixed
  *     `systemd-credential` backend id, the literal
  *     `nookbridge-db-key` credential label, and the read-policy
- *     allowlist `["notes.search", "notes.status", "notes.list_notebooks",
- *     "notes.get"]`.  Anything else — credential paths, env overrides, dev
+ *     allowlist. The legacy read-only tuple remains valid; the deployed
+ *     outbound-sync policy also admits `notes.sync` from the closed method
+ *     universe. Anything else — credential paths, env overrides, dev
  *     backends, generic merge behavior — is categorically refused.
  *   - Every loader / diagnostic error is a frozen
  *     {@link ServiceConfigError} whose `category` is a closed string
@@ -85,6 +86,7 @@ export const SERVICE_CONFIG_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = Object.f
   "notes.create",
   "notes.append",
   "notes.update",
+  "notes.sync",
 ]);
 
 /**
