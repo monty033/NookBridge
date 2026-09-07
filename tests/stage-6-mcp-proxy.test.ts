@@ -583,11 +583,16 @@ describe("end-to-end SDK smoke test", () => {
         if (buffer.length < 4 + len) return;
         const payload = JSON.parse(buffer.subarray(4, 4 + len).toString("utf8")) as {
           id: string;
+          method: string;
         };
+        const result =
+          payload.method === "notes.sync"
+            ? { kind: "sync", status: "synced", pendingSync: false, attempts: 1 }
+            : { kind: "search", notes: [{ title: "First hit" }] };
         const envelope = {
           id: payload.id,
           ok: true,
-          result: { kind: "search", notes: [{ title: "First hit" }] },
+          result,
         };
         const response = Buffer.from(JSON.stringify(envelope), "utf8");
         const frame = Buffer.alloc(4 + response.length);
@@ -650,6 +655,20 @@ describe("end-to-end SDK smoke test", () => {
         notes: Array<{ title: string }>;
       };
       expect(parsed.notes.map((note) => note.title)).toEqual(["First hit"]);
+
+      const sync = await client.callTool({
+        name: "notesnook_sync",
+        arguments: {},
+      });
+      expect(sync.isError).toBeFalsy();
+      const syncBlock = (sync.content as Array<{ type: string; text: string }>)[0];
+      if (syncBlock === undefined) throw new Error("missing sync result block");
+      expect(JSON.parse(syncBlock.text)).toEqual({
+        kind: "sync",
+        status: "synced",
+        pendingSync: false,
+        attempts: 1,
+      });
 
       const invalid = await client.callTool({
         name: "notesnook_search_notes",
