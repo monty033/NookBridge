@@ -94,6 +94,12 @@ sign-off remain open.
   `hermes-dashboard` remained active; explicit sync again returned
   `synced`, `pendingSync:false`, `attempts:1`.
 
-The RT-11 follow-up, privileged plaintext/state/log scan, outsider recheck,
-clean VM recovery drill, post-recovery target-host checks, and license sign-off
-remain open.
+- **RT-11 live lifecycle:** disposable note `6a9f1878954ad1f066cc91a7` was
+  created, appended, updated, explicitly synced, deleted on the phone, then
+  reconciled. The post-delete sync returned `synced`, `pendingSync:false`,
+  `attempts:1`; exact-title search returned **0 hits**. The separate local-write
+  race remains unexercised.
+
+The RT-11 local-write-race follow-up, privileged plaintext/state/log scan,
+outsider recheck, clean VM recovery drill, post-recovery target-host checks,
+and license sign-off remain open.
