@@ -951,31 +951,39 @@ function copyCoordinatorResult(raw: unknown): SyncCoordinatorResult {
   if (status === "synced") {
     // A remote-success claim is relayed only when the coordinator states
     // it unambiguously; any inconsistent flag fails closed.
-    if (localCommitted !== true || remoteSynced !== true || pendingSync !== false) {
+    if (
+      typeof localCommitted !== "boolean" ||
+      remoteSynced !== true ||
+      typeof pendingSync !== "boolean"
+    ) {
       fail("sync_failed");
     }
     if (attempts < 1) fail("sync_failed");
     return freezeSealed({
       status: "synced" as const,
-      localCommitted: true as const,
+      localCommitted,
       remoteSynced: true as const,
-      pendingSync: false as const,
+      pendingSync,
       attempts,
       startedAt,
     }) as unknown as SyncCoordinatorResult;
   }
   if (status === "failed") {
     if (readOwnProperty(record, "errorCode") !== "sync_failed") fail("sync_failed");
-    if (localCommitted !== true || remoteSynced !== false || pendingSync !== true) {
+    if (
+      typeof localCommitted !== "boolean" ||
+      remoteSynced !== false ||
+      typeof pendingSync !== "boolean"
+    ) {
       fail("sync_failed");
     }
     if (attempts < 1) fail("sync_failed");
     return freezeSealed({
       status: "failed" as const,
       errorCode: "sync_failed" as const,
-      localCommitted: true as const,
+      localCommitted,
       remoteSynced: false as const,
-      pendingSync: true as const,
+      pendingSync,
       attempts,
       startedAt,
     }) as unknown as SyncCoordinatorResult;

@@ -556,7 +556,7 @@ describe("Stage 4 write composition — the remote boundary stays separate", () 
     expect(composition.pendingSnapshot().pending).toHaveLength(1);
   });
 
-  it("reports an empty queue as idle without claiming a remote result", async () => {
+  it("runs native sync for an empty queue and reports remote reconciliation", async () => {
     const { adapter } = realAdapter();
     const coordinator = new SyncCoordinator({
       executor: async () => ({ status: "confirmed" }),
@@ -565,27 +565,27 @@ describe("Stage 4 write composition — the remote boundary stays separate", () 
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     await expect(composition.requestSync()).resolves.toEqual({
-      status: "idle",
+      status: "synced",
       localCommitted: false,
-      remoteSynced: false,
+      remoteSynced: true,
       pendingSync: false,
-      attempts: 0,
+      attempts: 1,
       startedAt: 42,
     });
   });
 
-  it("refuses to relay an inconsistent remote-success claim", async () => {
+  it("refuses to relay a remote-success claim with no completed attempt", async () => {
     const adapter = stubAdapter({ create: () => goodCreateResult() });
     const coordinator = stubCoordinator({
       onSync: () =>
         Promise.resolve({
           status: "synced",
           localCommitted: true,
-          // A coordinator stand-in that claims "synced" while still pending
-          // must not be relayed as a remote success.
+          // A coordinator stand-in that claims "synced" without an actual
+          // completed attempt must not be relayed as a remote success.
           remoteSynced: true,
           pendingSync: true,
-          attempts: 1,
+          attempts: 0,
           startedAt: 1,
         }),
     });
