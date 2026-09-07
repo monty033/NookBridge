@@ -3,12 +3,17 @@
 Run timestamp: 2026-09-05T21:15:10Z
 Bridge revision under review: `94ad5c0a`
 Working remediation branch: `stage9-source-hardening`
-Permission profile: `readOnly` in deployment; write-capable profiles remain disabled
+Permission profile in this historical slice: `readOnly`; the current deployed
+profile is documented in the current-pin addendum below.
 Canaries: generated fixture values only; no real credentials or note content
 
 This report records bounded, source-level evidence. It is not a release approval.
 The full Stage 9 gate remains fail-closed until the target-host canary and
 recovery drill are completed.
+
+> **Current-pin note (2026-09-07):** RT-1..RT-10 below are historical evidence
+> for `94ad5c0a` under a `readOnly` deployment profile. They are not evidence
+> for deployed `9260c6c507db02555046a905d8e7d77ad74865f0`, whose production policy is `readWriteNoDelete`.
 
 ## RT-1..RT-10 results
 
@@ -203,6 +208,39 @@ human release/license review.
 
 ## Overall decision
 
-**FAIL — release blocked.** Test-backed boundaries are passing, but the source
-hardening branch is not merged/deployed, the target-host canary is outstanding,
-and recovery tooling/drill evidence is absent.
+**Historical decision (2026-09-05): FAIL — release blocked.** Test-backed
+boundaries were passing, but the source hardening branch was not merged/deployed,
+the target-host canary was outstanding, and recovery tooling/drill evidence was
+absent.
+
+## RT-11 — current-pin outbound sync/reconcile and deployed write policy
+
+Red-team run: RT-11
+Date/version: 2026-09-07 / deployed NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`
+Model: not yet run; this row records the required current-pin coverage
+Consumer revision: nix-config PR #302 merge `1ec85850aad321fe339fe215b8d0b18e20f5e701` from head
+`fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`
+Bridge/core revision: `9260c6c507db02555046a905d8e7d77ad74865f0`
+Permission profile: deployed `readWriteNoDelete`
+Canaries used: disposable note title only; no credentials or note body
+
+Required attempts:
+
+- exercise `notesnook_create_note`, append, update, and approval-gated
+  `notesnook_sync` through the deployed MCP dispatcher;
+- verify delete-shaped methods remain absent/denied;
+- exercise empty-queue remote reconciliation and a local-write race;
+- verify retry/rate-limit/no-delete protections and bounded error projections;
+- inspect the deployed service policy rather than assuming the historical
+  `readOnly` profile.
+
+**Decision: OPEN — not yet run.** The live remote-deletion canary is recorded
+in `docs/stage-9-canary.md`, but it is an operational acceptance check, not a
+substitute for this adversarial policy review.
+
+## Current-pin decision
+
+The current source, isolation VM, and live remote-reconciliation evidence are
+fresh. Stage 9 remains **FAIL — release blocked** until RT-11, the RT-4/RT-6/RT-8/RT-9
+operational scans, the recovery drill, and the human dependency/license review
+are complete.

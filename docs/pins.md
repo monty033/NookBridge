@@ -68,12 +68,14 @@ during Stage 0; any refresh must be a deliberate, reviewed commit.
 
 | Item | Value |
 |---|---|
-| Source candidate under Stage 9 review | `94ad5c0a` (socket-mode hardening and evidence ledger) |
-| NookBridge source revision currently pinned by deployment | `1f433a421881031c407d84ab977ffda57d72c99c` (merged PR #46) |
+| Source candidate under Stage 9 review | historical `94ad5c0a` (socket-mode hardening and evidence ledger) |
+| NookBridge source revision currently deployed | `9260c6c507db02555046a905d8e7d77ad74865f0` (PR #59 merge) |
+| Nix pin-change merge applied by deployment | `1ec85850aad321fe339fe215b8d0b18e20f5e701` (nix-config PR #302; head `fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`) |
 | Branch | `main` |
 | Package version | `0.0.0-stage.0` (`private: true`; internal Nix artifact, not a public release) |
 
-The bridge does not yet have a public semver release. The Nix deployment
-remains pinned to the merged Stage 7 Slice 3 source until the separate source
-remediation is reviewed, merged, and repinned. Public distribution remains
-blocked on the licensing and release-identity review.
+The earlier `94ad5c0a` and `1f433a42` values in older receipts are historical
+Stage 9 review baselines. The current deployed derivation is recorded in the
+addenda in `docs/stage-9-source-evidence.md` and `docs/stage-9-canary.md`.
+Public distribution remains blocked on the licensing and release-identity
+review.

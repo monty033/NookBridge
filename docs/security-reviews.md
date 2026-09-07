@@ -631,3 +631,24 @@ surface after PR #51 merged. It is not a VM receipt or production approval.
   production gates fail-closed.
 
 Canonical source receipt: `docs/stage-9-source-evidence.md`.
+
+## Stage 9 current deployed-pin evidence addendum (2026-09-07)
+
+This entry records fresh evidence after NookBridge PR #59 and nix-config PR #302
+were applied and deployed. The NookBridge change is PR #59 merge
+`9260c6c507db02555046a905d8e7d77ad74865f0`; the nix-config pin change is PR #302 merge
+`1ec85850aad321fe339fe215b8d0b18e20f5e701` from head commit
+`fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`. It does not close the remaining Stage 9 security and
+operational gates.
+
+- **Source/pin:** NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`; nix-config PR #302 merge `1ec85850aad321fe339fe215b8d0b18e20f5e701` from pin-change head `fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`.
+- **Source gates:** clean current-pin worktree passed `just check` with **51 files / 1,512 tests**, typecheck, lint, format, build, and diff checks.
+- **VM gate:** current-pin `nookbridge-isolation` build passed.
+- **Production evidence:** all three consumers are active on the `gsg2b1` derivation; service-config validation, socket ownership/mode, and deployed MCP stdio smoke passed.
+- **Live account evidence:** the authorized disposable create/sync/phone-side-delete/reconcile exercise passed. After the phone-side deletion, explicit sync returned `synced`, `pendingSync:false`, `attempts:1`, and exact-title search returned zero hits.
+- **Policy correction:** the deployed profile is `readWriteNoDelete`, not the historical `readOnly` profile. No `notes.delete` capability was introduced.
+- **Open gates:** current-pin red-team coverage for outbound sync/reconcile and `readWriteNoDelete`; RT-4 resource soak; RT-6/RT-9 target-host plaintext-canary scans; RT-8 outsider/state/credential recheck; recovery VM/throwaway-state drill; post-recovery target-host policy/no-delete checks; and dependency/license human review.
+
+**Decision:** current source, VM, and live remote-deletion evidence are fresh;
+Stage 9 remains **NOT CLOSED** until the open gates above are independently
+completed.

@@ -1,10 +1,10 @@
 # Stage 9 recovery readiness
 
-Status: **SOURCE WORKFLOW IMPLEMENTED — VM DRILL AND PRODUCTION GATES OPEN**
+Status: **SOURCE WORKFLOW IMPLEMENTED — historical 2026-09-05 baseline; VM drill and production recovery gates open**
 
 Date: 2026-09-05
 Source baseline for this recovery slice: `f84a6f2`
-Permission profile: deployed `readOnly`
+Permission profile in this historical slice: `readOnly`
 
 ## Current verified behavior
 
@@ -49,15 +49,19 @@ transport capabilities.
 ## Remaining release gates
 
 The source implementation is not a production recovery authorization by itself.
-The following evidence remains required:
+The current-pin isolation VM gate is already recorded as PASS in the current
+source receipt. The recovery-specific evidence still required is:
 
 1. exercise the workflow in a throwaway VM with generated fixture data;
-2. verify socket, credential, state-directory, and read-only policy invariants
-   after the recovery/restart sequence;
-3. verify the external NixOS isolation checks against the final merged source
-   pin;
-4. run the target-host canary only after the reviewed source is merged and the
-   deployment pin is updated.
+2. verify socket, credential, state-directory, and current deployed policy
+   invariants after the recovery/restart sequence, including the
+   `readWriteNoDelete` allowlist and absent `notes.delete` boundary;
+3. after the recovery drill, rerun the target-host post-recovery checks and
+   record the current policy/no-`notes.delete` evidence; the existing
+   current-pin runtime and remote-deletion canary are recorded separately.
 
-No production recovery mutation has been attempted. Production remains on the
-existing read-only service until those gates pass.
+No production recovery mutation has been attempted. The current deployment uses
+`readWriteNoDelete`; that policy correction does not constitute recovery-drill
+evidence. The current-pin VM check and remote-deletion canary are recorded in
+`docs/stage-9-source-evidence.md`, but the throwaway-state recovery exercise
+remains open.
