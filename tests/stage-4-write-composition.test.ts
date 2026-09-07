@@ -400,6 +400,8 @@ describe("Stage 4 write composition — local commits become pending metadata", 
       remoteSynced: false,
       pendingSync: true,
     });
+    expect(Array.isArray(result.appliedFields)).toBe(true);
+    expect(Object.getPrototypeOf(result.appliedFields)).toBeNull();
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
       pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
     });
