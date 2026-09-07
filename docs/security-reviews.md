@@ -652,3 +652,40 @@ operational gates.
 **Decision:** current source, VM, and live remote-deletion evidence are fresh;
 Stage 9 remains **NOT CLOSED** until the open gates above are independently
 completed.
+
+## Stage 9 operational follow-up evidence (2026-09-07)
+
+This entry records bounded current-pin checks after the evidence addendum merged
+as PR #60. It does not claim closure of the remaining privileged VM/outsider or
+production recovery gates.
+
+- **RT-11:** deployed MCP exposed exactly the eight approved tools; delete-shaped
+  calls were absent/denied; malformed and oversized requests returned bounded
+  categorical errors; explicit empty-queue sync returned `synced`,
+  `pendingSync:false`, `attempts:1`; six focused suites passed **104 tests**.
+  A new live create/append/update race was not run because cleanup would require
+  another phone-side canary operation. **PASS WITH FOLLOW-UP.**
+- **RT-4:** 100 rapid synthetic searches completed in 522 ms; 20 succeeded and
+  80 returned the same `service_unavailable` response; RSS delta was 1,152 KiB,
+  FD delta zero, and stderr empty. **PASS WITH FOLLOW-UP**, not a long-duration
+  soak closure.
+- **RT-6/RT-9:** zero prior-canary hits in the deployed NookBridge store path or
+  `/run/nookbridge`; Hermes session/cache hits are test-history artifacts. The
+  protected state and logs were inaccessible to this account and remain open.
+  **PASS WITH FOLLOW-UP.**
+- **RT-8:** socket/runtime ownership remains `nookbridge:nookbridge-clients`
+  mode `0770`; Hermes remains in the client group; service state/credential
+  paths denied access. A non-member identity could not be launched because
+  `setresuid` is not permitted to this agent. **OPEN.**
+- **Recovery:** disposable healthy-state reinitialize/quarantine/rollback drill
+  passed, including occupied-destination refusal; focused recovery/doctor/CLI
+  suites passed **83 tests**. Clean VM and post-recovery target-host checks
+  remain open.
+- **Licensing:** the committed production inventory has 221 rows and no missing
+  license fields (161 MIT, 4 GPL-3.0-or-later, no AGPL entries). Public-release
+  human/legal sign-off remains required. **PASS WITH FOLLOW-UP.**
+
+**Updated decision:** operational evidence improved, but Stage 9 remains
+**NOT CLOSED / release blocked** pending RT-11 live-race follow-up, privileged
+RT-6/RT-8/RT-9 scans, clean recovery VM and post-recovery target-host checks,
+and human/legal license sign-off.

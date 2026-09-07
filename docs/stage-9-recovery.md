@@ -65,3 +65,20 @@ No production recovery mutation has been attempted. The current deployment uses
 evidence. The current-pin VM check and remote-deletion canary are recorded in
 `docs/stage-9-source-evidence.md`, but the throwaway-state recovery exercise
 remains open.
+
+## Current-pin throwaway-state drill (2026-09-07)
+
+Source/deployed revision: NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`.
+
+- A disposable encrypted state fixture was inspected as healthy.
+- Explicit `--approve-reinitialize` quarantined the original database under an
+  opaque `.recovery-quarantine/<id>/nookbridge.db` entry and initialized fresh
+  state.
+- Rollback correctly refused an occupied destination with exit code 2.
+- After explicit removal of the disposable fresh database, approved rollback
+  restored the preserved state; final inspection reported healthy.
+- The focused recovery/doctor/CLI suites passed **83 tests**.
+
+This closes the throwaway-state CLI exercise only. The clean NixOS VM drill,
+privileged production-state recovery, and post-recovery target-host policy and
+no-`notes.delete` checks remain open.

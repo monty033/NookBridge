@@ -217,7 +217,7 @@ absent.
 
 Red-team run: RT-11
 Date/version: 2026-09-07 / deployed NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`
-Model: not yet run; this row records the required current-pin coverage
+Model: gpt-5.6-luna / deployed MCP probe + local Vitest focused suites
 Consumer revision: nix-config PR #302 merge `1ec85850aad321fe339fe215b8d0b18e20f5e701` from head
 `fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`
 Bridge/core revision: `9260c6c507db02555046a905d8e7d77ad74865f0`
@@ -234,13 +234,67 @@ Required attempts:
 - inspect the deployed service policy rather than assuming the historical
   `readOnly` profile.
 
-**Decision: OPEN — not yet run.** The live remote-deletion canary is recorded
-in `docs/stage-9-canary.md`, but it is an operational acceptance check, not a
-substitute for this adversarial policy review.
+Observed current-pin results:
+
+- `tools/list` exposed exactly the eight approved tools; no delete-shaped tool
+  was exposed.
+- A delete-shaped call returned categorical `unknown_tool`; malformed and
+  oversized search requests returned categorical `invalid_request`.
+- Explicit empty-queue `notesnook_sync` returned `synced`, `pendingSync:false`,
+  and `attempts:1`.
+- The six focused policy/sync/runtime suites passed: **104 tests**.
+
+Unexpected successes: 0.
+Regression tests added: none; existing focused suites passed.
+Decision: **PASS WITH FOLLOW-UP**. A new live create/append/update sequence and
+local-write race were not run because cleanup would require another phone-side
+canary operation. The existing authorized phone-side deletion canary remains
+separate operational evidence, not a substitute for those adversarial cases.
+
+## Current-pin operational scan addendum (2026-09-07)
+
+### RT-4 — target-host bounded resource soak
+
+Red-team run: RT-4
+Date/version: 2026-09-07 / deployed NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`
+Model: gpt-5.6-luna / bounded stdio MCP harness
+Permission profile: deployed `readWriteNoDelete`
+Attempts: 100 rapid synthetic searches for `__rt4_nonexistent_canary__`.
+Unexpected successes: 0.
+Expected boundary: 20 requests succeeded; 80 returned the same categorical
+`service_unavailable` response; elapsed time 522 ms; RSS increased 1,152 KiB;
+file-descriptor count stayed at 21; stderr was empty.
+Decision: **PASS WITH FOLLOW-UP** — this bounded soak is not a long-running
+production-duration resource study.
+
+### RT-6/RT-9 — target-host plaintext-canary and package/runtime scan
+
+Red-team run: RT-6/RT-9
+Date/version: 2026-09-07 / deployed NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`
+Permission profile: deployed `readWriteNoDelete`
+Canaries used: prior disposable canary titles and IDs; no credentials.
+Attempts: bounded scan of the deployed NookBridge store path and `/run/nookbridge`.
+Unexpected successes: 0; zero hits in both service-owned roots.
+The broader scan found only test-history copies in Hermes session/cache artifacts;
+`/var/lib/nookbridge` and protected logs were inaccessible to this account and
+are not claimed clean. Decision: **PASS WITH FOLLOW-UP** — privileged state/log
+scan remains open.
+
+### RT-8 — outsider/state/credential boundary
+
+Red-team run: RT-8
+Date/version: 2026-09-07 / deployed NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`
+Permission profile: outsider boundary
+Observed socket/state metadata: socket and runtime directory are owned by
+`nookbridge:nookbridge-clients`; socket mode is `0770`; Hermes is a member of
+`nookbridge-clients`; service state and credential paths returned permission
+errors to Hermes. The agent could not change identity to an actual non-member
+user (`setresuid` was not permitted), so outsider connection denial was not
+independently rerun. Decision: **OPEN**.
 
 ## Current-pin decision
 
-The current source, isolation VM, and live remote-reconciliation evidence are
-fresh. Stage 9 remains **FAIL — release blocked** until RT-11, the RT-4/RT-6/RT-8/RT-9
-operational scans, the recovery drill, and the human dependency/license review
-are complete.
+The current source, isolation VM, live remote-reconciliation, bounded soak, and
+service-owned plaintext-scan evidence are fresh. Stage 9 remains **FAIL — release
+blocked** until the RT-11 follow-ups, privileged RT-6/RT-8/RT-9 checks, recovery
+VM/post-recovery checks, and dependency/license human sign-off are complete.

@@ -70,8 +70,30 @@ Status: **PASS WITH FOLLOW-UP — Stage 9 release remains blocked**.
 - **Remote-deletion canary:** the agent-created title `NookBridge phone deletion canary 2026-09-07T18:01:06Z` was deleted on the phone. Explicit `notesnook_sync` returned `synced`, `pendingSync:false`, `attempts:1`; an exact-title search returned **0 hits**.
 
 This is fresh target-host operational evidence for the deployed pin. It does
-not claim the full Stage 9 gate: the current red-team suite still lacks
-coverage for outbound sync/reconcile under the deployed `readWriteNoDelete`
-policy; RT-4 resource soak, RT-6/RT-9 plaintext-canary scans, and RT-8
-outsider/state/credential recheck remain open; and the recovery drill and
-license review remain open.
+not claim the full Stage 9 gate: RT-11 has bounded current-pin coverage but
+live create/append/update race follow-up remains; RT-4 is a bounded soak rather
+than a long-duration study; protected RT-6/RT-9 scans and RT-8 outsider checks
+remain incomplete; and the clean recovery VM, post-recovery checks, and license
+sign-off remain open.
+
+## Current-pin operational follow-up (2026-09-07)
+
+- **Bounded soak:** 100 rapid synthetic searches completed in 522 ms; 20
+  succeeded and 80 returned the same bounded `service_unavailable` response;
+  RSS delta was 1,152 KiB, file-descriptor delta was zero, and stderr was empty.
+  This is follow-up evidence, not a long-duration soak closure.
+- **Service-owned plaintext scan:** zero hits for the prior disposable canary
+  titles/IDs in the deployed NookBridge store path or `/run/nookbridge`.
+  Hermes-session/cache copies are test-history artifacts, not bridge-owned
+  persistence. Protected `/var/lib/nookbridge` and logs were not readable by
+  this account and remain unclaimed.
+- **Boundary status:** socket/runtime ownership and mode remain
+  `nookbridge:nookbridge-clients` / `0770`; an actual non-member identity could
+  not be launched from the agent account, so outsider denial remains open.
+- **Runtime health after scans:** `nookd`, `hermes-agent`, and
+  `hermes-dashboard` remained active; explicit sync again returned
+  `synced`, `pendingSync:false`, `attempts:1`.
+
+The RT-11 follow-up, privileged plaintext/state/log scan, outsider recheck,
+clean VM recovery drill, post-recovery target-host checks, and license sign-off
+remain open.
