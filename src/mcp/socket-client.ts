@@ -881,6 +881,20 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         result: Object.freeze(updateResult),
       }) as unknown as RpcAnyResponseEnvelope;
     }
+    if (resultRecord.kind === "delete") {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "id"]) ||
+        typeof resultRecord.id !== "string" ||
+        !isSafeIdentifier(resultRecord.id) ||
+        Buffer.byteLength(resultRecord.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "delete", id: resultRecord.id }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
     if (resultRecord.kind === "sync") {
       if (
         !hasExactOwnKeys(resultRecord, ["kind", "status", "pendingSync", "attempts"]) ||

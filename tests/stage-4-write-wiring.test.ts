@@ -390,6 +390,25 @@ async function expectAdapterError(
 // Source rejection.
 // ---------------------------------------------------------------------------
 
+describe("Stage 4 write wiring — optional delete projection", () => {
+  it("projects notes.moveToTrash as the bounded notesDelete seam", async () => {
+    const runtime = createFakeRuntime();
+    const deleted: string[] = [];
+    Object.defineProperty(runtime.notes, "moveToTrash", {
+      configurable: false,
+      enumerable: true,
+      value: async (...ids: string[]) => {
+        deleted.push(...ids);
+      },
+    });
+    const seam = bindNotesnookWriteRuntime(runtime);
+    expect(typeof seam.notesDelete).toBe("function");
+    await seam.notesDelete!("note-1");
+    expect(deleted).toEqual(["note-1"]);
+    expect(Object.keys(seam)).toContain("notesDelete");
+  });
+});
+
 describe("Stage 4 write wiring — source rejection", () => {
   it("rejects null, undefined, primitives, and non-object sources", async () => {
     const nulls: unknown[] = [null, undefined, 1, "string", true, Symbol("s"), 1n];

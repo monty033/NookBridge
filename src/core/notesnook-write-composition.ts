@@ -389,6 +389,18 @@ function readOwnMethod(record: object, slot: string): UnknownFunction {
   return value as UnknownFunction;
 }
 
+function readOptionalMethod(record: object, slot: string): UnknownFunction | undefined {
+  let value: unknown;
+  try {
+    value = Reflect.get(record, slot, record);
+  } catch {
+    fail("invalid_input");
+  }
+  if (value === undefined) return undefined;
+  if (typeof value !== "function") fail("invalid_input");
+  return value as UnknownFunction;
+}
+
 function requireRecord(value: unknown): Record<string, unknown> {
   let isArray: boolean;
   try {
@@ -619,7 +631,11 @@ interface CapturedHandle {
   readonly methods: Readonly<Record<string, UnknownFunction>>;
 }
 
-function requireHandle(value: unknown, slots: ReadonlyArray<string>): CapturedHandle {
+function requireHandle(
+  value: unknown,
+  slots: ReadonlyArray<string>,
+  optionalSlots: ReadonlyArray<string> = [],
+): CapturedHandle {
   const record = requireRecord(value);
   const methods = Object.create(null) as Record<string, UnknownFunction>;
   for (const slot of slots) {
@@ -634,6 +650,17 @@ function requireHandle(value: unknown, slots: ReadonlyArray<string>): CapturedHa
       writable: false,
       value: readOwnMethod(record, slot),
     });
+  }
+  for (const slot of optionalSlots) {
+    const method = readOptionalMethod(record, slot);
+    if (method !== undefined) {
+      Object.defineProperty(methods, slot, {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: method,
+      });
+    }
   }
   for (const name of FORBIDDEN_HANDLE_NAMES) {
     if (hasProperty(record, name) && readProperty(record, name) !== undefined) {
@@ -698,11 +725,11 @@ function requireState(instance: unknown): CompositionState {
 
 function buildState(options: unknown): CompositionState {
   const record = requireRecord(options);
-  const adapter = requireHandle(readProperty(record, "adapter"), [
-    "createNote",
-    "appendNote",
-    "updateNote",
-  ]);
+  const adapter = requireHandle(
+    readProperty(record, "adapter"),
+    ["createNote", "appendNote", "updateNote"],
+    ["deleteNote"],
+  );
   const coordinator = requireHandle(readProperty(record, "coordinator"), [
     "recordLocalCommit",
     "requestSync",

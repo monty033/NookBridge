@@ -1416,6 +1416,24 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
+    if (kind === "delete") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id"],
+        "rpc protocol: delete result has unexpected fields",
+      );
+      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "id"])) {
+        throw rpcProtocolError("rpc protocol: delete result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "deleted note id");
+      preflightResponseStringField(noteId, rawSum);
+      const resultPayload = objectCreate(null) as { kind: "delete"; id: string };
+      resultPayload.kind = "delete";
+      resultPayload.id = noteId;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
     if (kind === "sync") {
       const resultKeys = validateClosedObject(
         resultRecord,

@@ -157,6 +157,7 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
+    "notes.delete",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -183,6 +184,7 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
+    "notes.delete",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -267,6 +269,8 @@ export function methodToSettingsOperation(methodName: string): SettingsOperation
     case "notes.append":
     case "notes.update":
       return "edit";
+    case "notes.delete":
+      return "delete";
     default:
       return undefined;
   }

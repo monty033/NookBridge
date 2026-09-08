@@ -51,6 +51,7 @@ export interface NotesnookWriteRuntimeNotes {
   }) => Promise<string>;
   readonly addToNotebook: (notebookId: string, ...noteIds: string[]) => Promise<void>;
   readonly removeFromNotebook: (notebookId: string, ...noteIds: string[]) => Promise<void>;
+  readonly moveToTrash?: (...noteIds: string[]) => Promise<void>;
   readonly collection: {
     readonly update: (ids: readonly string[], partial: Record<string, unknown>) => Promise<void>;
   };
@@ -191,6 +192,7 @@ interface RuntimeSnapshot {
     readonly add: NotesnookWriteRuntimeNotes["add"];
     readonly addToNotebook: NotesnookWriteRuntimeNotes["addToNotebook"];
     readonly removeFromNotebook: NotesnookWriteRuntimeNotes["removeFromNotebook"];
+    readonly moveToTrash?: NotesnookWriteRuntimeNotes["moveToTrash"];
     readonly collection: {
       readonly owner: object;
       readonly update: NotesnookWriteRuntimeNotes["collection"]["update"];
@@ -423,6 +425,13 @@ export function bindNotesnookWriteRuntime(
   defineSeamMethod(seam, "contentFindByNoteId", contentFindByNoteId);
   defineSeamMethod(seam, "notesAdd", notesAdd);
   defineSeamMethod(seam, "notesUpdate", notesUpdate);
+  if (snapshot.notes.moveToTrash !== undefined) {
+    const notesDelete = async (id: string): Promise<void> => {
+      const safeId = requireIdentifier(id);
+      await safeCall(() => snapshot.notes.moveToTrash!(safeId));
+    };
+    defineSeamMethod(seam, "notesDelete", notesDelete);
+  }
   defineSeamMethod(seam, "notesTouch", notesTouch);
   defineSeamMethod(seam, "contentAdd", contentAdd);
   defineSeamMethod(seam, "contentUpdateByNoteId", contentUpdateByNoteId);
@@ -481,6 +490,7 @@ function validateRuntime(value: unknown): RuntimeSnapshot {
     "invalid_input",
   );
 
+  const moveToTrash = readPropertyGuarded(notesOwner, "moveToTrash");
   const notes = frozenRecord({
     owner: notesOwner,
     note: bindMethod(readPropertyGuarded(notesOwner, RUNTIME_SLOTS.notes[0]), notesOwner),
@@ -490,6 +500,8 @@ function validateRuntime(value: unknown): RuntimeSnapshot {
       readPropertyGuarded(notesOwner, RUNTIME_SLOTS.notes[3]),
       notesOwner,
     ),
+    moveToTrash:
+      typeof moveToTrash === "function" ? bindMethod(moveToTrash, notesOwner) : undefined,
     collection: frozenRecord({
       owner: collectionOwner,
       update: bindMethod(readPropertyGuarded(collectionOwner, "update"), collectionOwner),

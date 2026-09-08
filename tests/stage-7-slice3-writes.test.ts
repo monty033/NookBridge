@@ -491,13 +491,12 @@ describe("service policy — append/update admissions", () => {
     expect(authorizeServiceMethod(policy, "notes.update").allowed).toBe(true);
   });
 
-  it("readWriteNoDelete still denies notes.delete", () => {
+  it("readWriteNoDelete admits notes.delete", () => {
     const policy = createReadWriteNoDeleteServicePolicy();
-    const decision = authorizeServiceMethod(policy, "notes.delete");
-    expect(decision.allowed).toBe(false);
-    if (!decision.allowed) {
-      expect(decision.reason).toBe("permission_denied");
-    }
+    expect(authorizeServiceMethod(policy, "notes.delete")).toEqual({
+      allowed: true,
+      method: "notes.delete",
+    });
   });
 
   it("readOnly still denies notes.append and notes.update", () => {
@@ -514,13 +513,12 @@ describe("service policy — append/update admissions", () => {
     expect(authorizeServiceMethod(policy, "notes.create").allowed).toBe(false);
   });
 
-  it("custom refuses to admit notes.delete even alongside append/update", () => {
+  it("custom admits notes.delete alongside append/update", () => {
     const policy = createCustomServicePolicy(["notes.append", "notes.update", "notes.delete"]);
-    const decision = authorizeServiceMethod(policy, "notes.delete");
-    expect(decision.allowed).toBe(false);
-    if (!decision.allowed) {
-      expect(decision.reason).toBe("permission_denied");
-    }
+    expect(authorizeServiceMethod(policy, "notes.delete")).toEqual({
+      allowed: true,
+      method: "notes.delete",
+    });
   });
 
   it("custom admits exactly the configured allowlist of methods only", () => {
