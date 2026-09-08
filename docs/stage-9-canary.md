@@ -100,6 +100,28 @@ sign-off remain open.
   `attempts:1`; exact-title search returned **0 hits**. The separate local-write
   race remains unexercised.
 
-The RT-11 local-write-race follow-up, privileged plaintext/state/log scan,
-outsider recheck, clean VM recovery drill, post-recovery target-host checks,
-and license sign-off remain open.
+## Current-pin follow-up (2026-09-08)
+
+NookBridge `78ed6c0adc08d25be167c26e65dbacd6432cdfdb` carries the PR-71
+`notesTouch` fix that closes the RT-11 local-write-race follow-up.
+
+- **Sequential probe (`\nseq-1` then `\nseq-2` against the same note):** three
+  reads returned three distinct revision tokens
+  (`rev_a07c7100…`, `rev_981f90fa…`, `rev_5ec303f6…`), proving every
+  successful append now advances the note's `dateEdited` and therefore the
+  read-only projection's revision token.
+- **4-way parallel race against the same `expectedRevision`:** exactly **1
+  winner** (`kind:"append"`), 3 categorical `service_unavailable` rejections;
+  the winner's final revision token differed from the initial revision
+  (`revisionChanged: true`). The daemon's pre-existing request-budget layer
+  surfaced the racing writes; the append path is no longer able to mask a
+  stale revision as a successful write.
+- **Bounded disposable write canary (create → get → update → get → append →
+  get):** every step returned the expected MCP tool result kind; the post-append
+  revision token differed from the pre-update revision.
+- **Source evidence:** PR-71 added a regression test that pins the contract
+  `appendNote → notesTouch`. Full source suite: 56 files / 1584 tests pass.
+
+The RT-11 local-write-race follow-up is **closed**. Remaining open items
+on the plan: privileged plaintext/state/log scan, outsider recheck, clean VM
+recovery drill, post-recovery target-host checks, and license sign-off.

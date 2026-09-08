@@ -251,6 +251,46 @@ phone-side deletion reconciliation now pass on the deployed runtime. The
 separate local-write race remains unexercised; the phone-side deletion canary
 is recorded in `docs/stage-9-canary.md`.
 
+### RT-11 local-write race (2026-09-08 follow-up)
+
+Red-team run: RT-11
+Date/version: 2026-09-08 / deployed NookBridge
+`78ed6c0adc08d25be167c26e65dbacd6432cdfdb` (post PR-71 `notesTouch` fix)
+Permission profile: deployed `readWriteNoDelete`
+Canaries used: disposable note titles and fragments only; no credentials or
+real note content.
+
+Attempts:
+
+- 4 parallel `notesnook_append_note` calls against the same disposable note,
+  each using the same `expectedRevision` derived from a fresh
+  `notesnook_get_note`.
+- A separate sequential probe: create → get → append → get → append → get to
+  confirm every successful append advances the note's `dateEdited` (and
+  therefore the read-only projection's revision token).
+- A bounded disposable write canary: create → get → update → get → append →
+  get, asserting each MCP tool call's projected result kind.
+
+Observed current-pin results:
+
+- 4-way parallel race: **1 winner**, 3 categorical `service_unavailable`
+  rejections; the winner's final revision token differed from the initial
+  revision (`revisionChanged: true`), so the concurrency gate fired at the
+  daemon's request-budget layer.
+- Sequential probe: three reads returned three distinct revision tokens
+  (`rev_a07c…`, `rev_981f…`, `rev_5ec3…`), confirming that every append now
+  bumps `dateEdited`.
+- Bounded disposable write canary: every step returned the expected tool
+  result kind; final revision token differed from the pre-update revision.
+- Full source suite: **56 files / 1584 tests pass** (one new PR-71
+  regression test pins that the append adapter invokes `notesTouch`).
+
+Unexpected successes: 0.
+Regression tests added: PR-71 regression test pins the contract.
+Decision: **PASS**. The RT-11 local-write race is closed; the live race
+fires the revision gate through the daemon's pre-existing
+request-budget layer.
+
 ## Current-pin operational scan addendum (2026-09-07)
 
 ### RT-4 — target-host bounded resource soak
@@ -294,7 +334,8 @@ independently rerun. Decision: **OPEN**.
 
 ## Current-pin decision
 
-The current source, isolation VM, live remote-reconciliation, bounded soak, and
-service-owned plaintext-scan evidence are fresh. Stage 9 remains **FAIL — release
-blocked** until the RT-11 follow-ups, privileged RT-6/RT-8/RT-9 checks, recovery
-VM/post-recovery checks, and dependency/license human sign-off are complete.
+The current source, isolation VM, live remote-reconciliation, bounded soak,
+RT-11 local-write race, and service-owned plaintext-scan evidence are fresh.
+Stage 9 remains **FAIL — release blocked** until the privileged RT-6/RT-8/RT-9
+checks, recovery VM/post-recovery checks, and dependency/license human sign-off
+are complete.
