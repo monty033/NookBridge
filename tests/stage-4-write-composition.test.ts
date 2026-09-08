@@ -2055,6 +2055,7 @@ describe("Stage 4 write composition — exact closed surface", () => {
     // Every import is a local Stage 4 module.
     const importPaths = [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
     expect(importPaths.sort()).toEqual([
+      "./notesnook-database-mutex.js",
       "./notesnook-sync-coordinator.js",
       "./notesnook-write-adapter.js",
       "./notesnook-write-contract.js",

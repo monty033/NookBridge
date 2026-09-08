@@ -109,6 +109,7 @@ import type {
   SyncOperation,
   SyncPendingMarker,
 } from "./notesnook-sync-coordinator.js";
+import { withMutex } from "./notesnook-database-mutex.js";
 
 // ---------------------------------------------------------------------------
 // Bounds.
@@ -166,12 +167,23 @@ export interface NotesnookPendingSyncHandle {
   readonly recordLocalCommit: (receipt: SyncLocalCommit) => SyncLocalCommitResult;
   readonly requestSync: () => Promise<SyncCoordinatorResult>;
   readonly snapshot: () => SyncCoordinatorState;
+  /** Optional on legacy test seams; production coordinators provide it. */
+  readonly checkCapacity?: () => unknown;
 }
 
 /** Construction options.  Both handles are required and separate. */
 export interface NotesnookLocalWriteCompositionOptions {
   readonly adapter: NotesnookLocalWriteHandle;
   readonly coordinator: NotesnookPendingSyncHandle;
+  /**
+   * Optional database identity used for per-database serialization
+   * (P1-1).  When provided, every public method acquires a per-Database
+   * mutex before executing.  When omitted, the composition relies on its
+   * legacy per-instance `localDepth` counter for reentrancy guards and
+   * does not coordinate across distinct composition instances — that
+   * is the legacy seam preserved for tests and injected fakes.
+   */
+  readonly database?: object;
 }
 
 /** The union of bounded local results the composition can return. */
@@ -662,6 +674,8 @@ interface CompositionState {
   readonly recordLocalCommit: UnknownFunction;
   readonly requestSync: UnknownFunction;
   readonly snapshot: UnknownFunction;
+  readonly checkCapacity: UnknownFunction | undefined;
+  readonly database: object | undefined;
   localDepth: number;
 }
 
@@ -691,6 +705,13 @@ function buildState(options: unknown): CompositionState {
     // and remote-sync boundaries this slice exists to keep apart.
     fail("invalid_input");
   }
+  const databaseValue = readProperty(record, "database");
+  const database: object | undefined =
+    databaseValue === undefined
+      ? undefined
+      : typeof databaseValue === "object" && databaseValue !== null
+        ? databaseValue
+        : (fail("invalid_input"), undefined);
   return {
     adapterTarget: adapter.target,
     createNote: capturedMethod(adapter.methods, "createNote"),
@@ -700,6 +721,10 @@ function buildState(options: unknown): CompositionState {
     recordLocalCommit: capturedMethod(coordinator.methods, "recordLocalCommit"),
     requestSync: capturedMethod(coordinator.methods, "requestSync"),
     snapshot: capturedMethod(coordinator.methods, "snapshot"),
+    checkCapacity: hasProperty(coordinator.target, "checkCapacity")
+      ? readOwnMethod(coordinator.target, "checkCapacity")
+      : undefined,
+    database,
     localDepth: 0,
   };
 }
@@ -1139,19 +1164,25 @@ export class NotesnookLocalWriteComposition {
    */
   async createNote(command: CreateNoteCommand): Promise<CreateNoteResult> {
     const state = requireState(this);
-    return runLocalOperation(state, "create", () => state.createNote, command, copyCreateResult);
+    return gate(state, "local:create", () =>
+      runLocalOperation(state, "create", () => state.createNote, command, copyCreateResult),
+    );
   }
 
   /** Append one Markdown fragment locally, then record it as pending. */
   async appendNote(command: AppendNoteCommand): Promise<AppendNoteResult> {
     const state = requireState(this);
-    return runLocalOperation(state, "append", () => state.appendNote, command, copyAppendResult);
+    return gate(state, "local:append", () =>
+      runLocalOperation(state, "append", () => state.appendNote, command, copyAppendResult),
+    );
   }
 
   /** Apply an allowlisted patch locally, then record it as pending. */
   async updateNote(command: UpdateNoteCommand): Promise<UpdateNoteResult> {
     const state = requireState(this);
-    return runLocalOperation(state, "update", () => state.updateNote, command, copyUpdateResult);
+    return gate(state, "local:update", () =>
+      runLocalOperation(state, "update", () => state.updateNote, command, copyUpdateResult),
+    );
   }
 
   /**
@@ -1162,21 +1193,29 @@ export class NotesnookLocalWriteComposition {
    * (`localDepth > 0`), this method fails closed with
    * `invalid_input` rather than invoking the coordinator's executor —
    * a reentrant call from a hostile adapter must not be able to drain
-   * the queue while a local write is still committing.  The
-   * coordinator's own single-flight policy still governs amplification;
-   * the composition merely relays a validated bounded copy of the
-   * outcome.
+   * the queue while a local write is still committing.  When the
+   * composition was constructed with a database identity, the same gate
+   * also serialises this method against any other composition or
+   * remote-sync capability bound to that database — see
+   * {@link withMutex}.  The coordinator's own single-flight policy
+   * still governs amplification; the composition merely relays a
+   * validated bounded copy of the outcome.
    */
   async requestSync(): Promise<SyncCoordinatorResult> {
     const state = requireState(this);
+    // Check before queueing on the database mutex.  If an adapter calls
+    // back into this composition and awaits requestSync, queueing first
+    // would deadlock behind the mutation that is awaiting the callback.
     if (state.localDepth > 0) fail("invalid_input");
-    let raw: unknown;
-    try {
-      raw = await Reflect.apply(state.requestSync, state.coordinatorTarget, []);
-    } catch (error) {
-      throw normaliseThrow(error);
-    }
-    return copyCoordinatorResult(raw);
+    return gate(state, "remote:sync", async () => {
+      let raw: unknown;
+      try {
+        raw = await Reflect.apply(state.requestSync, state.coordinatorTarget, []);
+      } catch (error) {
+        throw normaliseThrow(error);
+      }
+      return copyCoordinatorResult(raw);
+    });
   }
 
   /**
@@ -1186,7 +1225,10 @@ export class NotesnookLocalWriteComposition {
    * record, path, or credential can appear here because the coordinator
    * never received one.  Like `requestSync`, this fails closed if a
    * local mutation is currently in flight — a hostile adapter cannot
-   * use a local write to peek at the queue through this surface.
+   * use a local write to peek at the queue through this surface.  The
+   * snapshot is not gated behind the per-Database mutex: it is a pure
+   * read with no remote side effects, and gating it would unnecessarily
+   * serialise every queue inspection behind the mutation queue.
    */
   pendingSnapshot(): SyncCoordinatorState {
     const state = requireState(this);
@@ -1199,6 +1241,40 @@ export class NotesnookLocalWriteComposition {
     }
     return copySnapshot(raw);
   }
+}
+
+/**
+ * Run `fn` either under the per-Database mutex (when the composition was
+ * constructed with a `database` identity) or directly (legacy seam).  When
+ * the mutex is in use, two distinct compositions pointing at the same
+ * `database` object serialise their create/append/update/requestSync calls
+ * — the underlying Notesnook database is now a single-owner resource.
+ *
+ * The label is short, bounded, and used only for fail-closed overflow
+ * diagnostics.  It is never logged by this module.
+ */
+async function gate<T>(
+  state: CompositionState,
+  label: string,
+  fn: () => T | PromiseLike<T>,
+): Promise<T> {
+  if (state.database === undefined) return fn();
+  return withMutex(state.database, label, fn);
+}
+
+function checkMutationCapacity(state: CompositionState): void {
+  if (state.checkCapacity === undefined) return;
+  let raw: unknown;
+  try {
+    raw = Reflect.apply(state.checkCapacity, state.coordinatorTarget, []);
+  } catch (error) {
+    throw normaliseThrow(error);
+  }
+  const record = requireRecord(raw);
+  const kind = readOwnProperty(record, "kind");
+  if (kind === "accept") return;
+  if (kind === "full") fail("invalid_input");
+  fail("sync_failed");
 }
 
 /**
@@ -1228,6 +1304,7 @@ async function runLocalOperation<T>(
 ): Promise<T> {
   state.localDepth += 1;
   try {
+    checkMutationCapacity(state);
     const fn = invoker();
     let raw: unknown;
     try {

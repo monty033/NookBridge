@@ -136,12 +136,24 @@ export function createLiveLocalWriteComposition(
       // fabricates a remote receipt.
       executor: (() => ({ status: "failed" as const })) satisfies SyncExecutor,
     });
-  return createNotesnookLocalWriteComposition({ adapter, coordinator });
+  return createNotesnookLocalWriteComposition({
+    adapter,
+    coordinator,
+    ...(options.database === undefined ? {} : { database: options.database }),
+  });
 }
 
 /** Options for sharing one coordinator between local writes and explicit sync. */
 export type LiveWriteCompositionOptions = Readonly<{
   readonly coordinator?: NotesnookPendingSyncHandle;
+  /**
+   * Optional database identity for per-Database serialization.  When
+   * provided, the resulting composition routes every public method
+   * through the per-Database mutex (see {@link withMutex}).  When
+   * omitted, the legacy per-instance reentrancy guard is the only
+   * serialization — preserved for tests and injected fakes.
+   */
+  readonly database?: object;
 }>;
 
 /**
