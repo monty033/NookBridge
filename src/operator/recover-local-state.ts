@@ -543,15 +543,10 @@ function runReinitialize(options: RunRecoverLocalStateOptions): RunRecoverComman
       message: "nookctl recover-local-state: database key is unavailable",
     };
   }
-  const inspection = inspectEncryptedSqlite({ dbPath: options.dbPath, key: options.dbKey });
-  if (inspection.status !== "healthy") {
-    return {
-      kind: "error",
-      exitCode: 2,
-      message: "nookctl recover-local-state: database integrity is not healthy",
-    };
-  }
-
+  // Do not inspect or open the existing DB before quarantine.  The
+  // recovery contract is specifically to preserve corrupt/unreadable
+  // bytes before creating fresh state.  The key is still required so
+  // the replacement state can be initialized with the same carrier.
   try {
     mkdirSync(quarantineDir, { recursive: true, mode: QUARANTINE_DIR_MODE });
     chmodSync(quarantineDir, QUARANTINE_DIR_MODE);

@@ -410,6 +410,33 @@ describe("runRecoverLocalState — quarantine and reinitialize", () => {
     expect(bytesAfter.equals(dbBytesBefore)).toBe(true);
   });
 
+  it("quarantines corrupt bytes before reinitializing fresh state", async () => {
+    const root = mkRoot("nookbridge-stage9-recovery-corrupt-");
+    const { stateDir, dbPath, key } = buildHealthyFixture(root);
+    const corruptBytes = Buffer.from("corrupt-database-fixture", "utf8");
+    writeFileSync(dbPath, corruptBytes);
+
+    const result = await runRecoverLocalState({
+      argv: ["reinitialize", "--approve-reinitialize"],
+      env: {},
+      stateDir,
+      dbPath,
+      dbKey: key,
+    });
+    expect(result.kind).toBe("reinitialized");
+    if (result.kind !== "reinitialized") return;
+
+    const quarantinedPath = join(
+      stateDir,
+      ".recovery-quarantine",
+      result.quarantineId,
+      "nookbridge.db",
+    );
+    expect(readFileBytes(quarantinedPath).equals(corruptBytes)).toBe(true);
+    expect(existsSync(dbPath)).toBe(true);
+    expect(readFileBytes(dbPath).equals(corruptBytes)).toBe(false);
+  });
+
   it("returns `reinitialized` and a fresh empty state after quarantine", async () => {
     const root = mkRoot("nookbridge-stage9-recovery-reinit-");
     const { stateDir, dbPath, key } = buildHealthyFixture(root);
