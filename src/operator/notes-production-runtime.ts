@@ -4,7 +4,11 @@ import { TextDecoder } from "node:util";
 
 import { createProductionLiveLoginRuntime } from "../auth/live-login-runtime.js";
 import type { LiveLoginRuntime } from "../auth/admin-command.js";
-import { createDevelopmentFileKeyStore } from "../keystore/file-keystore.js";
+import {
+  createProductionOperatorKeyStore,
+  PRODUCTION_STATE_DIR,
+  readSafeOperatorEnvironment,
+} from "./production-runtime.js";
 import type { Logger } from "../logging/logger.js";
 import {
   isBoundedOpaqueValue,
@@ -160,17 +164,15 @@ export function createNotesCommandRuntimeFromReadOnly(
 
 /** Open the real local read-only runtime lazily for one CLI command. */
 export async function createProductionNotesRuntime(options: {
-  readonly stateDir: string;
+  readonly environment: Readonly<Record<string, string | undefined>>;
   readonly logger?: Logger;
 }): Promise<NotesProductionRuntime> {
-  const keys = createDevelopmentFileKeyStore({
-    keyPath: `${options.stateDir}/.d/db.key`,
-    generateIfMissing: true,
-  });
+  const environment = readSafeOperatorEnvironment(options.environment);
+  const keys = createProductionOperatorKeyStore(environment);
   let live: LiveLoginRuntime | undefined;
   try {
     live = await createProductionLiveLoginRuntime({
-      stateDir: options.stateDir,
+      stateDir: PRODUCTION_STATE_DIR,
       keys,
       ...(options.logger === undefined ? {} : { logger: options.logger }),
     });
