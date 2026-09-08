@@ -148,8 +148,8 @@ describe("service policy — methodToSettingsOperation returns the closed map", 
     expect(methodToSettingsOperation("notes.sync")).toBe("read");
   });
 
-  it("returns undefined for notes.delete", () => {
-    expect(methodToSettingsOperation("notes.delete")).toBeUndefined();
+  it("maps notes.delete to delete", () => {
+    expect(methodToSettingsOperation("notes.delete")).toBe("delete");
   });
 
   it("returns undefined for any other unknown method string", () => {
@@ -357,16 +357,13 @@ describe("service policy — allowlist gate precedes the evaluator", () => {
     expect(calls).toEqual([]);
   });
 
-  it("does not allow notes.delete even when the evaluator would allow it", () => {
+  it("allows notes.delete when the custom policy and evaluator allow it", () => {
     const { evaluator } = makeStubEvaluator({ allowed: true });
-    // Use a custom policy with `notes.delete` dropped before
-    // construction.  The evaluator is irrelevant — the method
-    // never reaches it.
     const policy = createCustomServicePolicy(["notes.delete"]);
     const augmented = Object.assign(Object.create(null), policy, { evaluator });
     Object.freeze(augmented);
     const decision = authorizeServiceMethod(augmented as unknown as ServicePolicy, "notes.delete");
-    expect(decision).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(decision).toEqual({ allowed: true, method: "notes.delete" });
   });
 });
 

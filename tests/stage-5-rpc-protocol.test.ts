@@ -451,6 +451,18 @@ describe("serializeRpcResponse", () => {
     expect(decoded.result?.notes).toEqual([{ title: "First" }, { title: "Second" }]);
   });
 
+  it("serializes a bounded delete result", () => {
+    const bytes = serializeRpcResponse({
+      id: "delete-rpc",
+      ok: true,
+      result: { kind: "delete", id: "note-1" },
+    });
+    expect(decode(bytes)).toEqual({
+      id: "delete-rpc",
+      ok: true,
+      result: { kind: "delete", id: "note-1" },
+    });
+  });
   it("serializes notes as an array even when Array.prototype.toJSON is polluted", () => {
     const canary = "array-to-json-canary";
     const previous = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");

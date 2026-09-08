@@ -929,9 +929,16 @@ async function runNotesDelete(
   const record = raw as Record<string, unknown>;
   const operation = readOwnStringField(record, "operation");
   const noteId = readOwnStringField(record, "id");
+  const localCommitted = readOwnBooleanField(record, "localCommitted");
+  const remoteSynced = readOwnBooleanField(record, "remoteSynced");
+  const pendingSync = readOwnBooleanField(record, "pendingSync");
   if (
     operation !== "delete" ||
     noteId === undefined ||
+    noteId !== request.params.id ||
+    localCommitted !== true ||
+    remoteSynced !== false ||
+    pendingSync !== true ||
     noteId.length === 0 ||
     noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
     bufferByteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||

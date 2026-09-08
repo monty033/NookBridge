@@ -123,13 +123,10 @@ describe("service policy — readWriteNoDelete admits notes.create and the four 
     expect(decision).toEqual({ allowed: true, method: "notes.create" });
   });
 
-  it("denies notes.delete categorically — delete is never possible in this slice", () => {
+  it("allows notes.delete when the settings policy admits delete", () => {
     const policy = createReadWriteNoDeleteServicePolicy();
     const decision = authorizeServiceMethod(policy, "notes.delete");
-    expect(decision.allowed).toBe(false);
-    if (!decision.allowed) {
-      expect(decision.reason).toBe("permission_denied");
-    }
+    expect(decision).toEqual({ allowed: true, method: "notes.delete" });
   });
 
   it("admits notes.append and notes.update under the Slice 3 follow-up widening", () => {
@@ -199,6 +196,7 @@ describe("service policy — custom method allowlist", () => {
       "notes.sync",
       "notes.update",
       "notes.delete",
+      "notes.search",
     ];
     const oversizedPolicy = createCustomServicePolicy(oversized);
     expect(Array.from(oversizedPolicy.allowedMethods)).toEqual([]);
@@ -218,13 +216,10 @@ describe("service policy — custom method allowlist", () => {
     expect(getterCalls).toBe(0);
   });
 
-  it("refuses to admit notes.delete — delete is structurally never possible", () => {
+  it("allows notes.delete in a custom allowlist", () => {
     const policy = createCustomServicePolicy(["notes.search", "notes.create", "notes.delete"]);
     const decision = authorizeServiceMethod(policy, "notes.delete");
-    expect(decision.allowed).toBe(false);
-    if (!decision.allowed) {
-      expect(decision.reason).toBe("permission_denied");
-    }
+    expect(decision).toEqual({ allowed: true, method: "notes.delete" });
   });
 
   it("freezes the policy object and its allowlist tuple", () => {
