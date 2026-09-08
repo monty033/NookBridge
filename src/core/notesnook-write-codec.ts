@@ -302,11 +302,38 @@ function boundedStored(type: "tiptap" | "html", data: string): NotesnookStoredCo
  * stored type to the note's existing slot type on update, so this default
  * only ever applies to a freshly created note.
  */
+/**
+ * Append a Markdown fragment to a stored Tiptap/HTML document.
+ *
+ * Tiptap stored content is a self-contained `<div data-type="document">…</div>`
+ * (or a top-level node equivalent). Concatenating a freshly rendered
+ * `<p>…</p>` onto a stored Tiptap document leaves the result syntactically
+ * invalid — a new top-level block must be appended inside the document root.
+ *
+ * HTML stored content is concatenated verbatim because a Notesnook HTML slot is
+ * an arbitrary `<div>…</div>` whose internal tree can already be malformed
+ * without breaking subsequent reads; the existing test suite codifies that
+ * contract.
+ */
+function appendStored(
+  storedType: "tiptap" | "html",
+  storedData: string,
+  fragmentHtml: string,
+): string {
+  if (storedType === "tiptap") {
+    const trailingMatch = /<\/div>\s*$/.exec(storedData);
+    if (trailingMatch === null) return `${storedData}${fragmentHtml}`;
+    const head = storedData.slice(0, storedData.length - trailingMatch[0].length);
+    return `${head}${fragmentHtml}</div>`;
+  }
+  return `${storedData}${fragmentHtml}`;
+}
+
 export function createDeterministicMarkdownCodec(): NotesnookWriteMarkdownCodec {
   return Object.freeze({
     encodeMarkdown: (markdown: string): NotesnookStoredContent => {
       const safe = requireBoundedMarkdown(markdown, STAGE4_WRITE_LIMITS.maxContentBytes);
-      return boundedStored("tiptap", renderMarkdown(safe));
+      return boundedStored("tiptap", `<div data-type="document">${renderMarkdown(safe)}</div>`);
     },
     appendMarkdownToStoredContent: (input: {
       readonly storedType: "tiptap" | "html";
@@ -322,7 +349,10 @@ export function createDeterministicMarkdownCodec(): NotesnookWriteMarkdownCodec 
       );
       // Exactly one appended block; the existing stored bytes are preserved
       // byte-for-byte ahead of it and are never re-parsed.
-      return boundedStored(storedType, `${storedData}${renderMarkdown(fragment)}`);
+      return boundedStored(
+        storedType,
+        appendStored(storedType, storedData, renderMarkdown(fragment)),
+      );
     },
   });
 }
