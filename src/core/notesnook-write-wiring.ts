@@ -284,6 +284,35 @@ export function bindNotesnookWriteRuntime(
     await safeCall(() => snapshot.notes.collection.update(safeIds, safePartial));
   };
 
+  // Narrow touch used by the append adapter to bump the parent note's
+  // `dateEdited` after a content row has been replaced.  We deliberately
+  // do NOT route through `notesUpdate` because `mapNotesPartial` does not
+  // accept `dateEdited` (it is not a user-allowlisted field).  Passing
+  // an empty `{ dateEdited }` partial to `notes.collection.update` keeps
+  // the upstream Notesnook storage single-collection semantics: the
+  // Notes collection owns the edit timestamp, the Content collection
+  // does not.
+  const notesTouch = async (ids: readonly string[], dateEdited: number): Promise<void> => {
+    const safeIds = readStringArray(ids, "invalid_input", true);
+    if (safeIds.length === 0) return;
+    if (
+      typeof dateEdited !== "number" ||
+      !Number.isFinite(dateEdited) ||
+      dateEdited < 0 ||
+      !Number.isInteger(dateEdited)
+    ) {
+      throw wiringError("invalid_input");
+    }
+    const safePartial = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(safePartial, "dateEdited", {
+      value: dateEdited,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+    await safeCall(() => snapshot.notes.collection.update(safeIds, safePartial));
+  };
+
   const contentFindByNoteId = async (
     noteId: string,
   ): Promise<NotesnookWriteStoredContent | undefined> => {
@@ -394,6 +423,7 @@ export function bindNotesnookWriteRuntime(
   defineSeamMethod(seam, "contentFindByNoteId", contentFindByNoteId);
   defineSeamMethod(seam, "notesAdd", notesAdd);
   defineSeamMethod(seam, "notesUpdate", notesUpdate);
+  defineSeamMethod(seam, "notesTouch", notesTouch);
   defineSeamMethod(seam, "contentAdd", contentAdd);
   defineSeamMethod(seam, "contentUpdateByNoteId", contentUpdateByNoteId);
   defineSeamMethod(seam, "notebookExists", notebookExists);

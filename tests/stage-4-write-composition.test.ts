@@ -135,6 +135,9 @@ function fakeSeam(): FakeSeam {
     notesUpdate: async () => {
       calls.push("notesUpdate");
     },
+    notesTouch: async () => {
+      calls.push("notesTouch");
+    },
     contentAdd: async () => {
       calls.push("contentAdd");
       return "content-2";
