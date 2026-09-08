@@ -1049,9 +1049,17 @@ function mapResponseEnvelope(
       result === undefined ||
       result === null ||
       typeof result !== "object" ||
-      !["search", "status", "notebooks", "note", "create", "append", "update", "sync"].includes(
-        result.kind,
-      )
+      ![
+        "search",
+        "status",
+        "notebooks",
+        "note",
+        "create",
+        "append",
+        "update",
+        "delete",
+        "sync",
+      ].includes(result.kind)
     ) {
       return { ok: false, code: "service_unavailable" };
     }

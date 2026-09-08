@@ -223,6 +223,27 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
     expect(textPayload(result)).toEqual({ code: "not_found", message: "Not found" });
   });
 
+  it("accepts a successful exact-path delete response", async () => {
+    const observed: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const socketPath = await startFakeDaemon((request) => {
+      observed.push({ method: request.method, params: request.params });
+      return {
+        id: request.id,
+        ok: true,
+        result: { kind: "delete", id: "opaque-note-id" },
+      };
+    });
+    const client = new NookdSocketClient({ socketPath });
+    const result = await buildNookMcpServer({ client }).callTool("notesnook_delete_note", {
+      path: "Outdoors/Canoe Trip",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(observed).toEqual([{ method: "notes.delete", params: { path: "Outdoors/Canoe Trip" } }]);
+    expect(textPayload(result)).toEqual({ path: "Outdoors/Canoe Trip", deleted: true });
+    expect(JSON.stringify(result)).not.toContain("opaque-note-id");
+  });
+
   it("rejects malformed inputs before socket I/O", async () => {
     const connect = vi.fn(async () => {
       throw new Error("must not connect");
