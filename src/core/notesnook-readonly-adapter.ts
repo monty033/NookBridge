@@ -276,9 +276,31 @@ export class NotesnookReadOnlyAdapter {
         throw readOnlyAdapterError("Notesnook read-only adapter: sync attempt failed");
       }
     })();
-    this.#syncInFlight = attempt.finally(() => {
-      this.#syncInFlight = undefined;
-    });
+    // PR-65 P1-10 — single finalized fetch promise.  The previous
+    // shape stored `attempt.finally(() => { this.#syncInFlight = undefined })`
+    // which produced a NEW promise that no caller observed.  If
+    // `attempt` rejected, that finally-promise became an unhandled
+    // rejection that could terminate the process.  The fix is two-fold:
+    //   1) assign `attempt` itself (not a finally-chained promise) to
+    //      `#syncInFlight` so the bookkeeping is tied to the same
+    //      promise every caller observes, and
+    //   2) attach a no-op catch to the bookkeeping line so a hostile
+    //      or hostile-shaped rejection can never become unobserved.
+    this.#syncInFlight = attempt;
+    void attempt
+      .then(
+        () => {
+          if (this.#syncInFlight === attempt) this.#syncInFlight = undefined;
+        },
+        () => {
+          if (this.#syncInFlight === attempt) this.#syncInFlight = undefined;
+        },
+      )
+      .catch(() => {
+        // The bookkeeping callback never throws; the `.catch` exists
+        // solely to consume a defensive rejection from `attempt.then`
+        // so the chained promise can never become unobserved.
+      });
     try {
       return await attempt;
     } catch (error) {

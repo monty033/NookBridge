@@ -316,13 +316,18 @@ export function flattenLiveDatabaseToReadOnly(
       NotesnookReadOnlyDatabase["listNotebooks"] extends () => Promise<infer R> ? R : never
     > => {
       const ids = await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids");
+      // PR-65 P1-5a — read-side corpus bound.  Truncate the source
+      // id array at the published cap so a large notebook list cannot
+      // drive an unbounded number of follow-up `notebooks.notebook(id)`
+      // calls.
+      const boundedNotebookIds = truncateIds(ids, MAX_LIST_NOTEBOOKS);
       const summaries: Array<{
         readonly id: string;
         readonly title: string;
         readonly dateCreated?: number;
         readonly dateModified?: number;
       }> = [];
-      for (const id of ids) {
+      for (const id of boundedNotebookIds) {
         const notebook = await callThrough(
           notebookFn,
           [id],
@@ -340,6 +345,11 @@ export function flattenLiveDatabaseToReadOnly(
     > => {
       const notesAll = readFilteredSelector(notes, "notes.all", "Notes");
       const ids = await readFilteredSelectorIds(notesAll, "notes.all.ids");
+      // PR-65 P1-5a — read-side corpus bound.  The source query did
+      // not accept a limit so we stop iterating after the published
+      // cap so a large corpus cannot drive an unbounded number of
+      // follow-up `notes.note(id)` calls.
+      const boundedIds = truncateIds(ids, MAX_LIST_NOTES);
       const metadata: Array<{
         readonly id: string;
         readonly title: string;
@@ -352,7 +362,7 @@ export function flattenLiveDatabaseToReadOnly(
         readonly conflicted?: boolean;
         readonly locked?: boolean;
       }> = [];
-      for (const id of ids) {
+      for (const id of boundedIds) {
         const note = await callThrough(
           noteFn,
           [id],
@@ -411,7 +421,13 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: lookup.notes rejected",
       );
       const noteIds = await readSearchResultIds(noteResults, "lookup.notes.ids");
-      for (const noteId of noteIds) {
+      // PR-65 P1-5a — read-side corpus bound.  The seam does not
+      // expose a query with a limit, so the source still returns every
+      // match.  We stop iterating after the published cap so a large
+      // corpus cannot drive an unbounded number of follow-up
+      // `notes.note(id)` calls.  Tests assert the cap is honored.
+      const boundedNoteIds = truncateIds(noteIds, MAX_SEARCH_HITS);
+      for (const noteId of boundedNoteIds) {
         const note = await callThrough(
           noteFn,
           [noteId],
@@ -430,7 +446,8 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: lookup.notebooks rejected",
       );
       const notebookIds = await readSearchResultIds(notebookResults, "lookup.notebooks.ids");
-      for (const notebookId of notebookIds) {
+      const boundedNotebookIds = truncateIds(notebookIds, MAX_SEARCH_HITS);
+      for (const notebookId of boundedNotebookIds) {
         const notebook = await callThrough(
           notebookFn,
           [notebookId],
@@ -446,6 +463,29 @@ export function flattenLiveDatabaseToReadOnly(
       return hits as never;
     },
   });
+}
+
+/**
+ * Maximum number of search hits processed per source query
+ * (PR-65 P1-5a).  Tests assert the cap is honored and an oversized
+ * source result is silently truncated at the boundary.
+ */
+const MAX_SEARCH_HITS = 256;
+
+/** Maximum number of notes enumerated by `listNotes`. */
+const MAX_LIST_NOTES = 256;
+
+/** Maximum number of notebooks enumerated by `listNotebooks`. */
+const MAX_LIST_NOTEBOOKS = 256;
+
+/**
+ * Slice an oversized source id array to the published cap.
+ * Defensive: the source query did not honour a limit so we stop
+ * iterating at the boundary.
+ */
+function truncateIds<T>(ids: readonly T[], cap: number): readonly T[] {
+  if (ids.length <= cap) return ids;
+  return ids.slice(0, cap);
 }
 
 // ---------------------------------------------------------------------------

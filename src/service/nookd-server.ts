@@ -100,6 +100,13 @@ interface ConnectionState {
   lastActivityMs: number;
   elapsedMs: number;
   idleTimer: ReturnType<typeof scheduleTimeout> | undefined;
+  /**
+   * Runtime operations still settling after the transport moved on
+   * (PR-65 P1-5).  The connection stays "closing" until this set is
+   * empty so a follow-up request cannot race against a still-running
+   * runtime call.
+   */
+  readonly runtimeInFlight: Set<Promise<unknown>>;
   readonly closePromise: Promise<void>;
   readonly resolveClosed: () => void;
 }
@@ -193,6 +200,7 @@ export async function startNookdServer(
       lastActivityMs: Date.now(),
       elapsedMs: 0,
       idleTimer: undefined,
+      runtimeInFlight: new Set<Promise<unknown>>(),
       closePromise: stateResolver,
       resolveClosed: () => resolveClosed(),
     };
@@ -294,6 +302,14 @@ export async function startNookdServer(
   function destroyConnection(state: ConnectionState): void {
     state.closing = true;
     clearIdleTimer(state);
+    // PR-65 P1-5 — runtime ownership.  Resolve the close promise only
+    // after every runtime operation handed off via `registerInFlight`
+    // has settled.  The transport races ahead of the runtime, but
+    // shutdown waits for the runtime so a follow-up connection cannot
+    // race against a still-running operation.
+    const drain = Promise.allSettled([...state.runtimeInFlight]).then(() => undefined);
+    state.runtimeInFlight.clear();
+    void drain.then(() => state.resolveClosed());
     state.socket.destroy();
   }
 
@@ -311,6 +327,19 @@ export async function startNookdServer(
       audit("rpc.connection.idle_timeout", "timeout", AUDIT_METHOD_SENTINEL, false, idleForMs);
       destroyConnection(state);
     }, normalized.abuseBounds.connectionIdleTimeoutMs);
+  }
+
+  /**
+   * Register a runtime operation so the connection waits for it
+   * during shutdown (PR-65 P1-5).  Idempotent: registering the same
+   * promise twice is a no-op.
+   */
+  function registerInFlight(state: ConnectionState, promise: Promise<unknown>): void {
+    state.runtimeInFlight.add(promise);
+    const cleanup = (): void => {
+      state.runtimeInFlight.delete(promise);
+    };
+    promise.then(cleanup, cleanup);
   }
 
   function processConnection(state: ConnectionState): void {
@@ -364,6 +393,15 @@ export async function startNookdServer(
               response,
             }))
             .catch(() => ({ kind: "handler_failure" as const }));
+          // PR-65 P1-5 — runtime ownership.  When the transport wins
+          // (timeout / cancel), the underlying runtime promise keeps
+          // running.  Hand it to `inFlight` so the shutdown drain
+          // waits for the runtime to settle before closing the
+          // connection's lifecycle, and so the next connection cannot
+          // race against a still-running operation.  On natural
+          // completion the promise is already settled and the drain
+          // is a no-op.
+          void registerInFlight(state, responsePromise);
           const closed = state.closePromise.then(() => "cancelled" as const);
           const raced = await Promise.race([responsePromise, timeout, closed]);
           if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);

@@ -199,6 +199,7 @@ describe("Stage 4 SyncCoordinator — bounded retry policy", () => {
       executor,
       baseDelayMs: 100,
       maxAttempts: 3,
+      jitter: () => 0.5,
       sleep: async (delay) => {
         sleeps.push(delay);
       },
