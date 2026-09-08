@@ -1158,17 +1158,24 @@ describe("Stage 4 deterministic markdown codec", () => {
   });
 
   it("renders the tiny supported block grammar deterministically", () => {
-    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# Title").data).toBe("<h1>Title</h1>");
-    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("## Sub").data).toBe("<h2>Sub</h2>");
-    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("### Deep").data).toBe("<h3>Deep</h3>");
+    const wrap = (inner: string) => `<div data-type="document">${inner}</div>`;
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# Title").data).toBe(
+      wrap("<h1>Title</h1>"),
+    );
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("## Sub").data).toBe(wrap("<h2>Sub</h2>"));
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("### Deep").data).toBe(
+      wrap("<h3>Deep</h3>"),
+    );
     expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- a\n- b").data).toBe(
-      "<ul><li>a</li><li>b</li></ul>",
+      wrap("<ul><li>a</li><li>b</li></ul>"),
     );
     expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("one\ntwo").data).toBe(
-      "<p>one<br />two</p>",
+      wrap("<p>one<br />two</p>"),
     );
-    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a\n\nb").data).toBe("<p>a</p><p>b</p>");
-    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("").data).toBe("<p></p>");
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a\n\nb").data).toBe(
+      wrap("<p>a</p><p>b</p>"),
+    );
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("").data).toBe(wrap("<p></p>"));
     // Deterministic: identical input, identical output.
     expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# T").data).toBe(
       DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# T").data,
@@ -1183,6 +1190,28 @@ describe("Stage 4 deterministic markdown codec", () => {
     });
     expect(appended.type).toBe("html");
     expect(appended.data).toBe("<p>kept &amp; intact</p><p>added</p>");
+  });
+
+  it("emits fresh Tiptap content inside a self-contained document root", () => {
+    const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# Title\n\nbody");
+    expect(encoded.type).toBe("tiptap");
+    expect(encoded.data.startsWith('<div data-type="document">')).toBe(true);
+    expect(encoded.data.endsWith("</div>")).toBe(true);
+  });
+
+  it("appends into the existing Tiptap document root instead of emitting malformed markup", () => {
+    const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("# Title");
+    const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+      storedType: "tiptap",
+      storedData: encoded.data,
+      markdownFragment: "added body",
+    });
+    expect(appended.type).toBe("tiptap");
+    expect(appended.data).toBe('<div data-type="document"><h1>Title</h1><p>added body</p></div>');
+    const openCount = (appended.data.match(/<div data-type="document">/g) ?? []).length;
+    const closeCount = (appended.data.match(/<\/div>/g) ?? []).length;
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
   });
 
   it("refuses non-strings, control characters, and over-long input", () => {
