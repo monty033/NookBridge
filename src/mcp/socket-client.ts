@@ -351,7 +351,7 @@ function serializeRequest(
       typeof append.markdownFragment !== "string" ||
       append.markdownFragment.length === 0 ||
       Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(append.markdownFragment) ||
+      hasDisallowedControlCharacter(append.markdownFragment) ||
       typeof append.expectedRevision !== "string" ||
       !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision)
     ) {
@@ -1039,6 +1039,20 @@ function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;
     if ((code >= 0 && code <= 0x1f) || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Whitelist tabs, LF, and CR for inputs that the codec re-tokenises
+ * (Markdown fragments).  Reject every other ASCII control byte.
+ * Identifiers and titles keep the strict check above.
+ */
+function hasDisallowedControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || code === 0x7f) return true;
   }
   return false;
 }
