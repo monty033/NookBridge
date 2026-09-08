@@ -191,11 +191,19 @@ describe("nook-mcp server surface", () => {
       "notesnook_create_note",
       "notesnook_append_note",
       "notesnook_update_note",
+      "notesnook_delete_note",
       "notesnook_sync",
     ]);
     expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
-    expect(tools.every((tool) => tool.annotations?.destructiveHint === false)).toBe(true);
+    expect(
+      tools
+        .filter((tool) => tool.name !== "notesnook_delete_note")
+        .every((tool) => tool.annotations?.destructiveHint === false),
+    ).toBe(true);
+    expect(
+      tools.find((tool) => tool.name === "notesnook_delete_note")?.annotations?.destructiveHint,
+    ).toBe(true);
   });
 
   it("does not register prompts or resources", () => {
@@ -638,6 +646,7 @@ describe("end-to-end SDK smoke test", () => {
         "notesnook_create_note",
         "notesnook_append_note",
         "notesnook_update_note",
+        "notesnook_delete_note",
         "notesnook_sync",
       ]);
       expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
@@ -732,7 +741,7 @@ describe("forbidden module surface", () => {
     // server factory would reject it.  The intent is to fail the
     // build (via a test) rather than silently widen the surface.
     expect(NOOK_MCP_ALLOWED_TOOL_NAME).toBe("notesnook_search_notes");
-    expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_delete_note");
+    expect(FORBIDDEN_TOOL_NAMES).not.toContain("notesnook_delete_note");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_full_sync");
     expect(FORBIDDEN_TOOL_NAMES).toContain("notesnook_send_sync");
   });

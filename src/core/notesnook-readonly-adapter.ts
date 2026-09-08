@@ -67,6 +67,8 @@ import { createRevisionToken, type NotesnookRevisionToken } from "./notesnook-wr
 export interface NotesnookReadOnlyNotebookSummary {
   readonly id: string;
   readonly title: string;
+  /** Parent id proven by the pinned core's read-only breadcrumbs API. */
+  readonly parentId?: string;
   readonly dateCreated?: number;
   readonly dateModified?: number;
 }
@@ -176,6 +178,8 @@ export interface NotesnookReadOnlyDatabase {
     force?: boolean;
   }) => Promise<boolean>;
   readonly listNotebooks: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
+  /** Full, hierarchy-proven enumeration reserved for boot-time policy indexing. */
+  readonly listNotebooksWithParents?: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
   readonly listNotes: () => Promise<NotesnookReadOnlyNoteMetadata[]>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;

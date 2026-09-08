@@ -819,6 +819,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "hasUnsyncedChanges",
       "lastSynced",
       "listNotebooks",
+      "listNotebooksWithParents",
       "listNotes",
       "noteMetadata",
       "search",

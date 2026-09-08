@@ -53,12 +53,14 @@ import type { NotesnookRealCoreModule } from "../core/notesnook-core-adapter.js"
 import type {
   AppendNoteCommand,
   CreateNoteCommand,
+  DeleteNoteCommand,
   UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
 import {
   isNotesnookWriteAdapterError,
   type AppendNoteResult,
   type CreateNoteResult,
+  type DeleteNoteResult,
   type UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
 import {
@@ -106,6 +108,19 @@ export interface ServiceRuntime {
       Readonly<{
         id: string;
         title: string;
+        parentId?: string;
+        dateCreated?: number;
+        dateModified?: number;
+      }>
+    >
+  >;
+  /** Full hierarchy-proven notebook enumeration for boot-time settings. */
+  readonly listNotebooksForSettings?: () => Promise<
+    ReadonlyArray<
+      Readonly<{
+        id: string;
+        title: string;
+        parentId?: string;
         dateCreated?: number;
         dateModified?: number;
       }>
@@ -133,6 +148,8 @@ export interface ServiceRuntime {
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   /** Optional bounded local note update capability. */
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  /** Optional bounded local single-note delete capability. */
+  readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   /** Optional approval-gated outbound synchronization capability. */
   readonly requestSync?: () => Promise<
     Readonly<{ status: "idle" | "synced" | "failed"; pendingSync: boolean; attempts: number }>
@@ -276,6 +293,33 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
+  const listNotebooksForSettingsSource = readOnly.listNotebooksWithParents;
+  const listNotebooksForSettings =
+    listNotebooksForSettingsSource === undefined
+      ? undefined
+      : async (): Promise<
+          ReadonlyArray<
+            Readonly<{
+              id: string;
+              title: string;
+              parentId?: string;
+              dateCreated?: number;
+              dateModified?: number;
+            }>
+          >
+        > => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            return Object.freeze(
+              (await listNotebooksForSettingsSource()).map((notebook) =>
+                Object.freeze({ ...notebook }),
+              ),
+            );
+          } catch {
+            throw serviceRuntimeError("service runtime notebook hierarchy listing failed");
+          }
+        };
+
   const noteMetadata = async (
     id: string,
   ): Promise<
@@ -361,6 +405,25 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           }
         };
 
+  const deleteFn = localWrite?.deleteNote;
+  const deleteNote =
+    deleteFn === undefined
+      ? undefined
+      : async (command: DeleteNoteCommand): Promise<DeleteNoteResult> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            const result = await deleteFn(command);
+            if (result.operation !== "delete") {
+              throw serviceRuntimeError("service runtime note delete failed");
+            }
+            return result;
+          } catch (error) {
+            if (isServiceRuntimeError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error)) throw error;
+            throw serviceRuntimeError("service runtime write failed");
+          }
+        };
+
   const remoteSync = core.handle.remoteSync;
   const requestSync =
     remoteSync === undefined
@@ -385,10 +448,12 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     search,
     status,
     listNotebooks,
+    ...(listNotebooksForSettings === undefined ? {} : { listNotebooksForSettings }),
     noteMetadata,
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
+    ...(deleteNote === undefined ? {} : { deleteNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,
   });

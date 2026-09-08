@@ -359,7 +359,7 @@ describe("Stage 4 SyncCoordinator — hostile seam handling and closed surface",
     expect(codeOf(() => coordinator.recordLocalCommit(hostile as never))).toBe("invalid_input");
 
     const malformedStore = {
-      load: () => ({ pending: [{ operation: "delete", noteId: NOTE_ID, sequence: 1 }] }),
+      load: () => ({ pending: [{ operation: "create", noteId: "", sequence: 1 }] }),
       save: () => undefined,
     };
     expect(

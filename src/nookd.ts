@@ -7,6 +7,7 @@
  * runtime, and the Unix server.  No other startup form may select defaults.
  */
 
+import { readFileSync } from "node:fs";
 import process from "node:process";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,13 @@ import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "./service/service-abuse-bounds.js"
 import { createLogger } from "./logging/logger.js";
 import type { RpcMethod } from "./service/rpc-protocol.js";
 import { createServicePolicyFromMethods, type ServicePolicy } from "./service/service-policy.js";
+import {
+  buildNotebookIndex,
+  type NotebookIndex,
+  type NotebookRecord,
+} from "./settings/notebook-index.js";
+import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
+import { loadSettings } from "./settings/settings-loader.js";
 
 const freeze = Object.freeze;
 const defineProperty = Object.defineProperty;
@@ -95,6 +103,7 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "appendNote"
       | "updateNote"
       | "requestSync"
+      | "listNotebooksForSettings"
     >
   >;
 
@@ -103,6 +112,7 @@ export type NookdStartupFactories = Readonly<{
   loadConfig: (path: string, options?: LoadServiceConfigOptions) => LoadServiceConfigResult;
   createKeyStore: (options: CreateSystemdCredentialKeyStoreOptions) => SecureKeyStore;
   createRuntime: (options: CreateProductionServiceRuntimeOptions) => Promise<NookdStartupRuntime>;
+  readSettingsFile: (path: string) => string;
   startServer: (options: StartNookdServerOptions) => Promise<NookdServerHandle>;
 }>;
 
@@ -112,12 +122,15 @@ export type NookdStartupOptions = Readonly<{
   configOptions?: LoadServiceConfigOptions;
   /** Offline test seams; omitted by the real entry point. */
   factories?: NookdStartupFactories;
+  /** Explicit settings path is a test-only seam; production uses systemd credentials. */
+  settingsPath?: string;
 }>;
 
 export const NOOKD_STARTUP_ERROR_CATEGORIES = freeze([
   "invalid_arguments",
   "configuration",
   "credentials",
+  "settings_invalid",
   "runtime",
   "server",
 ] as const);
@@ -127,6 +140,7 @@ const NOOKD_STARTUP_ERROR_MESSAGES: Readonly<Record<NookdStartupErrorCategory, s
   invalid_arguments: "nookd startup arguments are invalid",
   configuration: "nookd configuration startup failed",
   credentials: "nookd credential directory or startup failed",
+  settings_invalid: "nookd settings startup failed",
   runtime: "nookd runtime startup failed",
   server: "nookd server startup failed",
 });
@@ -174,6 +188,7 @@ const PRODUCTION_STARTUP_FACTORIES: NookdStartupFactories = freeze({
   loadConfig: (path, options) => loadServiceConfig(path, options),
   createKeyStore: (options) => createSystemdCredentialKeyStore(options),
   createRuntime: (options) => createProductionServiceRuntime(options),
+  readSettingsFile: (path) => readFileSync(path, "utf8"),
   startServer: (options) => startNookdServer(options),
 });
 
@@ -199,6 +214,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let configPath: string;
   let configOptions: LoadServiceConfigOptions | undefined;
   let factories: NookdStartupFactories;
+  let settingsPath: string | undefined;
   try {
     if (typeof options !== "object" || options === null || isArray(options)) {
       throw startupError("invalid_arguments", "nookd startup arguments are invalid");
@@ -214,6 +230,16 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     }
     configOptions = options.configOptions;
     factories = options.factories ?? PRODUCTION_STARTUP_FACTORIES;
+    settingsPath = options.settingsPath;
+    if (
+      settingsPath !== undefined &&
+      (typeof settingsPath !== "string" ||
+        hasControlCharacter(settingsPath) ||
+        !isAbsolute(settingsPath) ||
+        resolve(settingsPath) !== settingsPath)
+    ) {
+      throw startupError("invalid_arguments", "nookd settings path is invalid");
+    }
   } catch (error) {
     const category = getSafeStartupCategory(error);
     throw startupError(category ?? "invalid_arguments");
@@ -233,7 +259,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     // config object (hostile getters, wrong backend/credential labels,
     // non-canonical paths, etc.) into createRuntime / startServer.
     config = narrowLoadedServiceConfig(loaded);
-    policy = createServicePolicyFromMethods(config.readPolicy);
+    // Policy construction is intentionally deferred until the settings evaluator
+    // and trusted notebook index have both been built below.
   } catch {
     throw startupError("configuration", "nookd configuration startup failed");
   }
@@ -246,6 +273,17 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   }
   if (!isSystemdCredentialsDirectory(credentialsDirectory)) {
     throw startupError("credentials", "nookd credential directory is unavailable");
+  }
+
+  const resolvedSettingsPath = settingsPath ?? `${credentialsDirectory}/nookbridge-settings`;
+  let settingsText: string;
+  let settings: ReturnType<typeof loadSettings>;
+  try {
+    settingsText = factories.readSettingsFile(resolvedSettingsPath);
+    if (typeof settingsText !== "string") throw new Error("invalid settings text");
+    settings = loadSettings(JSON.parse(settingsText) as unknown);
+  } catch {
+    throw startupError("settings_invalid", "nookd settings startup failed");
   }
 
   let keys: SecureKeyStore;
@@ -266,7 +304,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let appendNote: NookdStartupRuntime["appendNote"];
   let updateNote: NookdStartupRuntime["updateNote"];
   let requestSync: NookdStartupRuntime["requestSync"];
-  let runtimeCleanup: NookdStartupRuntime["cleanup"];
+  let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
+  let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
+  let notebookIndex: NotebookIndex;
+  let settingsPhase = false;
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
     if (typeof runtime !== "object" || runtime === null) {
@@ -280,6 +321,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedAppendNote = runtime.appendNote;
     const capturedUpdateNote = runtime.updateNote;
     const capturedRequestSync = runtime.requestSync;
+    const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
@@ -290,7 +332,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedCreateNote !== undefined && typeof capturedCreateNote !== "function") ||
       (capturedAppendNote !== undefined && typeof capturedAppendNote !== "function") ||
       (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function") ||
-      (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function")
+      (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function") ||
+      typeof capturedListNotebooksForSettings !== "function"
     ) {
       throw new Error("invalid service runtime");
     }
@@ -302,11 +345,34 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     appendNote = capturedAppendNote;
     updateNote = capturedUpdateNote;
     requestSync = capturedRequestSync;
+    listNotebooksForSettings = capturedListNotebooksForSettings;
     runtimeCleanup = capturedCleanup;
+
+    settingsPhase = true;
+    const notebookRecords = await listNotebooksForSettings();
+    if (!Array.isArray(notebookRecords)) throw new Error("invalid notebook hierarchy");
+    const notebookIds = new Set<string>();
+    for (const notebook of notebookRecords) {
+      if (typeof notebook.id !== "string") throw new Error("invalid notebook hierarchy");
+      notebookIds.add(notebook.id);
+    }
+    for (const notebook of notebookRecords) {
+      if (notebook.parentId !== undefined && !notebookIds.has(notebook.parentId)) {
+        throw new Error("incomplete notebook hierarchy");
+      }
+    }
+    notebookIndex = buildNotebookIndex(notebookRecords as readonly NotebookRecord[]);
+    const settingsEvaluator = createSettingsEvaluator(settings, notebookIndex);
+    policy = createServicePolicyFromMethods(config.readPolicy, settingsEvaluator);
   } catch {
-    throw startupError("runtime", "nookd runtime startup failed");
+    if (runtimeCleanup !== undefined) await swallowCleanup(onceAsync(runtimeCleanup));
+    throw startupError(
+      settingsPhase ? "settings_invalid" : "runtime",
+      settingsPhase ? "nookd settings startup failed" : "nookd runtime startup failed",
+    );
   }
 
+  if (runtimeCleanup === undefined) throw startupError("runtime", "nookd runtime startup failed");
   const cleanup = onceAsync(runtimeCleanup);
   const serverRuntime: NookdServerRuntime = freeze({
     search,
@@ -317,6 +383,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
+    notebookIndex,
     cleanup,
   });
 

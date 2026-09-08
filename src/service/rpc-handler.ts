@@ -38,6 +38,7 @@ import {
   type RpcNotesCreateRequest,
   type RpcNotesAppendRequest,
   type RpcNotesUpdateRequest,
+  type RpcNotesDeleteRequest,
   type RpcNotesSyncRequest,
   type RpcMethod,
   type RpcRequest,
@@ -50,22 +51,27 @@ import {
   type RpcCreatedNoteResult,
   type RpcAppendNoteResult,
   type RpcUpdateNoteResult,
+  type RpcDeleteNoteResult,
   type RpcSyncResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
 import type {
   CreateNoteCommand,
   AppendNoteCommand,
+  DeleteNoteCommand,
   UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
 import type {
   CreateNoteResult,
   AppendNoteResult,
+  DeleteNoteResult,
   UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
+import type { NotebookIndex } from "../settings/notebook-index.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
+  type ServicePolicySettingsContext,
   type ServicePolicy,
 } from "./service-policy.js";
 
@@ -133,9 +139,12 @@ export interface RpcHandlerRuntimeLike {
       }>
     | undefined
   >;
+  /** Optional trusted Stage 10 index for resolving notebook ids to titlePaths. */
+  readonly notebookIndex?: NotebookIndex;
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   readonly requestSync?: () => Promise<
     Readonly<{
       status: "idle" | "synced" | "failed";
@@ -206,68 +215,91 @@ export async function handleRpcRequest<T extends RpcRequest>(
   try {
     const structural = validateRequestStructurally(request);
     if (structural.kind === "ok") {
-      // Service-side authorization.  The parser has already
-      // narrowed `method` to the closed `RpcMethod` union, so the
-      // policy decision is exercised here as a belt-and-braces
-      // guard: a future write-capable profile (Slice 2+) will
-      // reuse the same seam to admit additional methods without
-      // changing the parser or the dispatcher.  Any policy
-      // denial is converted to a `permission_denied` envelope
-      // before the runtime is touched.
-      const authorization = authorizeServiceMethod(policy, structural.request.method);
+      // Global operations have no note-specific context.  They still
+      // consult an attached evaluator with the empty context, which lets
+      // settings defaults decide whether the request is admitted.
+      if (
+        structural.request.method === "notes.search" ||
+        structural.request.method === "notes.status" ||
+        structural.request.method === "notes.list_notebooks" ||
+        structural.request.method === "notes.sync" ||
+        policy.evaluator === undefined
+      ) {
+        const authorization = authorizeServiceMethod(policy, structural.request.method);
+        if (!authorization.allowed) {
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        }
+        return (await runAuthorizedRpcMethod(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+
+      if (structural.request.method === "notes.get") {
+        const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
+        if (!resolved.ok)
+          return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
+        const authorization = authorizeServiceMethod(policy, "notes.get", resolved.context);
+        if (!authorization.allowed) {
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        }
+        return (await runNotesGet(
+          structural.request,
+          runtime,
+          id,
+          resolved.note,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+
+      if (structural.request.method === "notes.create") {
+        const context = await resolveCreateSettingsContext(
+          structural.request.params.notebookId,
+          runtime,
+        );
+        if (!context.ok)
+          return buildErrorEnvelope(id, context.code) as unknown as RpcHandlerResponse<T>;
+        const authorization = authorizeServiceMethod(policy, "notes.create", context.context);
+        if (!authorization.allowed) {
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        }
+        return (await runNotesCreate(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+
+      const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
+      if (!resolved.ok)
+        return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
+      const authorization = authorizeServiceMethod(
+        policy,
+        structural.request.method,
+        resolved.context,
+      );
       if (!authorization.allowed) {
         return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
       }
-      switch (structural.request.method) {
-        case "notes.search":
-          return (await runNotesSearch(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.status":
-          return (await runNotesStatus(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.list_notebooks":
-          return (await runNotesListNotebooks(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.get":
-          return (await runNotesGet(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.create":
-          return (await runNotesCreate(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.append":
-          return (await runNotesAppend(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.update":
-          return (await runNotesUpdate(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
-        case "notes.sync":
-          return (await runNotesSync(
-            structural.request,
-            runtime,
-            id,
-          )) as unknown as RpcHandlerResponse<T>;
+      if (structural.request.method === "notes.append") {
+        return (await runNotesAppend(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
       }
+      if (structural.request.method === "notes.delete") {
+        return (await runNotesDelete(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+      return (await runNotesUpdate(
+        structural.request,
+        runtime,
+        id,
+      )) as unknown as RpcHandlerResponse<T>;
     }
     return buildErrorEnvelope(id, structural.code) as unknown as RpcHandlerResponse<T>;
   } catch {
@@ -319,6 +351,7 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod !== "notes.create" &&
     rawMethod !== "notes.append" &&
     rawMethod !== "notes.update" &&
+    rawMethod !== "notes.delete" &&
     rawMethod !== "notes.sync"
   ) {
     return { kind: "err", code: "invalid_request" };
@@ -466,6 +499,18 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params.id = rawNoteId;
     params.expectedRevision = rawRevision;
     params.patch = patch;
+  } else if (rawMethod === "notes.delete") {
+    if (!hasExactKeys(paramKeys, ["id", "expectedRevision"])) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    const rawNoteId = readOwnStringField(rawParams, "id");
+    const rawRevision = readOwnStringField(rawParams, "expectedRevision");
+    if (!isBoundedRpcIdentifier(rawNoteId) || !isRevisionToken(rawRevision)) {
+      return { kind: "err", code: "invalid_request" };
+    }
+    params = objectCreate(null) as Record<string, unknown>;
+    params.id = rawNoteId;
+    params.expectedRevision = rawRevision;
   } else if (rawMethod === "notes.sync") {
     if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
     params = objectCreate(null) as Record<string, unknown>;
@@ -592,6 +637,121 @@ function mapRuntimeError(error: unknown, id: string): RpcAnyResponseEnvelope | u
     return undefined;
   }
   return buildErrorEnvelope(id, code as AppendUpdateErrorCode);
+}
+
+async function runAuthorizedRpcMethod(
+  request: RpcRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  switch (request.method) {
+    case "notes.search":
+      return runNotesSearch(request, runtime, id);
+    case "notes.status":
+      return runNotesStatus(request, runtime, id);
+    case "notes.list_notebooks":
+      return runNotesListNotebooks(request, runtime, id);
+    case "notes.get":
+      return runNotesGet(request, runtime, id);
+    case "notes.create":
+      return runNotesCreate(request, runtime, id);
+    case "notes.append":
+      return runNotesAppend(request, runtime, id);
+    case "notes.update":
+      return runNotesUpdate(request, runtime, id);
+    case "notes.delete":
+      return runNotesDelete(request, runtime, id);
+    case "notes.sync":
+      return runNotesSync(request, runtime, id);
+  }
+}
+
+type SettingsContextResolution =
+  | {
+      readonly ok: true;
+      readonly context: ServicePolicySettingsContext;
+      readonly note: Record<string, unknown>;
+    }
+  | { readonly ok: false; readonly code: "not_found" | "service_unavailable" };
+
+async function resolveNoteSettingsContext(
+  noteId: string,
+  runtime: RpcHandlerRuntimeLike,
+): Promise<SettingsContextResolution> {
+  const fn = readRuntimeMethod(runtime, "noteMetadata");
+  if (fn === undefined) return { ok: false, code: "service_unavailable" };
+
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [noteId]);
+  } catch {
+    return { ok: false, code: "service_unavailable" };
+  }
+  if (raw === undefined) return { ok: false, code: "not_found" };
+  const note = normaliseNoteMetadata(raw);
+  if (note === undefined) return { ok: false, code: "service_unavailable" };
+
+  const notebookId = readOwnStringField(note, "notebookId");
+  const noteTitle = readOwnStringField(note, "title");
+  if (notebookId === undefined || noteTitle === undefined) {
+    return { ok: false, code: "not_found" };
+  }
+  const notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
+  if (notebookPath === undefined) return { ok: false, code: "not_found" };
+
+  return {
+    ok: true,
+    context: { notebookPath, noteTitle },
+    note,
+  };
+}
+
+type CreateSettingsContextResolution =
+  | { readonly ok: true; readonly context: ServicePolicySettingsContext }
+  | { readonly ok: false; readonly code: "not_found" };
+
+async function resolveCreateSettingsContext(
+  notebookId: string | undefined,
+  runtime: RpcHandlerRuntimeLike,
+): Promise<CreateSettingsContextResolution> {
+  // A notebook-less create has no note-specific context.  The evaluator
+  // receives its empty context so the configured default still applies.
+  if (notebookId === undefined) return { ok: true, context: {} };
+  const notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
+  if (notebookPath === undefined) return { ok: false, code: "not_found" };
+  return { ok: true, context: { notebookPath } };
+}
+
+function resolveTrustedNotebookPath(
+  runtime: RpcHandlerRuntimeLike,
+  notebookId: string,
+): string | undefined {
+  try {
+    const runtimeDescriptor = objectGetOwnPropertyDescriptor(runtime, "notebookIndex");
+    if (
+      runtimeDescriptor === undefined ||
+      !("value" in runtimeDescriptor) ||
+      runtimeDescriptor.value === null ||
+      typeof runtimeDescriptor.value !== "object"
+    ) {
+      return undefined;
+    }
+    const index = runtimeDescriptor.value as object;
+    const resolverDescriptor = objectGetOwnPropertyDescriptor(index, "resolvePath");
+    if (
+      resolverDescriptor === undefined ||
+      !("value" in resolverDescriptor) ||
+      typeof resolverDescriptor.value !== "function"
+    ) {
+      return undefined;
+    }
+    const path = reflectApply(resolverDescriptor.value, index, [notebookId]);
+    if (typeof path !== "string" || path.length === 0 || hasControlCharacter(path))
+      return undefined;
+    return path;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -746,6 +906,48 @@ async function runNotesUpdate(
   return buildResultSuccessEnvelope(id, result);
 }
 
+async function runNotesDelete(
+  request: RpcNotesDeleteRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "deleteNote");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  const commandRecord = objectCreate(null) as Record<string, unknown>;
+  commandRecord.id = request.params.id;
+  commandRecord.expectedRevision = request.params.expectedRevision;
+  const command = objectFreeze(commandRecord) as unknown as DeleteNoteCommand;
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [command]);
+  } catch (error) {
+    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (raw === null || typeof raw !== "object" || arrayIsArray(raw)) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const record = raw as Record<string, unknown>;
+  const operation = readOwnStringField(record, "operation");
+  const noteId = readOwnStringField(record, "id");
+  if (
+    operation !== "delete" ||
+    noteId === undefined ||
+    noteId.length === 0 ||
+    noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    bufferByteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    hasControlCharacter(noteId)
+  ) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const result = objectFreeze(
+    objectCreate(null, {
+      kind: { value: "delete", enumerable: true, configurable: false, writable: false },
+      id: { value: noteId, enumerable: true, configurable: false, writable: false },
+    }),
+  ) as RpcDeleteNoteResult;
+  return buildResultSuccessEnvelope(id, result);
+}
+
 async function runNotesSync(
   _request: RpcNotesSyncRequest,
   runtime: RpcHandlerRuntimeLike,
@@ -870,18 +1072,22 @@ async function runNotesGet(
   request: RpcNotesGetRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
+  resolvedNote?: Record<string, unknown>,
 ): Promise<RpcAnyResponseEnvelope> {
-  const fn = readRuntimeMethod(runtime, "noteMetadata");
-  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
-  let raw: unknown;
-  try {
-    raw = await reflectApply(fn, runtime, [request.params.id]);
-  } catch {
-    return buildErrorEnvelope(id, "service_unavailable");
+  let note = resolvedNote;
+  if (note === undefined) {
+    const fn = readRuntimeMethod(runtime, "noteMetadata");
+    if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+    let raw: unknown;
+    try {
+      raw = await reflectApply(fn, runtime, [request.params.id]);
+    } catch {
+      return buildErrorEnvelope(id, "service_unavailable");
+    }
+    if (raw === undefined) return buildErrorEnvelope(id, "not_found");
+    note = normaliseNoteMetadata(raw);
+    if (note === undefined) return buildErrorEnvelope(id, "service_unavailable");
   }
-  if (raw === undefined) return buildErrorEnvelope(id, "not_found");
-  const note = normaliseNoteMetadata(raw);
-  if (note === undefined) return buildErrorEnvelope(id, "service_unavailable");
   const result = objectFreeze(
     objectCreate(null, {
       kind: { value: "note", enumerable: true, configurable: false, writable: false },
@@ -900,6 +1106,7 @@ function readRuntimeMethod(
     | "createNote"
     | "appendNote"
     | "updateNote"
+    | "deleteNote"
     | "requestSync",
 ): ((...args: unknown[]) => unknown) | undefined {
   try {
@@ -1132,6 +1339,7 @@ function buildResultSuccessEnvelope(
     | RpcCreatedNoteResult
     | RpcAppendNoteResult
     | RpcUpdateNoteResult
+    | RpcDeleteNoteResult
     | RpcSyncResult,
 ): RpcAnyResponseEnvelope {
   return objectFreeze(

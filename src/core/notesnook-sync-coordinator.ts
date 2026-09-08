@@ -28,7 +28,7 @@ const DEFAULT_BASE_DELAY_MS = 100;
 const DEFAULT_RETRY_AFTER_CAP_MS = 30_000;
 
 /** The only local mutation categories the coordinator can queue. */
-export type SyncOperation = "create" | "append" | "update";
+export type SyncOperation = "create" | "append" | "update" | "delete";
 
 /**
  * The small result shared by the local mutation adapter and this coordinator.
@@ -436,7 +436,7 @@ function requireFunction<T>(value: unknown): T {
 }
 
 function isOperation(value: unknown): value is SyncOperation {
-  return value === "create" || value === "append" || value === "update";
+  return value === "create" || value === "append" || value === "update" || value === "delete";
 }
 
 function validNoteId(value: string): boolean {

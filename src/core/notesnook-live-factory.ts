@@ -702,6 +702,7 @@ function guardReadOnlyProjection(
   readOnly: NotesnookReadOnlyDatabase,
   ensureOpen: () => void,
 ): NotesnookReadOnlyDatabase {
+  const listNotebooksWithParents = readOnly.listNotebooksWithParents;
   return Object.freeze({
     lastSynced: async () => {
       ensureOpen();
@@ -719,6 +720,14 @@ function guardReadOnlyProjection(
       ensureOpen();
       return readOnly.listNotebooks();
     },
+    ...(listNotebooksWithParents === undefined
+      ? {}
+      : {
+          listNotebooksWithParents: async () => {
+            ensureOpen();
+            return listNotebooksWithParents();
+          },
+        }),
     listNotes: async () => {
       ensureOpen();
       return readOnly.listNotes();

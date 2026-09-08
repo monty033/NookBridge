@@ -474,6 +474,12 @@ export interface UpdateNoteCommand {
   readonly expectedRevision: NotesnookRevisionToken;
 }
 
+/** `deleteNote(id, expectedRevision)` input. */
+export interface DeleteNoteCommand {
+  readonly id: string;
+  readonly expectedRevision: NotesnookRevisionToken;
+}
+
 // ---------------------------------------------------------------------------
 // Stable result shapes.
 //
@@ -511,6 +517,13 @@ export interface UpdateNotePlan extends WriteOutcomeFlags {
   readonly operation: "update";
   readonly id: string;
   readonly patchFields: readonly NotesnookUpdatePatchField[];
+  readonly expectedRevision: NotesnookRevisionToken;
+}
+
+/** Bounded description of an authorised single-note delete. */
+export interface DeleteNotePlan extends WriteOutcomeFlags {
+  readonly operation: "delete";
+  readonly id: string;
   readonly expectedRevision: NotesnookRevisionToken;
 }
 
@@ -878,6 +891,27 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
     operation: "update" as const,
     id,
     patchFields: Object.freeze([...fields].sort()),
+    expectedRevision,
+    ...PENDING,
+  });
+}
+
+/**
+ * Validate a revision-guarded single-note delete.  The command is
+ * intentionally closed to exactly `{ id, expectedRevision }`; force,
+ * bulk identifiers, and every other upstream option are rejected.
+ */
+export function planDeleteNote(command: DeleteNoteCommand): DeleteNotePlan {
+  const record = requireRecord(command, "delete command");
+  const keys = readOwnKeys(record);
+  if (keys.length !== 2 || !keys.includes("id") || !keys.includes("expectedRevision")) {
+    fail("invalid_input", "delete command contains unsupported fields");
+  }
+  const id = requireId(readProperty(record, "id"));
+  const expectedRevision = requireRevisionToken(readProperty(record, "expectedRevision"));
+  return Object.freeze({
+    operation: "delete" as const,
+    id,
     expectedRevision,
     ...PENDING,
   });

@@ -62,6 +62,7 @@ export const NOOK_MCP_GET_NOTE_TOOL_NAME = "notesnook_get_note" as const;
 export const NOOK_MCP_CREATE_NOTE_TOOL_NAME = "notesnook_create_note" as const;
 export const NOOK_MCP_APPEND_NOTE_TOOL_NAME = "notesnook_append_note" as const;
 export const NOOK_MCP_UPDATE_NOTE_TOOL_NAME = "notesnook_update_note" as const;
+export const NOOK_MCP_DELETE_NOTE_TOOL_NAME = "notesnook_delete_note" as const;
 export const NOOK_MCP_SYNC_TOOL_NAME = "notesnook_sync" as const;
 
 /** The exhaustive allowlist of valid tool names. The factory
@@ -75,6 +76,7 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
   NOOK_MCP_CREATE_NOTE_TOOL_NAME,
   NOOK_MCP_APPEND_NOTE_TOOL_NAME,
   NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+  NOOK_MCP_DELETE_NOTE_TOOL_NAME,
   NOOK_MCP_SYNC_TOOL_NAME,
 ]);
 
@@ -84,8 +86,6 @@ export const NOOK_MCP_ALLOWED_TOOL_NAMES: ReadonlyArray<string> = Object.freeze(
  * single source of truth rather than a hand-edited list.
  */
 export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
-  "notesnook_delete_note",
-
   "notesnook_list_notes",
   "notesnook_full_sync",
   "notesnook_send_sync",
@@ -360,6 +360,31 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
   }),
 }) as unknown as Tool;
 
+const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
+  name: NOOK_MCP_DELETE_NOTE_TOOL_NAME,
+  description: "Move one note to trash using an expected note revision.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
+      expectedRevision: Object.freeze({
+        type: "string",
+        minLength: NOOK_MCP_MAX_REVISION_BYTES,
+        maxLength: NOOK_MCP_MAX_REVISION_BYTES,
+      }),
+    }),
+    required: Object.freeze(["id", "expectedRevision"]),
+    additionalProperties: false,
+  }),
+  annotations: Object.freeze({
+    title: "Delete note",
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
+  }),
+}) as unknown as Tool;
+
 const SYNC_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_SYNC_TOOL_NAME,
   description: "Explicitly request the approval-gated outbound sync coordinator.",
@@ -382,6 +407,7 @@ export const NOOK_MCP_TOOL_DEFINITIONS: ReadonlyArray<Tool> = Object.freeze([
   CREATE_NOTE_TOOL_DEFINITION,
   APPEND_NOTE_TOOL_DEFINITION,
   UPDATE_NOTE_TOOL_DEFINITION,
+  DELETE_NOTE_TOOL_DEFINITION,
   SYNC_TOOL_DEFINITION,
 ]);
 
@@ -442,6 +468,14 @@ const updateNoteInputSchema = {
     })
     .strict()
     .refine((patch) => Object.keys(patch).length > 0),
+};
+
+const deleteNoteInputSchema = {
+  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
+  expectedRevision: z
+    .string()
+    .length(NOOK_MCP_MAX_REVISION_BYTES)
+    .regex(/^rev_[0-9a-f]{32}$/),
 };
 
 const permissiveCallRequestSchema = z
@@ -609,6 +643,19 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
     ),
   });
   registered.push({
+    name: NOOK_MCP_DELETE_NOTE_TOOL_NAME,
+    handle: server.registerTool(
+      NOOK_MCP_DELETE_NOTE_TOOL_NAME,
+      {
+        title: "Delete note",
+        description: "Move one note to trash using an expected note revision.",
+        inputSchema: deleteNoteInputSchema,
+        annotations: DELETE_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
+      },
+      async (input) => invokeDeleteNote(options.client, input as DeleteNoteInput),
+    ),
+  });
+  registered.push({
     name: NOOK_MCP_SYNC_TOOL_NAME,
     handle: server.registerTool(
       NOOK_MCP_SYNC_TOOL_NAME,
@@ -646,6 +693,7 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         name !== NOOK_MCP_CREATE_NOTE_TOOL_NAME &&
         name !== NOOK_MCP_APPEND_NOTE_TOOL_NAME &&
         name !== NOOK_MCP_UPDATE_NOTE_TOOL_NAME &&
+        name !== NOOK_MCP_DELETE_NOTE_TOOL_NAME &&
         name !== NOOK_MCP_SYNC_TOOL_NAME
       ) {
         return toMcpErrorResult("unknown_tool");
@@ -665,6 +713,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
         return invokeAppendNote(options.client, args as AppendNoteInput);
       if (name === NOOK_MCP_UPDATE_NOTE_TOOL_NAME)
         return invokeUpdateNote(options.client, args as UpdateNoteInput);
+      if (name === NOOK_MCP_DELETE_NOTE_TOOL_NAME)
+        return invokeDeleteNote(options.client, args as DeleteNoteInput);
       return invokeRequestSync(options.client, args as Record<string, unknown>);
     } catch {
       return toMcpErrorResult("invalid_request");
@@ -718,6 +768,10 @@ interface CreateNoteInput {
 interface AppendNoteInput {
   id?: unknown;
   markdownFragment?: unknown;
+  expectedRevision?: unknown;
+}
+interface DeleteNoteInput {
+  id?: unknown;
   expectedRevision?: unknown;
 }
 interface UpdateNoteInput {
@@ -788,6 +842,29 @@ async function invokeAppendNote(
     return toMcpErrorResult("service_unavailable");
   }
   return projectAppendResult(result);
+}
+
+async function invokeDeleteNote(
+  client: NookdSocketClient,
+  input: DeleteNoteInput,
+): Promise<CallToolResult> {
+  try {
+    if (!hasExactKeys(input, ["id", "expectedRevision"]))
+      return toMcpErrorResult("invalid_request");
+    if (!isBoundedIdentifier(input.id) || !isRevision(input.expectedRevision))
+      return toMcpErrorResult("invalid_request");
+    const result = await client.deleteNote({
+      id: input.id,
+      expectedRevision: input.expectedRevision,
+    });
+    if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+    const value = result.envelope.result as unknown as Record<string, unknown>;
+    if (value.kind !== "delete" || value.id !== input.id)
+      return toMcpErrorResult("service_unavailable");
+    return { content: [{ type: "text", text: JSON.stringify({ id: value.id, deleted: true }) }] };
+  } catch {
+    return toMcpErrorResult("service_unavailable");
+  }
 }
 
 async function invokeUpdateNote(
@@ -1148,6 +1225,8 @@ async function callToolDirectly(
     return invokeAppendNote(client, args as AppendNoteInput);
   if (name === NOOK_MCP_UPDATE_NOTE_TOOL_NAME)
     return invokeUpdateNote(client, args as UpdateNoteInput);
+  if (name === NOOK_MCP_DELETE_NOTE_TOOL_NAME)
+    return invokeDeleteNote(client, args as DeleteNoteInput);
   if (name === NOOK_MCP_SYNC_TOOL_NAME) return invokeRequestSync(client, args);
   return toMcpErrorResult("unknown_tool");
 }

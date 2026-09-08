@@ -182,6 +182,12 @@ export function projectLiveDatabaseToWriteCapability(
       ensureOpen();
       return composition.updateNote(command as Parameters<typeof composition.updateNote>[0]);
     },
+    deleteNote: async (
+      command: Parameters<NonNullable<NotesnookLiveWriteCapability["deleteNote"]>>[0],
+    ) => {
+      ensureOpen();
+      return composition.deleteNote(command as Parameters<typeof composition.deleteNote>[0]);
+    },
     pendingSnapshot: () => {
       ensureOpen();
       return composition.pendingSnapshot();

@@ -15,6 +15,20 @@
  * and the factory drops any caller-supplied instance before
  * constructing the policy.
  *
+ * Stage 10 Task 6 — routes every `authorizeServiceMethod` call
+ * through an OPTIONAL settings evaluator when the policy was
+ * constructed with one.  The evaluator is added ON TOP of the
+ * existing allowlist gate, never in place of it: the allowlist
+ * still admits or denies the candidate method first, and the
+ * evaluator's `allowed: false` decision short-circuits the
+ * allowlist admit into a categorical `permission_denied` denial.
+ * The denial reason never echoes `matchedBy.pattern`,
+ * `overrideIndex`, the offending method name, or any other
+ * attacker-controlled byte — the reason is the closed
+ * categorical token and nothing else.  A method that maps to no
+ * `SettingsOperation` is allowed by the allowlist alone; the
+ * evaluator is not consulted for such methods.
+ *
  * This module is the small closed policy seam the Stage 7 Slice 1
  * service-side authorization work introduces.  It is intentionally
  * tiny:
@@ -59,12 +73,15 @@
  */
 
 import type { RpcMethod } from "./rpc-protocol.js";
+import type { SettingsDecision } from "../settings/settings-evaluator.js";
+import type { SettingsOperation } from "../settings/settings-types.js";
 
 // Capture every mutable intrinsic used by this closed boundary before any
 // caller can pollute a shared prototype.
 const objectCreate = Object.create;
 const objectFreeze = Object.freeze;
 const objectGetPrototypeOf = Object.getPrototypeOf;
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const objectIsFrozen = Object.isFrozen;
 const objectSetPrototypeOf = Object.setPrototypeOf;
 const arrayIsArray = Array.isArray;
@@ -207,6 +224,52 @@ function isAllowableCustomMethod(value: string): value is RpcMethod {
 export interface ServicePolicy {
   readonly profile: ServicePolicyProfile;
   readonly allowedMethods: ReadonlyArray<RpcMethod>;
+  readonly evaluator?: ServicePolicyEvaluator;
+}
+
+/**
+ * The settings context forwarded by the RPC caller.  The fields are
+ * optional because status / notebook-list requests may not have a
+ * resolved notebook or note yet.
+ */
+export type ServicePolicySettingsContext = Readonly<{
+  readonly notebookPath?: string;
+  readonly noteTitle?: string;
+}>;
+
+/**
+ * The optional Stage 10 settings evaluator attached to a service
+ * policy.  Its decision metadata is intentionally an implementation
+ * detail of the evaluator and never crosses the service-policy
+ * denial boundary.
+ */
+export type ServicePolicyEvaluator = (
+  op: SettingsOperation,
+  ctx: ServicePolicySettingsContext,
+) => SettingsDecision;
+
+/**
+ * Map the closed RPC method vocabulary to the settings operation
+ * consulted by the policy evaluator.  Methods outside the published
+ * map return `undefined`; in particular, `notes.delete` is not a
+ * policy method and never reaches the evaluator.
+ */
+export function methodToSettingsOperation(methodName: string): SettingsOperation | undefined {
+  switch (methodName) {
+    case "notes.search":
+    case "notes.status":
+    case "notes.list_notebooks":
+    case "notes.get":
+    case "notes.sync":
+      return "read";
+    case "notes.create":
+      return "create";
+    case "notes.append":
+    case "notes.update":
+      return "edit";
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -215,14 +278,8 @@ export interface ServicePolicy {
  * frozen too, so a hostile caller cannot widen the surface after
  * construction.
  */
-export function createReadOnlyServicePolicy(): ServicePolicy {
-  const policy = objectCreate(null) as {
-    profile: ServicePolicyProfile;
-    allowedMethods: ReadonlyArray<RpcMethod>;
-  };
-  policy.profile = "readOnly";
-  policy.allowedMethods = READ_ONLY_ALLOWED_METHODS;
-  return objectFreeze(policy) as ServicePolicy;
+export function createReadOnlyServicePolicy(evaluator?: ServicePolicyEvaluator): ServicePolicy {
+  return finishServicePolicy("readOnly", READ_ONLY_ALLOWED_METHODS, evaluator);
 }
 
 /**
@@ -234,14 +291,10 @@ export function createReadOnlyServicePolicy(): ServicePolicy {
  * allowlist tuple frozen too, so a hostile caller cannot widen the
  * surface after construction.
  */
-export function createReadWriteNoDeleteServicePolicy(): ServicePolicy {
-  const policy = objectCreate(null) as {
-    profile: ServicePolicyProfile;
-    allowedMethods: ReadonlyArray<RpcMethod>;
-  };
-  policy.profile = "readWriteNoDelete";
-  policy.allowedMethods = READ_WRITE_NO_DELETE_ALLOWED_METHODS;
-  return objectFreeze(policy) as ServicePolicy;
+export function createReadWriteNoDeleteServicePolicy(
+  evaluator?: ServicePolicyEvaluator,
+): ServicePolicy {
+  return finishServicePolicy("readWriteNoDelete", READ_WRITE_NO_DELETE_ALLOWED_METHODS, evaluator);
 }
 
 /**
@@ -263,13 +316,35 @@ export function createReadWriteNoDeleteServicePolicy(): ServicePolicy {
  * if a caller passes `["notes.delete"]`, the factory drops it and
  * the resulting policy allows nothing.
  */
-export function createCustomServicePolicy(allowedMethods: ReadonlyArray<string>): ServicePolicy {
+export function createCustomServicePolicy(
+  allowedMethods: ReadonlyArray<string>,
+  evaluator?: ServicePolicyEvaluator,
+): ServicePolicy {
   const clean = readCustomAllowlist(allowedMethods);
-  if (clean === undefined) return finishCustomServicePolicy([]);
-  return finishCustomServicePolicy(clean);
+  if (clean === undefined) return finishCustomServicePolicy([], evaluator);
+  return finishCustomServicePolicy(clean, evaluator);
 }
 
-function finishCustomServicePolicy(clean: readonly RpcMethod[]): ServicePolicy {
+function finishServicePolicy(
+  profile: ServicePolicyProfile,
+  allowedMethods: ReadonlyArray<RpcMethod>,
+  evaluator?: ServicePolicyEvaluator,
+): ServicePolicy {
+  const policy = objectCreate(null) as {
+    profile: ServicePolicyProfile;
+    allowedMethods: ReadonlyArray<RpcMethod>;
+    evaluator?: ServicePolicyEvaluator;
+  };
+  policy.profile = profile;
+  policy.allowedMethods = allowedMethods;
+  if (evaluator !== undefined) policy.evaluator = evaluator;
+  return objectFreeze(policy) as ServicePolicy;
+}
+
+function finishCustomServicePolicy(
+  clean: readonly RpcMethod[],
+  evaluator?: ServicePolicyEvaluator,
+): ServicePolicy {
   // Hand-rolled null-prototype frozen array: a pure `Object.create(null)`
   // does not pass `Array.isArray`, so we build a real array and then
   // null the prototype before freezing.
@@ -279,9 +354,11 @@ function finishCustomServicePolicy(clean: readonly RpcMethod[]): ServicePolicy {
   const policy = objectCreate(null) as {
     profile: ServicePolicyProfile;
     allowedMethods: ReadonlyArray<RpcMethod>;
+    evaluator?: ServicePolicyEvaluator;
   };
   policy.profile = "custom";
   policy.allowedMethods = cleanArr as ReadonlyArray<RpcMethod>;
+  if (evaluator !== undefined) policy.evaluator = evaluator;
   return objectFreeze(policy) as ServicePolicy;
 }
 
@@ -352,14 +429,17 @@ function readCustomAllowlist(value: unknown): RpcMethod[] | undefined {
  * bounded lists become a custom policy.  The returned value is always a
  * module-owned frozen policy, never the caller's array.
  */
-export function createServicePolicyFromMethods(methods: ReadonlyArray<RpcMethod>): ServicePolicy {
+export function createServicePolicyFromMethods(
+  methods: ReadonlyArray<RpcMethod>,
+  evaluator?: ServicePolicyEvaluator,
+): ServicePolicy {
   if (sameMethods(methods, READ_ONLY_ALLOWED_METHODS)) {
-    return createReadOnlyServicePolicy();
+    return createReadOnlyServicePolicy(evaluator);
   }
   if (sameMethods(methods, READ_WRITE_NO_DELETE_ALLOWED_METHODS)) {
-    return createReadWriteNoDeleteServicePolicy();
+    return createReadWriteNoDeleteServicePolicy(evaluator);
   }
-  return createCustomServicePolicy(methods);
+  return createCustomServicePolicy(methods, evaluator);
 }
 
 function sameMethods(left: ReadonlyArray<RpcMethod>, right: ReadonlyArray<RpcMethod>): boolean {
@@ -448,6 +528,7 @@ export type ServicePolicyDecision =
 export function authorizeServiceMethod(
   policy: ServicePolicy,
   method: string,
+  settingsContext?: ServicePolicySettingsContext,
 ): ServicePolicyDecision {
   // Defensive: a hostile caller could in principle pass a
   // non-policy object.  We re-validate the policy's closed shape
@@ -455,19 +536,9 @@ export function authorizeServiceMethod(
   // protocol uses, so a Proxy / inherited-getter trap cannot
   // smuggle a widened policy past the boundary.
   const allowlist = inspectPolicyAllowlist(policy);
-  if (allowlist === undefined) {
-    const deny = objectCreate(null) as { allowed: false; reason: ServicePolicyDenialReason };
-    deny.allowed = false;
-    deny.reason = "permission_denied";
-    return objectFreeze(deny) as ServicePolicyDecision;
-  }
+  if (allowlist === undefined) return denyServicePolicyDecision();
 
-  if (typeof method !== "string") {
-    const deny = objectCreate(null) as { allowed: false; reason: ServicePolicyDenialReason };
-    deny.allowed = false;
-    deny.reason = "permission_denied";
-    return objectFreeze(deny) as ServicePolicyDecision;
-  }
+  if (typeof method !== "string") return denyServicePolicyDecision();
 
   // O(n) walk over the active allowlist.  The allowlist is too
   // small to justify a Set, and a Set would leak the method names
@@ -485,6 +556,18 @@ export function authorizeServiceMethod(
     // past the boundary.
     for (let index = 0; index < allowlist.length; index += 1) {
       if (allowlist[index] === method) {
+        const operation = methodToSettingsOperation(method);
+        if (operation !== undefined && policy.evaluator !== undefined) {
+          const context = freezeSettingsContext(settingsContext);
+          let settingsDecision: SettingsDecision;
+          try {
+            settingsDecision = policy.evaluator(operation, context);
+          } catch {
+            return denyServicePolicyDecision();
+          }
+          if (settingsDecision.allowed !== true) return denyServicePolicyDecision();
+        }
+
         const allow = objectCreate(null) as { allowed: true; method: RpcMethod };
         allow.allowed = true;
         allow.method = method;
@@ -493,10 +576,30 @@ export function authorizeServiceMethod(
     }
   }
 
+  return denyServicePolicyDecision();
+}
+
+function denyServicePolicyDecision(): ServicePolicyDecision {
   const deny = objectCreate(null) as { allowed: false; reason: ServicePolicyDenialReason };
   deny.allowed = false;
   deny.reason = "permission_denied";
   return objectFreeze(deny) as ServicePolicyDecision;
+}
+
+function freezeSettingsContext(
+  settingsContext: ServicePolicySettingsContext | undefined,
+): ServicePolicySettingsContext {
+  const context = objectCreate(null) as {
+    notebookPath?: string;
+    noteTitle?: string;
+  };
+  if (settingsContext?.notebookPath !== undefined) {
+    context.notebookPath = settingsContext.notebookPath;
+  }
+  if (settingsContext?.noteTitle !== undefined) {
+    context.noteTitle = settingsContext.noteTitle;
+  }
+  return objectFreeze(context) as ServicePolicySettingsContext;
 }
 
 /**
@@ -522,7 +625,22 @@ function inspectPolicyAllowlist(value: unknown): ReadonlyArray<RpcMethod> | unde
     if (value === null || typeof value !== "object") return undefined;
     const record = value as Record<string, unknown>;
     if (!objectIsFrozen(record) || objectGetPrototypeOf(record) !== null) return undefined;
-    if (reflectOwnKeys(record).length !== 2) return undefined;
+    const keys = reflectOwnKeys(record);
+    if (keys.length !== 2 && keys.length !== 3) return undefined;
+    if (keys.length === 3 && (typeof keys[2] !== "string" || keys[2] !== "evaluator")) {
+      return undefined;
+    }
+    if (keys.length === 3) {
+      const evaluatorDescriptor = objectGetOwnPropertyDescriptor(record, "evaluator");
+      if (
+        evaluatorDescriptor === undefined ||
+        evaluatorDescriptor.enumerable !== true ||
+        !("value" in evaluatorDescriptor) ||
+        typeof evaluatorDescriptor.value !== "function"
+      ) {
+        return undefined;
+      }
+    }
     const profile = record.profile;
     if (profile === "readOnly") return READ_ONLY_ALLOWED_METHODS;
     if (profile === "readWriteNoDelete") return READ_WRITE_NO_DELETE_ALLOWED_METHODS;

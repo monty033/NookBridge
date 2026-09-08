@@ -1459,7 +1459,6 @@ describe("Stage 4 write composition — hostile input normalisation", () => {
       { pending: "none" },
       { pending: {} },
       { pending: [null] },
-      { pending: [{ operation: "delete", noteId: NOTE_ID, sequence: 1 }] },
       { pending: [{ operation: "create", noteId: "", sequence: 1 }] },
       { pending: [{ operation: "create", noteId: NOTE_ID, sequence: 0 }] },
       { pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1.5 }] },
@@ -1936,6 +1935,7 @@ describe("Stage 4 write composition — exact closed surface", () => {
   const EXPECTED_METHODS = [
     "appendNote",
     "createNote",
+    "deleteNote",
     "pendingSnapshot",
     "requestSync",
     "updateNote",
