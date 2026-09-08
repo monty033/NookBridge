@@ -834,7 +834,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       markdownFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
       utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxQueryBytes) >
         STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(markdownFragment)
+      hasDisallowedControlCharacter(markdownFragment)
     ) {
       throw rpcProtocolError("rpc protocol: request append markdown fragment is invalid");
     }
@@ -2035,6 +2035,23 @@ function isRpcErrorCode(value: string): value is RpcErrorCode {
 function hasControlCharacter(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = reflectApply(stringCharCodeAt, value, [index]);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Markdown whitespace is structurally significant: line breaks separate
+ * blocks and tabs indent code.  Allow these in any input where the codec
+ * itself will re-tokenise the value, and reject every other ASCII control
+ * byte that has no place in a well-formed document.  The fragment passes
+ * through the markdown codec which strips and re-encodes whitespace, so a
+ * permissive boundary here does not weaken the on-disk validator.
+ */
+function hasDisallowedControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = reflectApply(stringCharCodeAt, value, [index]);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;

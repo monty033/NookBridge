@@ -252,6 +252,11 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
         { id: "note-1", expectedRevision: REVISION, patch: { deleted: true } },
       ],
       ["notesnook_update_note", { id: "note-1", expectedRevision: REVISION, patch: { title: "" } }],
+      // Disallowed control character inside an append fragment must still fail closed.
+      [
+        "notesnook_append_note",
+        { id: "note-1", markdownFragment: "frag\u0000bad", expectedRevision: REVISION },
+      ],
     ];
     for (const [name, args] of cases) {
       const result = await server.callTool(name, args);
@@ -261,6 +266,46 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     expect(createNote).not.toHaveBeenCalled();
     expect(appendNote).not.toHaveBeenCalled();
     expect(updateNote).not.toHaveBeenCalled();
+  });
+
+  it("permits structural whitespace in append fragments while still rejecting other control bytes", async () => {
+    const client = makeClient();
+    const appendNote = vi.spyOn(client, "appendNote");
+    appendNote.mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-1",
+        ok: true,
+        result: { kind: "append", id: "note-1", fragmentBytes: 11 },
+      },
+    });
+    const server = buildNookMcpServer({ client });
+
+    const allowed: string[] = ["\nBounded append.", "line1\r\nline2", "col1\tcol2"];
+    for (const markdownFragment of allowed) {
+      const result = await server.callTool("notesnook_append_note", {
+        id: "note-1",
+        markdownFragment,
+        expectedRevision: REVISION,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(appendNote).toHaveBeenLastCalledWith({
+        id: "note-1",
+        markdownFragment,
+        expectedRevision: REVISION,
+      });
+    }
+
+    const blocked: string[] = ["frag\u0000null", "frag\u0007bell", "frag\u001bescape"];
+    for (const markdownFragment of blocked) {
+      const result = await server.callTool("notesnook_append_note", {
+        id: "note-1",
+        markdownFragment,
+        expectedRevision: REVISION,
+      });
+      expect(result.isError).toBe(true);
+      expect(payload(result)).toEqual({ code: "invalid_request", message: "Invalid request" });
+    }
   });
 
   it("maps socket failures safely and fails closed on malformed envelopes", async () => {

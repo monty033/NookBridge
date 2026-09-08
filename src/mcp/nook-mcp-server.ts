@@ -136,6 +136,27 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+/**
+ * Markdown fragments must permit structural whitespace — line breaks
+ * separate blocks and tabs indent code — while still rejecting every
+ * other ASCII control byte.  The pinned codec re-tokenises the
+ * fragment, so a permissive boundary here does not weaken the
+ * stored-content validator.  Used only by the append tool input
+ * gate; titles, queries, and identifiers keep the strict check.
+ */
+function isAppendableMarkdown(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0) return false;
+  if (value.length > NOOK_MCP_MAX_CONTENT_BYTES) return false;
+  if (Buffer.byteLength(value, "utf8") > NOOK_MCP_MAX_CONTENT_BYTES) return false;
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
 // -----------------------------------------------------------------------
 // Tool definitions.
 // -----------------------------------------------------------------------
@@ -748,7 +769,7 @@ async function invokeAppendNote(
       return toMcpErrorResult("invalid_request");
     if (
       !isBoundedIdentifier(input.id) ||
-      !isBoundedText(input.markdownFragment, NOOK_MCP_MAX_CONTENT_BYTES) ||
+      !isAppendableMarkdown(input.markdownFragment) ||
       !isRevision(input.expectedRevision)
     )
       return toMcpErrorResult("invalid_request");
