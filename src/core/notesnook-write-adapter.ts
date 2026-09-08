@@ -161,6 +161,7 @@ export interface NotesnookWriteDatabase {
     readonly content: NotesnookStoredContent;
   }) => Promise<string>;
   readonly notesUpdate: (ids: readonly string[], partial: Record<string, unknown>) => Promise<void>;
+  readonly notesTouch: (ids: readonly string[], dateEdited: number) => Promise<void>;
   readonly contentAdd: (partial: Record<string, unknown>) => Promise<string>;
   readonly contentUpdateByNoteId: (
     partial: Record<string, unknown>,
@@ -418,6 +419,22 @@ export class NotesnookWriteAdapter {
       );
     } catch {
       throw adapterError("sync_failed", "Notesnook write adapter: append failed");
+    }
+
+    // The pinned `@notesnook/core@8.1.3` Content collection does not
+    // bump the parent note's `dateEdited` when a content row is replaced
+    // through `Content.updateByNoteId`.  Without this explicit touch,
+    // a follow-up `notesnook_get_note` reads the same `dateEdited` and
+    // returns the pre-append revision token, so the concurrency gate
+    // cannot fire on a follow-up append.  The touch is a narrow write
+    // (one field, one id) so it does not widen the patch surface.
+    try {
+      await this.#safe("notesTouch", () => this.#database.notesTouch([plan.id], Date.now()));
+    } catch {
+      throw adapterError(
+        "sync_failed",
+        "Notesnook write adapter: append failed to bump note dateEdited",
+      );
     }
 
     return Object.freeze({
@@ -910,6 +927,7 @@ const REQUIRED_WRITE_SLOTS: ReadonlyArray<keyof NotesnookWriteDatabase> = [
   "contentFindByNoteId",
   "notesAdd",
   "notesUpdate",
+  "notesTouch",
   "contentAdd",
   "contentUpdateByNoteId",
   "notebookExists",

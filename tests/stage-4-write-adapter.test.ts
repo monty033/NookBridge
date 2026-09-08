@@ -114,6 +114,7 @@ interface FakeContent {
 interface FakeDatabaseCalls {
   add: Array<{ title: string; contentType: "tiptap" | "html"; contentData: string }>;
   update: Array<{ ids: string[]; partial: Record<string, unknown> }>;
+  touch: Array<{ ids: string[]; dateEdited: number }>;
   contentUpdate: Array<{ partial: Record<string, unknown>; ids: string[] }>;
   contentAdd: Array<{ partial: Record<string, unknown> }>;
   notebookAdd: Array<{ noteId: string; notebookId: string }>;
@@ -134,6 +135,7 @@ interface FakeDatabase extends NotesnookWriteDatabase {
     readonly content: NotesnookStoredContent;
   }) => Promise<string>;
   notesUpdate: (ids: readonly string[], partial: Record<string, unknown>) => Promise<void>;
+  notesTouch: (ids: readonly string[], dateEdited: number) => Promise<void>;
   contentAdd: (partial: Record<string, unknown>) => Promise<string>;
   contentUpdateByNoteId: (partial: Record<string, unknown>, ...ids: string[]) => Promise<void>;
   notebookExists: (id: string) => Promise<boolean>;
@@ -167,6 +169,7 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
   const calls: FakeDatabaseCalls = {
     add: [],
     update: [],
+    touch: [],
     contentUpdate: [],
     contentAdd: [],
     notebookAdd: [],
@@ -251,6 +254,14 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
         note.dateEdited += 1;
       }
     },
+    notesTouch: async (ids: readonly string[], dateEdited: number) => {
+      calls.touch.push({ ids: [...ids], dateEdited });
+      for (const id of ids) {
+        const note = notes.get(id);
+        if (!note) continue;
+        note.dateEdited = dateEdited;
+      }
+    },
     contentAdd: async (partial: Record<string, unknown>) => {
       calls.contentAdd.push({ partial: { ...partial } });
       const id = `content-${content.size + 1}`;
@@ -265,14 +276,14 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
     contentUpdateByNoteId: async (partial: Record<string, unknown>, ...ids: string[]) => {
       calls.contentUpdate.push({ partial: { ...partial }, ids: [...ids] });
       for (const id of ids) {
-        const note = notes.get(id);
-        if (note) note.dateEdited += 1;
         for (const item of content.values()) {
           if (item.noteId === id) {
             if (typeof partial.type === "string") {
-              item.type = partial.type === "html" ? "html" : "tiptap";
+              (item as { type: string }).type = partial.type === "html" ? "html" : "tiptap";
             }
-            if (typeof partial.data === "string") item.data = partial.data;
+            if (typeof partial.data === "string") {
+              (item as { data: string }).data = partial.data;
+            }
           }
         }
       }
@@ -923,6 +934,34 @@ describe("Stage 4 write adapter — appendNote", () => {
     expect(result.localCommitted).toBe(true);
     expect(result.remoteSynced).toBe(false);
     expect(result.pendingSync).toBe(true);
+  });
+
+  // PR-71 regression: pinned `@notesnook/core@8.1.3` `Content.updateByNoteId`
+  // does not bump the parent note's `dateEdited`.  Without an explicit
+  // touch after the content update, two appends against the same revision
+  // both succeed and the second can never surface `stale_revision`.
+  // This test pins the contract that the append adapter invokes
+  // `notesTouch` after every successful content update and that the
+  // touch alone is what bumps `dateEdited` for the append path.
+  it("bumps the note's dateEdited via notesTouch after every successful append", async () => {
+    const { adapter, database } = setupAppendable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    await adapter.appendNote({
+      id: NOTE_ID,
+      markdownFragment: "PR-71 regression body",
+      expectedRevision,
+    });
+
+    // contentUpdateByNoteId happened, then notesTouch([id], dateEdited)
+    // bumped dateEdited to Date.now() at the moment of the append.
+    expect(database.calls.contentUpdate.length).toBeGreaterThan(0);
+    expect(database.calls.touch.length).toBe(1);
+    const touch = database.calls.touch[0]!;
+    expect(touch.ids).toEqual([NOTE_ID]);
+    expect(typeof touch.dateEdited).toBe("number");
+    expect(Number.isInteger(touch.dateEdited)).toBe(true);
+    expect(touch.dateEdited).toBeGreaterThan(1_700_000_000_000);
   });
 });
 
