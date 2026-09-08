@@ -76,7 +76,11 @@ export const SERVICE_CONFIG_READ_POLICY = Object.freeze([
 
 /**
  * Closed service-policy method universe. This mirrors the published
- * RpcMethod union and deliberately excludes `notes.delete`.
+ * RpcMethod union and admits the bounded single-note delete
+ * capability for callers that explicitly configure it; the legacy
+ * `readWriteNoDelete` profile (`SERVICE_CONFIG_READ_POLICY`) still
+ * excludes `notes.delete` so existing deployments stay read-only for
+ * delete unless they opt in.
  */
 export const SERVICE_CONFIG_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = Object.freeze([
   "notes.search",
@@ -86,6 +90,7 @@ export const SERVICE_CONFIG_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = Object.f
   "notes.create",
   "notes.append",
   "notes.update",
+  "notes.delete",
   "notes.sync",
 ]);
 

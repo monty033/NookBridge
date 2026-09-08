@@ -355,8 +355,6 @@ describe("Stage 5 strict service configuration", () => {
       for (const policy of [
         [],
         ["notes.write"],
-        ["notes.delete"],
-        ["notes.search", "notes.delete"],
         ["notes.search", "anything-else"],
         ["NOTES.SEARCH"],
         "notes.search",
