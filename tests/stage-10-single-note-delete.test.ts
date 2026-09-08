@@ -25,19 +25,19 @@ function encodeFrame(payload: object): Uint8Array {
 const REVISION = "rev_00000000000000000000000000000001";
 
 describe("Stage 10 notes.delete", () => {
-  it("accepts exactly an id and expectedRevision on the wire", () => {
+  it("accepts exactly an exact note path on the wire", () => {
     const request = parseRpcFrame(
       encodeFrame({
         id: "delete-1",
         method: "notes.delete",
-        params: { id: "note-1", expectedRevision: REVISION },
+        params: { path: "Outdoors/Canoe Trip" },
       }),
     );
 
     expect(request).toMatchObject({
       id: "delete-1",
       method: "notes.delete",
-      params: { id: "note-1", expectedRevision: REVISION },
+      params: { path: "Outdoors/Canoe Trip" },
     });
   });
 

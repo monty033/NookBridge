@@ -106,6 +106,7 @@ export const NOOK_MCP_MAX_IDENTIFIER_BYTES = 256;
 export const NOOK_MCP_MAX_CONTENT_BYTES = 512;
 export const NOOK_MCP_MAX_TAGS = 16;
 export const NOOK_MCP_MAX_REVISION_BYTES = 36;
+export const NOOK_MCP_MAX_NOTE_PATH_BYTES = 512;
 
 /** Maximum `limit` we will ever accept, even if a future Stage 6
  *  slice grows the underlying RPC to support one.  Today `limit`
@@ -362,18 +363,18 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_DELETE_NOTE_TOOL_NAME,
-  description: "Move one note to trash using an expected note revision.",
+  description: "Move exactly one note to trash using its exact hierarchical path.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
-      id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
-      expectedRevision: Object.freeze({
+      path: Object.freeze({
         type: "string",
-        minLength: NOOK_MCP_MAX_REVISION_BYTES,
-        maxLength: NOOK_MCP_MAX_REVISION_BYTES,
+        minLength: 3,
+        maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
+        description: "Exact notebook hierarchy and note title, e.g. Outdoors/Canoe Trip.",
       }),
     }),
-    required: Object.freeze(["id", "expectedRevision"]),
+    required: Object.freeze(["path"]),
     additionalProperties: false,
   }),
   annotations: Object.freeze({
@@ -471,11 +472,11 @@ const updateNoteInputSchema = {
 };
 
 const deleteNoteInputSchema = {
-  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
-  expectedRevision: z
+  path: z
     .string()
-    .length(NOOK_MCP_MAX_REVISION_BYTES)
-    .regex(/^rev_[0-9a-f]{32}$/),
+    .min(3)
+    .max(NOOK_MCP_MAX_NOTE_PATH_BYTES)
+    .describe("Exact notebook hierarchy and note title, e.g. Outdoors/Canoe Trip."),
 };
 
 const permissiveCallRequestSchema = z
@@ -771,8 +772,7 @@ interface AppendNoteInput {
   expectedRevision?: unknown;
 }
 interface DeleteNoteInput {
-  id?: unknown;
-  expectedRevision?: unknown;
+  path?: unknown;
 }
 interface UpdateNoteInput {
   id?: unknown;
@@ -849,19 +849,16 @@ async function invokeDeleteNote(
   input: DeleteNoteInput,
 ): Promise<CallToolResult> {
   try {
-    if (!hasExactKeys(input, ["id", "expectedRevision"]))
-      return toMcpErrorResult("invalid_request");
-    if (!isBoundedIdentifier(input.id) || !isRevision(input.expectedRevision))
-      return toMcpErrorResult("invalid_request");
-    const result = await client.deleteNote({
-      id: input.id,
-      expectedRevision: input.expectedRevision,
-    });
+    if (!hasExactKeys(input, ["path"])) return toMcpErrorResult("invalid_request");
+    if (!isBoundedNotePath(input.path)) return toMcpErrorResult("invalid_request");
+    const result = await client.deleteNote({ path: input.path });
     if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
     const value = result.envelope.result as unknown as Record<string, unknown>;
-    if (value.kind !== "delete" || value.id !== input.id)
+    if (value.kind !== "delete" || typeof value.id !== "string")
       return toMcpErrorResult("service_unavailable");
-    return { content: [{ type: "text", text: JSON.stringify({ id: value.id, deleted: true }) }] };
+    return {
+      content: [{ type: "text", text: JSON.stringify({ path: input.path, deleted: true }) }],
+    };
   } catch {
     return toMcpErrorResult("service_unavailable");
   }
@@ -929,6 +926,24 @@ function isBoundedIdentifier(value: unknown): value is string {
     isSafeIdentifier(value) &&
     value.length <= NOOK_MCP_MAX_IDENTIFIER_BYTES &&
     Buffer.byteLength(value, "utf8") <= NOOK_MCP_MAX_IDENTIFIER_BYTES
+  );
+}
+
+function isBoundedNotePath(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length < 3 ||
+    value.length > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
+    Buffer.byteLength(value, "utf8") > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
+    hasControlCharacter(value) ||
+    value.includes("\\")
+  ) {
+    return false;
+  }
+  const segments = value.split("/");
+  return (
+    segments.length >= 2 &&
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
   );
 }
 

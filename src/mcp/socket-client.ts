@@ -405,21 +405,18 @@ function serializeRequest(
  * getter or toJSON hook after validation.
  */
 function snapshotDeleteParams(value: unknown): Record<string, unknown> {
-  const values = readExactDataProperties(value, ["id", "expectedRevision"]);
-  const id = values.id;
-  const expectedRevision = values.expectedRevision;
+  const values = readExactDataProperties(value, ["path"]);
+  const path = values.path;
   if (
-    typeof id !== "string" ||
-    id.length === 0 ||
-    id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-    Buffer.byteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-    !isSafeIdentifier(id) ||
-    typeof expectedRevision !== "string" ||
-    !/^rev_[0-9a-f]{32}$/.test(expectedRevision)
+    typeof path !== "string" ||
+    path.length === 0 ||
+    Buffer.byteLength(path, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+    hasDisallowedControlCharacter(path) ||
+    path.includes("\\")
   ) {
     throw new TypeError("nook-mcp: delete parameters are invalid");
   }
-  return Object.freeze({ id, expectedRevision });
+  return Object.freeze({ path });
 }
 
 function snapshotUpdateParams(value: unknown): Record<string, unknown> {

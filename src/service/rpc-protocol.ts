@@ -205,10 +205,9 @@ export interface RpcNotesUpdateParams {
   readonly patch: RpcNotesUpdatePatch;
 }
 
-/** Bounded `notes.delete` params. Exactly one note and one revision guard. */
+/** Bounded `notes.delete` params. The daemon resolves the exact path and owns the revision guard. */
 export interface RpcNotesDeleteParams {
-  readonly id: string;
-  readonly expectedRevision: string;
+  readonly path: string;
 }
 
 /** The closed set of allowed RPC methods. */
@@ -1005,26 +1004,21 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj.expectedRevision = expectedRevision;
     paramsObj.patch = patchObj;
   } else if (method === "notes.delete") {
-    if (!keysAreExactly(paramKeys, ["id", "expectedRevision"])) {
+    if (!keysAreExactly(paramKeys, ["path"])) {
       throw rpcProtocolError("rpc protocol: delete params have unexpected fields");
     }
-    const noteId = paramsRecord.id;
-    const expectedRevision = paramsRecord.expectedRevision;
+    const path = paramsRecord.path;
     if (
-      typeof noteId !== "string" ||
-      noteId.length === 0 ||
-      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
-        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(noteId) ||
-      typeof expectedRevision !== "string" ||
-      !isWellFormedRevisionToken(expectedRevision)
+      typeof path !== "string" ||
+      path.length === 0 ||
+      path.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      utf8ByteLength(path, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasControlCharacter(path)
     ) {
       throw rpcProtocolError("rpc protocol: request delete params are invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
-    paramsObj.id = noteId;
-    paramsObj.expectedRevision = expectedRevision;
+    paramsObj.path = path;
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");

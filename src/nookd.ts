@@ -51,6 +51,10 @@ import {
 } from "./settings/notebook-index.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
+import {
+  resolveExactNotePath,
+  type ExactNotePathResolution,
+} from "./service/exact-note-path-resolver.js";
 
 const freeze = Object.freeze;
 const defineProperty = Object.defineProperty;
@@ -104,6 +108,7 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "updateNote"
       | "requestSync"
       | "listNotebooksForSettings"
+      | "readOnly"
     >
   >;
 
@@ -307,6 +312,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
   let notebookIndex: NotebookIndex;
+  let resolveNotePath: ((path: string) => Promise<ExactNotePathResolution>) | undefined;
   let settingsPhase = false;
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -322,6 +328,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedUpdateNote = runtime.updateNote;
     const capturedRequestSync = runtime.requestSync;
     const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
+    const capturedReadOnly = runtime.readOnly;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
@@ -362,6 +369,18 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       }
     }
     notebookIndex = buildNotebookIndex(notebookRecords as readonly NotebookRecord[]);
+    if (
+      capturedReadOnly !== undefined &&
+      typeof capturedReadOnly.listNotes === "function" &&
+      typeof capturedNoteMetadata === "function"
+    ) {
+      resolveNotePath = (path) =>
+        resolveExactNotePath(path, {
+          notebooks: notebookRecords as readonly NotebookRecord[],
+          listNotes: () => capturedReadOnly.listNotes(),
+          noteMetadata: (noteId) => capturedNoteMetadata(noteId),
+        });
+    }
     const settingsEvaluator = createSettingsEvaluator(settings, notebookIndex);
     policy = createServicePolicyFromMethods(config.readPolicy, settingsEvaluator);
   } catch {
@@ -383,6 +402,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
+    ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     notebookIndex,
     cleanup,
   });

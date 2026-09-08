@@ -69,6 +69,11 @@ import type {
 } from "../core/notesnook-write-adapter.js";
 import type { NotebookIndex } from "../settings/notebook-index.js";
 import {
+  ExactNotePathError,
+  resolveExactNotePath,
+  type ExactNotePathResolution,
+} from "./exact-note-path-resolver.js";
+import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
   type ServicePolicySettingsContext,
@@ -145,6 +150,8 @@ export interface RpcHandlerRuntimeLike {
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
+  /** Optional daemon-side resolver for exact destructive note paths. */
+  readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
   readonly requestSync?: () => Promise<
     Readonly<{
       status: "idle" | "synced" | "failed";
@@ -270,6 +277,18 @@ export async function handleRpcRequest<T extends RpcRequest>(
         )) as unknown as RpcHandlerResponse<T>;
       }
 
+      if (structural.request.method === "notes.delete") {
+        const authorization = authorizeServiceMethod(policy, "notes.delete");
+        if (!authorization.allowed) {
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        }
+        return (await runNotesDelete(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+
       const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
       if (!resolved.ok)
         return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
@@ -283,13 +302,6 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
       if (structural.request.method === "notes.append") {
         return (await runNotesAppend(
-          structural.request,
-          runtime,
-          id,
-        )) as unknown as RpcHandlerResponse<T>;
-      }
-      if (structural.request.method === "notes.delete") {
-        return (await runNotesDelete(
           structural.request,
           runtime,
           id,
@@ -500,17 +512,15 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params.expectedRevision = rawRevision;
     params.patch = patch;
   } else if (rawMethod === "notes.delete") {
-    if (!hasExactKeys(paramKeys, ["id", "expectedRevision"])) {
+    if (!hasExactKeys(paramKeys, ["path"])) {
       return { kind: "err", code: "invalid_request" };
     }
-    const rawNoteId = readOwnStringField(rawParams, "id");
-    const rawRevision = readOwnStringField(rawParams, "expectedRevision");
-    if (!isBoundedRpcIdentifier(rawNoteId) || !isRevisionToken(rawRevision)) {
+    const rawPath = readOwnStringField(rawParams, "path");
+    if (!isBoundedRpcText(rawPath, STAGE5_RPC_LIMITS.maxQueryBytes)) {
       return { kind: "err", code: "invalid_request" };
     }
     params = objectCreate(null) as Record<string, unknown>;
-    params.id = rawNoteId;
-    params.expectedRevision = rawRevision;
+    params.path = rawPath;
   } else if (rawMethod === "notes.sync") {
     if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
     params = objectCreate(null) as Record<string, unknown>;
@@ -912,10 +922,27 @@ async function runNotesDelete(
   id: string,
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "deleteNote");
-  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  const resolvePath = readRuntimeMethod(runtime, "resolveNotePath");
+  if (fn === undefined || resolvePath === undefined)
+    return buildErrorEnvelope(id, "service_unavailable");
+  let resolution: ExactNotePathResolution;
+  try {
+    resolution = (await reflectApply(resolvePath, runtime, [
+      request.params.path,
+    ])) as ExactNotePathResolution;
+  } catch (error) {
+    if (error instanceof ExactNotePathError) {
+      if (error.code === "invalid_path" || error.code === "ambiguous") {
+        return buildErrorEnvelope(id, "invalid_request");
+      }
+      if (error.code === "not_found") return buildErrorEnvelope(id, "not_found");
+      return buildErrorEnvelope(id, "service_unavailable");
+    }
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
   const commandRecord = objectCreate(null) as Record<string, unknown>;
-  commandRecord.id = request.params.id;
-  commandRecord.expectedRevision = request.params.expectedRevision;
+  commandRecord.id = resolution.id;
+  commandRecord.expectedRevision = resolution.expectedRevision;
   const command = objectFreeze(commandRecord) as unknown as DeleteNoteCommand;
   let raw: unknown;
   try {
@@ -935,7 +962,7 @@ async function runNotesDelete(
   if (
     operation !== "delete" ||
     noteId === undefined ||
-    noteId !== request.params.id ||
+    noteId !== resolution.id ||
     localCommitted !== true ||
     remoteSynced !== false ||
     pendingSync !== true ||
@@ -1114,6 +1141,7 @@ function readRuntimeMethod(
     | "appendNote"
     | "updateNote"
     | "deleteNote"
+    | "resolveNotePath"
     | "requestSync",
 ): ((...args: unknown[]) => unknown) | undefined {
   try {
