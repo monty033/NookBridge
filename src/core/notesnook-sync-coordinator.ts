@@ -88,6 +88,12 @@ export type SyncCoordinatorOptions = Readonly<{
   readonly executor: SyncExecutor;
   readonly stateStore?: SyncMetadataStateStore;
   readonly sleep?: SyncSleep;
+  /**
+   * Optional jitter source.  Returns a number in `[0, 1)`.  Production
+   * defaults to `Math.random`; tests inject a deterministic source so
+   * the exponential backoff can be asserted exactly.
+   */
+  readonly jitter?: () => number;
   readonly now?: () => number;
   readonly maxAttempts?: number;
   readonly baseDelayMs?: number;
@@ -141,7 +147,15 @@ export type SyncCoordinatorResult =
       readonly startedAt: number;
     }>;
 
-const DEFAULT_SLEEP: SyncSleep = async () => undefined;
+const DEFAULT_JITTER = (): number => Math.random();
+
+const DEFAULT_SLEEP_IMPL: SyncSleep = (delayMs: number) =>
+  new Promise<void>((resolve) => {
+    globalThis.setTimeout(() => resolve(), Math.max(0, Math.floor(delayMs)));
+  });
+
+const DEFAULT_SLEEP: SyncSleep = DEFAULT_SLEEP_IMPL;
+
 const DEFAULT_NOW = (): number => Date.now();
 
 /**
@@ -156,6 +170,7 @@ export class SyncCoordinator {
   readonly #executor: SyncExecutor;
   readonly #store: SyncMetadataStateStore;
   readonly #sleep: SyncSleep;
+  readonly #jitter: () => number;
   readonly #now: () => number;
   readonly #maxAttempts: number;
   readonly #baseDelayMs: number;
@@ -177,6 +192,9 @@ export class SyncCoordinator {
     const nowRaw = readProperty(record, "now");
     const sleep = sleepRaw === undefined ? DEFAULT_SLEEP : requireFunction<SyncSleep>(sleepRaw);
     const now = nowRaw === undefined ? DEFAULT_NOW : requireFunction<() => number>(nowRaw);
+    const jitterRaw = readProperty(record, "jitter");
+    const jitter =
+      jitterRaw === undefined ? DEFAULT_JITTER : requireFunction<() => number>(jitterRaw);
 
     const maxAttempts = boundedOption(
       readProperty(record, "maxAttempts"),
@@ -203,6 +221,7 @@ export class SyncCoordinator {
     this.#executor = executor as SyncExecutor;
     this.#store = store;
     this.#sleep = sleep;
+    this.#jitter = jitter;
     this.#now = now;
     this.#maxAttempts = maxAttempts;
     this.#baseDelayMs = baseDelayMs;
@@ -316,7 +335,7 @@ export class SyncCoordinator {
         if (attempt === this.#maxAttempts) {
           return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
         }
-        const slept = await this.#wait(backoffDelay(this.#baseDelayMs, attempt));
+        const slept = await this.#wait(backoffDelay(this.#baseDelayMs, attempt, this.#jitter));
         if (!slept)
           return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
         continue;
@@ -332,7 +351,7 @@ export class SyncCoordinator {
         }
         const delay =
           parsed.retryAfterMs === undefined
-            ? backoffDelay(this.#baseDelayMs, attempt)
+            ? backoffDelay(this.#baseDelayMs, attempt, this.#jitter)
             : Math.min(parsed.retryAfterMs, this.#retryAfterCapMs);
         const slept = await this.#wait(delay);
         if (!slept)
@@ -559,8 +578,18 @@ function parseExecutorResult(value: unknown): SyncExecutorResult {
   }
 }
 
-function backoffDelay(baseDelayMs: number, attempt: number): number {
-  return Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** (attempt - 1));
+function backoffDelay(baseDelayMs: number, attempt: number, jitter: () => number): number {
+  // Exponential growth: base * 2^(attempt-1).  The minimum is the
+  // base delay itself (PR-65 P1-4) so a retry is never a zero-second
+  // wait.  The maximum is the published cap.
+  const exponent = Math.max(0, attempt - 1);
+  const raw = Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** exponent);
+  // Multiplicative jitter: 0.75× to 1.25× of the raw delay.  The
+  // jitter source is injected so tests can run deterministically;
+  // production supplies the helper that draws from `[0, 1)`.
+  const jitterFactor = 0.75 + jitter() * 0.5;
+  const withJitter = Math.floor(raw * jitterFactor);
+  return Math.max(baseDelayMs, Math.min(MAX_DELAY_MS, withJitter));
 }
 
 function failedResult(

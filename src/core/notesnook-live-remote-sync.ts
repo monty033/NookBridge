@@ -160,10 +160,88 @@ export function createLiveRemoteSyncExecutor(
       if (resolved === true) return Object.freeze({ status: "confirmed" as const });
       if (resolved === false) return Object.freeze({ status: "failed" as const });
       return Object.freeze({ status: "failed" as const });
-    } catch {
-      return Object.freeze({ status: "retry" as const });
+    } catch (error) {
+      // PR-65 P1-4 — distinguish transient (network, timeout, auth-fresh
+      // handshake) failures from persistent (auth missing, contract
+      // shape, monotonic seq) failures.  Persistent failures are not
+      // retried because every retry is doomed to the same categorical
+      // error.  Transient failures carry a bounded Retry-After hint so
+      // the coordinator can honour upstream rate-limit guidance.
+      const classification = classifySyncFailure(error);
+      if (classification.kind === "persistent") {
+        return Object.freeze({ status: "failed" as const });
+      }
+      return Object.freeze({
+        status: "retry" as const,
+        ...(classification.retryAfterMs === undefined
+          ? {}
+          : { retryAfterMs: classification.retryAfterMs }),
+      });
     }
   };
+}
+
+/** Categorical sync failure classification used by the live executor. */
+export type SyncFailureClassification =
+  | Readonly<{ readonly kind: "transient"; readonly retryAfterMs?: number }>
+  | Readonly<{ readonly kind: "persistent" }>;
+
+/**
+ * Closed classification of an upstream sync failure.  Any thrown error
+ * that does not match a transient hint is treated as persistent — the
+ * exhaustive match is deliberate so a hostile / unmapped shape cannot
+ * sneak into the retry path.
+ */
+export function classifySyncFailure(error: unknown): SyncFailureClassification {
+  if (!isRecord(error)) return Object.freeze({ kind: "persistent" as const });
+  const code = readStringField(error, "code");
+  const retryAfterMs = readOptionalRetryAfterMs(error);
+  if (code === undefined) {
+    // An error without a `code` field is treated as transient.  The
+    // bounded retry budget caps the worst case.
+    return retryAfterMs === undefined
+      ? Object.freeze({ kind: "transient" as const })
+      : Object.freeze({ kind: "transient" as const, retryAfterMs });
+  }
+  // Persistent categories never retry.
+  if (
+    code === "invalid_input" ||
+    code === "permission_denied" ||
+    code === "vault_locked" ||
+    code === "stale_revision" ||
+    code === "conflict" ||
+    code === "not_found"
+  ) {
+    return Object.freeze({ kind: "persistent" as const });
+  }
+  // Everything else (sync_failed, service_unavailable, network, ...)
+  // is treated as transient.
+  return retryAfterMs === undefined
+    ? Object.freeze({ kind: "transient" as const })
+    : Object.freeze({ kind: "transient" as const, retryAfterMs });
+}
+
+function readStringField(record: object, key: string): string | undefined {
+  let value: unknown;
+  try {
+    value = Reflect.get(record, key, record);
+  } catch {
+    return undefined;
+  }
+  return typeof value === "string" ? value : undefined;
+}
+
+function readOptionalRetryAfterMs(record: object): number | undefined {
+  let value: unknown;
+  try {
+    value = Reflect.get(record, "retryAfterMs", record);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return undefined;
+  }
+  return value;
 }
 
 /** A separately named explicit remote-sync capability. */
