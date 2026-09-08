@@ -401,7 +401,7 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       rawFragment.length === 0 ||
       rawFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
       bufferByteLength(rawFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(rawFragment) ||
+      hasDisallowedControlCharacter(rawFragment) ||
       !isRevisionToken(rawRevision)
     ) {
       return { kind: "err", code: "invalid_request" };
@@ -503,6 +503,16 @@ function hasExactKeys(actual: readonly string[], expected: readonly string[]): b
 function hasControlCharacter(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Markdown fragments may contain structural whitespace; other controls remain invalid. */
+function hasDisallowedControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;
