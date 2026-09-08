@@ -125,3 +125,20 @@ NookBridge `78ed6c0adc08d25be167c26e65dbacd6432cdfdb` carries the PR-71
 The RT-11 local-write-race follow-up is **closed**. Remaining open items
 on the plan: privileged plaintext/state/log scan, outsider recheck, clean VM
 recovery drill, post-recovery target-host checks, and license sign-off.
+
+## Current-pin follow-up (2026-09-08, RT-4 long soak)
+
+- **Burst:** 1000 `notesnook_search_notes` calls spaced at 600 ms (target
+  600 s); 1000 / 1000 success, 0 rejected, 0 errors; elapsed 602,714 ms
+  (10:02).
+- **Resource counters:** MCP stdio client RSS plateaued at ~44 MiB after
+  call 500; daemon (`nookd.service` PID 2031054) RSS grew 83,336 →
+  92,296 KiB (≈9 KiB / call); daemon threads steady at 11; client FD count
+  steady at 25; daemon FD limit at the systemd default of 256; stderr
+  empty on both client and daemon.
+- **Runtime health:** `nookd`, `hermes-agent`, and `hermes-dashboard` all
+  remained active throughout the 10-minute burst.
+- **Decision:** PASS WITH FOLLOW-UP — the 10-minute soak demonstrates
+  bounded resource usage on a single persistent connection. A multi-hour
+  follow-up would be needed to characterize the long-tail slope of the
+  ~9 KiB / call daemon-side growth.

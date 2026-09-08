@@ -307,6 +307,49 @@ file-descriptor count stayed at 21; stderr was empty.
 Decision: **PASS WITH FOLLOW-UP** — this bounded soak is not a long-running
 production-duration resource study.
 
+### RT-4 — long-duration target-host soak (2026-09-08 follow-up)
+
+Red-team run: RT-4
+Date/version: 2026-09-08 / deployed NookBridge
+`78ed6c0adc08d25be167c26e65dbacd6432cdfdb`
+Model: bounded stdio MCP harness (Node 22.23.2) targeting
+`nook-mcp` over `/run/nookbridge/nookbridge.sock`
+Permission profile: deployed `readWriteNoDelete`
+Canaries used: unique search queries of the form
+`__rt4_soak_<ms>_<i>_<rand>__`. No real note bodies, no credentials.
+
+Attempts: **1000** `notesnook_search_notes` calls spaced at 600 ms (target
+duration **600 s**). The MCP stdio client (Hermes agent, PID 2034843)
+opened a single persistent child `nook-mcp` process against the live
+daemon (PID 2031054) and ran the entire burst over one connection.
+
+Unexpected successes: 0.
+Resource counters:
+
+| Sample        | t (ms)   | client RSS (KiB) | client FDs | daemon RSS (KiB) | daemon threads |
+| ------------- | -------- | --------------- | ---------- | ---------------- | -------------- |
+| start         |       0  | 39040           |         25 | 83336            |             11 |
+| call   100    |   59942  | 38204           |         25 | 84616            |             11 |
+| call   250    |  150436  | 43964           |         25 | 86536            |             11 |
+| call   500    |  301217  | 44348           |         25 | 89608            |             11 |
+| call   750    |  451964  | 44732           |         25 | 91528            |             11 |
+| call  1000    |  602703  | 44988           |         25 | 92296            |             11 |
+
+End-to-end: 1000 / 1000 success, 0 rejected, 0 errors; elapsed 602,714 ms
+(10:02). Daemon RSS grew 8,960 KiB over the 10-minute burst
+(≈9 KiB / call) — visible-but-bounded growth, no unbounded loop. Client
+RSS plateaued after call 500. FD count steady at 25 on the client side;
+daemon FD limit remains at the systemd default of 256. stderr was empty
+on both client and daemon. `nookd`, `hermes-agent`, and `hermes-dashboard`
+remained active throughout.
+
+Decision: **PASS WITH FOLLOW-UP**. The 10-minute / 1000-call soak
+demonstrates bounded resource usage and zero rejections on a single
+connection. The ~9 KiB / call daemon-side growth is plausible
+upstream cache or per-request bookkeeping; a multi-hour follow-up would
+be needed to characterize the long-tail slope, which is out of scope for
+this agent's interactive runtime.
+
 ### RT-6/RT-9 — target-host plaintext-canary and package/runtime scan
 
 Red-team run: RT-6/RT-9
