@@ -277,7 +277,9 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
       expectedRevision: REVISION,
     });
     expect(stale.isError).toBe(true);
-    expect(payload(stale)).toEqual({ code: "service_unavailable", message: "Service unavailable" });
+    // PR-64 P1-6 — closed vocabulary: `stale_revision` is no longer
+    // collapsed into `service_unavailable` at the MCP boundary.
+    expect(payload(stale)).toEqual({ code: "stale_revision", message: "Stale revision" });
 
     updateNote.mockResolvedValue({
       ok: true,
@@ -307,5 +309,36 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
       code: "service_unavailable",
       message: "Service unavailable",
     });
+  });
+
+  it("passes the closed error vocabulary through unchanged (P1-6)", async () => {
+    // Every Stage 5 RPC code reaches the MCP boundary as the matching
+    // MCP code so the agent receives the same closed semantics the
+    // daemon emits.  No silent collapse into `service_unavailable`.
+    const client = makeClient();
+    const appendNote = vi.spyOn(client, "appendNote");
+    const server = buildNookMcpServer({ client });
+
+    const cases = [
+      { socket: "stale_revision", mcp: "stale_revision" },
+      { socket: "conflict", mcp: "conflict" },
+      { socket: "vault_locked", mcp: "vault_locked" },
+      { socket: "sync_failed", mcp: "sync_failed" },
+      { socket: "permission_denied", mcp: "permission_denied" },
+      { socket: "invalid_request", mcp: "invalid_request" },
+      { socket: "not_found", mcp: "not_found" },
+      { socket: "service_unavailable", mcp: "service_unavailable" },
+    ] as const;
+
+    for (const { socket, mcp } of cases) {
+      appendNote.mockResolvedValue({ ok: false, code: socket });
+      const result = await server.callTool("notesnook_append_note", {
+        id: "note-1",
+        markdownFragment: "frag",
+        expectedRevision: REVISION,
+      });
+      expect(result.isError).toBe(true);
+      expect(payload(result).code).toBe(mcp);
+    }
   });
 });

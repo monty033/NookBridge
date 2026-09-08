@@ -47,6 +47,8 @@ export type NookMcpErrorCode =
   | "service_unavailable"
   | "sync_failed"
   | "vault_locked"
+  | "stale_revision"
+  | "conflict"
   | "not_found"
   | "unknown_tool";
 
@@ -61,6 +63,8 @@ const NOOK_MCP_ERROR_MESSAGES: Readonly<Record<NookMcpErrorCode, string>> = Obje
   service_unavailable: "Service unavailable",
   sync_failed: "Sync failed",
   vault_locked: "Vault locked",
+  stale_revision: "Stale revision",
+  conflict: "Conflict",
   not_found: "Not found",
   unknown_tool: "Unknown tool",
 });

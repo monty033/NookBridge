@@ -90,6 +90,8 @@ interface FakeContentRecord {
   noteId: string;
   type: "tiptap" | "tiny";
   data: string;
+  /** Authoritative Vault marker mirrored from Notesnook `content.locked`. */
+  locked?: boolean;
 }
 
 interface FakeNotebookRecord {
@@ -642,10 +644,47 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     expect(observed.tags).toEqual([TAG_ID]);
   });
 
-  it("defaults an omitted upstream locked flag to false", async () => {
+  it("uses content.locked when note.locked is absent (P1-2)", async () => {
+    // The deprecated upstream `note.locked` flag is omitted entirely.
+    // The seam must consult `content.locked` (the authoritative
+    // Notesnook Vault marker) so a locked vault item fails the
+    // adapter's gate instead of slipping past it as `false`.
     const note = {
       id: NOTE_ID,
-      title: "Unlocked without deprecated flag",
+      title: "Vault-locked without deprecated flag",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      dateEdited: 1_700_000_000_000,
+    } as unknown as FakeNoteRecord;
+    const runtime = createFakeRuntime({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([
+        [
+          "content-locked",
+          {
+            id: "content-locked",
+            noteId: NOTE_ID,
+            type: "tiptap",
+            data: "<p>locked</p>",
+            locked: true,
+          },
+        ],
+      ]),
+    });
+    const seam = bindNotesnookWriteRuntime(runtime);
+
+    const observed = await seam.note(NOTE_ID);
+    expect(observed).toMatchObject({ id: NOTE_ID, locked: true });
+  });
+
+  it("treats absent note.locked AND absent content.locked as unlocked (P1-2)", async () => {
+    // Without either marker the seam falls back to `false`.  This is
+    // the same shape as the deprecated upstream default; the gate
+    // only changes behavior when the content marker disagrees.
+    const note = {
+      id: NOTE_ID,
+      title: "Unlocked without either flag",
       pinned: false,
       favorite: false,
       conflicted: false,
@@ -656,10 +695,42 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     });
     const seam = bindNotesnookWriteRuntime(runtime);
 
-    await expect(seam.note(NOTE_ID)).resolves.toMatchObject({
+    const observed = await seam.note(NOTE_ID);
+    expect(observed).toMatchObject({ id: NOTE_ID, locked: false });
+  });
+
+  it("honors explicit note.locked over content.locked (P1-2)", async () => {
+    // The deprecated upstream flag wins when supplied, even if the
+    // content marker disagrees.  This mirrors the contract surface
+    // Notesnook actually returns today.
+    const note: FakeNoteRecord = {
       id: NOTE_ID,
+      title: "Upstream says unlocked",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
       locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const runtime = createFakeRuntime({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([
+        [
+          "content-1",
+          {
+            id: "content-1",
+            noteId: NOTE_ID,
+            type: "tiptap",
+            data: "<p>x</p>",
+            locked: true,
+          },
+        ],
+      ]),
     });
+    const seam = bindNotesnookWriteRuntime(runtime);
+
+    const observed = await seam.note(NOTE_ID);
+    expect(observed).toMatchObject({ id: NOTE_ID, locked: false });
   });
 
   it("binds note() to the runtime object so a thief cannot detach it", async () => {

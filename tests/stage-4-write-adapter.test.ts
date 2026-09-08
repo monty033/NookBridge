@@ -1422,3 +1422,147 @@ describe("Stage 4 write adapter — categorical redaction", () => {
     expect((error as unknown as { code: string }).code).toBe("sync_failed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Supported-construct fidelity gate (Astra finding P1-7).
+//
+// The deterministic codec silently downgrades unsupported Markdown
+// constructs to paragraph text.  The adapter's gate refuses the
+// request before any mutator fires so the construct shape the operator
+// asked for is never lost.
+// ---------------------------------------------------------------------------
+
+describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
+  it("refuses a create note whose content uses a Markdown table", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const code = await codeOfAsync(() =>
+      adapter.createNote({
+        title: "Tables not supported",
+        content: "| a | b |\n| - | - |\n| 1 | 2 |",
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.add).toHaveLength(0);
+  });
+
+  it("refuses an append whose fragment contains a task list", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Has task list",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>old</p>",
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+    const code = await codeOfAsync(() =>
+      adapter.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "- [ ] task",
+        expectedRevision,
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  it("refuses an update whose replacement content contains inline HTML", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Title",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>old</p>",
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "<table><tr><td>cell</td></tr></table>" },
+        expectedRevision,
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  it("accepts a create note whose content uses only supported constructs", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const result = await adapter.createNote({
+      title: "Headings and lists",
+      content:
+        "# Heading\n\n- item one\n- item two\n\nA paragraph with **bold** and *italic* and `code`.",
+    });
+    expect(result.operation).toBe("create");
+    expect(database.calls.add).toHaveLength(1);
+  });
+
+  it("accepts an update whose content uses only supported constructs", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Title",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>old</p>",
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      patch: { content: "# New heading\n\nA paragraph." },
+      expectedRevision,
+    });
+    expect(result.operation).toBe("update");
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+});

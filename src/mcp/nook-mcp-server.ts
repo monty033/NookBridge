@@ -1178,6 +1178,18 @@ function normaliseSearchInput(input: SearchInput): NormalisedSearchInput | Norma
   return { ok: true, query: trimmed };
 }
 
+/**
+ * Map a Stage 5 RPC error envelope code to the closed MCP vocabulary.
+ * The Stage 5 set is the closed authoritative vocabulary; every code is
+ * passed through unchanged so the proxy never invents an externally
+ * visible category.  Anything outside the Stage 5 set falls back to
+ * `service_unavailable`.
+ *
+ * Note: prior to PR-64 this function deliberately collapsed `stale_revision`
+ * and `conflict` into `service_unavailable` (Astra finding P1-6).  The
+ * MCP vocabulary has now been widened to carry both categories so the
+ * agent receives the same closed semantics the daemon emits.
+ */
 function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
   switch (reason) {
     case "invalid_request":
@@ -1185,10 +1197,9 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
     case "permission_denied":
       return "permission_denied";
     case "stale_revision":
+      return "stale_revision";
     case "conflict":
-      // The MCP vocabulary is intentionally narrower than the write RPC
-      // vocabulary; do not invent a new externally visible category here.
-      return "service_unavailable";
+      return "conflict";
     case "sync_failed":
       return "sync_failed";
     case "vault_locked":
