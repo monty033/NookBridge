@@ -52,7 +52,9 @@ import {
   STAGE4_WRITE_LIMITS,
   type NotesnookRevisionToken,
   type NotesnookWriteErrorCode,
+  type DeleteNoteCommand,
 } from "./notesnook-write-contract.js";
+import type { DeleteNoteResult } from "./notesnook-write-adapter.js";
 import type { NotesnookLocalWriteResult } from "./notesnook-write-composition.js";
 import type { NotesnookLiveRemoteSyncCapability } from "./notesnook-live-remote-sync.js";
 
@@ -221,6 +223,7 @@ export interface NotesnookLiveWriteCapability {
     readonly patch: Readonly<Record<string, unknown>>;
     readonly expectedRevision: NotesnookRevisionToken;
   }) => Promise<NotesnookLocalWriteResult>;
+  readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   readonly pendingSnapshot: () => { readonly pending: readonly unknown[] };
 }
 

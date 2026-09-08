@@ -105,6 +105,7 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
       "notesnook_create_note",
       "notesnook_append_note",
       "notesnook_update_note",
+      "notesnook_delete_note",
       "notesnook_sync",
     ]);
     expect(handle.tools.map((tool) => tool.name)).toEqual(NOOK_MCP_ALLOWED_TOOL_NAMES);
@@ -114,7 +115,15 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
     expect(handle.tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(
       true,
     );
-    expect(handle.tools.every((tool) => tool.annotations?.destructiveHint === false)).toBe(true);
+    expect(
+      handle.tools
+        .filter((tool) => tool.name !== "notesnook_delete_note")
+        .every((tool) => tool.annotations?.destructiveHint === false),
+    ).toBe(true);
+    expect(
+      handle.tools.find((tool) => tool.name === "notesnook_delete_note")?.annotations
+        ?.destructiveHint,
+    ).toBe(true);
   });
 
   it("maps status to notes.status without touching search", async () => {

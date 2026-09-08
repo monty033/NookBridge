@@ -205,12 +205,13 @@ export interface RpcNotesUpdateParams {
   readonly patch: RpcNotesUpdatePatch;
 }
 
-/**
- * The closed set of allowed RPC methods.  Slice 3 widens the
- * union with `notes.append` and `notes.update`.  `notes.delete`
- * remains absent and is rejected by the wire parser as
- * `invalid_request`.
- */
+/** Bounded `notes.delete` params. Exactly one note and one revision guard. */
+export interface RpcNotesDeleteParams {
+  readonly id: string;
+  readonly expectedRevision: string;
+}
+
+/** The closed set of allowed RPC methods. */
 export type RpcMethod =
   | "notes.search"
   | "notes.status"
@@ -219,6 +220,7 @@ export type RpcMethod =
   | "notes.create"
   | "notes.append"
   | "notes.update"
+  | "notes.delete"
   | "notes.sync";
 
 export interface RpcNotesSearchRequest {
@@ -263,6 +265,12 @@ export interface RpcNotesUpdateRequest {
   readonly params: RpcNotesUpdateParams;
 }
 
+export interface RpcNotesDeleteRequest {
+  readonly id: string;
+  readonly method: "notes.delete";
+  readonly params: RpcNotesDeleteParams;
+}
+
 export interface RpcNotesSyncRequest {
   readonly id: string;
   readonly method: "notes.sync";
@@ -277,6 +285,7 @@ export type RpcRequest =
   | RpcNotesCreateRequest
   | RpcNotesAppendRequest
   | RpcNotesUpdateRequest
+  | RpcNotesDeleteRequest
   | RpcNotesSyncRequest;
 
 /**
@@ -370,6 +379,12 @@ export interface RpcUpdateNoteResult {
   readonly contentBytes?: number;
 }
 
+/** The bounded success result for a single-note delete. */
+export interface RpcDeleteNoteResult {
+  readonly kind: "delete";
+  readonly id: string;
+}
+
 export interface RpcSyncResult {
   readonly kind: "sync";
   readonly status: "idle" | "synced";
@@ -385,6 +400,7 @@ export type RpcResult =
   | RpcCreatedNoteResult
   | RpcAppendNoteResult
   | RpcUpdateNoteResult
+  | RpcDeleteNoteResult
   | RpcSyncResult;
 
 export interface RpcSuccessEnvelope {
@@ -707,6 +723,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.create" &&
     method !== "notes.append" &&
     method !== "notes.update" &&
+    method !== "notes.delete" &&
     method !== "notes.sync"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
@@ -987,6 +1004,27 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj.id = noteId;
     paramsObj.expectedRevision = expectedRevision;
     paramsObj.patch = patchObj;
+  } else if (method === "notes.delete") {
+    if (!keysAreExactly(paramKeys, ["id", "expectedRevision"])) {
+      throw rpcProtocolError("rpc protocol: delete params have unexpected fields");
+    }
+    const noteId = paramsRecord.id;
+    const expectedRevision = paramsRecord.expectedRevision;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId) ||
+      typeof expectedRevision !== "string" ||
+      !isWellFormedRevisionToken(expectedRevision)
+    ) {
+      throw rpcProtocolError("rpc protocol: request delete params are invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+    paramsObj.expectedRevision = expectedRevision;
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");

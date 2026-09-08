@@ -817,6 +817,7 @@ describe("nookctl write — no auto-sync and pending semantics", () => {
     expect(Object.keys(capability).sort()).toEqual([
       "appendNote",
       "createNote",
+      "deleteNote",
       "pendingSnapshot",
       "updateNote",
     ]);

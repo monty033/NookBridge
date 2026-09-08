@@ -35,6 +35,7 @@ import {
   type RpcNotesCreateParams,
   type RpcNotesAppendParams,
   type RpcNotesUpdateParams,
+  type RpcNotesDeleteParams,
   type RpcAnyResponseEnvelope,
   type RpcResult,
   type RpcAnySuccessEnvelope,
@@ -213,6 +214,10 @@ export class NookdSocketClient {
     return this.#request("notes.update", params);
   }
 
+  async deleteNote(params: RpcNotesDeleteParams): Promise<NookdSocketResult> {
+    return this.#request("notes.delete", params);
+  }
+
   async requestSync(): Promise<NookdSocketResult> {
     return this.#request("notes.sync", {});
   }
@@ -226,12 +231,14 @@ export class NookdSocketClient {
       | "notes.create"
       | "notes.append"
       | "notes.update"
+      | "notes.delete"
       | "notes.sync",
     params:
       | RpcNotesSearchParams
       | RpcNotesCreateParams
       | RpcNotesAppendParams
       | RpcNotesUpdateParams
+      | RpcNotesDeleteParams
       | Record<string, never>
       | { readonly id: string },
     suppliedId?: string,
@@ -291,12 +298,14 @@ function serializeRequest(
     | "notes.create"
     | "notes.append"
     | "notes.update"
+    | "notes.delete"
     | "notes.sync",
   params:
     | RpcNotesSearchParams
     | RpcNotesCreateParams
     | RpcNotesAppendParams
     | RpcNotesUpdateParams
+    | RpcNotesDeleteParams
     | Record<string, never>
     | { readonly id: string },
 ): Uint8Array {
@@ -364,6 +373,8 @@ function serializeRequest(
     };
   } else if (method === "notes.update") {
     cleanParams = snapshotUpdateParams(params);
+  } else if (method === "notes.delete") {
+    cleanParams = snapshotDeleteParams(params);
   } else {
     if (Object.keys(params).length !== 0)
       throw new TypeError("nook-mcp: parameterless request has fields");
@@ -393,6 +404,24 @@ function serializeRequest(
  * primitive allowlisted values, so JSON.stringify cannot invoke a caller's
  * getter or toJSON hook after validation.
  */
+function snapshotDeleteParams(value: unknown): Record<string, unknown> {
+  const values = readExactDataProperties(value, ["id", "expectedRevision"]);
+  const id = values.id;
+  const expectedRevision = values.expectedRevision;
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    Buffer.byteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+    !isSafeIdentifier(id) ||
+    typeof expectedRevision !== "string" ||
+    !/^rev_[0-9a-f]{32}$/.test(expectedRevision)
+  ) {
+    throw new TypeError("nook-mcp: delete parameters are invalid");
+  }
+  return Object.freeze({ id, expectedRevision });
+}
+
 function snapshotUpdateParams(value: unknown): Record<string, unknown> {
   const values = readExactDataProperties(value, ["id", "expectedRevision", "patch"]);
   const id = values.id;

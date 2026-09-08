@@ -91,6 +91,7 @@ import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
   type CreateNoteCommand,
+  type DeleteNoteCommand,
   type NotesnookUpdatePatchField,
   type NotesnookWriteErrorCode,
   type UpdateNoteCommand,
@@ -99,6 +100,7 @@ import {
   isNotesnookWriteAdapterError,
   type AppendNoteResult,
   type CreateNoteResult,
+  type DeleteNoteResult,
   type UpdateNoteResult,
 } from "./notesnook-write-adapter.js";
 import type {
@@ -160,6 +162,7 @@ export interface NotesnookLocalWriteHandle {
   readonly createNote: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   readonly appendNote: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   readonly updateNote: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  readonly deleteNote: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
 }
 
 /** The only pending-synchronization capability the composition may consume. */
@@ -187,7 +190,11 @@ export interface NotesnookLocalWriteCompositionOptions {
 }
 
 /** The union of bounded local results the composition can return. */
-export type NotesnookLocalWriteResult = CreateNoteResult | AppendNoteResult | UpdateNoteResult;
+export type NotesnookLocalWriteResult =
+  | CreateNoteResult
+  | AppendNoteResult
+  | UpdateNoteResult
+  | DeleteNoteResult;
 
 // ---------------------------------------------------------------------------
 // Categorical errors.
@@ -523,7 +530,7 @@ function requireByteCount(value: unknown, maximum: number): number {
 }
 
 function isSyncOperation(value: unknown): value is SyncOperation {
-  return value === "create" || value === "append" || value === "update";
+  return value === "create" || value === "append" || value === "update" || value === "delete";
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +677,7 @@ interface CompositionState {
   readonly createNote: UnknownFunction;
   readonly appendNote: UnknownFunction;
   readonly updateNote: UnknownFunction;
+  readonly deleteNote: UnknownFunction | undefined;
   readonly coordinatorTarget: object;
   readonly recordLocalCommit: UnknownFunction;
   readonly requestSync: UnknownFunction;
@@ -717,6 +725,7 @@ function buildState(options: unknown): CompositionState {
     createNote: capturedMethod(adapter.methods, "createNote"),
     appendNote: capturedMethod(adapter.methods, "appendNote"),
     updateNote: capturedMethod(adapter.methods, "updateNote"),
+    deleteNote: adapter.methods["deleteNote"],
     coordinatorTarget: coordinator.target,
     recordLocalCommit: capturedMethod(coordinator.methods, "recordLocalCommit"),
     requestSync: capturedMethod(coordinator.methods, "requestSync"),
@@ -820,6 +829,18 @@ function copyUpdateResult(raw: unknown): UpdateNoteResult {
     remoteSynced: false as const,
     pendingSync: true as const,
   }) as unknown as UpdateNoteResult;
+}
+
+function copyDeleteResult(raw: unknown): DeleteNoteResult {
+  const record = requireRecord(raw);
+  const { id } = requireLocalReceipt("delete", record);
+  return freezeSealed({
+    operation: "delete" as const,
+    id,
+    localCommitted: true as const,
+    remoteSynced: false as const,
+    pendingSync: true as const,
+  }) as unknown as DeleteNoteResult;
 }
 
 function copyAppliedFields(value: unknown): readonly NotesnookUpdatePatchField[] {
@@ -1182,6 +1203,21 @@ export class NotesnookLocalWriteComposition {
     const state = requireState(this);
     return gate(state, "local:update", () =>
       runLocalOperation(state, "update", () => state.updateNote, command, copyUpdateResult),
+    );
+  }
+
+  /** Soft-delete exactly one note locally, then record it as pending. */
+  async deleteNote(command: DeleteNoteCommand): Promise<DeleteNoteResult> {
+    const state = requireState(this);
+    if (state.deleteNote === undefined) fail("invalid_input");
+    return gate(state, "local:delete", () =>
+      runLocalOperation(
+        state,
+        "delete",
+        () => state.deleteNote as UnknownFunction,
+        command,
+        copyDeleteResult,
+      ),
     );
   }
 

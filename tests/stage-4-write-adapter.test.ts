@@ -1305,7 +1305,9 @@ describe("Stage 4 write adapter — structural seam hardening", () => {
     const adapter = createNotesnookWriteAdapter({ source: database, codec });
     const protoNames = Object.getOwnPropertyNames(Object.getPrototypeOf(adapter)).sort();
     expect(protoNames).toEqual(
-      (["constructor", "createNote", "appendNote", "updateNote"] as string[]).slice().sort(),
+      (["constructor", "createNote", "appendNote", "updateNote", "deleteNote"] as string[])
+        .slice()
+        .sort(),
     );
     expect((adapter as unknown as { database?: unknown }).database).toBeUndefined();
     expect((adapter as unknown as { delete?: unknown }).delete).toBeUndefined();

@@ -46,9 +46,11 @@ import {
   isNotesnookWriteContractError,
   planAppendNote,
   planCreateNote,
+  planDeleteNote,
   planUpdateNote,
   type AppendNoteCommand,
   type CreateNoteCommand,
+  type DeleteNoteCommand,
   type NotesnookRevisionState,
   type NotesnookRevisionToken,
   type NotesnookUpdatePatchField,
@@ -161,6 +163,7 @@ export interface NotesnookWriteDatabase {
     readonly content: NotesnookStoredContent;
   }) => Promise<string>;
   readonly notesUpdate: (ids: readonly string[], partial: Record<string, unknown>) => Promise<void>;
+  readonly notesDelete?: (id: string) => Promise<void>;
   readonly notesTouch: (ids: readonly string[], dateEdited: number) => Promise<void>;
   readonly contentAdd: (partial: Record<string, unknown>) => Promise<string>;
   readonly contentUpdateByNoteId: (
@@ -225,6 +228,11 @@ export interface UpdateNoteResult extends WriteOutcomeFlags {
   readonly id: string;
   readonly appliedFields: readonly NotesnookUpdatePatchField[];
   readonly contentBytes?: number;
+}
+
+export interface DeleteNoteResult extends WriteOutcomeFlags {
+  readonly operation: "delete";
+  readonly id: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +643,34 @@ export class NotesnookWriteAdapter {
     return Object.freeze(result);
   }
 
+  /**
+   * Soft-delete exactly one note through the pinned `notes.moveToTrash`
+   * projection.  Metadata is re-read immediately before this sole
+   * mutation, and every locked/conflicted/stale state fails closed.
+   */
+  async deleteNote(command: DeleteNoteCommand): Promise<DeleteNoteResult> {
+    const snapshot = snapshotDeleteCommand(command);
+    const plan = planDeleteNote(snapshot);
+    const observed = await this.#readNoteFreshly(plan.id);
+    this.#assertCanWrite(observed, plan.expectedRevision);
+    try {
+      const notesDelete = this.#database.notesDelete;
+      if (notesDelete === undefined) {
+        throw adapterError("invalid_input", "Notesnook write adapter: delete unavailable");
+      }
+      await this.#safe("notesDelete", () => notesDelete(plan.id));
+    } catch {
+      throw adapterError("sync_failed", "Notesnook write adapter: delete failed");
+    }
+    return Object.freeze({
+      operation: "delete" as const,
+      id: plan.id,
+      localCommitted: true as const,
+      remoteSynced: false as const,
+      pendingSync: true as const,
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Internals.
   // -------------------------------------------------------------------------
@@ -762,6 +798,42 @@ function snapshotUpdateCommand(command: UpdateNoteCommand): UpdateNoteCommand {
   snapshot.patch = snapshotPatch(snapshotProperty(record, "patch"));
   snapshot.expectedRevision = snapshotProperty(record, "expectedRevision");
   return Object.freeze(snapshot) as unknown as UpdateNoteCommand;
+}
+
+function snapshotDeleteCommand(command: DeleteNoteCommand): DeleteNoteCommand {
+  const record = command as unknown as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  let keys: PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(record);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: delete command rejected");
+  }
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(record, key);
+    } catch {
+      throw adapterError("invalid_input", "Notesnook write adapter: delete command rejected");
+    }
+    if (descriptor?.enumerable !== true) continue;
+    if (key !== "id" && key !== "expectedRevision") {
+      Object.defineProperty(snapshot, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: undefined,
+      });
+      continue;
+    }
+    snapshot[key] = snapshotProperty(record, key);
+  }
+  if (!Object.prototype.hasOwnProperty.call(snapshot, "id")) snapshot.id = undefined;
+  if (!Object.prototype.hasOwnProperty.call(snapshot, "expectedRevision")) {
+    snapshot.expectedRevision = undefined;
+  }
+  return Object.freeze(snapshot) as unknown as DeleteNoteCommand;
 }
 
 function snapshotProperty(record: Record<string, unknown>, key: string): unknown {
