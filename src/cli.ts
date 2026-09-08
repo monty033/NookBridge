@@ -345,7 +345,7 @@ async function runNotes(args: Args): Promise<number> {
               const { createProductionNotesRuntime } = await import(
                 "./operator/notes-production-runtime.js"
               );
-              return createProductionNotesRuntime({ stateDir });
+              return createProductionNotesRuntime({ environment });
             })()
           : await injectedProduction(stateDir);
       cleanup = production.cleanup;
