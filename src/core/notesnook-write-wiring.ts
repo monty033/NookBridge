@@ -227,9 +227,33 @@ export function bindNotesnookWriteRuntime(
 
   const note = async (id: string): Promise<NotesnookWriteNoteMetadata | undefined> => {
     const safeId = requireIdentifier(id);
-    const result = await safeCall(() => snapshot.notes.note(safeId));
-    if (result === undefined) return undefined;
-    return mapNote(result, safeId);
+    const noteResult = await safeCall(() => snapshot.notes.note(safeId));
+    if (noteResult === undefined) return undefined;
+    // Fetch the stored content in parallel only when the upstream
+    // `note.locked` field is absent (Astra finding P1-2).  When the
+    // note record explicitly supplies the flag, that value is the
+    // source of truth and the content lookup is wasted work.
+    const noteRecord =
+      typeof noteResult === "object" && noteResult !== null
+        ? (noteResult as unknown as Record<string, unknown>)
+        : undefined;
+    const hasExplicitLocked =
+      noteRecord !== undefined && Object.prototype.hasOwnProperty.call(noteRecord, "locked");
+    let contentLocked: boolean | undefined;
+    if (hasExplicitLocked) {
+      contentLocked = undefined;
+    } else {
+      try {
+        const contentResult = await safeCall(() => snapshot.content.findByNoteId(safeId));
+        contentLocked =
+          contentResult !== undefined && contentResult !== null && typeof contentResult === "object"
+            ? readOptionalLockedMarker(contentResult)
+            : undefined;
+      } catch {
+        contentLocked = undefined;
+      }
+    }
+    return mapNote(noteResult, safeId, contentLocked);
   };
 
   const notesAdd = async (input: {
@@ -792,15 +816,18 @@ function mapRelationInput(value: unknown): {
   return { fromId, toId, type };
 }
 
-function mapNote(value: unknown, requestedId: string): NotesnookWriteNoteMetadata {
+function mapNote(
+  value: unknown,
+  requestedId: string,
+  contentLocked: boolean | undefined,
+): NotesnookWriteNoteMetadata {
   const record = requireObject(value, "invalid_input");
   const id = requireIdentifier(requireOwnProperty(record, "id", "invalid_input"));
   const title = requireString(requireOwnProperty(record, "title", "invalid_input"));
   const pinned = requireOwnProperty(record, "pinned", "invalid_input");
   const favorite = requireOwnProperty(record, "favorite", "invalid_input");
   const conflicted = requireOwnProperty(record, "conflicted", "invalid_input");
-  const lockedProperty = readOwnProperty(record, "locked", "invalid_input");
-  const locked = lockedProperty.present ? lockedProperty.value : false;
+  const locked = resolveLockedState(record, contentLocked);
   const dateEdited = requireOwnProperty(record, "dateEdited", "invalid_input");
   if (
     typeof pinned !== "boolean" ||
@@ -840,6 +867,33 @@ function mapNote(value: unknown, requestedId: string): NotesnookWriteNoteMetadat
   return Object.freeze(result);
 }
 
+/**
+ * Resolve the authoritative locked marker for a note (Astra finding
+ * P1-2).  When the upstream `note.locked` field is supplied, that
+ * value is the source of truth — even if it disagrees with the
+ * content marker, the adapter honors what upstream actually returned.
+ *
+ * When `note.locked` is absent the projection consults the content
+ * record's `locked` marker (`content.locked` is the canonical Vault
+ * flag in Notesnook).  The seam derives this hint through a single
+ * `content.findByNoteId(id)` call performed alongside `notes.note(id)`
+ * so the adapter's gate receives the merged projection without a
+ * follow-up fetch.
+ *
+ * When neither the note record nor the content record carries the
+ * marker, the projection fails closed: `locked` is `false`, the
+ * authoritative check remains a non-issue, and the gate does not
+ * falsely raise `vault_locked`.
+ */
+function resolveLockedState(record: object, contentLocked: boolean | undefined): boolean {
+  const noteProperty = readOwnProperty(record, "locked", "invalid_input");
+  if (noteProperty.present && noteProperty.value !== undefined) {
+    if (typeof noteProperty.value !== "boolean") throw wiringError("invalid_input");
+    return noteProperty.value;
+  }
+  return contentLocked === true;
+}
+
 function mapContent(value: unknown, requestedNoteId: string): NotesnookWriteStoredContent {
   const record = requireObject(value, "invalid_input");
   const id = requireIdentifier(requireOwnProperty(record, "id", "invalid_input"));
@@ -847,9 +901,33 @@ function mapContent(value: unknown, requestedNoteId: string): NotesnookWriteStor
   const type = requireOwnProperty(record, "type", "invalid_input");
   const data = requireString(requireOwnProperty(record, "data", "invalid_input"));
   if (noteId !== requestedNoteId) throw wiringError("invalid_input");
-  if (type === "tiptap") return Object.freeze({ id, noteId, type: "tiptap", data });
-  if (type === "tiny") return Object.freeze({ id, noteId, type: "html", data });
+  const locked = readOptionalLockedMarker(record);
+  if (type === "tiptap") {
+    return locked === undefined
+      ? Object.freeze({ id, noteId, type: "tiptap", data })
+      : Object.freeze({ id, noteId, type: "tiptap", data, locked });
+  }
+  if (type === "tiny") {
+    return locked === undefined
+      ? Object.freeze({ id, noteId, type: "html", data })
+      : Object.freeze({ id, noteId, type: "html", data, locked });
+  }
   throw wiringError("invalid_input");
+}
+
+/**
+ * Read the optional `locked` marker off a runtime record.  Returns
+ * `undefined` when the field is absent, `true` / `false` when present
+ * and a boolean, and throws a categorically-safe `invalid_input` when
+ * the field is present but the wrong shape.
+ */
+function readOptionalLockedMarker(record: object): boolean | undefined {
+  const property = readOwnProperty(record, "locked", "invalid_input");
+  if (!property.present) return undefined;
+  const value = property.value;
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw wiringError("invalid_input");
+  return value;
 }
 
 function mapTag(

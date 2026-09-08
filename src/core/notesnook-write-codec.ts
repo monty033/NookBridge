@@ -97,6 +97,117 @@ function requireStoredType(value: unknown): "tiptap" | "html" {
   refuse();
 }
 
+// ---------------------------------------------------------------------------
+// Markdown construct fidelity gate (Astra finding P1-7).
+//
+// The deterministic codec emits a deliberately tiny subset of Markdown:
+// `h1` / `h2` / `h3`, unordered lists, paragraphs, and a small inline
+// mark set.  Constructs the codec does not round-trip safely MUST be
+// refused before the adapter mutates a note so a full replacement never
+// silently downgrades the content shape.
+//
+// The gate detects every construct present in the input (supported and
+// unsupported) and throws on the first unsupported construct so the
+// adapter can normalise the refusal to `unsupported_content`.
+// ---------------------------------------------------------------------------
+
+export type MarkdownConstruct =
+  | "heading-1"
+  | "heading-2"
+  | "heading-3"
+  | "unordered-list"
+  | "task-list"
+  | "paragraph"
+  | "inline-bold"
+  | "inline-italic"
+  | "inline-code"
+  | "markdown-table"
+  | "fenced-code-block"
+  | "link-or-image"
+  | "attachment-reference"
+  | "inline-html";
+
+/**
+ * The closed list of Markdown constructs the codec supports.  Anything
+ * detected in the input that is not in this set triggers a refusal.
+ */
+export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Object.freeze(
+  new Set<MarkdownConstruct>([
+    "heading-1",
+    "heading-2",
+    "heading-3",
+    "unordered-list",
+    "paragraph",
+    "inline-bold",
+    "inline-italic",
+    "inline-code",
+  ]),
+);
+
+/**
+ * Human-readable names for the Markdown constructs the deterministic
+ * codec refuses.  Exposed for the write adapter and operator-facing
+ * documentation; tests assert membership.
+ */
+export const UNSUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlyArray<string> = Object.freeze([
+  "markdown-table",
+  "task-list",
+  "attachment-reference",
+  "fenced-code-block",
+  "link-or-image",
+  "inline-html",
+]);
+
+/**
+ * Detect every construct in `markdown`.  Throws when the input is not a
+ * bounded string; otherwise returns the frozen set of detected
+ * constructs.  The detection is total over accepted input.
+ */
+export function detectMarkdownConstructs(
+  markdown: string,
+  maxBytes: number,
+): ReadonlySet<MarkdownConstruct> {
+  const safe = requireBoundedMarkdown(markdown, maxBytes);
+  const observed = new Set<MarkdownConstruct>();
+  const lines = safe.split("\n");
+  for (const line of lines) {
+    if (/^#{1,3} +/.test(line)) {
+      const level = line.startsWith("### ") ? 3 : line.startsWith("## ") ? 2 : 1;
+      observed.add(level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3");
+    } else if (/^[-*] +\[ \] +/.test(line) || /^[-*] +\[x\] +/.test(line)) {
+      observed.add("task-list");
+    } else if (/^[-*] +/.test(line)) {
+      observed.add("unordered-list");
+    } else if (/^\|.+\|/.test(line) || /^\s*-{3,}\s*$/.test(line)) {
+      observed.add("markdown-table");
+    } else if (line.trim().length > 0) {
+      observed.add("paragraph");
+    }
+    if (/!\[[^\]\n]*\]\([^)\n]*\)/.test(line)) observed.add("attachment-reference");
+    if (/!\[\[[^\]\n]*\]\]/.test(line)) observed.add("attachment-reference");
+    if (/```/.test(line)) observed.add("fenced-code-block");
+    if (/\[[^\]\n]+\]\([^)\n]+\)/.test(line)) observed.add("link-or-image");
+    if (/\*\*[^*\n]+\*\*/.test(line)) observed.add("inline-bold");
+    if (/(^|[^*])\*[^*\n]+\*(?!\*)/.test(line)) observed.add("inline-italic");
+    if (/`[^`\n]+`/.test(line)) observed.add("inline-code");
+    if (/<[a-zA-Z][^>\n]*>/.test(line)) observed.add("inline-html");
+  }
+  return Object.freeze(observed);
+}
+
+/**
+ * Throw when `markdown` contains a construct outside
+ * {@link SUPPORTED_MARKDOWN_CONSTRUCTS}.  The error message is
+ * chain-free; the adapter normalises the throw to
+ * `unsupported_content`.
+ */
+export function assertSupportedConstructs(markdown: string, maxBytes: number): void {
+  const observed = detectMarkdownConstructs(markdown, maxBytes);
+  for (const construct of observed) {
+    if (!SUPPORTED_MARKDOWN_CONSTRUCTS.has(construct)) refuse();
+  }
+}
+
 /**
  * Escape every HTML-significant byte.  Applied to operator text BEFORE any
  * structural tag is added, so operator input can never become markup.

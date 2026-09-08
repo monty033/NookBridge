@@ -40,6 +40,7 @@ import { Buffer } from "node:buffer";
 
 import {
   NotesnookWriteContractError,
+  STAGE4_WRITE_LIMITS,
   assertRevisionMatch,
   createRevisionToken,
   isNotesnookWriteContractError,
@@ -53,6 +54,7 @@ import {
   type NotesnookUpdatePatchField,
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
+import { assertSupportedConstructs } from "./notesnook-write-codec.js";
 
 // ---------------------------------------------------------------------------
 // Markdown → stored-content codec seam.
@@ -119,12 +121,20 @@ export interface NotesnookWriteNoteMetadata {
 /**
  * The narrow stored-content shape a Stage 4 append / update reads.
  * Body content stays in the seam; the adapter never widens it.
+ *
+ * `locked` is the authoritative Notesnook Vault marker carried on the
+ * stored content record (Astra finding P1-2).  When the upstream
+ * `notes.note(id)` projection omits the deprecated `note.locked`
+ * flag, the seam consults `content.findByNoteId(id).locked` and
+ * surfaces it here so the adapter's `vault_locked` gate can refuse
+ * the write without a follow-up fetch.
  */
 export interface NotesnookWriteStoredContent {
   readonly id: string;
   readonly noteId: string;
   readonly type: "tiptap" | "html";
   readonly data: string;
+  readonly locked?: boolean;
 }
 
 /**
@@ -269,6 +279,20 @@ export class NotesnookWriteAdapter {
       await this.#validateTags(plan.tags);
     }
 
+    // Step 2.5 — fidelity gate.  Refuse Markdown constructs the codec
+    // cannot round-trip (Astra finding P1-7).  The throw is normalised
+    // to `unsupported_content` so the categorical boundary stays
+    // closed.  Runs before any mutator so the unsupported construct is
+    // never silently downgraded to a paragraph.
+    try {
+      assertSupportedConstructs(snapshot.content, STAGE4_WRITE_LIMITS.maxContentBytes);
+    } catch {
+      throw adapterError(
+        "unsupported_content",
+        "Notesnook write adapter: create content uses an unsupported construct",
+      );
+    }
+
     // Step 3 — translate Markdown to the stored representation via the
     // injected codec.  Any throw is normalised to `unsupported_content`.
     // The contract only stores byte counts here; the raw Markdown is
@@ -363,6 +387,17 @@ export class NotesnookWriteAdapter {
       );
     }
 
+    // Fidelity gate.  Refuse Markdown constructs the codec cannot
+    // round-trip before any mutator fires (Astra finding P1-7).
+    try {
+      assertSupportedConstructs(snapshot.markdownFragment, STAGE4_WRITE_LIMITS.maxFragmentBytes);
+    } catch {
+      throw adapterError(
+        "unsupported_content",
+        "Notesnook write adapter: append fragment uses an unsupported construct",
+      );
+    }
+
     let next: NotesnookStoredContent;
     try {
       next = this.#codec.appendMarkdownToStoredContent({
@@ -430,6 +465,16 @@ export class NotesnookWriteAdapter {
     let preparedContent: NotesnookStoredContent | undefined;
     if (plan.patchFields.includes("content")) {
       const newContent = patch.content as string;
+      // Fidelity gate.  Refuse Markdown constructs the codec cannot
+      // round-trip before any mutator fires (Astra finding P1-7).
+      try {
+        assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
+      } catch {
+        throw adapterError(
+          "unsupported_content",
+          "Notesnook write adapter: update content uses an unsupported construct",
+        );
+      }
       contentBytes = Buffer.byteLength(newContent, "utf8");
       const stored = await this.#safe("contentFindByNoteId", () =>
         this.#database.contentFindByNoteId(plan.id),
