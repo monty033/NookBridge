@@ -106,6 +106,19 @@ export interface ServiceRuntime {
       Readonly<{
         id: string;
         title: string;
+        parentId?: string;
+        dateCreated?: number;
+        dateModified?: number;
+      }>
+    >
+  >;
+  /** Full hierarchy-proven notebook enumeration for boot-time settings. */
+  readonly listNotebooksForSettings?: () => Promise<
+    ReadonlyArray<
+      Readonly<{
+        id: string;
+        title: string;
+        parentId?: string;
         dateCreated?: number;
         dateModified?: number;
       }>
@@ -276,6 +289,33 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
+  const listNotebooksForSettingsSource = readOnly.listNotebooksWithParents;
+  const listNotebooksForSettings =
+    listNotebooksForSettingsSource === undefined
+      ? undefined
+      : async (): Promise<
+          ReadonlyArray<
+            Readonly<{
+              id: string;
+              title: string;
+              parentId?: string;
+              dateCreated?: number;
+              dateModified?: number;
+            }>
+          >
+        > => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          try {
+            return Object.freeze(
+              (await listNotebooksForSettingsSource()).map((notebook) =>
+                Object.freeze({ ...notebook }),
+              ),
+            );
+          } catch {
+            throw serviceRuntimeError("service runtime notebook hierarchy listing failed");
+          }
+        };
+
   const noteMetadata = async (
     id: string,
   ): Promise<
@@ -385,6 +425,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     search,
     status,
     listNotebooks,
+    ...(listNotebooksForSettings === undefined ? {} : { listNotebooksForSettings }),
     noteMetadata,
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),

@@ -348,7 +348,15 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
         // without making the production type wider than necessary.
         const slotNames = Object.keys(runtime);
         expect(slotNames.sort()).toEqual(
-          ["cleanup", "listNotebooks", "noteMetadata", "readOnly", "search", "status"].sort(),
+          [
+            "cleanup",
+            "listNotebooks",
+            "listNotebooksForSettings",
+            "noteMetadata",
+            "readOnly",
+            "search",
+            "status",
+          ].sort(),
         );
         const denied = [
           "providerFactory",

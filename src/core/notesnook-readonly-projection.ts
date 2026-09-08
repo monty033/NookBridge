@@ -244,6 +244,9 @@ export function flattenLiveDatabaseToReadOnly(
     "notebook",
     "Notesnook read-only projection: notebooks.notebook is unavailable",
   );
+  // Notebook records do not carry parentId in the pinned core. The
+  // read-only breadcrumbs API is therefore required to prove ancestry.
+  const breadcrumbsFn = readOptionalManagerMethod(notebooks, "breadcrumbs");
   const noteFn = readManagerMethod(
     notes,
     "note",
@@ -336,6 +339,46 @@ export function flattenLiveDatabaseToReadOnly(
         if (notebook === undefined || notebook === null) continue;
         const summary = coerceUpstreamNotebookToSummary(notebook);
         if (summary !== undefined) summaries.push(summary);
+      }
+      return summaries as never;
+    },
+
+    // Boot-time settings indexing uses a separate, full enumeration. It
+    // proves every parent through the pinned read-only breadcrumbs API and
+    // intentionally does not inherit the RPC corpus cap.
+    listNotebooksWithParents: async (): Promise<
+      NotesnookReadOnlyDatabase["listNotebooks"] extends () => Promise<infer R> ? R : never
+    > => {
+      if (breadcrumbsFn === undefined) {
+        throw projectionError(
+          "Notesnook read-only projection: notebooks.breadcrumbs is unavailable",
+        );
+      }
+      const ids = await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids");
+      const summaries: Array<{
+        readonly id: string;
+        readonly title: string;
+        readonly parentId?: string;
+        readonly dateCreated?: number;
+        readonly dateModified?: number;
+      }> = [];
+      for (const id of ids) {
+        const notebook = await callThrough(
+          notebookFn,
+          [id],
+          "Notesnook read-only projection: notebooks.notebook rejected",
+        );
+        if (notebook === undefined || notebook === null) {
+          throw projectionError(
+            "Notesnook read-only projection: notebook enumeration is incomplete",
+          );
+        }
+        const summary = coerceUpstreamNotebookToSummary(notebook);
+        if (summary === undefined) {
+          throw projectionError("Notesnook read-only projection: notebook enumeration is invalid");
+        }
+        const parentId = await readNotebookParentId(breadcrumbsFn, id, summary);
+        summaries.push(parentId === undefined ? summary : { ...summary, parentId });
       }
       return summaries as never;
     },
@@ -564,6 +607,27 @@ function readManagerMethod(
   };
 }
 
+/** Optional capture used by hierarchy proof; listNotebooks() rejects absence. */
+function readOptionalManagerMethod(
+  manager: unknown,
+  slot: string,
+): ((...args: unknown[]) => unknown) | undefined {
+  let fn: unknown;
+  try {
+    fn = (manager as Record<string, unknown>)[slot];
+  } catch {
+    return undefined;
+  }
+  if (typeof fn !== "function") return undefined;
+  return (...args: unknown[]) => {
+    try {
+      return (fn as (...args: unknown[]) => unknown).apply(manager, args);
+    } catch {
+      throw projectionError(`Notesnook read-only projection: ${slot} threw synchronously`);
+    }
+  };
+}
+
 /**
  * Read a database-level method (lastSynced / hasUnsyncedChanges) and
  * wrap it so the call binds to the database instance.
@@ -761,6 +825,7 @@ function coerceUpstreamNotebookToSummary(value: unknown):
   | {
       readonly id: string;
       readonly title: string;
+      readonly parentId?: string;
       readonly dateCreated?: number;
       readonly dateModified?: number;
     }
@@ -805,6 +870,42 @@ function coerceUpstreamNotebookToSummary(value: unknown):
     (out as { dateModified?: number }).dateModified = dateModified;
   }
   return out;
+}
+
+/** Convert root-to-leaf pinned-core breadcrumbs into a proven parent id. */
+async function readNotebookParentId(
+  breadcrumbsFn: (...args: unknown[]) => unknown,
+  notebookId: string,
+  summary: { readonly id: string; readonly title: string },
+): Promise<string | undefined> {
+  const raw = await callThrough<unknown>(
+    breadcrumbsFn,
+    [notebookId],
+    "Notesnook read-only projection: notebooks.breadcrumbs rejected",
+  );
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw projectionError("Notesnook read-only projection: notebook breadcrumbs are invalid");
+  }
+  const records: Array<{ readonly id: string; readonly title: string }> = [];
+  for (const value of raw) {
+    if (value === null || typeof value !== "object") {
+      throw projectionError("Notesnook read-only projection: notebook breadcrumbs are invalid");
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.id !== "string" ||
+      record.id.length === 0 ||
+      typeof record.title !== "string"
+    ) {
+      throw projectionError("Notesnook read-only projection: notebook breadcrumbs are invalid");
+    }
+    records.push({ id: record.id, title: record.title });
+  }
+  const last = records[records.length - 1];
+  if (last === undefined || last.id !== summary.id || last.title !== summary.title) {
+    throw projectionError("Notesnook read-only projection: notebook breadcrumbs are incomplete");
+  }
+  return records.length > 1 ? records[records.length - 2]?.id : undefined;
 }
 
 /**

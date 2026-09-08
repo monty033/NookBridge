@@ -14,6 +14,11 @@ import type { NookdServerHandle, StartNookdServerOptions } from "../src/service/
 
 const CONFIG_PATH = "/etc/nookbridge/service.json";
 const CREDENTIALS_DIRECTORY = "/run/credentials/nookbridge.service";
+const SETTINGS_TEXT = JSON.stringify({
+  version: 1,
+  defaults: { read: true, edit: false, create: false, delete: false },
+  overrides: [],
+});
 const CONFIG: ServiceConfig = Object.freeze({
   stateDir: "/var/lib/nookbridge",
   socketPath: "/run/nookbridge/nookbridge.sock",
@@ -50,6 +55,7 @@ function fakeHandle(): NookdServerHandle {
 function runtimeFixture(cleanup: ReturnType<typeof vi.fn>): NookdStartupRuntime {
   return Object.freeze({
     search: vi.fn(async () => [{ title: "result" }]),
+    listNotebooksForSettings: vi.fn(async () => [{ id: "root", title: "Root" }]),
     cleanup,
   });
 }
@@ -59,6 +65,7 @@ function factoriesFixture(overrides: Partial<NookdStartupFactories> = {}): Nookd
     loadConfig: vi.fn((_: string): LoadServiceConfigResult => ({ ok: true, config: CONFIG })),
     createKeyStore: vi.fn(() => productionKeys),
     createRuntime: vi.fn(async () => runtimeFixture(vi.fn(async () => undefined))),
+    readSettingsFile: vi.fn(() => SETTINGS_TEXT),
     startServer: vi.fn(async () => fakeHandle()),
     ...overrides,
   };
@@ -281,6 +288,9 @@ describe("bounded nookd startup composition", () => {
       get search() {
         searchReads += 1;
         return search;
+      },
+      get listNotebooksForSettings() {
+        return async () => [{ id: "root", title: "Root" }];
       },
       get cleanup() {
         cleanupReads += 1;
