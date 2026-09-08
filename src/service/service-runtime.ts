@@ -67,6 +67,7 @@ import {
   createProductionRuntimeCore,
   type ProductionRuntimeCore,
 } from "../auth/live-login-runtime.js";
+import { resolveExactNotePath, type ExactNotePathResolution } from "./exact-note-path-resolver.js";
 
 export type CreateProductionServiceRuntimeOptions = Readonly<{
   stateDir: string;
@@ -142,6 +143,8 @@ export interface ServiceRuntime {
       }>
     | undefined
   >;
+  /** Resolve one exact hierarchical note path to an opaque id and revision. */
+  readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
   /** Optional bounded local note creation capability. */
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   /** Optional bounded local note append capability. */
@@ -349,6 +352,19 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
+  const resolveNotePath =
+    listNotebooksForSettings === undefined
+      ? undefined
+      : async (path: string): Promise<ExactNotePathResolution> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          const notebooks = await listNotebooksForSettings();
+          return resolveExactNotePath(path, {
+            notebooks,
+            listNotes: () => readOnly.listNotes(),
+            noteMetadata,
+          });
+        };
+
   const localWrite = core.handle.localWrite;
   const createNote =
     localWrite === undefined
@@ -450,6 +466,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     listNotebooks,
     ...(listNotebooksForSettings === undefined ? {} : { listNotebooksForSettings }),
     noteMetadata,
+    ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
