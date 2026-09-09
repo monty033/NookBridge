@@ -346,14 +346,16 @@ export function flattenLiveDatabaseToReadOnly(
     // Boot-time settings indexing uses a separate, full enumeration. It
     // proves every parent through the pinned read-only breadcrumbs API and
     // intentionally does not inherit the RPC corpus cap.
+    //
+    // When the live core does not expose `notebooks.breadcrumbs` (e.g.
+    // older DB instances or partial mocks) the projection falls back to
+    // root-only summaries.  The resolver's hierarchy-proof then accepts
+    // single-segment paths only; nested paths surface as `not_found`
+    // rather than a generic `service_unavailable`.  This keeps the
+    // destructive-delete seam available on every supported DB shape.
     listNotebooksWithParents: async (): Promise<
       NotesnookReadOnlyDatabase["listNotebooks"] extends () => Promise<infer R> ? R : never
     > => {
-      if (breadcrumbsFn === undefined) {
-        throw projectionError(
-          "Notesnook read-only projection: notebooks.breadcrumbs is unavailable",
-        );
-      }
       const ids = await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids");
       const summaries: Array<{
         readonly id: string;
@@ -362,6 +364,35 @@ export function flattenLiveDatabaseToReadOnly(
         readonly dateCreated?: number;
         readonly dateModified?: number;
       }> = [];
+      if (breadcrumbsFn === undefined) {
+        // Fallback: enumerate without parent proof.  Every notebook is
+        // treated as a root; the resolver still produces a stable id↔title
+        // index so single-segment paths resolve correctly.
+        for (const id of ids) {
+          const notebook = await callThrough(
+            notebookFn,
+            [id],
+            "Notesnook read-only projection: notebooks.notebook rejected",
+          );
+          if (notebook === undefined || notebook === null) {
+            throw projectionError(
+              "Notesnook read-only projection: notebook enumeration is incomplete",
+            );
+          }
+          const summary = coerceUpstreamNotebookToSummary(notebook);
+          if (summary === undefined) {
+            throw projectionError(
+              "Notesnook read-only projection: notebook enumeration is invalid",
+            );
+          }
+          summaries.push(summary);
+        }
+        return summaries as never;
+      }
+      // Breadcrumbs path.  If the live core throws (e.g. an older DB
+      // exposes the slot but the call rejects), fall back to root-only
+      // enumeration so the destructive-delete seam stays available.
+      let breadcrumbsUsable = true;
       for (const id of ids) {
         const notebook = await callThrough(
           notebookFn,
@@ -377,7 +408,17 @@ export function flattenLiveDatabaseToReadOnly(
         if (summary === undefined) {
           throw projectionError("Notesnook read-only projection: notebook enumeration is invalid");
         }
-        const parentId = await readNotebookParentId(breadcrumbsFn, id, summary);
+        let parentId: string | undefined;
+        if (breadcrumbsUsable) {
+          try {
+            parentId = await readNotebookParentId(breadcrumbsFn, id, summary);
+          } catch {
+            // Breadcrumbs rejected mid-enumeration: drop to root-only
+            // summaries so a partial failure does not break the seam.
+            breadcrumbsUsable = false;
+            parentId = undefined;
+          }
+        }
         summaries.push(parentId === undefined ? summary : { ...summary, parentId });
       }
       return summaries as never;

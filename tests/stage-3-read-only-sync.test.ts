@@ -291,6 +291,8 @@ function createFakeLiveDatabase(
     notebookSearchIds?: string[];
     extraNotes?: Array<Readonly<Record<string, unknown>> & { id: string; title: string }>;
     conflictMarker?: "present" | "absent";
+    breadcrumbs?: (id: string) => Promise<Array<{ id: string; title: string }>>;
+    breadcrumbsThrows?: boolean;
   } = {},
 ): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -356,6 +358,15 @@ function createFakeLiveDatabase(
     notebooks: {
       all: { ids: async () => ["nb-1"] },
       notebook: async (id: string) => notebooks.get(id),
+      ...(options.breadcrumbsThrows
+        ? {
+            breadcrumbs: async () => {
+              throw new Error("breadcrumbs unavailable");
+            },
+          }
+        : options.breadcrumbs !== undefined
+          ? { breadcrumbs: options.breadcrumbs }
+          : {}),
     },
     notes: {
       all: { ids: async () => options.noteListIds ?? ["note-1"] },
@@ -860,6 +871,63 @@ describe("Stage 3 production projection and sync gate", () => {
       isNotesnookReadOnlyProjectionError,
     );
     expect(database.syncCalls).toEqual([{ type: "fetch" }]);
+  });
+
+  it("falls back to root-only summaries when notebooks.breadcrumbs is absent", async () => {
+    // The fake DB without breadcrumbs should now succeed and produce a
+    // root-only summary, not a categorical projection error.
+    const database = createFakeLiveDatabase();
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+    await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+      { id: "nb-1", title: "Work", dateModified: 11 },
+    ]);
+  });
+
+  it("uses breadcrumbs when present and surfaces parentId for nested notebooks", async () => {
+    // Synthetic nested hierarchy: parent -> child.  Both ids map to a
+    // notebook record returned by `notebooks.notebook(id)`.
+    const database = createFakeLiveDatabase({
+      breadcrumbs: async (id: string) => {
+        if (id === "nb-root") return [{ id: "nb-root", title: "Root" }];
+        if (id === "nb-child") {
+          return [
+            { id: "nb-root", title: "Root" },
+            { id: "nb-child", title: "Child" },
+          ];
+        }
+        return [];
+      },
+    });
+    // Replace the single notebook with a root+child pair.
+    const notebooks = new Map<string, { id: string; title: string; dateEdited: number }>([
+      ["nb-root", { id: "nb-root", title: "Root", dateEdited: 11 }],
+      ["nb-child", { id: "nb-child", title: "Child", dateEdited: 22 }],
+    ]);
+    const notebooksManager = database.notebooks as unknown as {
+      all: { ids: () => Promise<string[]> };
+      notebook: (
+        id: string,
+      ) => Promise<{ id: string; title: string; dateEdited: number } | undefined>;
+    };
+    notebooksManager.all = { ids: async () => ["nb-root", "nb-child"] };
+    notebooksManager.notebook = async (id: string) => notebooks.get(id);
+
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+    await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+      { id: "nb-root", title: "Root", dateModified: 11 },
+      { id: "nb-child", title: "Child", dateModified: 22, parentId: "nb-root" },
+    ]);
+  });
+
+  it("falls back to root-only summaries when notebooks.breadcrumbs throws", async () => {
+    // Some live cores expose the slot but reject the call.  The
+    // destructive-delete seam must stay available rather than surface
+    // a generic `service_unavailable`.
+    const database = createFakeLiveDatabase({ breadcrumbsThrows: true });
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+    await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+      { id: "nb-1", title: "Work", dateModified: 11 },
+    ]);
   });
 
   it("redacts hostile upstream metadata failures", async () => {
