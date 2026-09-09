@@ -63,6 +63,10 @@ export const SERVICE_CONFIG_BACKEND = "systemd-credential" as const;
  */
 export const SERVICE_CONFIG_CREDENTIAL_NAME = "nookbridge-db-key" as const;
 
+/** Explicit settings ownership mode carried by the runtime service config. */
+export const SERVICE_CONFIG_SETTINGS_BACKENDS = Object.freeze(["nix", "cli"] as const);
+export type ServiceConfigSettingsBackend = (typeof SERVICE_CONFIG_SETTINGS_BACKENDS)[number];
+
 /**
  * The closed read-policy allowlist.  Anything other than this exact
  * tuple is rejected.
@@ -106,6 +110,7 @@ export const SERVICE_CONFIG_ERROR_CATEGORIES = Object.freeze([
   "invalid_socket_group",
   "invalid_backend",
   "invalid_credential_name",
+  "invalid_settings_backend",
   "invalid_read_policy",
   "forbidden_credential_path",
   "forbidden_env_override",
@@ -151,6 +156,8 @@ export interface ServiceConfig {
   readonly socketGroup: string;
   readonly backend: typeof SERVICE_CONFIG_BACKEND;
   readonly credentialName: typeof SERVICE_CONFIG_CREDENTIAL_NAME;
+  /** Optional for backward-compatible non-Nix configs; Nix deployments set it explicitly. */
+  readonly settingsBackend?: ServiceConfigSettingsBackend;
   /** A non-empty, duplicate-free subset of the closed RpcMethod universe. */
   readonly readPolicy: ReadonlyArray<RpcMethod>;
 }
@@ -301,6 +308,7 @@ function validateFields(
     "socketGroup",
     "backend",
     "credentialName",
+    "settingsBackend",
     "readPolicy",
   ]);
 
@@ -440,6 +448,24 @@ function validateFields(
     };
   }
 
+  const rawSettingsBackend = parsed.settingsBackend;
+  if (
+    rawSettingsBackend !== undefined &&
+    (typeof rawSettingsBackend !== "string" ||
+      !SERVICE_CONFIG_SETTINGS_BACKENDS.includes(
+        rawSettingsBackend as ServiceConfigSettingsBackend,
+      ))
+  ) {
+    return {
+      ok: false,
+      error: new ServiceConfigError(
+        "invalid_settings_backend",
+        "service config settingsBackend must be nix or cli",
+      ),
+    };
+  }
+  const settingsBackend = rawSettingsBackend as ServiceConfigSettingsBackend | undefined;
+
   const readPolicy = parsed.readPolicy;
   if (!Array.isArray(readPolicy) || !isValidReadPolicy(readPolicy)) {
     return {
@@ -513,6 +539,7 @@ function validateFields(
     socketGroup,
     backend,
     credentialName,
+    ...(settingsBackend === undefined ? {} : { settingsBackend }),
     readPolicy: configReadPolicy,
   });
   return { ok: true, config };

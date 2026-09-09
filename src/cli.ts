@@ -70,6 +70,7 @@ import {
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
+import { runSettingsCommand } from "./operator/settings-cli.js";
 import {
   formatTreeHelp,
   formatTreeResult,
@@ -87,6 +88,7 @@ type Args = {
   conflictsArgs?: readonly string[];
   recoverArgs?: readonly string[];
   notesArgs?: readonly string[];
+  settingsArgs?: readonly string[];
   treeArgs?: readonly string[];
 };
 
@@ -132,6 +134,10 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
   }
   if (subcommand === "notes") {
     args.notesArgs = rest.slice();
+    return { subcommand, args };
+  }
+  if (subcommand === "settings") {
+    args.settingsArgs = rest.slice();
     return { subcommand, args };
   }
   if (subcommand === "tree") {
@@ -193,6 +199,9 @@ export async function run(argv: string[]): Promise<number> {
   if (subcommand === "notes") {
     return runNotes(args);
   }
+  if (subcommand === "settings") {
+    return runSettings(args);
+  }
   if (subcommand === "tree") {
     return runTree(args);
   }
@@ -232,6 +241,24 @@ export async function run(argv: string[]): Promise<number> {
 
   process.stdout.write(report.human + "\n");
   if (!report.ok) return 1;
+  return 0;
+}
+
+/** Dispatch the settings inspection/editing command tree. */
+async function runSettings(args: Args): Promise<number> {
+  let environment: Record<string, string | undefined>;
+  try {
+    environment = readSafeEnvSnapshot();
+  } catch {
+    process.stderr.write("nookctl settings: invalid command environment\n");
+    return 2;
+  }
+  const result = await runSettingsCommand({ argv: args.settingsArgs ?? [], env: environment });
+  if (result.kind === "error") {
+    process.stderr.write(`${result.message}\n`);
+    return result.exitCode;
+  }
+  process.stdout.write(result.message.endsWith("\n") ? result.message : `${result.message}\n`);
   return 0;
 }
 
@@ -830,6 +857,7 @@ function printHelp(): void {
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
       "  nookctl notes <help|browse|search|get|edit|undo>",
+      "  nookctl settings <show|validate|edit|reset|help>",
       "  nookctl tree <help|list>",
       "",
       "Options:",

@@ -162,6 +162,28 @@ describe("Stage 5 strict service configuration", () => {
       });
     });
 
+    it("accepts the explicit Nix settings backend discriminator", () => {
+      const file = writeJsonConfig("valid-settings-backend", {
+        ...VALID_FIXTURE,
+        settingsBackend: "nix",
+      });
+      const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
+      expect(result.config.settingsBackend).toBe("nix");
+    });
+
+    it("accepts the explicit CLI settings backend discriminator", () => {
+      const file = writeJsonConfig("valid-cli-settings-backend", {
+        ...VALID_FIXTURE,
+        settingsBackend: "cli",
+      });
+      const result = loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
+      expect(result.config.settingsBackend).toBe("cli");
+    });
+
     it("accepts the deployed outbound-sync policy", () => {
       const fixture = {
         ...VALID_FIXTURE,
