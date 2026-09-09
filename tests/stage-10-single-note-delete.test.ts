@@ -22,8 +22,6 @@ function encodeFrame(payload: object): Uint8Array {
   return frame;
 }
 
-const REVISION = "rev_00000000000000000000000000000001";
-
 describe("Stage 10 notes.delete", () => {
   it("accepts exactly an exact note path on the wire", () => {
     const request = parseRpcFrame(

@@ -703,6 +703,8 @@ function guardReadOnlyProjection(
   ensureOpen: () => void,
 ): NotesnookReadOnlyDatabase {
   const listNotebooksWithParents = readOnly.listNotebooksWithParents;
+  const findNotesByTitle = readOnly.findNotesByTitle;
+  const findNoteIdsByNotebook = readOnly.findNoteIdsByNotebook;
   return Object.freeze({
     lastSynced: async () => {
       ensureOpen();
@@ -728,11 +730,26 @@ function guardReadOnlyProjection(
             return listNotebooksWithParents();
           },
         }),
-    listNotes: async (notebookId?: string) => {
+    listNotes: async () => {
       ensureOpen();
-      return readOnly.listNotes(notebookId);
+      return readOnly.listNotes();
     },
-
+    ...(findNotesByTitle === undefined
+      ? {}
+      : {
+          findNotesByTitle: async (title: string) => {
+            ensureOpen();
+            return findNotesByTitle(title);
+          },
+        }),
+    ...(findNoteIdsByNotebook === undefined
+      ? {}
+      : {
+          findNoteIdsByNotebook: async (notebookId: string) => {
+            ensureOpen();
+            return findNoteIdsByNotebook(notebookId);
+          },
+        }),
     noteMetadata: async (id: string) => {
       ensureOpen();
       return readOnly.noteMetadata(id);

@@ -68,11 +68,7 @@ import type {
   UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
 import type { NotebookIndex } from "../settings/notebook-index.js";
-import {
-  ExactNotePathError,
-  resolveExactNotePath,
-  type ExactNotePathResolution,
-} from "./exact-note-path-resolver.js";
+import { ExactNotePathError, type ExactNotePathResolution } from "./exact-note-path-resolver.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,

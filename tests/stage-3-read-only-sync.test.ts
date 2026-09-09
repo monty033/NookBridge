@@ -828,6 +828,8 @@ describe("Stage 3 production projection and sync gate", () => {
     const readOnly = flattenLiveDatabaseToReadOnly(database);
 
     expect(Object.keys(readOnly).sort()).toEqual([
+      "findNoteIdsByNotebook",
+      "findNotesByTitle",
       "hasUnsyncedChanges",
       "lastSynced",
       "listNotebooks",
@@ -851,14 +853,18 @@ describe("Stage 3 production projection and sync gate", () => {
         locked: true,
       },
     ]);
-    await expect(readOnly.listNotes("nb-1")).resolves.toEqual([
+    expect(readOnly.findNotesByTitle).toBeTypeOf("function");
+    await expect(readOnly.findNotesByTitle!("A note")).resolves.toEqual([
       {
         id: "note-1",
         title: "A note",
         dateModified: 22,
         notebookId: "nb-1",
+        revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
       },
     ]);
+    expect(readOnly.findNoteIdsByNotebook).toBeTypeOf("function");
+    await expect(readOnly.findNoteIdsByNotebook!("nb-1")).resolves.toEqual(["note-1"]);
     await expect(readOnly.noteMetadata("note-1")).resolves.toEqual({
       id: "note-1",
       title: "A note",
