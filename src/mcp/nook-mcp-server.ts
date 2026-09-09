@@ -36,6 +36,7 @@ import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server
 import type { CallToolResult, Tool, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { parseExactNotePath } from "../service/exact-note-path-resolver.js";
 import { toMcpErrorResult, type NookMcpErrorCode } from "./errors.js";
 import { NookdSocketClient, type NookdSocketFailure } from "./socket-client.js";
 
@@ -369,9 +370,10 @@ const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
     properties: Object.freeze({
       path: Object.freeze({
         type: "string",
-        minLength: 3,
+        minLength: 1,
         maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
-        description: "Exact notebook hierarchy and note title, e.g. Outdoors/Canoe Trip.",
+        description:
+          "Exact notebook hierarchy and note title, or a root-note title without a slash.",
       }),
     }),
     required: Object.freeze(["path"]),
@@ -474,9 +476,9 @@ const updateNoteInputSchema = {
 const deleteNoteInputSchema = {
   path: z
     .string()
-    .min(3)
+    .min(1)
     .max(NOOK_MCP_MAX_NOTE_PATH_BYTES)
-    .describe("Exact notebook hierarchy and note title, e.g. Outdoors/Canoe Trip."),
+    .describe("Exact notebook hierarchy and note title, or a root-note title without a slash."),
 };
 
 const permissiveCallRequestSchema = z
@@ -932,7 +934,7 @@ function isBoundedIdentifier(value: unknown): value is string {
 function isBoundedNotePath(value: unknown): value is string {
   if (
     typeof value !== "string" ||
-    value.length < 3 ||
+    value.length === 0 ||
     value.length > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
     Buffer.byteLength(value, "utf8") > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
     hasControlCharacter(value) ||
@@ -940,11 +942,12 @@ function isBoundedNotePath(value: unknown): value is string {
   ) {
     return false;
   }
-  const segments = value.split("/");
-  return (
-    segments.length >= 2 &&
-    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
-  );
+  try {
+    parseExactNotePath(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isRevision(value: unknown): value is string {

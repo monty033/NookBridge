@@ -232,6 +232,25 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     });
   });
 
+  it("accepts a title-only root-note delete path at the MCP boundary", async () => {
+    const client = makeClient();
+    const deleteNote = vi.spyOn(client, "deleteNote").mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-delete-root",
+        ok: true,
+        result: { kind: "delete", id: "root-note" },
+      },
+    });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_delete_note", { path: "Root Note" });
+
+    expect(result.isError).toBeFalsy();
+    expect(payload(result)).toEqual({ path: "Root Note", deleted: true });
+    expect(deleteNote).toHaveBeenCalledWith({ path: "Root Note" });
+  });
+
   it("rejects malformed write inputs before invoking the socket client", async () => {
     const client = makeClient();
     const createNote = client.createNote as ReturnType<typeof vi.fn>;

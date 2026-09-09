@@ -76,12 +76,14 @@ function disposeState(state: TempState): void {
  * resolve to empty results so the read-only projection can build
  * without ever observing a real Note / Notebook record.
  */
-function createFakeRealCoreModule(): NotesnookRealCoreModule {
+function createFakeRealCoreModule(
+  options: Readonly<{ notebookLookupFailure?: boolean }> = {},
+): NotesnookRealCoreModule {
   const emptySearchResults = {
     ids: async () => [] as string[],
   };
   const emptyNotebookIds = {
-    ids: async () => [] as string[],
+    ids: async () => (options.notebookLookupFailure ? ["broken-id"] : []) as string[],
   };
   const ctor = vi.fn(function FakeDatabaseCtor() {
     return {
@@ -113,7 +115,10 @@ function createFakeRealCoreModule(): NotesnookRealCoreModule {
       },
       notebooks: {
         all: emptyNotebookIds,
-        notebook: async () => undefined,
+        notebook: async () => {
+          if (options.notebookLookupFailure) throw new Error("notebook lookup failed");
+          return undefined;
+        },
       },
       notes: {
         note: async () => undefined,
@@ -380,6 +385,35 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
           expect((runtime as unknown as Record<string, unknown>)[name]).toBeUndefined();
         }
       } finally {
+        rmSync(tempCredentialsDir, { recursive: true, force: true });
+      }
+    });
+
+    it("short-circuits a missing title before hierarchy enumeration", async () => {
+      const state = newState();
+      const tempCredentialsDir = mkdtempSync(
+        join(tmpdir(), "nookbridge-stage-5-service-title-first-"),
+      );
+      writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+        mode: 0o600,
+      });
+      const keys = createSystemdCredentialKeyStore({
+        credentialsDirectory: tempCredentialsDir,
+      });
+
+      let runtime: ServiceRuntime | undefined;
+      try {
+        runtime = await createProductionServiceRuntime({
+          stateDir: state.stateDir,
+          keys,
+          injectedModule: createFakeRealCoreModule({ notebookLookupFailure: true }),
+        });
+
+        await expect(runtime.resolveNotePath?.("General/__missing_title__")).rejects.toMatchObject({
+          code: "not_found",
+        });
+      } finally {
+        if (runtime) await runtime.cleanup();
         rmSync(tempCredentialsDir, { recursive: true, force: true });
       }
     });

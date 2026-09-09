@@ -45,6 +45,7 @@ export type ExactNotePathNote = Readonly<{
   readonly id: string;
   readonly title: string;
   readonly notebookId?: string;
+  readonly revision?: string;
 }>;
 
 export type ExactNotePathMetadata = ExactNotePathNote &
@@ -80,43 +81,22 @@ export async function resolveExactNotePath(
   source: ExactNotePathSource,
 ): Promise<ExactNotePathResolution> {
   const parsed = parseExactNotePath(path);
-  let index: ReturnType<typeof buildNotebookIndex>;
-  try {
-    index = buildNotebookIndex(source.notebooks);
-  } catch (error) {
-    if (error instanceof NotebookIndexError && error.code === "notebook_duplicate_path") {
-      throw new ExactNotePathError("ambiguous");
-    }
-    throw new ExactNotePathError("source_unavailable");
-  }
 
-  const notebookId = index.resolveId(parsed.notebookPath);
-  if (notebookId === undefined || index.resolvePath(notebookId) !== parsed.notebookPath) {
-    throw new ExactNotePathError("not_found");
-  }
-
+  // Search the title index before touching notebook hierarchy data. A
+  // missing title is definitively not_found; unrelated hierarchy/index
+  // failures must not turn that absence into service_unavailable.
   let notes: readonly ExactNotePathNote[];
-  let notebookNoteIds: readonly string[];
   try {
-    [notes, notebookNoteIds] = await Promise.all([
-      source.findNotesByTitle(parsed.noteTitle),
-      source.findNoteIdsByNotebook(notebookId),
-    ]);
+    notes = await source.findNotesByTitle(parsed.noteTitle);
   } catch {
     throw new ExactNotePathError("source_unavailable");
   }
-  if (
-    !Array.isArray(notes) ||
-    notes.length > MAX_NOTES ||
-    !Array.isArray(notebookNoteIds) ||
-    notebookNoteIds.length > MAX_NOTES ||
-    notebookNoteIds.some((id) => typeof id !== "string" || id.length === 0)
-  ) {
+  if (!Array.isArray(notes) || notes.length > MAX_NOTES) {
     throw new ExactNotePathError("source_unavailable");
   }
+  if (notes.length === 0) throw new ExactNotePathError("not_found");
 
-  const notebookNoteIdSet = new Set(notebookNoteIds);
-  const candidates: ExactNotePathNote[] = [];
+  const validatedNotes: ExactNotePathNote[] = [];
   for (const note of notes) {
     if (
       note === null ||
@@ -128,8 +108,57 @@ export async function resolveExactNotePath(
     ) {
       throw new ExactNotePathError("source_unavailable");
     }
-    if (notebookNoteIdSet.has(note.id) && note.title === parsed.noteTitle) {
-      candidates.push(note);
+    validatedNotes.push(note);
+  }
+
+  let candidates: ExactNotePathNote[];
+  if (parsed.notebookPath === undefined) {
+    candidates = validatedNotes.filter(
+      (note) => note.title === parsed.noteTitle && note.notebookId === undefined,
+    );
+  } else {
+    let index: ReturnType<typeof buildNotebookIndex>;
+    try {
+      index = buildNotebookIndex(source.notebooks);
+    } catch (error) {
+      if (error instanceof NotebookIndexError && error.code === "notebook_duplicate_path") {
+        throw new ExactNotePathError("ambiguous");
+      }
+      throw new ExactNotePathError("source_unavailable");
+    }
+
+    const notebookId = index.resolveId(parsed.notebookPath);
+    if (notebookId === undefined || index.resolvePath(notebookId) !== parsed.notebookPath) {
+      throw new ExactNotePathError("not_found");
+    }
+
+    const directCandidates = validatedNotes.filter(
+      (note) =>
+        note.title === parsed.noteTitle &&
+        note.notebookId !== undefined &&
+        note.notebookId === notebookId,
+    );
+    if (directCandidates.length > 0) {
+      candidates = directCandidates;
+    } else {
+      let notebookNoteIds: readonly string[];
+      try {
+        notebookNoteIds = await source.findNoteIdsByNotebook(notebookId);
+      } catch {
+        throw new ExactNotePathError("source_unavailable");
+      }
+      if (
+        !Array.isArray(notebookNoteIds) ||
+        notebookNoteIds.length > MAX_NOTES ||
+        notebookNoteIds.some((id) => typeof id !== "string" || id.length === 0)
+      ) {
+        throw new ExactNotePathError("source_unavailable");
+      }
+
+      const notebookNoteIdSet = new Set(notebookNoteIds);
+      candidates = validatedNotes.filter(
+        (note) => note.title === parsed.noteTitle && notebookNoteIdSet.has(note.id),
+      );
     }
   }
   if (candidates.length === 0) throw new ExactNotePathError("not_found");
@@ -137,6 +166,9 @@ export async function resolveExactNotePath(
 
   const candidate = candidates[0];
   if (candidate === undefined) throw new ExactNotePathError("source_unavailable");
+  if (typeof candidate.revision === "string" && REVISION_PATTERN.test(candidate.revision)) {
+    return Object.freeze({ id: candidate.id, expectedRevision: candidate.revision });
+  }
   let metadata: ExactNotePathMetadata | undefined;
   try {
     metadata = await source.noteMetadata(candidate.id);
@@ -156,8 +188,8 @@ export async function resolveExactNotePath(
   return Object.freeze({ id: metadata.id, expectedRevision: metadata.revision });
 }
 
-function parseExactNotePath(path: unknown): Readonly<{
-  readonly notebookPath: string;
+export function parseExactNotePath(path: unknown): Readonly<{
+  readonly notebookPath: string | undefined;
   readonly noteTitle: string;
 }> {
   if (
@@ -172,17 +204,15 @@ function parseExactNotePath(path: unknown): Readonly<{
 
   const segments = path.split("/");
   if (
-    segments.length < 2 ||
+    segments.length === 0 ||
     segments.length > MAX_PATH_SEGMENTS ||
     segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
   ) {
     throw new ExactNotePathError("invalid_path");
   }
   const noteTitle = segments[segments.length - 1];
-  const notebookPath = segments.slice(0, -1).join("/");
-  if (noteTitle === undefined || notebookPath.length === 0) {
-    throw new ExactNotePathError("invalid_path");
-  }
+  if (noteTitle === undefined) throw new ExactNotePathError("invalid_path");
+  const notebookPath = segments.length === 1 ? undefined : segments.slice(0, -1).join("/");
   return Object.freeze({ notebookPath, noteTitle });
 }
 

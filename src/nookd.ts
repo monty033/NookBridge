@@ -51,10 +51,6 @@ import {
 } from "./settings/notebook-index.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
-import {
-  resolveExactNotePath,
-  type ExactNotePathResolution,
-} from "./service/exact-note-path-resolver.js";
 
 const freeze = Object.freeze;
 const defineProperty = Object.defineProperty;
@@ -106,9 +102,10 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "createNote"
       | "appendNote"
       | "updateNote"
+      | "deleteNote"
+      | "resolveNotePath"
       | "requestSync"
       | "listNotebooksForSettings"
-      | "readOnly"
     >
   >;
 
@@ -308,11 +305,12 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let createNote: NookdStartupRuntime["createNote"];
   let appendNote: NookdStartupRuntime["appendNote"];
   let updateNote: NookdStartupRuntime["updateNote"];
+  let deleteNote: NookdStartupRuntime["deleteNote"];
+  let resolveNotePath: NookdStartupRuntime["resolveNotePath"];
   let requestSync: NookdStartupRuntime["requestSync"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
   let notebookIndex: NotebookIndex;
-  let resolveNotePath: ((path: string) => Promise<ExactNotePathResolution>) | undefined;
   let settingsPhase = false;
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -326,9 +324,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedCreateNote = runtime.createNote;
     const capturedAppendNote = runtime.appendNote;
     const capturedUpdateNote = runtime.updateNote;
+    const capturedDeleteNote = runtime.deleteNote;
+    const capturedResolveNotePath = runtime.resolveNotePath;
     const capturedRequestSync = runtime.requestSync;
     const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
-    const capturedReadOnly = runtime.readOnly;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
@@ -339,6 +338,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedCreateNote !== undefined && typeof capturedCreateNote !== "function") ||
       (capturedAppendNote !== undefined && typeof capturedAppendNote !== "function") ||
       (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function") ||
+      (capturedDeleteNote !== undefined && typeof capturedDeleteNote !== "function") ||
+      (capturedResolveNotePath !== undefined && typeof capturedResolveNotePath !== "function") ||
       (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function") ||
       typeof capturedListNotebooksForSettings !== "function"
     ) {
@@ -351,6 +352,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     createNote = capturedCreateNote;
     appendNote = capturedAppendNote;
     updateNote = capturedUpdateNote;
+    deleteNote = capturedDeleteNote;
+    resolveNotePath = capturedResolveNotePath;
     requestSync = capturedRequestSync;
     listNotebooksForSettings = capturedListNotebooksForSettings;
     runtimeCleanup = capturedCleanup;
@@ -369,22 +372,6 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       }
     }
     notebookIndex = buildNotebookIndex(notebookRecords as readonly NotebookRecord[]);
-    const capturedFindNotesByTitle = capturedReadOnly?.findNotesByTitle;
-    const capturedFindNoteIdsByNotebook = capturedReadOnly?.findNoteIdsByNotebook;
-    if (
-      capturedReadOnly !== undefined &&
-      typeof capturedFindNotesByTitle === "function" &&
-      typeof capturedFindNoteIdsByNotebook === "function" &&
-      typeof capturedNoteMetadata === "function"
-    ) {
-      resolveNotePath = (path) =>
-        resolveExactNotePath(path, {
-          notebooks: notebookRecords as readonly NotebookRecord[],
-          findNotesByTitle: (title) => capturedFindNotesByTitle(title),
-          findNoteIdsByNotebook: (notebookId) => capturedFindNoteIdsByNotebook(notebookId),
-          noteMetadata: (noteId) => capturedNoteMetadata(noteId),
-        });
-    }
     const settingsEvaluator = createSettingsEvaluator(settings, notebookIndex);
     policy = createServicePolicyFromMethods(config.readPolicy, settingsEvaluator);
   } catch {
@@ -405,6 +392,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
+    ...(deleteNote === undefined ? {} : { deleteNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     notebookIndex,

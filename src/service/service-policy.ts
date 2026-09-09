@@ -166,14 +166,9 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 
 /**
  * The closed universe of methods any `custom` policy may ever
- * admit.  `notes.delete` is intentionally absent — a caller that
- * passes it to `createCustomServicePolicy` is silently dropped
- * before the policy is constructed.  This is the structural
- * guarantee that delete is never possible through any policy.
- *
- * `notes.append`, `notes.update`, and the explicitly approval-gated
- * `notes.sync` method are admitted end-to-end; `notes.delete` is
- * structurally absent and impossible to smuggle in.
+ * admit. Bounded note creation, append, update, exact-path delete,
+ * and the explicitly approval-gated `notes.sync` method are admitted
+ * only when present in the validated configuration allowlist.
  */
 const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
   const arr: RpcMethod[] = [
@@ -194,10 +189,10 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
 /**
  * The closed universe of methods the policy engine recognises for
  * the purposes of structural validation.  The four read methods,
- * `notes.create`, `notes.append`, `notes.update`, and explicitly
- * approval-gated `notes.sync` are valid.
- * Anything else (including `notes.delete`, any future write method
- * outside the published amendment) is unknown to the policy engine
+ * `notes.create`, `notes.append`, `notes.update`, `notes.delete`, and
+ * explicitly approval-gated `notes.sync` are valid. Anything else
+ * (including any future write method outside the published amendment)
+ * is unknown to the policy engine
  * and would always be denied — but it is also never carried in a
  * custom allowlist because the factory drops anything outside
  * `CUSTOM_POLICY_ALLOWABLE_METHODS` silently.
