@@ -461,6 +461,32 @@ export function flattenLiveDatabaseToReadOnly(
       return metadata as never;
     },
 
+    findNotesByTitle: async (title: string): Promise<NotesnookReadOnlyNoteMetadata[]> => {
+      if (typeof title !== "string" || title.length === 0) {
+        throw projectionError(
+          "Notesnook read-only projection: note title must be a non-empty string",
+        );
+      }
+      const noteResults = await callThrough(
+        lookupNotesFn,
+        [title],
+        "Notesnook read-only projection: lookup.notes rejected",
+      );
+      const noteIds = await readSearchResultIds(noteResults, "lookup.notes.ids");
+      const metadata: NotesnookReadOnlyNoteMetadata[] = [];
+      for (const id of truncateIds(noteIds, MAX_SEARCH_HITS)) {
+        const note = await callThrough(
+          noteFn,
+          [id],
+          "Notesnook read-only projection: notes.note rejected",
+        );
+        if (note === undefined || note === null) continue;
+        const noteMetadata = coerceUpstreamNoteToMetadata(note, true);
+        if (noteMetadata !== undefined) metadata.push(noteMetadata);
+      }
+      return metadata;
+    },
+
     noteMetadata: async (
       id: string,
     ): Promise<

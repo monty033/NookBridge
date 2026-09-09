@@ -369,15 +369,16 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       }
     }
     notebookIndex = buildNotebookIndex(notebookRecords as readonly NotebookRecord[]);
+    const capturedFindNotesByTitle = capturedReadOnly?.findNotesByTitle;
     if (
       capturedReadOnly !== undefined &&
-      typeof capturedReadOnly.listNotes === "function" &&
+      typeof capturedFindNotesByTitle === "function" &&
       typeof capturedNoteMetadata === "function"
     ) {
       resolveNotePath = (path) =>
         resolveExactNotePath(path, {
           notebooks: notebookRecords as readonly NotebookRecord[],
-          listNotes: () => capturedReadOnly.listNotes(),
+          findNotesByTitle: (title) => capturedFindNotesByTitle(title),
           noteMetadata: (noteId) => capturedNoteMetadata(noteId),
         });
     }

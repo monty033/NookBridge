@@ -59,7 +59,8 @@ export type ExactNotePathResolution = Readonly<{
 
 export type ExactNotePathSource = Readonly<{
   readonly notebooks: readonly NotebookRecord[];
-  readonly listNotes: () => Promise<readonly ExactNotePathNote[]>;
+  /** Search-indexed candidates for the exact note title. */
+  readonly findNotesByTitle: (title: string) => Promise<readonly ExactNotePathNote[]>;
   readonly noteMetadata: (id: string) => Promise<ExactNotePathMetadata | undefined>;
 }>;
 
@@ -94,7 +95,7 @@ export async function resolveExactNotePath(
 
   let notes: readonly ExactNotePathNote[];
   try {
-    notes = await source.listNotes();
+    notes = await source.findNotesByTitle(parsed.noteTitle);
   } catch {
     throw new ExactNotePathError("source_unavailable");
   }
