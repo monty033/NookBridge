@@ -887,6 +887,12 @@ Required properties:
 - support an approved runtime secret source and fail closed if only an insecure plaintext-key fallback is available;
 - document package-manager-neutral manual installation first; distro-native packages can follow based on demand;
 - run the same live sync, permission, canary, corruption-recovery, and red-team suites used for NixOS.
+- before declaring conventional Linux support, perform a dedicated settings-CLI installation check outside `/nix/store` (for example, a direct Node/npm installation with a systemd unit that has no Nix-managed wrapper or environment override):
+  1. confirm `NOOKBRIDGE_SETTINGS_BACKEND` is unset and the CLI defaults to `cli` rather than inferring mode from an installation path;
+  2. run `nookctl settings show`, `validate`, `edit`, `set`, and `reset` against the selected system or user settings path (`/etc/nookbridge/settings.json` or `~/.config/nookbridge/settings.json`);
+  3. verify that `edit`, `set`, and `reset` perform schema validation before committing and write atomically, with no partially written settings file after an injected failure;
+  4. restart the configured `nookd` service after a successful write and verify that it starts cleanly and reports the new settings;
+  5. repeat the check with an invalid settings document and confirm validation fails closed without replacing the last valid file.
 
 Generic Linux support is accepted only if it preserves the same security-parity invariants as the NixOS reference deployment. “Works when run as the Hermes user” is not considered a supported production configuration.
 
