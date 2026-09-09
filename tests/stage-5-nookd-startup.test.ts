@@ -282,6 +282,18 @@ describe("bounded nookd startup composition", () => {
     vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
     const cleanup = vi.fn(async () => undefined);
     const search = vi.fn(async () => []);
+    const deleteNote = vi.fn(async () => ({
+      operation: "delete" as const,
+      id: "note",
+      localCommitted: true as const,
+      remoteSynced: false as const,
+      pendingSync: true as const,
+    }));
+    const resolveNotePath = vi.fn(async () => ({
+      id: "note",
+      expectedRevision: "rev_00000000000000000000000000000001",
+    }));
+    const startServer = vi.fn(async (_options: StartNookdServerOptions) => fakeHandle());
     let searchReads = 0;
     let cleanupReads = 0;
     const runtime = {
@@ -292,6 +304,8 @@ describe("bounded nookd startup composition", () => {
       get listNotebooksForSettings() {
         return async () => [{ id: "root", title: "Root" }];
       },
+      deleteNote,
+      resolveNotePath,
       get cleanup() {
         cleanupReads += 1;
         return cleanup;
@@ -299,12 +313,18 @@ describe("bounded nookd startup composition", () => {
     };
     const factories = factoriesFixture({
       createRuntime: vi.fn(async () => runtime),
+      startServer,
     });
-
     const handle = await startNookd({ configPath: CONFIG_PATH, factories });
 
     expect(searchReads).toBe(1);
     expect(cleanupReads).toBe(1);
+    const serverRuntime = startServer.mock.calls[0]?.[0].runtime as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(serverRuntime.deleteNote).toBe(deleteNote);
+    expect(serverRuntime.resolveNotePath).toBe(resolveNotePath);
     await handle.shutdown();
     expect(cleanup).toHaveBeenCalledTimes(1);
   });

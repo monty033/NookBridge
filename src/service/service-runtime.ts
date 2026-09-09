@@ -67,7 +67,12 @@ import {
   createProductionRuntimeCore,
   type ProductionRuntimeCore,
 } from "../auth/live-login-runtime.js";
-import { resolveExactNotePath, type ExactNotePathResolution } from "./exact-note-path-resolver.js";
+import {
+  parseExactNotePath,
+  resolveExactNotePath,
+  ExactNotePathError,
+  type ExactNotePathResolution,
+} from "./exact-note-path-resolver.js";
 
 export type CreateProductionServiceRuntimeOptions = Readonly<{
   stateDir: string;
@@ -361,10 +366,31 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
       ? undefined
       : async (path: string): Promise<ExactNotePathResolution> => {
           if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
-          const notebooks = await listNotebooksForSettings();
+
+          // Validate and extract the title before touching the full notebook
+          // hierarchy. Missing titles are definitively not_found; hierarchy
+          // enumeration is only needed after a title candidate exists.
+          const parsed = parseExactNotePath(path);
+          let titleCandidates: Awaited<ReturnType<NonNullable<typeof findNotesByTitle>>>;
+          try {
+            titleCandidates = await findNotesByTitle(parsed.noteTitle);
+          } catch {
+            throw serviceRuntimeError("service runtime title search failed");
+          }
+          if (!Array.isArray(titleCandidates)) {
+            throw serviceRuntimeError("service runtime title search failed");
+          }
+          if (titleCandidates.length === 0) {
+            throw new ExactNotePathError("not_found");
+          }
+
+          const notebooks =
+            parsed.notebookPath === undefined ? [] : await listNotebooksForSettings();
           return resolveExactNotePath(path, {
             notebooks,
-            findNotesByTitle: (title) => findNotesByTitle(title),
+            // Reuse the already validated title candidates; positive paths
+            // must not perform a second live title search.
+            findNotesByTitle: async () => titleCandidates,
             findNoteIdsByNotebook: (notebookId) => findNoteIdsByNotebook(notebookId),
             noteMetadata,
           });
