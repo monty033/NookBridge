@@ -59,7 +59,10 @@ export type ExactNotePathResolution = Readonly<{
 
 export type ExactNotePathSource = Readonly<{
   readonly notebooks: readonly NotebookRecord[];
-  readonly listNotes: (notebookId: string) => Promise<readonly ExactNotePathNote[]>;
+  /** Search-indexed candidates for the exact note title. */
+  readonly findNotesByTitle: (title: string) => Promise<readonly ExactNotePathNote[]>;
+  /** Authoritative notebook membership ids from the live Notesnook manager. */
+  readonly findNoteIdsByNotebook: (notebookId: string) => Promise<readonly string[]>;
   readonly noteMetadata: (id: string) => Promise<ExactNotePathMetadata | undefined>;
 }>;
 
@@ -93,15 +96,26 @@ export async function resolveExactNotePath(
   }
 
   let notes: readonly ExactNotePathNote[];
+  let notebookNoteIds: readonly string[];
   try {
-    notes = await source.listNotes(notebookId);
+    [notes, notebookNoteIds] = await Promise.all([
+      source.findNotesByTitle(parsed.noteTitle),
+      source.findNoteIdsByNotebook(notebookId),
+    ]);
   } catch {
     throw new ExactNotePathError("source_unavailable");
   }
-  if (!Array.isArray(notes) || notes.length > MAX_NOTES) {
+  if (
+    !Array.isArray(notes) ||
+    notes.length > MAX_NOTES ||
+    !Array.isArray(notebookNoteIds) ||
+    notebookNoteIds.length > MAX_NOTES ||
+    notebookNoteIds.some((id) => typeof id !== "string" || id.length === 0)
+  ) {
     throw new ExactNotePathError("source_unavailable");
   }
 
+  const notebookNoteIdSet = new Set(notebookNoteIds);
   const candidates: ExactNotePathNote[] = [];
   for (const note of notes) {
     if (
@@ -114,7 +128,7 @@ export async function resolveExactNotePath(
     ) {
       throw new ExactNotePathError("source_unavailable");
     }
-    if (note.notebookId === notebookId && note.title === parsed.noteTitle) {
+    if (notebookNoteIdSet.has(note.id) && note.title === parsed.noteTitle) {
       candidates.push(note);
     }
   }
@@ -133,7 +147,6 @@ export async function resolveExactNotePath(
     metadata === undefined ||
     metadata.id !== candidate.id ||
     metadata.title !== parsed.noteTitle ||
-    metadata.notebookId !== notebookId ||
     typeof metadata.revision !== "string" ||
     !REVISION_PATTERN.test(metadata.revision)
   ) {
@@ -151,7 +164,7 @@ function parseExactNotePath(path: unknown): Readonly<{
     typeof path !== "string" ||
     path.length === 0 ||
     Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES ||
-    /[\u0000-\u001f\u007f]/u.test(path) ||
+    hasControlCharacter(path) ||
     path.includes("\\")
   ) {
     throw new ExactNotePathError("invalid_path");
@@ -171,4 +184,12 @@ function parseExactNotePath(path: unknown): Readonly<{
     throw new ExactNotePathError("invalid_path");
   }
   return Object.freeze({ notebookPath, noteTitle });
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }

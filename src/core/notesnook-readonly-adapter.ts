@@ -180,7 +180,11 @@ export interface NotesnookReadOnlyDatabase {
   readonly listNotebooks: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
   /** Full, hierarchy-proven enumeration reserved for boot-time policy indexing. */
   readonly listNotebooksWithParents?: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
-  readonly listNotes: (notebookId?: string) => Promise<NotesnookReadOnlyNoteMetadata[]>;
+  readonly listNotes: () => Promise<NotesnookReadOnlyNoteMetadata[]>;
+  /** Search-indexed note candidates used by the exact-path delete resolver. */
+  readonly findNotesByTitle?: (title: string) => Promise<NotesnookReadOnlyNoteMetadata[]>;
+  /** Authoritative notebook membership ids used by the exact-path resolver. */
+  readonly findNoteIdsByNotebook?: (notebookId: string) => Promise<string[]>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }
