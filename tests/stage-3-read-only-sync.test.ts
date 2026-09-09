@@ -358,6 +358,7 @@ function createFakeLiveDatabase(
     notebooks: {
       all: { ids: async () => ["nb-1"] },
       notebook: async (id: string) => notebooks.get(id),
+      notes: async (id: string) => (id === "nb-1" ? ["note-1"] : []),
       ...(options.breadcrumbsThrows
         ? {
             breadcrumbs: async () => {
@@ -827,7 +828,6 @@ describe("Stage 3 production projection and sync gate", () => {
     const readOnly = flattenLiveDatabaseToReadOnly(database);
 
     expect(Object.keys(readOnly).sort()).toEqual([
-      "findNotesByTitle",
       "hasUnsyncedChanges",
       "lastSynced",
       "listNotebooks",
@@ -851,14 +851,12 @@ describe("Stage 3 production projection and sync gate", () => {
         locked: true,
       },
     ]);
-    expect(readOnly.findNotesByTitle).toBeTypeOf("function");
-    await expect(readOnly.findNotesByTitle!("A note")).resolves.toEqual([
+    await expect(readOnly.listNotes("nb-1")).resolves.toEqual([
       {
         id: "note-1",
         title: "A note",
         dateModified: 22,
         notebookId: "nb-1",
-        revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
       },
     ]);
     await expect(readOnly.noteMetadata("note-1")).resolves.toEqual({
