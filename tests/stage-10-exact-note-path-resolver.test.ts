@@ -15,7 +15,8 @@ const revision = "rev_00000000000000000000000000000001";
 function source(notes = [{ id: "canoe", title: "Canoe Trip", notebookId: "trips" }]) {
   return {
     notebooks,
-    listNotes: async () => notes,
+    findNotesByTitle: async (title: string) =>
+      notes.filter((note) => note.title === title).map((note) => ({ ...note })),
     noteMetadata: async (id: string) => {
       const note = notes.find((value) => value.id === id);
       return note === undefined ? undefined : { ...note, revision };

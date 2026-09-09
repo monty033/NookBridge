@@ -352,15 +352,16 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
+  const findNotesByTitle = readOnly.findNotesByTitle;
   const resolveNotePath =
-    listNotebooksForSettings === undefined
+    listNotebooksForSettings === undefined || findNotesByTitle === undefined
       ? undefined
       : async (path: string): Promise<ExactNotePathResolution> => {
           if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
           const notebooks = await listNotebooksForSettings();
           return resolveExactNotePath(path, {
             notebooks,
-            listNotes: () => readOnly.listNotes(),
+            findNotesByTitle: (title) => findNotesByTitle(title),
             noteMetadata,
           });
         };

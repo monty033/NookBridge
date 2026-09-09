@@ -181,6 +181,8 @@ export interface NotesnookReadOnlyDatabase {
   /** Full, hierarchy-proven enumeration reserved for boot-time policy indexing. */
   readonly listNotebooksWithParents?: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
   readonly listNotes: () => Promise<NotesnookReadOnlyNoteMetadata[]>;
+  /** Search-indexed note candidates used by the exact-path delete resolver. */
+  readonly findNotesByTitle?: (title: string) => Promise<NotesnookReadOnlyNoteMetadata[]>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }
