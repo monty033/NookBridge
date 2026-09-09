@@ -244,6 +244,7 @@ export function flattenLiveDatabaseToReadOnly(
     "notebook",
     "Notesnook read-only projection: notebooks.notebook is unavailable",
   );
+  const notebookNotesFn = readOptionalManagerMethod(notebooks, "notes");
   // Notebook records do not carry parentId in the pinned core. The
   // read-only breadcrumbs API is therefore required to prove ancestry.
   const breadcrumbsFn = readOptionalManagerMethod(notebooks, "breadcrumbs");
@@ -424,28 +425,39 @@ export function flattenLiveDatabaseToReadOnly(
       return summaries as never;
     },
 
-    listNotes: async (): Promise<
-      NotesnookReadOnlyDatabase["listNotes"] extends () => Promise<infer R> ? R : never
-    > => {
-      const notesAll = readFilteredSelector(notes, "notes.all", "Notes");
-      const ids = await readFilteredSelectorIds(notesAll, "notes.all.ids");
+    listNotes: async (notebookId?: string): Promise<NotesnookReadOnlyNoteMetadata[]> => {
+      let ids: readonly string[];
+      if (notebookId !== undefined) {
+        if (typeof notebookId !== "string" || notebookId.length === 0) {
+          throw projectionError(
+            "Notesnook read-only projection: notebook id must be a non-empty string",
+          );
+        }
+        if (notebookNotesFn === undefined) {
+          throw projectionError("Notesnook read-only projection: notebooks.notes is unavailable");
+        }
+        const rawIds = await callThrough(
+          notebookNotesFn,
+          [notebookId],
+          "Notesnook read-only projection: notebooks.notes rejected",
+        );
+        if (
+          !Array.isArray(rawIds) ||
+          rawIds.some((id): id is unknown => typeof id !== "string" || id.length === 0)
+        ) {
+          throw projectionError(
+            "Notesnook read-only projection: notebooks.notes returned invalid ids",
+          );
+        }
+        ids = rawIds;
+      } else {
+        const notesAll = readFilteredSelector(notes, "notes.all", "Notes");
+        ids = await readFilteredSelectorIds(notesAll, "notes.all.ids");
+      }
       // PR-65 P1-5a — read-side corpus bound.  The source query did
-      // not accept a limit so we stop iterating after the published
-      // cap so a large corpus cannot drive an unbounded number of
-      // follow-up `notes.note(id)` calls.
+      // not accept a limit so we stop iterating after the published cap.
       const boundedIds = truncateIds(ids, MAX_LIST_NOTES);
-      const metadata: Array<{
-        readonly id: string;
-        readonly title: string;
-        readonly dateCreated?: number;
-        readonly dateModified?: number;
-        readonly notebookId?: string;
-        readonly pinned?: boolean;
-        readonly favorite?: boolean;
-        readonly localOnly?: boolean;
-        readonly conflicted?: boolean;
-        readonly locked?: boolean;
-      }> = [];
+      const metadata: NotesnookReadOnlyNoteMetadata[] = [];
       for (const id of boundedIds) {
         const note = await callThrough(
           noteFn,
@@ -453,36 +465,15 @@ export function flattenLiveDatabaseToReadOnly(
           "Notesnook read-only projection: notes.note rejected",
         );
         if (note === undefined || note === null) continue;
+        if (notebookId !== undefined && !hasDirectNotebookMembership(note, notebookId)) continue;
         const noteMetadata = coerceUpstreamNoteToMetadata(note);
         if (noteMetadata === undefined) continue;
+        if (notebookId !== undefined) {
+          metadata.push({ ...noteMetadata, notebookId });
+          continue;
+        }
         const locked = await readLockedState(contentFindByNoteIdFn, id);
         metadata.push(locked === true ? { ...noteMetadata, locked: true } : noteMetadata);
-      }
-      return metadata as never;
-    },
-
-    findNotesByTitle: async (title: string): Promise<NotesnookReadOnlyNoteMetadata[]> => {
-      if (typeof title !== "string" || title.length === 0) {
-        throw projectionError(
-          "Notesnook read-only projection: note title must be a non-empty string",
-        );
-      }
-      const noteResults = await callThrough(
-        lookupNotesFn,
-        [title],
-        "Notesnook read-only projection: lookup.notes rejected",
-      );
-      const noteIds = await readSearchResultIds(noteResults, "lookup.notes.ids");
-      const metadata: NotesnookReadOnlyNoteMetadata[] = [];
-      for (const id of truncateIds(noteIds, MAX_SEARCH_HITS)) {
-        const note = await callThrough(
-          noteFn,
-          [id],
-          "Notesnook read-only projection: notes.note rejected",
-        );
-        if (note === undefined || note === null) continue;
-        const noteMetadata = coerceUpstreamNoteToMetadata(note, true);
-        if (noteMetadata !== undefined) metadata.push(noteMetadata);
       }
       return metadata;
     },
@@ -1090,6 +1081,25 @@ function coerceUpstreamNoteToMetadata(
   if (typeof localOnly === "boolean") (out as { localOnly?: boolean }).localOnly = localOnly;
   if (typeof conflicted === "boolean") (out as { conflicted?: boolean }).conflicted = conflicted;
   return out;
+}
+
+function hasDirectNotebookMembership(note: unknown, notebookId: string): boolean {
+  if (note === null || typeof note !== "object") return false;
+  try {
+    const record = note as Record<string, unknown>;
+    const notebooks = record.notebooks;
+    if (Array.isArray(notebooks)) {
+      return notebooks.some(
+        (reference) =>
+          reference !== null &&
+          typeof reference === "object" &&
+          (reference as Record<string, unknown>).id === notebookId,
+      );
+    }
+    return record.notebookId === notebookId;
+  } catch {
+    return false;
+  }
 }
 
 function readOptionalContentFindByNoteId(
