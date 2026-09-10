@@ -16,11 +16,12 @@
  *      the evaluator still tolerates a `notes`-only override as a
  *      non-match for `create`).
  *   3. `read` / `edit` / `delete` may match either via `notebooks`
- *      (the override matches when `ctx.notebookPath` is present
- *      and any notebook pattern glob-matches it) OR via `notes`
- *      (the override matches when `ctx.noteTitle` is present and
- *      any notes pattern glob-matches `<notebookPath>/<noteTitle>`
- *      where `<notebookPath>` is `ctx.notebookPath ?? ""`).
+ *      (the override matches when any notebook pattern glob-matches
+ *      the full `ctx.notebookPath` or one of its parent paths at a
+ *      `/` boundary) OR via `notes` (the override matches when
+ *      `ctx.noteTitle` is present and any notes pattern glob-matches
+ *      `<notebookPath>/<noteTitle>` where `<notebookPath>` is
+ *      `ctx.notebookPath ?? ""`).
  *   4. When an override matches, `decision.allowed` is set to
  *      `override[op]` for that op and `decision.matchedBy` reports
  *      the override index and the matched pattern.
@@ -172,6 +173,21 @@ describe("settings evaluator — read/edit/delete match by notebooks pattern", (
     expect(evaluate("read", { notebookPath: "Personal", noteTitle: "Hello" })).toEqual({
       allowed: false,
       matchedBy: { overrideIndex: 0, pattern: "Personal" },
+    });
+  });
+
+  it("a notebook override cascades through descendants without matching a longer segment", () => {
+    const file = buildFile([{ notebooks: ["Financial"], delete: false }], { delete: true });
+    const evaluate = createSettingsEvaluator(file, makeIndex([]));
+
+    expect(
+      evaluate("delete", { notebookPath: "Financial/Banking/Checking", noteTitle: "Note" }),
+    ).toEqual({
+      allowed: false,
+      matchedBy: { overrideIndex: 0, pattern: "Financial" },
+    });
+    expect(evaluate("delete", { notebookPath: "Financialness", noteTitle: "Note" })).toEqual({
+      allowed: true,
     });
   });
 
@@ -610,13 +626,14 @@ describe("settings evaluator — star and question mark within a segment", () =>
     expect(evaluate("read", { notebookPath: "Pers", noteTitle: "Note" }).allowed).toBe(false);
   });
 
-  it("star does not cross segment boundaries", () => {
+  it("star matches a parent segment and cascades without crossing the separator", () => {
     const file = buildFile([{ notebooks: ["Per*"], read: false }], { read: true });
     const evaluate = createSettingsEvaluator(file, makeIndex([]));
-    // "Personal/Private" has two segments; pattern "Per*" has one
-    // segment.  No match.
+    // "Per*" matches the parent segment "Personal" and therefore
+    // cascades to descendants; the wildcard itself still never
+    // consumes the "/Private" segment.
     expect(evaluate("read", { notebookPath: "Personal/Private", noteTitle: "Note" }).allowed).toBe(
-      true,
+      false,
     );
   });
 });

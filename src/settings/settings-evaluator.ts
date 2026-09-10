@@ -27,26 +27,19 @@
  *  2. Iterate `settings.overrides` in array order with index `i`.
  *  3. For each override:
  *       - If `override[op]` is undefined, skip.
- *       - Compute a match:
- *           - For `create`: matches iff `ctx.notebookPath` is
- *             present AND `override.notebooks` is defined AND
- *             any pattern in `override.notebooks` glob-matches
- *             `ctx.notebookPath`.  `override.notes` is never
- *             consulted for `create`.
- *           - For `read` / `edit` / `delete`: matches iff either
- *             (a) `ctx.noteTitle` is present AND
- *                 `override.notes` is defined AND any pattern in
- *                 `override.notes` glob-matches
- *                 `<notebookPath>/<noteTitle>` where
- *                 `<notebookPath>` is `ctx.notebookPath ?? ""`,
- *             OR  (b) `override.notebooks` is defined AND any
- *                 pattern in `override.notebooks` glob-matches
- *                 `ctx.notebookPath` (when present) OR the empty
- *                 input (when `ctx.notebookPath` is undefined
- *                 and the pattern is single-segment).
- *             The loader guarantees an override MUST NOT mix
- *             `notebooks` and `notes`; the evaluator does not
- *             need to re-check that invariant.
+ *       - For `create`: matches iff `ctx.notebookPath` is
+ *         present and any pattern in `override.notebooks` matches
+ *         the full path or one of its parent paths at a `/`
+ *         boundary. `override.notes` is never consulted for `create`.
+ *       - For `read` / `edit` / `delete`: matches via
+ *         `override.notes` against `<notebookPath>/<noteTitle>`
+ *         when a note title is present, or via `override.notebooks`
+ *         against the full notebook path or one of its parent paths.
+ *         A `Financial` pattern therefore applies to
+ *         `Financial/Banking` descendants but not `Financialness`.
+ *         The loader guarantees an override MUST NOT mix
+ *         `notebooks` and `notes`; the evaluator does not need to
+ *         re-check that invariant.
  *  4. For every override that matches, collect one candidate
  *     record: `{ overrideIndex, pattern, value }` where
  *     `pattern` is the single pattern that won the
@@ -299,13 +292,38 @@ const findMatch = (
 };
 
 /**
+ * Find a notebook pattern that matches the full path or one of its
+ * parent paths.  Parent candidates are cut only at `/` boundaries,
+ * so a `Financial` override matches `Financial/Banking` but not
+ * `Financialness`.  The full path is checked first so the existing
+ * specificity rules continue to prefer a child notebook override.
+ */
+const findNotebookMatch = (
+  list: ReadonlyArray<{ readonly original: string; readonly matcher: CompiledMatcher }> | undefined,
+  notebookPath: string,
+): { readonly original: string; readonly matcher: CompiledMatcher } | undefined => {
+  if (list === undefined) return undefined;
+
+  let candidateEnd = notebookPath.length;
+  while (true) {
+    const matched = findMatch(list, notebookPath.slice(0, candidateEnd));
+    if (matched !== undefined) return matched;
+
+    const separator = notebookPath.lastIndexOf("/", candidateEnd - 1);
+    if (separator < 0) return undefined;
+    candidateEnd = separator;
+  }
+};
+
+/**
  * Does the compiled override's `notebooks` patterns match the
  * current ctx?  Returns the matched `{ original }` or
- * `undefined`.  An undefined `notebookPath` is matched only
- * when the supplied list contains at least one single-segment
- * pattern (no `/`) that matches the empty input — multi-segment
- * patterns cannot match a zero-segment input (the glob module
- * enforces equal segment counts).
+ * `undefined`.  When a notebook path is present, the full path and
+ * each parent path are checked at `/` boundaries so notebook rules
+ * cascade through descendants.  An undefined `notebookPath` is
+ * matched only when the supplied list contains at least one
+ * single-segment pattern (no `/`) that matches the empty input —
+ * multi-segment patterns cannot match a zero-segment input.
  */
 const matchNotebooks = (
   compiled: CompiledOverride,
@@ -314,7 +332,7 @@ const matchNotebooks = (
   const list = compiled.compiledNotebooks;
   if (list === undefined) return undefined;
   if (notebookPath !== undefined) {
-    const matched = findMatch(list, notebookPath);
+    const matched = findNotebookMatch(list, notebookPath);
     return matched?.original;
   }
   // notebookPath is undefined — substitute the empty input.
