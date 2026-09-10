@@ -1236,6 +1236,76 @@ describe("Stage 4 write adapter — updateNote", () => {
 });
 
 // ---------------------------------------------------------------------------
+// deleteNote
+// ---------------------------------------------------------------------------
+
+describe("Stage 4 write adapter — deleteNote", () => {
+  it("maps an upstream ERR_VAULT_LOCKED delete refusal to vault_locked", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Bernie Test Locked",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      // The live metadata projection can omit this marker; the mutator is
+      // still authoritative and refuses the delete at the vault boundary.
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const database = createFakeDatabase({ notes: new Map([[NOTE_ID, note]]) });
+    (
+      database as unknown as {
+        notesDelete?: (id: string) => Promise<void>;
+      }
+    ).notesDelete = async () => {
+      throw new Error("ERR_VAULT_LOCKED");
+    };
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+
+    const code = await codeOfAsync(() =>
+      adapter.deleteNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+
+    expect(code).toBe("vault_locked");
+  });
+
+  it("does not trust an unverified lowercase vault_locked code", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Bernie Test Locked",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const database = createFakeDatabase({ notes: new Map([[NOTE_ID, note]]) });
+    (
+      database as unknown as {
+        notesDelete?: (id: string) => Promise<void>;
+      }
+    ).notesDelete = async () => {
+      const error = new Error("unverified locked detail");
+      Object.defineProperty(error, "code", { value: "vault_locked" });
+      throw error;
+    };
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+
+    const code = await codeOfAsync(() =>
+      adapter.deleteNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Structural seam and escape-hatch rejection.
 // ---------------------------------------------------------------------------
 

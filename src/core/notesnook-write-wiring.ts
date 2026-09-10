@@ -1081,6 +1081,16 @@ function mapRelations(
   return Object.freeze(result);
 }
 
+function isUpstreamVaultLockedRefusal(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, "message");
+    return descriptor?.get === undefined && descriptor?.value === "ERR_VAULT_LOCKED";
+  } catch {
+    return false;
+  }
+}
+
 async function safeCall<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
     return await fn();
@@ -1120,6 +1130,8 @@ function sanitizeError(
     ) {
       code = candidate;
     }
+  } else if (isUpstreamVaultLockedRefusal(error)) {
+    code = "vault_locked";
   }
   return hardenedError(code);
 }

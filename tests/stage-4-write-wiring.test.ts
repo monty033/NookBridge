@@ -407,6 +407,54 @@ describe("Stage 4 write wiring — optional delete projection", () => {
     expect(deleted).toEqual(["note-1"]);
     expect(Object.keys(seam)).toContain("notesDelete");
   });
+
+  it("maps the pinned core vault-lock error message without leaking upstream detail", async () => {
+    const runtime = createFakeRuntime();
+    Object.defineProperty(runtime.notes, "moveToTrash", {
+      configurable: false,
+      enumerable: true,
+      value: async () => {
+        throw new Error("ERR_VAULT_LOCKED");
+      },
+    });
+    const seam = bindNotesnookWriteRuntime(runtime);
+    const result = await expectAdapterError(() => seam.notesDelete!(NOTE_ID));
+    expect(result.code).toBe("vault_locked");
+    expect(result.message).not.toContain("ERR_VAULT_LOCKED");
+  });
+
+  it("rejects inherited and accessor vault-lock messages", async () => {
+    const inheritedRuntime = createFakeRuntime();
+    Object.defineProperty(inheritedRuntime.notes, "moveToTrash", {
+      configurable: false,
+      enumerable: true,
+      value: async () => {
+        throw Object.create({ message: "ERR_VAULT_LOCKED" });
+      },
+    });
+    const inheritedSeam = bindNotesnookWriteRuntime(inheritedRuntime);
+    expect((await expectAdapterError(() => inheritedSeam.notesDelete!(NOTE_ID))).code).toBe(
+      "sync_failed",
+    );
+
+    const accessorRuntime = createFakeRuntime();
+    Object.defineProperty(accessorRuntime.notes, "moveToTrash", {
+      configurable: false,
+      enumerable: true,
+      value: async () => {
+        const error = new Error("ordinary failure");
+        Object.defineProperty(error, "message", {
+          configurable: true,
+          get: () => "ERR_VAULT_LOCKED",
+        });
+        throw error;
+      },
+    });
+    const accessorSeam = bindNotesnookWriteRuntime(accessorRuntime);
+    expect((await expectAdapterError(() => accessorSeam.notesDelete!(NOTE_ID))).code).toBe(
+      "sync_failed",
+    );
+  });
 });
 
 describe("Stage 4 write wiring — source rejection", () => {
