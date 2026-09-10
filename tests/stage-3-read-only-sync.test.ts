@@ -1003,6 +1003,25 @@ describe("Stage 3 production projection and sync gate", () => {
     ]);
   });
 
+  it("skips an unavailable unrelated notebook while preserving valid hierarchy entries", async () => {
+    const database = createFakeLiveDatabase();
+    const notebooks = database.notebooks as unknown as {
+      all: { ids: () => Promise<string[]> };
+      notebook: (id: string) => Promise<unknown>;
+    };
+    const originalNotebook = notebooks.notebook;
+    notebooks.all = { ids: async () => ["nb-1", "broken-notebook"] };
+    notebooks.notebook = async (id: string) => {
+      if (id === "broken-notebook") throw new Error("unavailable unrelated notebook");
+      return originalNotebook(id);
+    };
+
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+    await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+      { id: "nb-1", title: "Work", dateModified: 11 },
+    ]);
+  });
+
   it("redacts hostile upstream metadata failures", async () => {
     const database = createFakeLiveDatabase();
     const secret = "upstream-secret-note-body";

@@ -391,6 +391,31 @@ async function expectAdapterError(
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write wiring — optional delete projection", () => {
+  it("preserves a vault lock when content lookup returns the pinned refusal", async () => {
+    const note = {
+      id: NOTE_ID,
+      title: "Locked",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    } as FakeNoteRecord;
+    delete (note as unknown as Record<string, unknown>).locked;
+    const runtime = createFakeRuntime({
+      notes: new Map([[NOTE_ID, note]]),
+    });
+    runtime.content.findByNoteId = async () => {
+      throw new Error("ERR_VAULT_LOCKED");
+    };
+
+    const seam = bindNotesnookWriteRuntime(runtime);
+    await expect(seam.note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
   it("projects notes.moveToTrash as the bounded notesDelete seam", async () => {
     const runtime = createFakeRuntime();
     const deleted: string[] = [];
