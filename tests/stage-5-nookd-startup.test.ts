@@ -25,6 +25,7 @@ const CONFIG: ServiceConfig = Object.freeze({
   socketGroup: "nookbridge-clients",
   backend: "systemd-credential",
   credentialName: "nookbridge-db-key",
+  settingsBackend: "nix",
   readPolicy: Object.freeze([
     "notes.search",
     "notes.status",

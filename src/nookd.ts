@@ -18,10 +18,12 @@ import {
   loadServiceConfig,
   SERVICE_CONFIG_BACKEND,
   SERVICE_CONFIG_CREDENTIAL_NAME,
+  SERVICE_CONFIG_SETTINGS_BACKENDS,
   SERVICE_CONFIG_ALLOWED_METHODS,
   type LoadServiceConfigOptions,
   type LoadServiceConfigResult,
   type ServiceConfig,
+  type ServiceConfigSettingsBackend,
 } from "./config/service-config.js";
 import {
   createSystemdCredentialKeyStore,
@@ -518,7 +520,19 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
   // `Object.keys` is itself hostile-getter-safe via Reflect.ownKeys below
   // (covers symbol keys too).
   const ownKeys = reflectOwnKeys(configRecord);
-  if (ownKeys.length !== 6) throw new Error("invalid service config");
+  if (ownKeys.length !== 6 && ownKeys.length !== 7) throw new Error("invalid service config");
+  const hasSettingsBackend = ownKeys.some((key) => key === "settingsBackend");
+  let settingsBackend: ServiceConfigSettingsBackend | undefined;
+  if (hasSettingsBackend) {
+    const candidate = safeGet(configRecord, "settingsBackend");
+    if (
+      typeof candidate !== "string" ||
+      !SERVICE_CONFIG_SETTINGS_BACKENDS.includes(candidate as ServiceConfigSettingsBackend)
+    ) {
+      throw new Error("invalid service config");
+    }
+    settingsBackend = candidate as ServiceConfigSettingsBackend;
+  }
   for (const key of ownKeys) {
     if (
       key !== "stateDir" &&
@@ -526,7 +540,8 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
       key !== "socketGroup" &&
       key !== "backend" &&
       key !== "credentialName" &&
-      key !== "readPolicy"
+      key !== "readPolicy" &&
+      key !== "settingsBackend"
     ) {
       throw new Error("invalid service config");
     }
@@ -566,6 +581,7 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
     socketGroup,
     backend: SERVICE_CONFIG_BACKEND,
     credentialName: SERVICE_CONFIG_CREDENTIAL_NAME,
+    ...(settingsBackend === undefined ? {} : { settingsBackend }),
     readPolicy,
   });
 }
