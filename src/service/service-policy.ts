@@ -4,16 +4,16 @@
  * Stage 7 Slice 3 amendment — adds the `readWriteNoDelete` and
  * `custom` profiles that admit `notes.create` end-to-end while
  * preserving all four read methods and the closed categorical
- * `permission_denied` denial vocabulary.  `notes.delete` remains
- * structurally unreachable through any policy factory.
+ * `permission_denied` denial vocabulary.  Delete is admitted only
+ * through the validated write allowlists and remains subject to the
+ * optional settings evaluator.
  *
  * Stage 7 Slice 3 follow-up — widens `readWriteNoDelete` and the
  * `custom` allowlist to additionally admit `notes.append` and
- * `notes.update` end-to-end.  `notes.delete` remains structurally
- * impossible: it is never present in either the read-write-no-delete
- * allowlist or the closed universe of `custom` allowable methods,
- * and the factory drops any caller-supplied instance before
- * constructing the policy.
+ * `notes.update`, and exact-path `notes.delete` end-to-end.  Delete
+ * remains bounded by the exact-path handler and the optional settings
+ * evaluator; the factory still drops methods outside the closed
+ * custom universe before constructing the policy.
  *
  * Stage 10 Task 6 — routes every `authorizeServiceMethod` call
  * through an OPTIONAL settings evaluator when the policy was
@@ -39,12 +39,12 @@
  *   - Closed: the supported profile vocabulary is exactly three
  *     literals — `"readOnly"`, `"readWriteNoDelete"`, and
  *     `"custom"`.  The `readOnly` allowlist is exactly the four
- *     read methods in published order.  The `readWriteNoDelete`
- *     allowlist is the four reads plus `notes.create`.  The
- *     `custom` allowlist is the configured subset of the four
- *     reads plus `notes.create`; `notes.delete` is structurally
- *     refused by every factory regardless of the configured
- *     argument.  Any future widening requires an explicit
+ *     read methods in published order.  The historical
+ *     `readWriteNoDelete` profile admits the four reads plus the
+ *     bounded create, append, update, delete, and sync methods;
+ *     notebook-scoped settings provide the delete decision.  The
+ *     `custom` allowlist is the configured subset of the same closed
+ *     method universe.  Any future widening requires an explicit
  *     decision-record amendment.
  *   - Frozen: the policy object, its allowlist tuple, and every
  *     decision record are frozen on a null prototype so a hostile
@@ -142,11 +142,11 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 })();
 
 /**
- * The `readWriteNoDelete` allowlist: the four reads plus
+ * The historical `readWriteNoDelete` allowlist: the four reads plus
  * the side-effecting `notes.create`, `notes.append`, `notes.update`,
- * and explicitly approval-gated `notes.sync` method.
- * `notes.delete` is intentionally absent — delete is never
- * reachable through any profile in this slice.
+ * exact-path `notes.delete`, and explicitly approval-gated
+ * `notes.sync` methods.  The name is retained for profile/API
+ * compatibility; delete remains settings-evaluator-gated.
  */
 const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
   const arr: RpcMethod[] = [
@@ -248,8 +248,8 @@ export type ServicePolicyEvaluator = (
 /**
  * Map the closed RPC method vocabulary to the settings operation
  * consulted by the policy evaluator.  Methods outside the published
- * map return `undefined`; in particular, `notes.delete` is not a
- * policy method and never reaches the evaluator.
+ * map return `undefined`; every side-effecting method, including
+ * `notes.delete`, reaches the evaluator when one is attached.
  */
 export function methodToSettingsOperation(methodName: string): SettingsOperation | undefined {
   switch (methodName) {
@@ -302,18 +302,17 @@ export function createReadWriteNoDeleteServicePolicy(
  * The contract is:
  *
  *   - Only methods in {@link CUSTOM_POLICY_ALLOWABLE_METHODS} are
- *     admitted.  Anything else — including `notes.delete` and any
- *     unknown strings, non-strings, empty strings — is silently
- *     dropped before the policy is constructed.
+ *     admitted.  Any unknown strings, non-strings, or empty strings
+ *     are silently dropped before the policy is constructed.
  *   - Duplicate entries are deduped while preserving the caller's
  *     supplied order.
  *   - The resulting `allowedMethods` tuple is null-prototype and
  *     frozen, and the policy object is itself frozen on a null
  *     prototype.
  *
- * In particular, `notes.delete` is structurally impossible: even
- * if a caller passes `["notes.delete"]`, the factory drops it and
- * the resulting policy allows nothing.
+ * In particular, methods outside the closed universe are structurally
+ * impossible: even if a caller supplies one, the factory drops it and
+ * the resulting policy admits nothing for that entry.
  */
 export function createCustomServicePolicy(
   allowedMethods: ReadonlyArray<string>,
@@ -514,9 +513,9 @@ export type ServicePolicyDecision =
  *   2. If `method` is exactly one of the entries in the active
  *      policy's allowlist, return
  *      `{ allowed: true, method: <canonical literal> }`.
- *   3. Otherwise — including side-effecting methods, unknown
- *      methods, the empty string, non-strings, and lookalike
- *      variants — return
+ *   3. Otherwise — including methods absent from the active
+ *      allowlist, unknown methods, the empty string, non-strings,
+ *      and lookalike variants — return
  *      `{ allowed: false, reason: "permission_denied" }`.  The
  *      decision record never echoes the offending method name
  *      into the reason.

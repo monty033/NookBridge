@@ -156,6 +156,58 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(JSON.stringify(response)).not.toContain("note-1");
   });
 
+  it("passes exact delete path context to settings authorization before resolving or mutating", async () => {
+    const { calls, evaluator } = makeEvaluator((_op, ctx) =>
+      ctx.notebookPath === "Personal/Projects" && ctx.noteTitle === "Roadmap" ? false : true,
+    );
+    const resolveNotePath = vi.fn(async () => {
+      throw new Error("delete resolver must not run after policy denial");
+    });
+    const deleteNote = vi.fn(async () => {
+      throw new Error("delete mutation must not run after policy denial");
+    });
+    const response = await handleRpcRequest(
+      request("notes.delete", { path: "Personal/Projects/Roadmap" }),
+      makeRuntime({ resolveNotePath, deleteNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(calls).toEqual([
+      { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
+    ]);
+    expect(resolveNotePath).not.toHaveBeenCalled();
+    expect(deleteNote).not.toHaveBeenCalled();
+  });
+
+  it("preserves the root-note context shape when a delete is allowed", async () => {
+    const { calls, evaluator } = makeEvaluator(true);
+    const resolveNotePath = vi.fn(async () => ({
+      id: "note-1",
+      expectedRevision: REVISION,
+    }));
+    const deleteNote = vi.fn(
+      async () =>
+        ({
+          operation: "delete",
+          id: "note-1",
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        }) as const,
+    );
+    const response = await handleRpcRequest(
+      request("notes.delete", { path: "Roadmap" }),
+      makeRuntime({ resolveNotePath, deleteNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response).toMatchObject({ ok: true, result: { kind: "delete", id: "note-1" } });
+    expect(calls).toEqual([{ op: "delete", ctx: { noteTitle: "Roadmap" } }]);
+    expect(resolveNotePath).toHaveBeenCalledWith("Roadmap");
+    expect(deleteNote).toHaveBeenCalledWith({ id: "note-1", expectedRevision: REVISION });
+  });
+
   it("resolves note context before authorizing append and update", async () => {
     const { calls, evaluator } = makeEvaluator(true);
     const runtime = makeRuntime({

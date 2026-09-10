@@ -68,7 +68,11 @@ import type {
   UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
 import type { NotebookIndex } from "../settings/notebook-index.js";
-import { ExactNotePathError, type ExactNotePathResolution } from "./exact-note-path-resolver.js";
+import {
+  ExactNotePathError,
+  parseExactNotePath,
+  type ExactNotePathResolution,
+} from "./exact-note-path-resolver.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
@@ -274,7 +278,12 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       if (structural.request.method === "notes.delete") {
-        const authorization = authorizeServiceMethod(policy, "notes.delete");
+        const parsedPath = parseExactNotePath(structural.request.params.path);
+        const settingsContext =
+          parsedPath.notebookPath === undefined
+            ? { noteTitle: parsedPath.noteTitle }
+            : { notebookPath: parsedPath.notebookPath, noteTitle: parsedPath.noteTitle };
+        const authorization = authorizeServiceMethod(policy, "notes.delete", settingsContext);
         if (!authorization.allowed) {
           return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
         }
