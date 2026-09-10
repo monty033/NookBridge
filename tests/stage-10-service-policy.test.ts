@@ -52,6 +52,7 @@ import {
   createReadOnlyServicePolicy,
   createReadWriteNoDeleteServicePolicy,
   methodToSettingsOperation,
+  narrowServicePolicy,
   type ServicePolicy,
   type ServicePolicyDecision,
 } from "../src/service/service-policy.js";
@@ -250,6 +251,25 @@ describe("service policy — evaluator with an allowed decision", () => {
 // ---------------------------------------------------------------------------
 
 describe("service policy — evaluator with a denied decision", () => {
+  it("preserves the evaluator when the server narrows the policy", () => {
+    const { calls, evaluator } = makeStubEvaluator({ allowed: false });
+    const narrowed = narrowServicePolicy(makePolicyWithEvaluator(evaluator));
+
+    expect(narrowed).toBeDefined();
+    expect(
+      authorizeServiceMethod(narrowed!, "notes.delete", {
+        notebookPath: "Financial/Banking",
+        noteTitle: "Bernie Delete Me",
+      }),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(calls).toEqual([
+      {
+        op: "delete",
+        ctx: { notebookPath: "Financial/Banking", noteTitle: "Bernie Delete Me" },
+      },
+    ]);
+  });
+
   it("denies with permission_denied when the evaluator denies an allowlisted method", () => {
     const { evaluator } = makeStubEvaluator({ allowed: false });
     const policy = makePolicyWithEvaluator(evaluator);

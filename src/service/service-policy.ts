@@ -458,9 +458,23 @@ export function narrowServicePolicy(value: unknown): ServicePolicy | undefined {
   if (allowlist === undefined) return undefined;
   try {
     const profile = (value as { readonly profile: unknown }).profile;
-    if (profile === "readOnly") return createReadOnlyServicePolicy();
-    if (profile === "readWriteNoDelete") return createReadWriteNoDeleteServicePolicy();
-    return createCustomServicePolicy(allowlist);
+    const evaluator = readPolicyEvaluator(value);
+    if (profile === "readOnly") return createReadOnlyServicePolicy(evaluator);
+    if (profile === "readWriteNoDelete") return createReadWriteNoDeleteServicePolicy(evaluator);
+    return createCustomServicePolicy(allowlist, evaluator);
+  } catch {
+    return undefined;
+  }
+}
+
+function readPolicyEvaluator(value: unknown): ServicePolicyEvaluator | undefined {
+  try {
+    if (value === null || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, "evaluator");
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    return typeof descriptor.value === "function"
+      ? (descriptor.value as ServicePolicyEvaluator)
+      : undefined;
   } catch {
     return undefined;
   }
