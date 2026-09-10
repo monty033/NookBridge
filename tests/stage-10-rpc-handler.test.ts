@@ -180,7 +180,34 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(deleteNote).not.toHaveBeenCalled();
   });
 
-  it("preserves the root-note context shape when a delete is allowed", async () => {
+  it("preserves a vault_locked delete refusal at the RPC boundary", async () => {
+    const { evaluator } = makeEvaluator(true);
+    const resolveNotePath = vi.fn(async () => ({
+      id: "locked-note",
+      expectedRevision: REVISION,
+    }));
+    const deleteNote = vi.fn(async () => {
+      const error = new Error("upstream locked detail must stay internal");
+      Object.defineProperty(error, "code", { value: "vault_locked" });
+      throw error;
+    });
+
+    const response = await handleRpcRequest(
+      request("notes.delete", { path: "General/Bernie Test Locked" }),
+      makeRuntime({ resolveNotePath, deleteNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response).toMatchObject({ ok: false, error: { code: "vault_locked" } });
+    expect(resolveNotePath).toHaveBeenCalledWith("General/Bernie Test Locked");
+    expect(deleteNote).toHaveBeenCalledWith({
+      id: "locked-note",
+      expectedRevision: REVISION,
+    });
+    expect(JSON.stringify(response)).not.toContain("locked detail");
+  });
+
+  it("resolves the root-note context shape when a delete is allowed", async () => {
     const { calls, evaluator } = makeEvaluator(true);
     const resolveNotePath = vi.fn(async () => ({
       id: "note-1",
