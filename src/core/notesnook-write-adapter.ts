@@ -658,8 +658,17 @@ export class NotesnookWriteAdapter {
       if (notesDelete === undefined) {
         throw adapterError("invalid_input", "Notesnook write adapter: delete unavailable");
       }
-      await this.#safe("notesDelete", () => notesDelete(plan.id));
-    } catch {
+      await notesDelete(plan.id);
+    } catch (error) {
+      if (isWriteAdapterError(error) || isNotesnookWriteContractError(error)) {
+        throw error;
+      }
+      if (isUpstreamVaultLockedRefusal(error)) {
+        throw adapterError(
+          "vault_locked",
+          "Notesnook write adapter: delete refused by locked vault",
+        );
+      }
       throw adapterError("sync_failed", "Notesnook write adapter: delete failed");
     }
     return Object.freeze({
@@ -926,6 +935,18 @@ function snapshotArray(value: unknown): unknown {
 // `__context__` are explicitly cleared so an attacker that controls
 // the upstream error cannot smuggle data through the chain.
 // ---------------------------------------------------------------------------
+
+function isUpstreamVaultLockedRefusal(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    const code = Object.getOwnPropertyDescriptor(value, "code");
+    if (code?.get === undefined && code?.value === "ERR_VAULT_LOCKED") return true;
+    const message = Object.getOwnPropertyDescriptor(value, "message");
+    return message?.get === undefined && message?.value === "ERR_VAULT_LOCKED";
+  } catch {
+    return false;
+  }
+}
 
 const WRITE_ADAPTER_ERRORS = new WeakSet<object>();
 
