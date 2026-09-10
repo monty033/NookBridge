@@ -370,22 +370,24 @@ export function flattenLiveDatabaseToReadOnly(
         // treated as a root; the resolver still produces a stable id↔title
         // index so single-segment paths resolve correctly.
         for (const id of ids) {
-          const notebook = await callThrough(
-            notebookFn,
-            [id],
-            "Notesnook read-only projection: notebooks.notebook rejected",
-          );
-          if (notebook === undefined || notebook === null) {
-            throw projectionError(
-              "Notesnook read-only projection: notebook enumeration is incomplete",
+          let notebook: unknown;
+          try {
+            notebook = await callThrough(
+              notebookFn,
+              [id],
+              "Notesnook read-only projection: notebooks.notebook rejected",
             );
+          } catch {
+            continue;
           }
-          const summary = coerceUpstreamNotebookToSummary(notebook);
-          if (summary === undefined) {
-            throw projectionError(
-              "Notesnook read-only projection: notebook enumeration is invalid",
-            );
+          if (notebook === undefined || notebook === null) continue;
+          let summary: ReturnType<typeof coerceUpstreamNotebookToSummary>;
+          try {
+            summary = coerceUpstreamNotebookToSummary(notebook);
+          } catch {
+            continue;
           }
+          if (summary === undefined) continue;
           summaries.push(summary);
         }
         return summaries as never;
@@ -395,20 +397,24 @@ export function flattenLiveDatabaseToReadOnly(
       // enumeration so the destructive-delete seam stays available.
       let breadcrumbsUsable = true;
       for (const id of ids) {
-        const notebook = await callThrough(
-          notebookFn,
-          [id],
-          "Notesnook read-only projection: notebooks.notebook rejected",
-        );
-        if (notebook === undefined || notebook === null) {
-          throw projectionError(
-            "Notesnook read-only projection: notebook enumeration is incomplete",
+        let notebook: unknown;
+        try {
+          notebook = await callThrough(
+            notebookFn,
+            [id],
+            "Notesnook read-only projection: notebooks.notebook rejected",
           );
+        } catch {
+          continue;
         }
-        const summary = coerceUpstreamNotebookToSummary(notebook);
-        if (summary === undefined) {
-          throw projectionError("Notesnook read-only projection: notebook enumeration is invalid");
+        if (notebook === undefined || notebook === null) continue;
+        let summary: ReturnType<typeof coerceUpstreamNotebookToSummary>;
+        try {
+          summary = coerceUpstreamNotebookToSummary(notebook);
+        } catch {
+          continue;
         }
+        if (summary === undefined) continue;
         let parentId: string | undefined;
         if (breadcrumbsUsable) {
           try {

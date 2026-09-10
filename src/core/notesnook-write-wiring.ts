@@ -251,8 +251,9 @@ export function bindNotesnookWriteRuntime(
           contentResult !== undefined && contentResult !== null && typeof contentResult === "object"
             ? readOptionalLockedMarker(contentResult)
             : undefined;
-      } catch {
-        contentLocked = undefined;
+      } catch (error) {
+        contentLocked =
+          isNotesnookWriteContractError(error) && error.code === "vault_locked" ? true : undefined;
       }
     }
     return mapNote(noteResult, safeId, contentLocked);

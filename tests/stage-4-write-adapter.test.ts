@@ -1240,6 +1240,38 @@ describe("Stage 4 write adapter — updateNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — deleteNote", () => {
+  it("rejects a locked note before invoking the delete mutator", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Bernie Test Locked",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: true,
+      dateEdited: 1_700_000_000_000,
+    };
+    const database = createFakeDatabase({ notes: new Map([[NOTE_ID, note]]) });
+    let deleteCalls = 0;
+    (
+      database as unknown as {
+        notesDelete?: (id: string) => Promise<void>;
+      }
+    ).notesDelete = async () => {
+      deleteCalls += 1;
+    };
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+
+    const code = await codeOfAsync(() =>
+      adapter.deleteNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+
+    expect(code).toBe("vault_locked");
+    expect(deleteCalls).toBe(0);
+  });
+
   it("maps an upstream ERR_VAULT_LOCKED delete refusal to vault_locked", async () => {
     const note: FakeNote = {
       id: NOTE_ID,
