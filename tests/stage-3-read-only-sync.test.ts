@@ -713,6 +713,64 @@ describe("Stage 3 production projection and sync gate", () => {
     expect(formatSyncCommandResult(result)).not.toContain("note-1");
   });
 
+  it("treats an upstream vault_locked content refusal as a locked metadata marker", async () => {
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => {
+      const error = new Error("upstream detail must stay internal");
+      Object.defineProperty(error, "code", { value: "ERR_VAULT_LOCKED" });
+      throw error;
+    };
+
+    const projection = flattenLiveDatabaseToReadOnly(database);
+    await expect(projection.noteMetadata("locked-note")).resolves.toMatchObject({
+      id: "locked-note",
+      locked: true,
+    });
+  });
+
+  it("does not trust an unverified vault_locked error code", async () => {
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => {
+      const error = new Error("untrusted upstream detail");
+      Object.defineProperty(error, "code", { value: "vault_locked" });
+      throw error;
+    };
+
+    const projection = flattenLiveDatabaseToReadOnly(database);
+    await expect(projection.noteMetadata("locked-note")).rejects.toMatchObject({
+      message: "Notesnook read-only projection: content.findByNoteId rejected",
+    });
+  });
+
+  it("treats a trusted read-only vault_locked refusal as a locked metadata marker", async () => {
+    const adapter = createNotesnookReadOnlyAdapter({ source: createFakeDatabase() });
+    const lockedError = await adapter.readNoteBody("locked-note").catch((error) => error);
+    expect(isNotesnookReadOnlyAdapterError(lockedError)).toBe(true);
+
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => {
+      throw lockedError;
+    };
+
+    const projection = flattenLiveDatabaseToReadOnly(database);
+    await expect(projection.noteMetadata("locked-note")).resolves.toMatchObject({
+      id: "locked-note",
+      locked: true,
+    });
+  });
+
   it("rejects malformed conflict and lock markers categorically", async () => {
     const conflictDatabase = createFakeLiveDatabase();
     (conflictDatabase.notes as { note: (id: string) => Promise<unknown> }).note = async (id) => ({

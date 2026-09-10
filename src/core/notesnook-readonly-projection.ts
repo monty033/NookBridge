@@ -1146,11 +1146,16 @@ async function readLockedState(
   id: string,
 ): Promise<boolean | undefined> {
   if (findByNoteId === undefined) return undefined;
-  const content = await callThrough<unknown>(
-    findByNoteId,
-    [id],
-    "Notesnook read-only projection: content.findByNoteId rejected",
-  );
+  let content: unknown;
+  try {
+    content = await findByNoteId(id);
+  } catch (error) {
+    // Notesnook can refuse the content lookup for a locked note before it
+    // returns the metadata marker.  That refusal is still useful metadata:
+    // preserve the closed lock state without exposing the upstream error.
+    if (isVaultLockedRefusal(error)) return true;
+    throw projectionError("Notesnook read-only projection: content.findByNoteId rejected");
+  }
   if (content === undefined || content === null) return undefined;
   if (typeof content !== "object") {
     throw projectionError("Notesnook read-only projection: content record is not an object");
@@ -1166,4 +1171,26 @@ async function readLockedState(
     throw projectionError("Notesnook read-only projection: content lock marker is invalid");
   }
   return locked;
+}
+
+function isVaultLockedRefusal(error: unknown): boolean {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) {
+    return false;
+  }
+  if (isNotesnookReadOnlyAdapterError(error)) {
+    try {
+      return error.message === "vault_locked";
+    } catch {
+      return false;
+    }
+  }
+  try {
+    // The raw upstream vocabulary is pinned to @notesnook/core@8.1.3.
+    // The internal `vault_locked` form is accepted only above through the
+    // identity-verified adapter predicate.
+    const code = (error as { code?: unknown }).code;
+    return code === "ERR_VAULT_LOCKED";
+  } catch {
+    return false;
+  }
 }
