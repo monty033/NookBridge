@@ -203,7 +203,7 @@ The source full gate passed. External `nix-config` flake/service/isolation
 checks passed against source pin `1f433a42`; they are not candidate evidence
 until repinned and rerun. The lockfile-derived production inventory has
 221/221 license fields and is exported at
-`docs/stage-9-production-licenses.csv`. Public distribution still requires the
+`docs/engineering/stages/stage-9-production-licenses.csv`. Public distribution still requires the
 human release/license review.
 
 ## Overall decision
@@ -249,7 +249,7 @@ Regression tests added: none; existing focused suites passed.
 Decision: **PASS WITH FOLLOW-UP**. The live create/append/update sequence and
 phone-side deletion reconciliation now pass on the deployed runtime. The
 separate local-write race remains unexercised; the phone-side deletion canary
-is recorded in `docs/stage-9-canary.md`.
+is recorded in `docs/engineering/stages/stage-9-canary.md`.
 
 ### RT-11 local-write race (2026-09-08 follow-up)
 

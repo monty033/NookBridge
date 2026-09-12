@@ -23,7 +23,7 @@ Result:
   package metadata was fetched during the run.
 
 The complete CSV export is committed at
-`docs/stage-9-production-licenses.csv`.
+`docs/engineering/stages/stage-9-production-licenses.csv`.
 SHA-256: `9dff251210ed329a09d4966cee0739f995e3793b916ef4315a7d69a9bdf42735`.
 Direct runtime license summaries remain in `docs/licensing.md`.
 

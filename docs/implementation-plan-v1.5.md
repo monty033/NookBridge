@@ -623,7 +623,7 @@ Objective: turn the proven client into an isolated local service whose secrets/s
 > **Status (2026-08-30): docs-only decision record in progress.**
 > No daemon code, Nix configuration, credential handling, or socket work has
 > landed in this slice yet. The first deliverable is
-> [`docs/stage-5-service-boundary.md`](stage-5-service-boundary.md), which
+> [`docs/engineering/stages/stage-5-service-boundary.md`](engineering/stages/stage-5-service-boundary.md), which
 > captures the resolved trust zones, key-backend decision, deployment
 > ownership, initial RPC allowlist, and forbidden capabilities. **Gate 5 is
 > not passed.** Implementation begins only after that decision record is
@@ -1660,7 +1660,7 @@ observable by a fresh fetch-only client.
 
 Gate 3 is closed for the current fetch-only/read-only POC with that conflict
 observability limitation explicitly recorded. The next artifact is the
-Stage 4 safe-write plan in `docs/stage-4-write-plan.md`; no write-capable
+Stage 4 safe-write plan in `docs/engineering/stages/stage-4-write-plan.md`; no write-capable
 implementation or live write operation is authorized by this closeout.
 
 ### Stage 5 local-state conflict observer — offline-prepared
@@ -1694,7 +1694,7 @@ detecting client's local marker, not independent NookBridge observability.
 ### Stage 5 service boundary — decision record only
 
 On 2026-08-30, the formal **Stage 5 service boundary** work begins with
-[`docs/stage-5-service-boundary.md`](stage-5-service-boundary.md). This is
+[`docs/engineering/stages/stage-5-service-boundary.md`](engineering/stages/stage-5-service-boundary.md). This is
 a docs-only, pre-implementation decision record; **Gate 5 is not passed** by
 this task and no daemon code, Nix configuration, or credential handling has
 been merged.
@@ -1937,7 +1937,7 @@ production acceptance.
 
 **Source baseline anchor:** the Stage 9 operator source is merged through PR #51
 at `909ec4a9d19eac2adf7a1a9bbeac573d82caee69`. The source evidence receipt is
-`docs/stage-9-source-evidence.md`; the VM and production gates remain separate.
+`docs/engineering/stages/stage-9-source-evidence.md`; the VM and production gates remain separate.
 
 ### Goal
 
@@ -2199,8 +2199,8 @@ record and fresh security review.
 **Reviewer:** `gpt-6-astra` (xhigh), independent read-only review
 **Snapshot reviewed:** `097d6d6e69533569fc0f13ec7292634f005f2785` (upstream/main)
 **Review record:** the captured review is reproduced verbatim at
-`docs/stage-9-5-astra-review-output.txt`; the exact invocation prompt is
-preserved at `docs/stage-9-5-astra-review-prompt.txt`. Both files live in
+`docs/engineering/stages/stage-9-5-astra-review-output.txt`; the exact invocation prompt is
+preserved at `docs/engineering/stages/stage-9-5-astra-review-prompt.txt`. Both files live in
 the repository so the review can be re-checked against the same snapshot
 without depending on `/tmp` artifacts.
 

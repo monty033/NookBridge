@@ -140,7 +140,7 @@ collector does this to return the user identifier), a copy of the
 bytes lives on the V8 heap until the next garbage collection. The
 `Buffer.fill(0)` mitigation is therefore a **best-effort** wipe of
 the captured buffer, not a cryptographic erasure. The
-`docs/stage-2b.md` header comments and `CollectedSecret.zero()`
+`docs/engineering/stages/stage-2b.md` header comments and `CollectedSecret.zero()`
 JSDoc reflect this honestly; the module does not claim stronger
 guarantees.
 
@@ -253,7 +253,7 @@ The next slice will land the real account login pathway:
    boundary instead of returning `deferred`. Add a feature flag and
    an additional security review checklist.
 3. Once the mocked boundary is stable and reviewed, switch to the
-   real `@notesnook/core` import path. Update `docs/stage-2b-live.md`
+   real `@notesnook/core` import path. Update `docs/engineering/stages/stage-2b-live.md`
    to describe the new boundary.
 4. Land `auth status`, `auth logout`, `auth reset-local-client` as
    thin wrappers over `PersistentStorage` reads and writes.
