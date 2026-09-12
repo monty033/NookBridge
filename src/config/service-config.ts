@@ -76,6 +76,7 @@ export const SERVICE_CONFIG_READ_POLICY = Object.freeze([
   "notes.status",
   "notes.list_notebooks",
   "notes.get",
+  "notes.path_diagnostic",
 ] as const);
 
 /**
@@ -95,6 +96,7 @@ export const SERVICE_CONFIG_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = Object.f
   "notes.append",
   "notes.update",
   "notes.delete",
+  "notes.path_diagnostic",
   "notes.sync",
 ]);
 

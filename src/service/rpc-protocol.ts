@@ -210,6 +210,16 @@ export interface RpcNotesDeleteParams {
   readonly path: string;
 }
 
+/** Bounded operator-only locked-note acceptance proof params. */
+export interface RpcNotesLockedNoteProofParams {
+  readonly path: string;
+}
+
+/** Bounded operator-only exact-path resolver diagnostic params. */
+export interface RpcNotesPathDiagnosticParams {
+  readonly path: string;
+}
+
 /** The closed set of allowed RPC methods. */
 export type RpcMethod =
   | "notes.search"
@@ -220,6 +230,8 @@ export type RpcMethod =
   | "notes.append"
   | "notes.update"
   | "notes.delete"
+  | "notes.locked_note_proof"
+  | "notes.path_diagnostic"
   | "notes.sync";
 
 export interface RpcNotesSearchRequest {
@@ -270,6 +282,18 @@ export interface RpcNotesDeleteRequest {
   readonly params: RpcNotesDeleteParams;
 }
 
+export interface RpcNotesLockedNoteProofRequest {
+  readonly id: string;
+  readonly method: "notes.locked_note_proof";
+  readonly params: RpcNotesLockedNoteProofParams;
+}
+
+export interface RpcNotesPathDiagnosticRequest {
+  readonly id: string;
+  readonly method: "notes.path_diagnostic";
+  readonly params: RpcNotesPathDiagnosticParams;
+}
+
 export interface RpcNotesSyncRequest {
   readonly id: string;
   readonly method: "notes.sync";
@@ -285,6 +309,8 @@ export type RpcRequest =
   | RpcNotesAppendRequest
   | RpcNotesUpdateRequest
   | RpcNotesDeleteRequest
+  | RpcNotesLockedNoteProofRequest
+  | RpcNotesPathDiagnosticRequest
   | RpcNotesSyncRequest;
 
 /**
@@ -384,6 +410,37 @@ export interface RpcDeleteNoteResult {
   readonly id: string;
 }
 
+export type RpcLockedNoteProofCode =
+  | "vault_locked"
+  | "ok"
+  | "not_found"
+  | "permission_denied"
+  | "service_unavailable";
+
+/** Closed, redacted result of the operator-only locked-note proof. */
+export interface RpcLockedNoteProofResult {
+  readonly kind: "locked_note_proof";
+  readonly pathBytes: number;
+  readonly read: RpcLockedNoteProofCode;
+  readonly update: RpcLockedNoteProofCode;
+  readonly delete: RpcLockedNoteProofCode;
+}
+
+export type RpcPathDiagnosticTitleStatus = "none" | "one" | "multiple" | "unavailable";
+export type RpcPathDiagnosticStage = "present" | "absent" | "unavailable" | "not_applicable";
+export type RpcPathDiagnosticRevision = "valid" | "invalid" | "unavailable" | "not_applicable";
+
+/** Closed, redacted result of the operator-only exact-path diagnostic. */
+export interface RpcNotesPathDiagnosticResult {
+  readonly kind: "path_diagnostic";
+  readonly pathBytes: number;
+  readonly title: RpcPathDiagnosticTitleStatus;
+  readonly notebook: RpcPathDiagnosticStage;
+  readonly directMembership: RpcPathDiagnosticStage;
+  readonly recursiveMembership: RpcPathDiagnosticStage;
+  readonly revision: RpcPathDiagnosticRevision;
+}
+
 export interface RpcSyncResult {
   readonly kind: "sync";
   readonly status: "idle" | "synced";
@@ -400,6 +457,8 @@ export type RpcResult =
   | RpcAppendNoteResult
   | RpcUpdateNoteResult
   | RpcDeleteNoteResult
+  | RpcLockedNoteProofResult
+  | RpcNotesPathDiagnosticResult
   | RpcSyncResult;
 
 export interface RpcSuccessEnvelope {
@@ -723,6 +782,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.append" &&
     method !== "notes.update" &&
     method !== "notes.delete" &&
+    method !== "notes.locked_note_proof" &&
+    method !== "notes.path_diagnostic" &&
     method !== "notes.sync"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
@@ -1003,9 +1064,13 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj.id = noteId;
     paramsObj.expectedRevision = expectedRevision;
     paramsObj.patch = patchObj;
-  } else if (method === "notes.delete") {
+  } else if (
+    method === "notes.delete" ||
+    method === "notes.locked_note_proof" ||
+    method === "notes.path_diagnostic"
+  ) {
     if (!keysAreExactly(paramKeys, ["path"])) {
-      throw rpcProtocolError("rpc protocol: delete params have unexpected fields");
+      throw rpcProtocolError("rpc protocol: path params have unexpected fields");
     }
     const path = paramsRecord.path;
     if (
@@ -1015,7 +1080,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       utf8ByteLength(path, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
       hasControlCharacter(path)
     ) {
-      throw rpcProtocolError("rpc protocol: request delete params are invalid");
+      throw rpcProtocolError("rpc protocol: request path params are invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.path = path;
@@ -1425,6 +1490,124 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const resultPayload = objectCreate(null) as { kind: "delete"; id: string };
       resultPayload.kind = "delete";
       resultPayload.id = noteId;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "locked_note_proof") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "pathBytes", "read", "update", "delete"],
+        "rpc protocol: locked-note proof result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "pathBytes", "read", "update", "delete"])
+      ) {
+        throw rpcProtocolError("rpc protocol: locked-note proof result has unexpected fields");
+      }
+      if (
+        typeof resultRecord.pathBytes !== "number" ||
+        !Number.isSafeInteger(resultRecord.pathBytes) ||
+        resultRecord.pathBytes < 0 ||
+        resultRecord.pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      ) {
+        throw rpcProtocolError("rpc protocol: locked-note proof path bytes are invalid");
+      }
+      const codes = ["vault_locked", "ok", "not_found", "permission_denied", "service_unavailable"];
+      if (
+        typeof resultRecord.read !== "string" ||
+        typeof resultRecord.update !== "string" ||
+        typeof resultRecord.delete !== "string" ||
+        !codes.includes(resultRecord.read) ||
+        !codes.includes(resultRecord.update) ||
+        !codes.includes(resultRecord.delete)
+      ) {
+        throw rpcProtocolError("rpc protocol: locked-note proof result category is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "locked_note_proof";
+        pathBytes: number;
+        read: string;
+        update: string;
+        delete: string;
+      };
+      resultPayload.kind = "locked_note_proof";
+      resultPayload.pathBytes = resultRecord.pathBytes;
+      resultPayload.read = resultRecord.read;
+      resultPayload.update = resultRecord.update;
+      resultPayload.delete = resultRecord.delete;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "path_diagnostic") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        [
+          "kind",
+          "pathBytes",
+          "title",
+          "notebook",
+          "directMembership",
+          "recursiveMembership",
+          "revision",
+        ],
+        "rpc protocol: path diagnostic result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 7 ||
+        !keysAreExactly(resultKeys, [
+          "kind",
+          "pathBytes",
+          "title",
+          "notebook",
+          "directMembership",
+          "recursiveMembership",
+          "revision",
+        ])
+      ) {
+        throw rpcProtocolError("rpc protocol: path diagnostic result has unexpected fields");
+      }
+      if (
+        typeof resultRecord.pathBytes !== "number" ||
+        !Number.isSafeInteger(resultRecord.pathBytes) ||
+        resultRecord.pathBytes < 0 ||
+        resultRecord.pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+      ) {
+        throw rpcProtocolError("rpc protocol: path diagnostic path bytes are invalid");
+      }
+      const titleStatuses = ["none", "one", "multiple", "unavailable"];
+      const stageStatuses = ["present", "absent", "unavailable", "not_applicable"];
+      const revisionStatuses = ["valid", "invalid", "unavailable", "not_applicable"];
+      if (
+        typeof resultRecord.title !== "string" ||
+        !titleStatuses.includes(resultRecord.title) ||
+        typeof resultRecord.notebook !== "string" ||
+        !stageStatuses.includes(resultRecord.notebook) ||
+        typeof resultRecord.directMembership !== "string" ||
+        !stageStatuses.includes(resultRecord.directMembership) ||
+        typeof resultRecord.recursiveMembership !== "string" ||
+        !stageStatuses.includes(resultRecord.recursiveMembership) ||
+        typeof resultRecord.revision !== "string" ||
+        !revisionStatuses.includes(resultRecord.revision)
+      ) {
+        throw rpcProtocolError("rpc protocol: path diagnostic result category is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "path_diagnostic";
+        pathBytes: number;
+        title: string;
+        notebook: string;
+        directMembership: string;
+        recursiveMembership: string;
+        revision: string;
+      };
+      resultPayload.kind = "path_diagnostic";
+      resultPayload.pathBytes = resultRecord.pathBytes;
+      resultPayload.title = resultRecord.title;
+      resultPayload.notebook = resultRecord.notebook;
+      resultPayload.directMembership = resultRecord.directMembership;
+      resultPayload.recursiveMembership = resultRecord.recursiveMembership;
+      resultPayload.revision = resultRecord.revision;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 

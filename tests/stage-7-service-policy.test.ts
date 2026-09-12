@@ -83,13 +83,14 @@ describe("service policy — readOnly factory contract", () => {
     expect(policy.profile).toBe("readOnly");
   });
 
-  it("publishes the exact four read methods in the published order", () => {
+  it("publishes the exact read methods in the published order", () => {
     const policy = createReadOnlyServicePolicy();
     expect(policy.allowedMethods).toEqual([
       "notes.search",
       "notes.status",
       "notes.list_notebooks",
       "notes.get",
+      "notes.path_diagnostic",
     ]);
   });
 

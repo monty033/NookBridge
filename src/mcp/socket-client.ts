@@ -36,6 +36,8 @@ import {
   type RpcNotesAppendParams,
   type RpcNotesUpdateParams,
   type RpcNotesDeleteParams,
+  type RpcNotesLockedNoteProofParams,
+  type RpcNotesPathDiagnosticParams,
   type RpcAnyResponseEnvelope,
   type RpcResult,
   type RpcAnySuccessEnvelope,
@@ -218,6 +220,14 @@ export class NookdSocketClient {
     return this.#request("notes.delete", params);
   }
 
+  async lockedNoteProof(params: RpcNotesLockedNoteProofParams): Promise<NookdSocketResult> {
+    return this.#request("notes.locked_note_proof", params);
+  }
+
+  async pathDiagnostic(params: RpcNotesPathDiagnosticParams): Promise<NookdSocketResult> {
+    return this.#request("notes.path_diagnostic", params);
+  }
+
   async requestSync(): Promise<NookdSocketResult> {
     return this.#request("notes.sync", {});
   }
@@ -232,6 +242,8 @@ export class NookdSocketClient {
       | "notes.append"
       | "notes.update"
       | "notes.delete"
+      | "notes.locked_note_proof"
+      | "notes.path_diagnostic"
       | "notes.sync",
     params:
       | RpcNotesSearchParams
@@ -239,6 +251,8 @@ export class NookdSocketClient {
       | RpcNotesAppendParams
       | RpcNotesUpdateParams
       | RpcNotesDeleteParams
+      | RpcNotesLockedNoteProofParams
+      | RpcNotesPathDiagnosticParams
       | Record<string, never>
       | { readonly id: string },
     suppliedId?: string,
@@ -299,6 +313,8 @@ function serializeRequest(
     | "notes.append"
     | "notes.update"
     | "notes.delete"
+    | "notes.locked_note_proof"
+    | "notes.path_diagnostic"
     | "notes.sync",
   params:
     | RpcNotesSearchParams
@@ -375,6 +391,28 @@ function serializeRequest(
     cleanParams = snapshotUpdateParams(params);
   } else if (method === "notes.delete") {
     cleanParams = snapshotDeleteParams(params);
+  } else if (method === "notes.locked_note_proof") {
+    const proof = params as RpcNotesLockedNoteProofParams;
+    if (
+      typeof proof.path !== "string" ||
+      proof.path.length === 0 ||
+      Buffer.byteLength(proof.path, "utf8") > 512 ||
+      hasControlCharacter(proof.path)
+    ) {
+      throw new TypeError("nook-mcp: locked-note-proof path is invalid");
+    }
+    cleanParams = { path: proof.path };
+  } else if (method === "notes.path_diagnostic") {
+    const diagnostic = params as RpcNotesPathDiagnosticParams;
+    if (
+      typeof diagnostic.path !== "string" ||
+      diagnostic.path.length === 0 ||
+      Buffer.byteLength(diagnostic.path, "utf8") > 512 ||
+      hasControlCharacter(diagnostic.path)
+    ) {
+      throw new TypeError("nook-mcp: path-diagnostic path is invalid");
+    }
+    cleanParams = { path: diagnostic.path };
   } else {
     if (Object.keys(params).length !== 0)
       throw new TypeError("nook-mcp: parameterless request has fields");
@@ -892,6 +930,74 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         result: Object.freeze({ kind: "delete", id: resultRecord.id }),
       }) as unknown as RpcAnyResponseEnvelope;
     }
+    if (resultRecord.kind === "locked_note_proof") {
+      const read = resultRecord.read;
+      const update = resultRecord.update;
+      const remove = resultRecord.delete;
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "pathBytes", "read", "update", "delete"]) ||
+        typeof resultRecord.pathBytes !== "number" ||
+        !Number.isSafeInteger(resultRecord.pathBytes) ||
+        resultRecord.pathBytes < 0 ||
+        resultRecord.pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        !isLockedNoteProofCode(read) ||
+        !isLockedNoteProofCode(update) ||
+        !isLockedNoteProofCode(remove)
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "locked_note_proof",
+          pathBytes: resultRecord.pathBytes,
+          read,
+          update,
+          delete: remove,
+        }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
+    if (resultRecord.kind === "path_diagnostic") {
+      const title = resultRecord.title;
+      const notebook = resultRecord.notebook;
+      const directMembership = resultRecord.directMembership;
+      const recursiveMembership = resultRecord.recursiveMembership;
+      const revision = resultRecord.revision;
+      if (
+        !hasExactOwnKeys(resultRecord, [
+          "kind",
+          "pathBytes",
+          "title",
+          "notebook",
+          "directMembership",
+          "recursiveMembership",
+          "revision",
+        ]) ||
+        typeof resultRecord.pathBytes !== "number" ||
+        !Number.isSafeInteger(resultRecord.pathBytes) ||
+        resultRecord.pathBytes < 0 ||
+        resultRecord.pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        !isPathDiagnosticTitle(title) ||
+        !isPathDiagnosticStage(notebook) ||
+        !isPathDiagnosticStage(directMembership) ||
+        !isPathDiagnosticStage(recursiveMembership) ||
+        !isPathDiagnosticRevision(revision)
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({
+          kind: "path_diagnostic",
+          pathBytes: resultRecord.pathBytes,
+          title,
+          notebook,
+          directMembership,
+          recursiveMembership,
+          revision,
+        }),
+      }) as unknown as RpcAnyResponseEnvelope;
+    }
     if (resultRecord.kind === "sync") {
       if (
         !hasExactOwnKeys(resultRecord, ["kind", "status", "pendingSync", "attempts"]) ||
@@ -933,6 +1039,46 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
     ok: false,
     error: Object.freeze({ code: errorRecord.code, message: "Categorical RPC error" }),
   });
+}
+
+function isLockedNoteProofCode(
+  value: unknown,
+): value is "vault_locked" | "ok" | "not_found" | "permission_denied" | "service_unavailable" {
+  return (
+    value === "vault_locked" ||
+    value === "ok" ||
+    value === "not_found" ||
+    value === "permission_denied" ||
+    value === "service_unavailable"
+  );
+}
+
+function isPathDiagnosticTitle(
+  value: unknown,
+): value is "none" | "one" | "multiple" | "unavailable" {
+  return value === "none" || value === "one" || value === "multiple" || value === "unavailable";
+}
+
+function isPathDiagnosticStage(
+  value: unknown,
+): value is "present" | "absent" | "unavailable" | "not_applicable" {
+  return (
+    value === "present" ||
+    value === "absent" ||
+    value === "unavailable" ||
+    value === "not_applicable"
+  );
+}
+
+function isPathDiagnosticRevision(
+  value: unknown,
+): value is "valid" | "invalid" | "unavailable" | "not_applicable" {
+  return (
+    value === "valid" ||
+    value === "invalid" ||
+    value === "unavailable" ||
+    value === "not_applicable"
+  );
 }
 
 function decodeNotebook(value: unknown): Readonly<Record<string, unknown>> {
@@ -1058,6 +1204,8 @@ function mapResponseEnvelope(
         "append",
         "update",
         "delete",
+        "locked_note_proof",
+        "path_diagnostic",
         "sync",
       ].includes(result.kind)
     ) {

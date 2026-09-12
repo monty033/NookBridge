@@ -705,6 +705,8 @@ function guardReadOnlyProjection(
   const listNotebooksWithParents = readOnly.listNotebooksWithParents;
   const findNotesByTitle = readOnly.findNotesByTitle;
   const findNoteIdsByNotebook = readOnly.findNoteIdsByNotebook;
+  const hasNoteInNotebook = readOnly.hasNoteInNotebook;
+  const readNoteLockState = readOnly.readNoteLockState;
   return Object.freeze({
     lastSynced: async () => {
       ensureOpen();
@@ -748,6 +750,22 @@ function guardReadOnlyProjection(
           findNoteIdsByNotebook: async (notebookId: string) => {
             ensureOpen();
             return findNoteIdsByNotebook(notebookId);
+          },
+        }),
+    ...(hasNoteInNotebook === undefined
+      ? {}
+      : {
+          hasNoteInNotebook: async (notebookId: string, noteId: string) => {
+            ensureOpen();
+            return hasNoteInNotebook(notebookId, noteId);
+          },
+        }),
+    ...(readNoteLockState === undefined
+      ? {}
+      : {
+          readNoteLockState: async (id: string) => {
+            ensureOpen();
+            return readNoteLockState(id);
           },
         }),
     noteMetadata: async (id: string) => {

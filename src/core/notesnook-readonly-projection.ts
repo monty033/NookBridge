@@ -254,12 +254,12 @@ export function flattenLiveDatabaseToReadOnly(
     "Notesnook read-only projection: notes.note is unavailable",
   );
   const contentFindByNoteIdFn = readOptionalContentFindByNoteId(source);
-
+  const relationsFromFn = readOptionalRelationsFrom(source);
   // Build the closed seam.  Every method is async; every throw /
   // reject maps to a categorical projection error.  Upstream
   // categorical notesnook-adapter errors propagate unchanged so
   // their chain-free invariants are preserved end-to-end.
-  return Object.freeze({
+  const seam: NotesnookReadOnlyDatabase = Object.freeze({
     lastSynced: async (): Promise<number> => {
       const raw = await callThrough(
         lastSyncedFn,
@@ -522,6 +522,71 @@ export function flattenLiveDatabaseToReadOnly(
       return rawIds;
     },
 
+    /**
+     * Direct, bounded notebook membership probe used by the
+     * exact-path resolver when `notebooks.notes` refuses an
+     * oversized corpus.  Backs onto
+     * `db.relations.from({id: notebookId, type: 'notebook'}, 'note').has(noteId)`
+     * per the pinned `@notesnook/core@8.1.3` d.ts.  Returns
+     * `undefined` when `db.relations` is unavailable so the resolver
+     * falls back to corpus enumeration.
+     */
+    ...(relationsFromFn === undefined
+      ? {}
+      : {
+          hasNoteInNotebook: async (notebookId: string, noteId: string): Promise<boolean> => {
+            if (typeof notebookId !== "string" || notebookId.length === 0) {
+              throw projectionError(
+                "Notesnook read-only projection: notebook id must be a non-empty string",
+              );
+            }
+            if (typeof noteId !== "string" || noteId.length === 0) {
+              throw projectionError(
+                "Notesnook read-only projection: note id must be a non-empty string",
+              );
+            }
+            const relationsArray = await callThrough(
+              relationsFromFn,
+              [{ id: notebookId, type: "notebook" }, "note"],
+              "Notesnook read-only projection: relations.from rejected",
+            );
+            if (
+              relationsArray === undefined ||
+              relationsArray === null ||
+              typeof relationsArray !== "object"
+            ) {
+              throw projectionError(
+                "Notesnook read-only projection: relations.from returned an invalid RelationsArray",
+              );
+            }
+            const hasFn = (relationsArray as { has?: unknown }).has;
+            if (typeof hasFn !== "function") {
+              throw projectionError(
+                "Notesnook read-only projection: relations.from did not return a RelationsArray",
+              );
+            }
+            let raw: unknown;
+            try {
+              raw = Reflect.apply(hasFn, relationsArray, [noteId]);
+            } catch {
+              throw projectionError(
+                "Notesnook read-only projection: relations RelationsArray.has threw synchronously",
+              );
+            }
+            const resolved = await callThenable(
+              raw as PromiseLike<unknown>,
+              "relations.from(...).has",
+              (value) => value,
+            );
+            if (typeof resolved !== "boolean") {
+              throw projectionError(
+                "Notesnook read-only projection: relations RelationsArray.has did not return a boolean",
+              );
+            }
+            return resolved;
+          },
+        }),
+
     noteMetadata: async (
       id: string,
     ): Promise<
@@ -540,6 +605,24 @@ export function flattenLiveDatabaseToReadOnly(
       if (metadata === undefined) return undefined as never;
       const locked = await readLockedState(contentFindByNoteIdFn, id);
       return (locked === true ? { ...metadata, locked: true } : metadata) as never;
+    },
+
+    readNoteLockState: async (id: string): Promise<"locked" | "unlocked"> => {
+      if (typeof id !== "string" || id.length === 0) {
+        throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
+      }
+      const locked = await readLockedState(contentFindByNoteIdFn, id);
+      if (locked === true) return "locked";
+      if (locked === false) return "unlocked";
+      const note = await callThrough(
+        noteFn,
+        [id],
+        "Notesnook read-only projection: notes.note rejected",
+      );
+      const metadataLocked = readOptionalNoteLockedMarker(note);
+      if (metadataLocked === true) return "locked";
+      if (metadataLocked === false) return "unlocked";
+      throw projectionError("Notesnook read-only projection: note lock state is unavailable");
     },
 
     search: async (
@@ -608,6 +691,7 @@ export function flattenLiveDatabaseToReadOnly(
       return hits as never;
     },
   });
+  return seam;
 }
 
 /**
@@ -728,6 +812,27 @@ function readOptionalManagerMethod(
       throw projectionError(`Notesnook read-only projection: ${slot} threw synchronously`);
     }
   };
+}
+
+/**
+ * Capture the optional `db.relations.from(reference, type)` method
+ * without forcing the relations slot to exist.  Returns
+ * `undefined` when `db.relations` is missing or when its `from`
+ * method is not callable; the exact-path resolver will then fall
+ * back to corpus enumeration.
+ */
+function readOptionalRelationsFrom(
+  source: NotesnookReadOnlyProjectionSource,
+): ((...args: unknown[]) => unknown) | undefined {
+  let relations: unknown;
+  try {
+    relations = (source as unknown as Record<string, unknown>).relations;
+  } catch {
+    return undefined;
+  }
+  if (relations === undefined || relations === null) return undefined;
+  if (typeof relations !== "object") return undefined;
+  return readOptionalManagerMethod(relations, "from");
 }
 
 /**
@@ -1172,11 +1277,38 @@ async function readLockedState(
   } catch {
     throw projectionError("Notesnook read-only projection: content lock marker getter threw");
   }
+  let dataIsCipher = false;
+  try {
+    const contentValue = content as Record<string, unknown>;
+    const data = contentValue.data;
+    dataIsCipher =
+      (contentValue.cipher !== undefined &&
+        contentValue.iv !== undefined &&
+        contentValue.salt !== undefined) ||
+      (data !== null &&
+        typeof data === "object" &&
+        "cipher" in data &&
+        "iv" in data &&
+        "salt" in data);
+  } catch {
+    throw projectionError("Notesnook read-only projection: content cipher marker getter threw");
+  }
+  if (dataIsCipher) return true;
   if (locked === undefined) return undefined;
   if (typeof locked !== "boolean") {
     throw projectionError("Notesnook read-only projection: content lock marker is invalid");
   }
   return locked;
+}
+
+function readOptionalNoteLockedMarker(value: unknown): boolean | undefined {
+  if (value === undefined || value === null || typeof value !== "object") return undefined;
+  try {
+    const locked = (value as Record<string, unknown>).locked;
+    return typeof locked === "boolean" ? locked : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isVaultLockedRefusal(error: unknown): boolean {
@@ -1191,9 +1323,10 @@ function isVaultLockedRefusal(error: unknown): boolean {
     }
   }
   try {
-    // The raw upstream vocabulary is pinned to @notesnook/core@8.1.3.
-    // The internal `vault_locked` form is accepted only above through the
-    // identity-verified adapter predicate.
+    // @notesnook/core@8.1.3 throws `new Error("ERR_VAULT_LOCKED")`;
+    // the discriminator is the exact message, not an arbitrary error code.
+    const message = (error as { message?: unknown }).message;
+    if (message === "ERR_VAULT_LOCKED") return true;
     const code = (error as { code?: unknown }).code;
     return code === "ERR_VAULT_LOCKED";
   } catch {

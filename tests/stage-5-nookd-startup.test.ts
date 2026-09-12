@@ -294,6 +294,13 @@ describe("bounded nookd startup composition", () => {
       id: "note",
       expectedRevision: "rev_00000000000000000000000000000001",
     }));
+    const lockedNoteProof = vi.fn(async () => ({
+      kind: "locked_note_proof" as const,
+      pathBytes: 1,
+      read: "vault_locked" as const,
+      update: "vault_locked" as const,
+      delete: "vault_locked" as const,
+    }));
     const startServer = vi.fn(async (_options: StartNookdServerOptions) => fakeHandle());
     let searchReads = 0;
     let cleanupReads = 0;
@@ -307,6 +314,7 @@ describe("bounded nookd startup composition", () => {
       },
       deleteNote,
       resolveNotePath,
+      lockedNoteProof,
       get cleanup() {
         cleanupReads += 1;
         return cleanup;
@@ -326,6 +334,7 @@ describe("bounded nookd startup composition", () => {
     >;
     expect(serverRuntime.deleteNote).toBe(deleteNote);
     expect(serverRuntime.resolveNotePath).toBe(resolveNotePath);
+    expect(serverRuntime.lockedNoteProof).toBe(lockedNoteProof);
     await handle.shutdown();
     expect(cleanup).toHaveBeenCalledTimes(1);
   });

@@ -185,6 +185,15 @@ export interface NotesnookReadOnlyDatabase {
   readonly findNotesByTitle?: (title: string) => Promise<NotesnookReadOnlyNoteMetadata[]>;
   /** Authoritative notebook membership ids used by the exact-path resolver. */
   readonly findNoteIdsByNotebook?: (notebookId: string) => Promise<string[]>;
+  /**
+   * Bounded direct membership probe used by the exact-path resolver
+   * when {@link findNoteIdsByNotebook} refuses an oversized notebook
+   * corpus.  Optional: when absent the resolver falls back to
+   * enumeration.
+   */
+  readonly hasNoteInNotebook?: (notebookId: string, noteId: string) => Promise<boolean>;
+  /** Internal categorical lock-state probe; never returns note content. */
+  readonly readNoteLockState?: (id: string) => Promise<"locked" | "unlocked">;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }

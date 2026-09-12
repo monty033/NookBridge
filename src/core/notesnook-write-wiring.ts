@@ -231,32 +231,27 @@ export function bindNotesnookWriteRuntime(
     const safeId = requireIdentifier(id);
     const noteResult = await safeCall(() => snapshot.notes.note(safeId));
     if (noteResult === undefined) return undefined;
-    // Fetch the stored content in parallel only when the upstream
-    // `note.locked` field is absent (Astra finding P1-2).  When the
-    // note record explicitly supplies the flag, that value is the
-    // source of truth and the content lookup is wasted work.
     const noteRecord =
       typeof noteResult === "object" && noteResult !== null
         ? (noteResult as unknown as Record<string, unknown>)
         : undefined;
-    const hasExplicitLocked =
-      noteRecord !== undefined && Object.prototype.hasOwnProperty.call(noteRecord, "locked");
-    let contentLocked: boolean | undefined;
-    if (hasExplicitLocked) {
-      contentLocked = undefined;
-    } else {
-      try {
-        const contentResult = await safeCall(() => snapshot.content.findByNoteId(safeId));
-        contentLocked =
-          contentResult !== undefined && contentResult !== null && typeof contentResult === "object"
-            ? readOptionalLockedMarker(contentResult)
-            : undefined;
-      } catch (error) {
-        contentLocked =
-          isNotesnookWriteContractError(error) && error.code === "vault_locked" ? true : undefined;
-      }
+    let explicitLocked: boolean | undefined;
+    if (noteRecord !== undefined && Object.prototype.hasOwnProperty.call(noteRecord, "locked")) {
+      const value = noteRecord.locked;
+      if (typeof value === "boolean") explicitLocked = value;
     }
-    return mapNote(noteResult, safeId, contentLocked);
+    let contentLocked: boolean | undefined;
+    try {
+      const contentResult = await safeCall(() => snapshot.content.findByNoteId(safeId));
+      contentLocked =
+        contentResult !== undefined && contentResult !== null && typeof contentResult === "object"
+          ? readOptionalLockedMarker(contentResult)
+          : undefined;
+    } catch (error) {
+      contentLocked =
+        isNotesnookWriteContractError(error) && error.code === "vault_locked" ? true : undefined;
+    }
+    return mapNote(noteResult, safeId, contentLocked ?? explicitLocked);
   };
 
   const notesAdd = async (input: {
@@ -911,30 +906,18 @@ function mapNote(
 }
 
 /**
- * Resolve the authoritative locked marker for a note (Astra finding
- * P1-2).  When the upstream `note.locked` field is supplied, that
- * value is the source of truth — even if it disagrees with the
- * content marker, the adapter honors what upstream actually returned.
- *
- * When `note.locked` is absent the projection consults the content
- * record's `locked` marker (`content.locked` is the canonical Vault
- * flag in Notesnook).  The seam derives this hint through a single
- * `content.findByNoteId(id)` call performed alongside `notes.note(id)`
- * so the adapter's gate receives the merged projection without a
- * follow-up fetch.
- *
- * When neither the note record nor the content record carries the
- * marker, the projection fails closed: `locked` is `false`, the
- * authoritative check remains a non-issue, and the gate does not
- * falsely raise `vault_locked`.
+ * Resolve the authoritative locked marker for a note.  The content
+ * record is canonical when it supplies a marker; the upstream note
+ * field is only a fallback for older records without content state.
  */
 function resolveLockedState(record: object, contentLocked: boolean | undefined): boolean {
+  if (contentLocked !== undefined) return contentLocked;
   const noteProperty = readOwnProperty(record, "locked", "invalid_input");
   if (noteProperty.present && noteProperty.value !== undefined) {
     if (typeof noteProperty.value !== "boolean") throw wiringError("invalid_input");
     return noteProperty.value;
   }
-  return contentLocked === true;
+  return false;
 }
 
 function mapContent(value: unknown, requestedNoteId: string): NotesnookWriteStoredContent {
@@ -969,6 +952,23 @@ function readOptionalLockedMarker(record: object): boolean | undefined {
   if (!property.present) return undefined;
   const value = property.value;
   if (value === undefined) return undefined;
+  let dataIsCipher = false;
+  try {
+    const recordValue = record as Record<string, unknown>;
+    const data = recordValue.data;
+    dataIsCipher =
+      (recordValue.cipher !== undefined &&
+        recordValue.iv !== undefined &&
+        recordValue.salt !== undefined) ||
+      (data !== null &&
+        typeof data === "object" &&
+        "cipher" in data &&
+        "iv" in data &&
+        "salt" in data);
+  } catch {
+    throw wiringError("invalid_input");
+  }
+  if (dataIsCipher) return true;
   if (typeof value !== "boolean") throw wiringError("invalid_input");
   return value;
 }
@@ -1085,8 +1085,10 @@ function mapRelations(
 function isUpstreamVaultLockedRefusal(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   try {
-    const descriptor = Reflect.getOwnPropertyDescriptor(value, "message");
-    return descriptor?.get === undefined && descriptor?.value === "ERR_VAULT_LOCKED";
+    const message = Reflect.getOwnPropertyDescriptor(value, "message");
+    if (message?.get === undefined && message?.value === "ERR_VAULT_LOCKED") return true;
+    const code = Reflect.getOwnPropertyDescriptor(value, "code");
+    return code?.get === undefined && code?.value === "ERR_VAULT_LOCKED";
   } catch {
     return false;
   }
