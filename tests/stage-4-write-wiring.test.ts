@@ -792,10 +792,9 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     expect(observed).toMatchObject({ id: NOTE_ID, locked: false });
   });
 
-  it("honors explicit note.locked over content.locked (P1-2)", async () => {
-    // The deprecated upstream flag wins when supplied, even if the
-    // content marker disagrees.  This mirrors the contract surface
-    // Notesnook actually returns today.
+  it("honors content.locked over an explicit note.locked fallback", async () => {
+    // Content state is authoritative when present; note.locked is only
+    // a fallback for records without a content marker.
     const note: FakeNoteRecord = {
       id: NOTE_ID,
       title: "Upstream says unlocked",
@@ -823,7 +822,7 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     const seam = bindNotesnookWriteRuntime(runtime);
 
     const observed = await seam.note(NOTE_ID);
-    expect(observed).toMatchObject({ id: NOTE_ID, locked: false });
+    expect(observed).toMatchObject({ id: NOTE_ID, locked: true });
   });
 
   it("binds note() to the runtime object so a thief cannot detach it", async () => {

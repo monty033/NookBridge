@@ -145,6 +145,32 @@ describe("nookd socket client — note revision projection", () => {
     }
   });
 
+  it("round-trips the closed locked-note proof method over the framed socket", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "locked_note_proof",
+          pathBytes: 14,
+          read: "vault_locked",
+          update: "vault_locked",
+          delete: "vault_locked",
+        },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.lockedNoteProof({ path: "General/Locked" });
+
+    expect(result.ok).toBe(true);
+    if (result.ok && result.envelope.result.kind === "locked_note_proof") {
+      expect(result.envelope.result.read).toBe("vault_locked");
+      expect(result.envelope.result.update).toBe("vault_locked");
+      expect(result.envelope.result.delete).toBe("vault_locked");
+    }
+  });
+
   it("fails closed when the framed note metadata has a malformed revision", async () => {
     const socketPath = await startFakeDaemon((request) =>
       framedResponse({

@@ -45,17 +45,21 @@
  *   `service_unavailable`-style error.
  */
 
+import { Buffer } from "node:buffer";
 import { normaliseStateDir } from "../config/state-dir.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookRealCoreModule } from "../core/notesnook-core-adapter.js";
-import type {
-  AppendNoteCommand,
-  CreateNoteCommand,
-  DeleteNoteCommand,
-  UpdateNoteCommand,
+import {
+  isNotesnookWriteContractError,
+  type AppendNoteCommand,
+  type CreateNoteCommand,
+  type DeleteNoteCommand,
+  type NotesnookRevisionToken,
+  type UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
+import { isNotesnookReadOnlyAdapterError } from "../core/notesnook-readonly-adapter.js";
 import {
   isNotesnookWriteAdapterError,
   type AppendNoteResult,
@@ -63,6 +67,7 @@ import {
   type DeleteNoteResult,
   type UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
+import type { RpcLockedNoteProofResult, RpcNotesPathDiagnosticResult } from "./rpc-protocol.js";
 import {
   createProductionRuntimeCore,
   type ProductionRuntimeCore,
@@ -70,7 +75,9 @@ import {
 import {
   parseExactNotePath,
   resolveExactNotePath,
+  diagnoseExactNotePath,
   ExactNotePathError,
+  type ExactNotePathDiagnostic,
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
 
@@ -150,6 +157,10 @@ export interface ServiceRuntime {
   >;
   /** Resolve one exact hierarchical note path to an opaque id and revision. */
   readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
+  /** Execute the closed daemon-owned locked-note acceptance proof. */
+  readonly lockedNoteProof?: (path: string) => Promise<RpcLockedNoteProofResult>;
+  /** Execute the closed, read-only exact-path resolver diagnostic. */
+  readonly pathDiagnostic?: (path: string) => Promise<RpcNotesPathDiagnosticResult>;
   /** Optional bounded local note creation capability. */
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   /** Optional bounded local note append capability. */
@@ -359,6 +370,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
 
   const findNotesByTitle = readOnly.findNotesByTitle;
   const findNoteIdsByNotebook = readOnly.findNoteIdsByNotebook;
+  const hasNoteInNotebook = readOnly.hasNoteInNotebook;
   const resolveNotePath =
     listNotebooksForSettings === undefined ||
     findNotesByTitle === undefined ||
@@ -392,8 +404,111 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
             // must not perform a second live title search.
             findNotesByTitle: async () => titleCandidates,
             findNoteIdsByNotebook: (notebookId) => findNoteIdsByNotebook(notebookId),
+            ...(hasNoteInNotebook === undefined
+              ? {}
+              : {
+                  hasNoteInNotebook: (notebookId: string, noteId: string) =>
+                    hasNoteInNotebook(notebookId, noteId),
+                }),
             noteMetadata,
           });
+        };
+
+  const pathDiagnostic =
+    findNotesByTitle === undefined || findNoteIdsByNotebook === undefined
+      ? undefined
+      : async (path: string): Promise<RpcNotesPathDiagnosticResult> => {
+          if (typeof path !== "string") {
+            return pathDiagnosticReport(0, {
+              title: "unavailable",
+              notebook: "unavailable",
+              directMembership: "unavailable",
+              recursiveMembership: "unavailable",
+              revision: "unavailable",
+            });
+          }
+          const pathBytes = Buffer.byteLength(path, "utf8");
+          let parsed: ReturnType<typeof parseExactNotePath>;
+          try {
+            parsed = parseExactNotePath(path);
+          } catch {
+            return pathDiagnosticReport(pathBytes, {
+              title: "unavailable",
+              notebook: "unavailable",
+              directMembership: "unavailable",
+              recursiveMembership: "unavailable",
+              revision: "unavailable",
+            });
+          }
+
+          let titleCandidates: Awaited<ReturnType<NonNullable<typeof findNotesByTitle>>>;
+          try {
+            titleCandidates = await findNotesByTitle(parsed.noteTitle);
+          } catch {
+            return pathDiagnosticReport(pathBytes, {
+              title: "unavailable",
+              notebook: parsed.notebookPath === undefined ? "not_applicable" : "unavailable",
+              directMembership: "not_applicable",
+              recursiveMembership: "not_applicable",
+              revision: "unavailable",
+            });
+          }
+          if (!Array.isArray(titleCandidates) || titleCandidates.length > 256) {
+            return pathDiagnosticReport(pathBytes, {
+              title: "unavailable",
+              notebook: parsed.notebookPath === undefined ? "not_applicable" : "unavailable",
+              directMembership: "not_applicable",
+              recursiveMembership: "not_applicable",
+              revision: "unavailable",
+            });
+          }
+          if (titleCandidates.length === 0) {
+            return pathDiagnosticReport(pathBytes, {
+              title: "none",
+              notebook: parsed.notebookPath === undefined ? "not_applicable" : "not_applicable",
+              directMembership: "not_applicable",
+              recursiveMembership: "not_applicable",
+              revision: "not_applicable",
+            });
+          }
+
+          let notebooks: Awaited<ReturnType<NonNullable<typeof listNotebooksForSettings>>> = [];
+          if (parsed.notebookPath !== undefined) {
+            if (listNotebooksForSettings === undefined) {
+              return pathDiagnosticReport(pathBytes, {
+                title: titleCandidates.length === 1 ? "one" : "multiple",
+                notebook: "unavailable",
+                directMembership: "not_applicable",
+                recursiveMembership: "not_applicable",
+                revision: "unavailable",
+              });
+            }
+            try {
+              notebooks = await listNotebooksForSettings();
+            } catch {
+              return pathDiagnosticReport(pathBytes, {
+                title: titleCandidates.length === 1 ? "one" : "multiple",
+                notebook: "unavailable",
+                directMembership: "not_applicable",
+                recursiveMembership: "not_applicable",
+                revision: "unavailable",
+              });
+            }
+          }
+
+          const diagnostic = await diagnoseExactNotePath(path, {
+            notebooks,
+            findNotesByTitle: async () => titleCandidates,
+            findNoteIdsByNotebook: (notebookId) => findNoteIdsByNotebook(notebookId),
+            ...(hasNoteInNotebook === undefined
+              ? {}
+              : {
+                  hasNoteInNotebook: (notebookId: string, noteId: string) =>
+                    hasNoteInNotebook(notebookId, noteId),
+                }),
+            noteMetadata,
+          });
+          return pathDiagnosticReport(pathBytes, diagnostic);
         };
 
   const localWrite = core.handle.localWrite;
@@ -427,7 +542,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
             return result;
           } catch (error) {
             if (isServiceRuntimeError(error)) throw error;
-            if (isNotesnookWriteAdapterError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
+              throw error;
             throw serviceRuntimeError("service runtime write failed");
           }
         };
@@ -447,7 +563,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
             return result;
           } catch (error) {
             if (isServiceRuntimeError(error)) throw error;
-            if (isNotesnookWriteAdapterError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
+              throw error;
             throw serviceRuntimeError("service runtime write failed");
           }
         };
@@ -466,9 +583,80 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
             return result;
           } catch (error) {
             if (isServiceRuntimeError(error)) throw error;
-            if (isNotesnookWriteAdapterError(error)) throw error;
+            if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
+              throw error;
             throw serviceRuntimeError("service runtime write failed");
           }
+        };
+
+  const proofReadNoteLockState =
+    readOnly.readNoteLockState ??
+    (async (id: string): Promise<"locked" | "unlocked"> => {
+      const metadata = await noteMetadata(id);
+      if (metadata === undefined) throw serviceRuntimeError("note lock state is unavailable");
+      return metadata.locked === true ? "locked" : "unlocked";
+    });
+  const lockedNoteProof =
+    resolveNotePath === undefined || updateNote === undefined || deleteNote === undefined
+      ? undefined
+      : async (path: string): Promise<RpcLockedNoteProofResult> => {
+          const pathBytes = Buffer.byteLength(path, "utf8");
+          const report = {
+            kind: "locked_note_proof" as const,
+            pathBytes,
+            read: "service_unavailable" as RpcLockedNoteProofResult["read"],
+            update: "service_unavailable" as RpcLockedNoteProofResult["update"],
+            delete: "service_unavailable" as RpcLockedNoteProofResult["delete"],
+          };
+          let resolution: ExactNotePathResolution;
+          try {
+            parseExactNotePath(path);
+            resolution = await resolveNotePath(path);
+          } catch (error) {
+            if (error instanceof ExactNotePathError && error.code === "not_found") {
+              return Object.freeze({
+                ...report,
+                read: "not_found",
+                update: "not_found",
+                delete: "not_found",
+              });
+            }
+            return Object.freeze(report);
+          }
+
+          try {
+            report.read =
+              (await proofReadNoteLockState(resolution.id)) === "locked" ? "vault_locked" : "ok";
+          } catch (error) {
+            report.read = isVaultLockedReadProofError(error)
+              ? "vault_locked"
+              : "service_unavailable";
+          }
+          const pinned = resolution.pinned === true;
+          try {
+            await updateNote({
+              id: resolution.id,
+              expectedRevision: resolution.expectedRevision as NotesnookRevisionToken,
+              patch: { pinned },
+            });
+            report.update = "ok";
+          } catch (error) {
+            report.update = isVaultLockedWriteProofError(error)
+              ? "vault_locked"
+              : "service_unavailable";
+          }
+          try {
+            await deleteNote({
+              id: resolution.id,
+              expectedRevision: resolution.expectedRevision as NotesnookRevisionToken,
+            });
+            report.delete = "ok";
+          } catch (error) {
+            report.delete = isVaultLockedWriteProofError(error)
+              ? "vault_locked"
+              : "service_unavailable";
+          }
+          return Object.freeze(report);
         };
 
   const remoteSync = core.handle.remoteSync;
@@ -498,6 +686,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(listNotebooksForSettings === undefined ? {} : { listNotebooksForSettings }),
     noteMetadata,
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
+    ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
+    ...(pathDiagnostic === undefined ? {} : { pathDiagnostic }),
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
@@ -505,6 +695,32 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,
   });
+}
+
+function pathDiagnosticReport(
+  pathBytes: number,
+  diagnostic: ExactNotePathDiagnostic,
+): RpcNotesPathDiagnosticResult {
+  return Object.freeze({
+    kind: "path_diagnostic" as const,
+    pathBytes,
+    ...diagnostic,
+  });
+}
+
+function isVaultLockedReadProofError(error: unknown): boolean {
+  return isNotesnookReadOnlyAdapterError(error) && error.message === "vault_locked";
+}
+
+function isVaultLockedWriteProofError(error: unknown): boolean {
+  if (!isNotesnookWriteAdapterError(error) && !isNotesnookWriteContractError(error)) return false;
+  if (typeof error !== "object" || error === null) return false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    return descriptor !== undefined && "value" in descriptor && descriptor.value === "vault_locked";
+  } catch {
+    return false;
+  }
 }
 
 type NormalizedServiceRuntimeOptions = Readonly<{

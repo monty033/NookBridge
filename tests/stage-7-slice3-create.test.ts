@@ -196,6 +196,7 @@ describe("service policy — custom method allowlist", () => {
       "notes.sync",
       "notes.update",
       "notes.delete",
+      "notes.path_diagnostic",
       "notes.search",
     ];
     const oversizedPolicy = createCustomServicePolicy(oversized);

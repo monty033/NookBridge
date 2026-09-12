@@ -106,6 +106,8 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "updateNote"
       | "deleteNote"
       | "resolveNotePath"
+      | "pathDiagnostic"
+      | "lockedNoteProof"
       | "requestSync"
       | "listNotebooksForSettings"
     >
@@ -309,6 +311,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let updateNote: NookdStartupRuntime["updateNote"];
   let deleteNote: NookdStartupRuntime["deleteNote"];
   let resolveNotePath: NookdStartupRuntime["resolveNotePath"];
+  let pathDiagnostic: NookdStartupRuntime["pathDiagnostic"];
+  let lockedNoteProof: NookdStartupRuntime["lockedNoteProof"];
   let requestSync: NookdStartupRuntime["requestSync"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
@@ -328,6 +332,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedUpdateNote = runtime.updateNote;
     const capturedDeleteNote = runtime.deleteNote;
     const capturedResolveNotePath = runtime.resolveNotePath;
+    const capturedPathDiagnostic = runtime.pathDiagnostic;
+    const capturedLockedNoteProof = runtime.lockedNoteProof;
     const capturedRequestSync = runtime.requestSync;
     const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
     const capturedCleanup = runtime.cleanup;
@@ -342,6 +348,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function") ||
       (capturedDeleteNote !== undefined && typeof capturedDeleteNote !== "function") ||
       (capturedResolveNotePath !== undefined && typeof capturedResolveNotePath !== "function") ||
+      (capturedPathDiagnostic !== undefined && typeof capturedPathDiagnostic !== "function") ||
+      (capturedLockedNoteProof !== undefined && typeof capturedLockedNoteProof !== "function") ||
       (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function") ||
       typeof capturedListNotebooksForSettings !== "function"
     ) {
@@ -356,6 +364,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     updateNote = capturedUpdateNote;
     deleteNote = capturedDeleteNote;
     resolveNotePath = capturedResolveNotePath;
+    pathDiagnostic = capturedPathDiagnostic;
+    lockedNoteProof = capturedLockedNoteProof;
     requestSync = capturedRequestSync;
     listNotebooksForSettings = capturedListNotebooksForSettings;
     runtimeCleanup = capturedCleanup;
@@ -397,6 +407,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(deleteNote === undefined ? {} : { deleteNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
+    ...(pathDiagnostic === undefined ? {} : { pathDiagnostic }),
+    ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
     notebookIndex,
     cleanup,
   });

@@ -374,6 +374,20 @@ function createFakeLiveDatabase(
       note: async (id: string) => notes.get(id),
     },
     content: { findByNoteId: async (id: string) => contents.get(id) },
+    relations: {
+      from: vi.fn((reference: { id: string; type: string }, type: string) => ({
+        marker: "relation-array",
+        has(this: { marker: string }, id: string) {
+          if (this.marker !== "relation-array") throw new Error("relations.has lost binding");
+          return Promise.resolve(
+            reference.id === "nb-1" &&
+              reference.type === "notebook" &&
+              type === "note" &&
+              id === "note-1",
+          );
+        },
+      })),
+    },
     lookup: {
       notes: async () => searchResults(options.noteSearchIds ?? ["note-1"]),
       notebooks: async () => searchResults(options.notebookSearchIds ?? ["nb-1"]),
@@ -732,6 +746,40 @@ describe("Stage 3 production projection and sync gate", () => {
     });
   });
 
+  it("treats the pinned upstream vault-locked message as a locked marker", async () => {
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => {
+      throw new Error("ERR_VAULT_LOCKED");
+    };
+
+    const projection = flattenLiveDatabaseToReadOnly(database);
+    await expect(projection.noteMetadata("locked-note")).resolves.toMatchObject({
+      id: "locked-note",
+      locked: true,
+    });
+  });
+
+  it("treats the pinned cipher-shaped content as locked without exposing it", async () => {
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        content: { findByNoteId: (id: string) => Promise<unknown> };
+      }
+    ).content.findByNoteId = async () => ({
+      data: { cipher: "hidden", iv: "hidden", salt: "hidden" },
+    });
+
+    const projection = flattenLiveDatabaseToReadOnly(database);
+    await expect(projection.noteMetadata("locked-note")).resolves.toMatchObject({
+      id: "locked-note",
+      locked: true,
+    });
+  });
+
   it("does not trust an unverified vault_locked error code", async () => {
     const database = createFakeLiveDatabase();
     (
@@ -888,12 +936,14 @@ describe("Stage 3 production projection and sync gate", () => {
     expect(Object.keys(readOnly).sort()).toEqual([
       "findNoteIdsByNotebook",
       "findNotesByTitle",
+      "hasNoteInNotebook",
       "hasUnsyncedChanges",
       "lastSynced",
       "listNotebooks",
       "listNotebooksWithParents",
       "listNotes",
       "noteMetadata",
+      "readNoteLockState",
       "search",
       "sync",
     ]);
@@ -923,6 +973,15 @@ describe("Stage 3 production projection and sync gate", () => {
     ]);
     expect(readOnly.findNoteIdsByNotebook).toBeTypeOf("function");
     await expect(readOnly.findNoteIdsByNotebook!("nb-1")).resolves.toEqual(["note-1"]);
+    expect(readOnly.hasNoteInNotebook).toBeTypeOf("function");
+    await expect(readOnly.hasNoteInNotebook!("nb-1", "note-1")).resolves.toBe(true);
+    await expect(readOnly.hasNoteInNotebook!("nb-1", "locked-note")).resolves.toBe(false);
+    const relations = (
+      database as unknown as {
+        relations: { from: ReturnType<typeof vi.fn> };
+      }
+    ).relations;
+    expect(relations.from).toHaveBeenCalledWith({ id: "nb-1", type: "notebook" }, "note");
     await expect(readOnly.noteMetadata("note-1")).resolves.toEqual({
       id: "note-1",
       title: "A note",
@@ -944,6 +1003,27 @@ describe("Stage 3 production projection and sync gate", () => {
       isNotesnookReadOnlyProjectionError,
     );
     expect(database.syncCalls).toEqual([{ type: "fetch" }]);
+  });
+
+  it("normalizes direct relation membership failures without leaking upstream detail", async () => {
+    const database = createFakeLiveDatabase();
+    const privateDetail = "private relation database failure";
+    (
+      database as unknown as {
+        relations: { from: (reference: unknown, type: string) => unknown };
+      }
+    ).relations.from = () => ({
+      has: async () => {
+        throw new Error(privateDetail);
+      },
+    });
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+    const failure = await readOnly.hasNoteInNotebook!("nb-1", "note-1").catch(
+      (error: unknown) => error,
+    );
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(String(failure)).not.toContain(privateDetail);
   });
 
   it("falls back to root-only summaries when notebooks.breadcrumbs is absent", async () => {

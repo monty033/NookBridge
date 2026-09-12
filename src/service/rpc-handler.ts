@@ -39,6 +39,8 @@ import {
   type RpcNotesAppendRequest,
   type RpcNotesUpdateRequest,
   type RpcNotesDeleteRequest,
+  type RpcNotesLockedNoteProofRequest,
+  type RpcNotesPathDiagnosticRequest,
   type RpcNotesSyncRequest,
   type RpcMethod,
   type RpcRequest,
@@ -52,6 +54,8 @@ import {
   type RpcAppendNoteResult,
   type RpcUpdateNoteResult,
   type RpcDeleteNoteResult,
+  type RpcLockedNoteProofResult,
+  type RpcNotesPathDiagnosticResult,
   type RpcSyncResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
@@ -152,6 +156,10 @@ export interface RpcHandlerRuntimeLike {
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   /** Optional daemon-side resolver for exact destructive note paths. */
   readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
+  /** Daemon-owned closed locked-note acceptance proof. */
+  readonly lockedNoteProof?: (path: string) => Promise<RpcLockedNoteProofResult>;
+  /** Daemon-owned closed read-only exact-path diagnostic. */
+  readonly pathDiagnostic?: (path: string) => Promise<RpcNotesPathDiagnosticResult>;
   readonly requestSync?: () => Promise<
     Readonly<{
       status: "idle" | "synced" | "failed";
@@ -229,6 +237,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
         structural.request.method === "notes.search" ||
         structural.request.method === "notes.status" ||
         structural.request.method === "notes.list_notebooks" ||
+        structural.request.method === "notes.path_diagnostic" ||
         structural.request.method === "notes.sync" ||
         policy.evaluator === undefined
       ) {
@@ -288,6 +297,36 @@ export async function handleRpcRequest<T extends RpcRequest>(
           return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
         }
         return (await runNotesDelete(
+          structural.request,
+          runtime,
+          id,
+        )) as unknown as RpcHandlerResponse<T>;
+      }
+
+      if (structural.request.method === "notes.locked_note_proof") {
+        const resolver = runtime.resolveNotePath;
+        if (resolver === undefined) {
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
+        }
+        try {
+          await reflectApply(resolver, runtime, [structural.request.params.path]);
+        } catch (error) {
+          if (error instanceof ExactNotePathError && error.code === "not_found") {
+            return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
+          }
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
+        }
+        const parsedPath = parseExactNotePath(structural.request.params.path);
+        const settingsContext =
+          parsedPath.notebookPath === undefined
+            ? { noteTitle: parsedPath.noteTitle }
+            : { notebookPath: parsedPath.notebookPath, noteTitle: parsedPath.noteTitle };
+        for (const method of ["notes.get", "notes.update", "notes.delete"] as const) {
+          if (!authorizeServiceMethod(policy, method, settingsContext).allowed) {
+            return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+          }
+        }
+        return (await runLockedNoteProof(
           structural.request,
           runtime,
           id,
@@ -369,6 +408,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod !== "notes.append" &&
     rawMethod !== "notes.update" &&
     rawMethod !== "notes.delete" &&
+    rawMethod !== "notes.locked_note_proof" &&
+    rawMethod !== "notes.path_diagnostic" &&
     rawMethod !== "notes.sync"
   ) {
     return { kind: "err", code: "invalid_request" };
@@ -516,7 +557,11 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params.id = rawNoteId;
     params.expectedRevision = rawRevision;
     params.patch = patch;
-  } else if (rawMethod === "notes.delete") {
+  } else if (
+    rawMethod === "notes.delete" ||
+    rawMethod === "notes.locked_note_proof" ||
+    rawMethod === "notes.path_diagnostic"
+  ) {
     if (!hasExactKeys(paramKeys, ["path"])) {
       return { kind: "err", code: "invalid_request" };
     }
@@ -676,6 +721,10 @@ async function runAuthorizedRpcMethod(
       return runNotesUpdate(request, runtime, id);
     case "notes.delete":
       return runNotesDelete(request, runtime, id);
+    case "notes.locked_note_proof":
+      return runLockedNoteProof(request, runtime, id);
+    case "notes.path_diagnostic":
+      return runPathDiagnostic(request, runtime, id);
     case "notes.sync":
       return runNotesSync(request, runtime, id);
   }
@@ -987,6 +1036,126 @@ async function runNotesDelete(
   return buildResultSuccessEnvelope(id, result);
 }
 
+async function runLockedNoteProof(
+  request: RpcNotesLockedNoteProofRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "lockedNoteProof");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [request.params.path]);
+  } catch {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (raw === null || typeof raw !== "object" || arrayIsArray(raw)) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const record = raw as Record<string, unknown>;
+  const kind = readOwnStringField(record, "kind");
+  const pathBytes = readOwnNumberField(record, "pathBytes");
+  const read = readOwnStringField(record, "read");
+  const update = readOwnStringField(record, "update");
+  const remove = readOwnStringField(record, "delete");
+  const codes = ["vault_locked", "ok", "not_found", "permission_denied", "service_unavailable"];
+  if (
+    kind !== "locked_note_proof" ||
+    pathBytes === undefined ||
+    !Number.isSafeInteger(pathBytes) ||
+    pathBytes < 0 ||
+    pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes ||
+    read === undefined ||
+    update === undefined ||
+    remove === undefined ||
+    !codes.includes(read) ||
+    !codes.includes(update) ||
+    !codes.includes(remove)
+  ) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const result = objectFreeze(
+    objectCreate(null, {
+      kind: { value: "locked_note_proof", enumerable: true, configurable: false, writable: false },
+      pathBytes: { value: pathBytes, enumerable: true, configurable: false, writable: false },
+      read: { value: read, enumerable: true, configurable: false, writable: false },
+      update: { value: update, enumerable: true, configurable: false, writable: false },
+      delete: { value: remove, enumerable: true, configurable: false, writable: false },
+    }),
+  ) as RpcLockedNoteProofResult;
+  return buildResultSuccessEnvelope(id, result);
+}
+
+async function runPathDiagnostic(
+  request: RpcNotesPathDiagnosticRequest,
+  runtime: RpcHandlerRuntimeLike,
+  id: string,
+): Promise<RpcAnyResponseEnvelope> {
+  const fn = readRuntimeMethod(runtime, "pathDiagnostic");
+  if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  let raw: unknown;
+  try {
+    raw = await reflectApply(fn, runtime, [request.params.path]);
+  } catch {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (raw === null || typeof raw !== "object" || arrayIsArray(raw)) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const record = raw as Record<string, unknown>;
+  const kind = readOwnStringField(record, "kind");
+  const pathBytes = readOwnNumberField(record, "pathBytes");
+  const title = readOwnStringField(record, "title");
+  const notebook = readOwnStringField(record, "notebook");
+  const directMembership = readOwnStringField(record, "directMembership");
+  const recursiveMembership = readOwnStringField(record, "recursiveMembership");
+  const revision = readOwnStringField(record, "revision");
+  const titleStatuses = ["none", "one", "multiple", "unavailable"];
+  const stageStatuses = ["present", "absent", "unavailable", "not_applicable"];
+  const revisionStatuses = ["valid", "invalid", "unavailable", "not_applicable"];
+  if (
+    kind !== "path_diagnostic" ||
+    pathBytes === undefined ||
+    !Number.isSafeInteger(pathBytes) ||
+    pathBytes < 0 ||
+    pathBytes > STAGE5_RPC_LIMITS.maxQueryBytes ||
+    title === undefined ||
+    !titleStatuses.includes(title) ||
+    notebook === undefined ||
+    !stageStatuses.includes(notebook) ||
+    directMembership === undefined ||
+    !stageStatuses.includes(directMembership) ||
+    recursiveMembership === undefined ||
+    !stageStatuses.includes(recursiveMembership) ||
+    revision === undefined ||
+    !revisionStatuses.includes(revision)
+  ) {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+  const result = objectFreeze(
+    objectCreate(null, {
+      kind: { value: "path_diagnostic", enumerable: true, configurable: false, writable: false },
+      pathBytes: { value: pathBytes, enumerable: true, configurable: false, writable: false },
+      title: { value: title, enumerable: true, configurable: false, writable: false },
+      notebook: { value: notebook, enumerable: true, configurable: false, writable: false },
+      directMembership: {
+        value: directMembership,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      recursiveMembership: {
+        value: recursiveMembership,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      revision: { value: revision, enumerable: true, configurable: false, writable: false },
+    }),
+  ) as RpcNotesPathDiagnosticResult;
+  return buildResultSuccessEnvelope(id, result);
+}
+
 async function runNotesSync(
   _request: RpcNotesSyncRequest,
   runtime: RpcHandlerRuntimeLike,
@@ -1147,6 +1316,8 @@ function readRuntimeMethod(
     | "updateNote"
     | "deleteNote"
     | "resolveNotePath"
+    | "lockedNoteProof"
+    | "pathDiagnostic"
     | "requestSync",
 ): ((...args: unknown[]) => unknown) | undefined {
   try {
@@ -1380,6 +1551,8 @@ function buildResultSuccessEnvelope(
     | RpcAppendNoteResult
     | RpcUpdateNoteResult
     | RpcDeleteNoteResult
+    | RpcLockedNoteProofResult
+    | RpcNotesPathDiagnosticResult
     | RpcSyncResult,
 ): RpcAnyResponseEnvelope {
   return objectFreeze(

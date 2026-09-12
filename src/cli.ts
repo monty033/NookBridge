@@ -70,6 +70,16 @@ import {
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
+import {
+  createProductionLockedNoteProofRuntime,
+  formatLockedNoteProof,
+  runLockedNoteProof,
+} from "./operator/locked-note-proof.js";
+import {
+  createProductionPathDiagnosticRuntime,
+  formatPathDiagnostic,
+  runPathDiagnostic,
+} from "./operator/path-diagnostic.js";
 import { runSettingsCommand } from "./operator/settings-cli.js";
 import {
   formatTreeHelp,
@@ -323,6 +333,81 @@ async function runTree(args: Args): Promise<number> {
 }
 
 /**
+ * Run the operator-only locked-note acceptance proof. This command is
+ * intentionally outside the public notes parser and never becomes an MCP
+ * method. It requires the same non-secret live-sync gate as the existing
+ * production operator commands.
+ */
+async function runLockedNoteProofCommand(
+  argv: readonly string[],
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<number> {
+  if (argv.length !== 2 || argv[0] !== "--path" || typeof argv[1] !== "string") {
+    process.stderr.write("nookctl notes locked-note-proof: invalid command input\n");
+    return 2;
+  }
+  if (environment["NOOKBRIDGE_ENABLE_LIVE_SYNC"] !== "1") {
+    process.stderr.write(
+      "nookctl notes locked-note-proof is disabled; set NOOKBRIDGE_ENABLE_LIVE_SYNC=1\n",
+    );
+    return 2;
+  }
+
+  let cleanup: (() => void | Promise<void>) | undefined;
+  try {
+    const production = await createProductionLockedNoteProofRuntime(environment);
+    cleanup = production.cleanup;
+    const report = await runLockedNoteProof(argv[1], production.runtime);
+    process.stdout.write(`${formatLockedNoteProof(report)}\n`);
+    return report.read === "vault_locked" &&
+      report.update === "vault_locked" &&
+      report.delete === "vault_locked"
+      ? 0
+      : 1;
+  } catch {
+    process.stderr.write("nookctl notes locked-note-proof: service unavailable\n");
+    return 3;
+  } finally {
+    if (cleanup !== undefined) {
+      try {
+        await cleanup();
+      } catch {
+        // Keep the operator boundary categorical.
+      }
+    }
+  }
+}
+
+async function runPathDiagnosticCommand(
+  argv: readonly string[],
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<number> {
+  if (argv.length !== 2 || argv[0] !== "--path" || argv[1] === undefined) {
+    process.stderr.write("nookctl notes path-diagnostic: expected --path <exact path>\n");
+    return 2;
+  }
+  let cleanup: (() => void | Promise<void>) | undefined;
+  try {
+    const production = await createProductionPathDiagnosticRuntime(environment);
+    cleanup = production.cleanup;
+    const report = await runPathDiagnostic(argv[1], production.runtime);
+    process.stdout.write(`${formatPathDiagnostic(report)}\\n`);
+    return report.title === "unavailable" ? 1 : 0;
+  } catch {
+    process.stderr.write("nookctl notes path-diagnostic: service unavailable\\n");
+    return 3;
+  } finally {
+    if (cleanup !== undefined) {
+      try {
+        await cleanup();
+      } catch {
+        // Keep the operator boundary categorical.
+      }
+    }
+  }
+}
+
+/**
  * Dispatch the bounded operator notes tree. Help and bare invocation remain
  * runtime-free; valid read-only commands construct the production Notesnook
  * capability only after parsing and bounded stdin validation.
@@ -337,6 +422,12 @@ async function runNotes(args: Args): Promise<number> {
   }
 
   const argv = args.notesArgs ?? [];
+  if (argv[0] === "locked-note-proof") {
+    return runLockedNoteProofCommand(argv.slice(1), environment);
+  }
+  if (argv[0] === "path-diagnostic") {
+    return runPathDiagnosticCommand(argv.slice(1), environment);
+  }
   const parsed = parseNotesCommand(argv, environment);
   if (parsed.kind === "error") {
     process.stderr.write(`nookctl: ${parsed.message}\n`);

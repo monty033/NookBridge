@@ -687,7 +687,7 @@ describe("nookctl write — create/append/update dispatch", () => {
     expect(fake.contentByNoteId.get("note-1")?.data).toBe("<p>x</p>");
   });
 
-  it("refuses a vault-locked note without touching content", async () => {
+  it("refuses a vault-locked note after probing authoritative content state", async () => {
     const fake = createFakeDatabase({
       notes: [
         {
@@ -709,7 +709,7 @@ describe("nookctl write — create/append/update dispatch", () => {
     });
     expect(result).toMatchObject({ kind: "error", exitCode: 2 });
     if (result.kind === "error") expect(result.message).toContain("vault locked");
-    expect(fake.calls).not.toContain("content.findByNoteId");
+    expect(fake.calls).toContain("content.findByNoteId");
   });
 
   it("refuses a conflicted note", async () => {

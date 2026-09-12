@@ -187,6 +187,30 @@ describe("exact note path resolver", () => {
     ).resolves.toEqual({ id: "canoe", expectedRevision: revision });
   });
 
+  it("resolves one exact candidate without enumerating an oversized notebook", async () => {
+    let enumerationCalls = 0;
+    let membershipCalls = 0;
+    const candidateSource = {
+      notebooks,
+      findNotesByTitle: async () => [{ id: "canoe", title: "Canoe Trip", revision }],
+      hasNoteInNotebook: async (notebookId: string, noteId: string) => {
+        membershipCalls += 1;
+        return notebookId === "trips" && noteId === "canoe";
+      },
+      findNoteIdsByNotebook: async () => {
+        enumerationCalls += 1;
+        return Array.from({ length: 257 }, (_, index) => `unrelated-${index}`);
+      },
+      noteMetadata: async () => ({ id: "canoe", title: "Canoe Trip", revision }),
+    };
+
+    await expect(
+      resolveExactNotePath("Outdoors/Canoe Trips/Canoe Trip", candidateSource),
+    ).resolves.toEqual({ id: "canoe", expectedRevision: revision });
+    expect(membershipCalls).toBe(1);
+    expect(enumerationCalls).toBe(0);
+  });
+
   it("rejects a path whose notebook casing is not exact", async () => {
     await expect(
       resolveExactNotePath("outdoors/Canoe Trips/Canoe Trip", source()),

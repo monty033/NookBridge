@@ -136,7 +136,13 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
   // the allowlist shape would see a non-array.  This hand-rolled
   // builder keeps the array surface frozen and null-prototype
   // while still being a proper array.
-  const arr: RpcMethod[] = ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"];
+  const arr: RpcMethod[] = [
+    "notes.search",
+    "notes.status",
+    "notes.list_notebooks",
+    "notes.get",
+    "notes.path_diagnostic",
+  ];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
 })();
@@ -158,6 +164,7 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.append",
     "notes.update",
     "notes.delete",
+    "notes.path_diagnostic",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -180,6 +187,7 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.append",
     "notes.update",
     "notes.delete",
+    "notes.path_diagnostic",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -257,6 +265,7 @@ export function methodToSettingsOperation(methodName: string): SettingsOperation
     case "notes.status":
     case "notes.list_notebooks":
     case "notes.get":
+    case "notes.path_diagnostic":
     case "notes.sync":
       return "read";
     case "notes.create":

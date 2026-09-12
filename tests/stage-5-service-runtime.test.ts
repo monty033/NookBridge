@@ -358,6 +358,7 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
             "listNotebooks",
             "listNotebooksForSettings",
             "noteMetadata",
+            "pathDiagnostic",
             "readOnly",
             "resolveNotePath",
             "search",
