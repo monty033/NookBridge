@@ -56,8 +56,8 @@ acceptance. Those are independent gates.
 | Closed categorical output and redaction | `src/operator/notes-cli.ts:254-293, 760-1032`; `src/operator/notes-edit-runtime.ts:82-215`; `tests/stage-9-notes-cli.test.ts:1-1032` | DONE — source |
 | No delete capability | `src/operator/notes-cli.ts:221-245, 760-1032`; `src/service/rpc-protocol.ts:1-260`; `src/service/service-policy.ts:1-260`; `tests/stage-9-notes-cli-dispatch.test.ts:391-430` | DONE — source |
 | Existing production source is safe to wire | `src/operator/notes-production-runtime.ts:1-260`; `src/core/notesnook-readonly-adapter.ts:1-260` | PARTIAL — edit/undo remains categorically unavailable pending a proven live body/revision source |
-| VM service identity, socket, state, and credential boundary | `docs/stage-9-canary.md:14-37` | OPEN — existing evidence is against an older source/pin |
-| Target-host canary and production edit canary | `docs/stage-9-canary.md:39-60` | OPEN — not performed |
+| VM service identity, socket, state, and credential boundary | `docs/engineering/stages/stage-9-canary.md:14-37` | OPEN — existing evidence is against an older source/pin |
+| Target-host canary and production edit canary | `docs/engineering/stages/stage-9-canary.md:39-60` | OPEN — not performed |
 
 ## Source gate evidence
 
@@ -119,7 +119,7 @@ The source pass does not close either operational gate.
   unavailable for edit/undo. The source adapter is tested through injected
   seams only; wiring it to production requires a separately reviewed live
   source that proves bounded note body and revision values.
-- Existing VM evidence in `docs/stage-9-canary.md` is baseline evidence for an
+- Existing VM evidence in `docs/engineering/stages/stage-9-canary.md` is baseline evidence for an
   older source/pin and must not be reused as proof for this merge.
 - The VM drill must exercise the reviewed deployment pin and include bounded
   tree output, note browse/read, approved edit, stale-revision conflict, undo,

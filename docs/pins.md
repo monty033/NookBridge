@@ -76,6 +76,6 @@ during Stage 0; any refresh must be a deliberate, reviewed commit.
 
 The earlier `94ad5c0a` and `1f433a42` values in older receipts are historical
 Stage 9 review baselines. The current deployed derivation is recorded in the
-addenda in `docs/stage-9-source-evidence.md` and `docs/stage-9-canary.md`.
+addenda in `docs/engineering/stages/stage-9-source-evidence.md` and `docs/engineering/stages/stage-9-canary.md`.
 Public distribution remains blocked on the licensing and release-identity
 review.

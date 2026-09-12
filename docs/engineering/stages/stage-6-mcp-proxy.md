@@ -1,5 +1,11 @@
 # Stage 6: read-only MCP proxy
 
+> **Historical Stage 6 record.** This document records the original
+> read-only baseline and Stage 7 write addendum. The current proxy also has
+> later, separately gated single-note delete and explicit outbound-sync tools;
+> consult the [current MCP tool reference](../../reference/mcp-tools.md) for the
+> compiled interface and policy constraints.
+
 `nook-mcp` is a small stdio MCP proxy for the Stage 5 `nookd` Unix-socket
 service. It has no Notesnook credentials and does not read the NookBridge state
 directory. Its only service connection is the explicitly supplied Unix socket.

@@ -316,7 +316,7 @@ files. It does not cover a live account, real `@notesnook/core` runtime,
 network transport, or deployment credentials. The live-account S2 checkpoint
 remains explicitly deferred.
 
-- **Scope:** `docs/security-reviews.md`, `docs/stage-2b-live.md`,
+- **Scope:** `docs/security-reviews.md`, `docs/engineering/stages/stage-2b-live.md`,
   `src/auth/admin-command.ts`, `src/auth/coordinator.ts`,
   `src/auth/notesnook-auth-provider.ts`, `src/auth/secret-input.ts`,
   `src/auth/types.ts`, `src/cli.ts`, `src/index.ts`,
@@ -353,7 +353,7 @@ remains explicitly deferred.
 This entry records the additive publication of the Stage 2-live POC: the
 already-implemented lazy narrow real-core factory, the explicit live
 Notesnook auth provider, and the opt-in live auth runner are now exported
-through `src/index.ts`; the slice is documented in `docs/stage-2-live.md`;
+through `src/index.ts`; the slice is documented in `docs/engineering/stages/stage-2-live.md`;
 the upstream pin provenance, dual commit/integrity record, and corrected
 constructable-`Database` static-setup language are recorded in
 `docs/upstream-contract.md`. **No new code behavior is introduced.**
@@ -361,7 +361,7 @@ constructable-`Database` static-setup language are recorded in
 This entry does **not** claim S2 PASS; the live-account S2 security
 checkpoint remains explicitly deferred.
 
-- **Scope:** `src/index.ts`, `docs/stage-2-live.md`,
+- **Scope:** `src/index.ts`, `docs/engineering/stages/stage-2-live.md`,
   `docs/upstream-contract.md`, `docs/security-reviews.md` (this entry).
   The implementation files (`src/auth/live-notesnook-auth-provider.ts`,
   `src/auth/live-auth-runner.ts`, `src/core/notesnook-live-factory.ts`)
@@ -386,7 +386,7 @@ checkpoint remains explicitly deferred.
   to point at the opt-in live runner without changing the deferred
   default.
 - **Documentation changes:**
-  - `docs/stage-2-live.md` is new. It documents the lazy
+  - `docs/engineering/stages/stage-2-live.md` is new. It documents the lazy
     `@notesnook/core` factory, the constructable `Database` with
     instance `setup(options)` then `init()`, the callable `db.kv`
     accessor, canonical `token` key, login order
@@ -447,7 +447,7 @@ checkpoint remains explicitly deferred.
 
 - **Scope:** `src/auth/live-login-runtime.ts`,
   `tests/stage-2-live-init-recursion.test.ts` (new),
-  `docs/stage-2-live.md`, `docs/security-reviews.md` (this entry).
+  `docs/engineering/stages/stage-2-live.md`, `docs/security-reviews.md` (this entry).
 - **Defect:** `buildSetupOptions`'s `sqliteOptions.dialect` callback forwarded
   upstream's second argument to kysely as
   `new SqliteDialect({ database, onCreateConnection: init })`. At the pinned
@@ -510,7 +510,7 @@ absent.
   `src/service/nookd-server.ts`, `src/service/rpc-handler.ts`,
   `src/service/rpc-protocol.ts`, `src/service/service-audit.ts`,
   `src/service/service-policy.ts`, `src/service/service-runtime.ts`,
-  `docs/stage-6-mcp-proxy.md`, and the corresponding Stage 4–7 regression tests.
+  `docs/engineering/stages/stage-6-mcp-proxy.md`, and the corresponding Stage 4–7 regression tests.
 - **Authorization:** `readOnly` admits the four read methods;
   `readWriteNoDelete` admits the four reads plus create/append/update;
   `custom` admits only a bounded duplicate-free subset of that closed universe.
@@ -580,10 +580,10 @@ separate and still pins the prior source revision.
 - **Source change:** `nookd` now applies socket mode `0770` by default after a
   successful bind; an explicit caller-supplied mode remains validated and
   supported. A regression test observes the actual filesystem mode.
-- **Evidence artifacts:** `docs/stage-9-red-team.md`,
-  `docs/stage-9-canary.md`, `docs/stage-9-recovery.md`,
-  `docs/stage-9-dependencies.md`, and the lockfile-derived
-  `docs/stage-9-production-licenses.csv`.
+- **Evidence artifacts:** `docs/engineering/stages/stage-9-red-team.md`,
+  `docs/engineering/stages/stage-9-canary.md`, `docs/engineering/stages/stage-9-recovery.md`,
+  `docs/engineering/stages/stage-9-dependencies.md`, and the lockfile-derived
+  `docs/engineering/stages/stage-9-production-licenses.csv`.
 - **Verification:** offline full gate PASS — 41 test files, 1,112 tests;
   typecheck, lint, format, build, and diff checks PASS. Nix structural and
   isolation checks PASS against the currently pinned merged source.
@@ -617,7 +617,7 @@ surface after PR #51 merged. It is not a VM receipt or production approval.
   review noted only non-blocking defensive nits concerning remove/undo TOCTOU,
   token-collision categorization, and a named stdin bound.
 - **Source status:** **PASS**.
-- **VM status:** **OPEN**. Existing `docs/stage-9-canary.md` evidence is an
+- **VM status:** **OPEN**. Existing `docs/engineering/stages/stage-9-canary.md` evidence is an
   older source/pin baseline and is not reused as proof for this merge. A new
   clean VM drill must use the reviewed deployment pin and exercise service
   identity, socket/state/credential boundaries, bounded tree output, note
@@ -630,7 +630,7 @@ surface after PR #51 merged. It is not a VM receipt or production approval.
 - **Decision:** close the source implementation gate only; keep VM and
   production gates fail-closed.
 
-Canonical source receipt: `docs/stage-9-source-evidence.md`.
+Canonical source receipt: `docs/engineering/stages/stage-9-source-evidence.md`.
 
 ## Stage 9 current deployed-pin evidence addendum (2026-09-07)
 

@@ -63,7 +63,7 @@ source receipt. The recovery-specific evidence still required is:
 No production recovery mutation has been attempted. The current deployment uses
 `readWriteNoDelete`; that policy correction does not constitute recovery-drill
 evidence. The current-pin VM check and remote-deletion canary are recorded in
-`docs/stage-9-source-evidence.md`, but the throwaway-state recovery exercise
+`docs/engineering/stages/stage-9-source-evidence.md`, but the throwaway-state recovery exercise
 remains open.
 
 ## Current-pin throwaway-state drill (2026-09-07)

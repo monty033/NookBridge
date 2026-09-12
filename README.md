@@ -1,191 +1,76 @@
 # NookBridge
 
-> **Status: pre-alpha. Stages 0–3 read-only native sync are proven; Stage 4 safe writes and explicit remote sync are offline-verified with one operator-local live canary. Stage 5 local conflict-marker observation is offline-prepared and remains explicitly read-only; a positive two-device canary is not a NookBridge completion gate.** The gated live-login, cold-restart, refresh, logout/relogin, credential-hygiene, fetch-only sync, search, restart, and Vault-locked-note checks are recorded as passing. Conflict visibility is device-local and is not claimed for a fresh fetch-only client. **The Stage 5 production service boundary and Stage 6 Slice 2 read-only MCP proxy are implemented; the application-side production provisioning path is ready, and its manual systemd-credential-backed Nix wrappers are maintained in the deployment repository.**
+NookBridge is a pre-alpha, headless [Notesnook](https://notesnook.com/) client
+for Linux. It lets an authorized local MCP client work with Notesnook through a
+narrow Unix-socket service boundary, without receiving reusable Notesnook
+credentials, encryption keys, or direct access to the bridge state.
 
-## What this project is
+It is not an official Notesnook component and is not tied to a particular MCP
+client.
 
-**NookBridge** is a planned headless Notesnook client for Linux, designed to be used by [Hermes Agent](https://hermes-agent.nousresearch.com/) (and other authorized local clients) as an ordinary MCP-backed notes service. It is **not** an official Notesnook component, and its architecture is not inherently tied to Hermes.
+## Status
 
-The goal is to give an authorized agent capabilities comparable to an authorized user operating the official Notesnook desktop client — authentication, encrypted local state, native encrypted sync, and read/search/create/append/update of notes — **without** materially weakening Notesnook's desktop-client security model.
+NookBridge is under active development. The NixOS deployment is the reference
+and currently supported production path. Conventional systemd Linux and Docker
+are planned portability targets, not supported installation paths. Read the
+[getting-started guide](docs/getting-started.md) before attempting a deployment.
 
-- Canonical project name: **NookBridge** (repository / package namespace: `nookbridge`).
-- Planned components: trusted daemon `nookd`, admin CLI `nookctl`, and thin MCP proxy `nook-mcp`.
-- Target environment: Linux only. **NixOS is the reference and first production deployment**; conventional systemd Linux and a Docker Linux-container profile are the first portability targets after the NixOS MVP. macOS and Windows are explicit non-goals.
-- Recommended implementation language: TypeScript / Node.js (because `@notesnook/core` is TypeScript/JavaScript and its Node E2E tests are the practical integration blueprint).
-- Project license: **GPL-3.0-or-later**. This is chosen to align with the `@notesnook/core` license, which the daemon directly imports/incorporates. See `LICENSE` at the repository root.
+## Start here
 
-## Current stage
+- [Documentation home](docs/index.md) — choose an operator, user, or contributor path.
+- [Background and intent](docs/background.md) — why the bridge exists and its design principles.
+- [Project status](docs/project-status.md) — implemented, validated, and supported boundaries.
+- [Getting started](docs/getting-started.md) — purpose, support status, and prerequisites.
+- [NixOS installation](docs/installation-nixos.md) — reference deployment boundary.
+- [Setup and provisioning](docs/setup-and-provisioning.md) — safe first-login and sync workflow.
+- [Usage](docs/usage.md) — MCP and operator-facing workflows.
+- [Security and privacy](docs/security-and-privacy.md) — trust boundaries and safe-operation rules.
+- [Troubleshooting and recovery](docs/troubleshooting.md) — diagnostics and conservative recovery guidance.
 
-Stages 0–2A, Stage 2B authentication, and the Stage 3 read-only native-sync POC
-are complete and merged. The repository contains the TypeScript/Node
-implementation, pinned Nix development environment, production-compatible
-Notesnook crypto/storage adapter, closed read-only projection, and gated live
-sync path. Credentials are accepted only through the echo-disabled interactive
-TTY flow; argv/environment credential carriers are rejected.
-
-On 2026-08-28, a fresh-state manual run completed the full live login flow and
-returned `authenticated`. The follow-up cold-restart, explicit refresh,
-logout/relogin, credential-hygiene, and fetch-only native-sync receipts passed.
-On 2026-08-29, the title-based Vault-locked-note canary returned
-`vault-locked: pass` with body refusal and clean teardown. PR #20 also added a
-local-only fixture documenting why the phone's device-local conflict marker
-cannot be independently observed by a fresh fetch-only client. **Gate 3 is
-closed for the current read-only scope. Stage 4 safe-write implementation has
-offline verification plus one operator-local live canary; no broader live-account
-coverage is claimed, and MCP work remains deferred.** The exact handoff and
-acceptance criteria are in
-[`Section 13.7`](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff).
-
-On 2026-08-30, an operator-local Stage 4 canary created a disposable note,
-reported it as local-committed and remote-pending, then used the separate
-explicit `nookctl write sync` command to report `remote: synced`, `pending: no`,
-and `attempts: 1`. The note was verified on Android. This receipt covers this
-operator-local canary only.
-
-## Stage 5 local conflict observation (offline-prepared)
-
-The read-only local conflict projection is exposed through a separate
-`nookctl conflicts` tree:
+## Architecture
 
 ```text
-nookctl conflicts help
-nookctl conflicts list
-nookctl conflicts observe --title <exact-title>
+Authorized local MCP client
+        │ stdio
+        ▼
+nook-mcp (no Notesnook secrets)
+        │ permission-controlled Unix socket
+        ▼
+nookd (trusted service identity)
+        │
+        ├── encrypted local state
+        └── Notesnook encrypted sync
 ```
 
-Help is ungated. `list` and `observe` require the exact
-`NOOKBRIDGE_ENABLE_LIVE_SYNC=1` opt-in, reject credential/body/ID/revision and
-sync-mode carriers before runtime construction, and emit only categorical
-`observed`/`not-observed` results. The projection reads only local
-`notes.conflicted.ids()` plus `notes.note(id)` metadata; it retains bounded
-IDs internally for title resolution and identity binding, but the CLI never
-emits IDs. It never syncs, mutates, resolves conflicts, exposes bodies, or
-prints upstream errors.
-A fresh fetch-only client is expected to return no local conflict marker. A
-positive two-device canary is intentionally not a completion gate: it can only
-prove a marker in the detecting client's local state, which NookBridge neither
-owns nor mutates in this read-only slice.
+`nookd` owns the authenticated client state. `nook-mcp` is a thin proxy that
+does not import the Notesnook client core or read the daemon's state directory.
+The service exposes no TCP or HTTP listener by default.
 
-All stages follow the same rule: **do not start the next stage until the
-current stage has a repeatable automated test and a written pass/fail result**.
-Failed gates are concrete decisions: fix, change architecture, or stop.
+## Engineering material
 
-## Stage 4 operator acceptance (offline-prepared)
+The user guides describe the supported operational surface. These documents
+record implementation contracts, security evidence, and release gates:
 
-The write path is exposed only through the separate `nookctl write` command
-tree and is **off by default**. An operator must explicitly set
-`NOOKBRIDGE_ENABLE_LIVE_SYNC=1`; an unset or different value fails closed
-before the live runtime is constructed.
+- [Implementation plan and current handoff](docs/implementation-plan-v1.5.md)
+- [Upstream compatibility contract](docs/upstream-contract.md)
+- [Service-boundary decision record](docs/engineering/stages/stage-5-service-boundary.md)
+- [MCP proxy contract](docs/engineering/stages/stage-6-mcp-proxy.md)
+- [Security reviews](docs/security-reviews.md)
 
-Supported acceptance commands are intentionally narrow:
+## Development
 
-```text
-nookctl write help
-nookctl write create --title <disposable-title> [--notebook-id <id>]
-nookctl write append --note-id <id> --expect-revision <token>
-nookctl write update --note-id <id> --expect-revision <token> (--set-pinned <true|false> | --set-favorite <true|false>)
-nookctl write sync
-```
-
-Use only a disposable title and state. Create/append use fixed acceptance
-content owned by the command; note bodies are not accepted through argv,
-environment, logs, or chat. Credentials and MFA remain TTY-only and are never
-accepted by the write command. Output is categorical only: local commit,
-remote synchronization, pending state, and a bounded pending count.
-
-Local create/append/update commands remain pending-only; the separate explicit
-`nookctl write sync` command executes remote synchronization behind the same
-opt-in gate. The offline pre-flight is:
+Use the pinned offline development shell for project checks:
 
 ```bash
-just check-stage4-operator-gate
+nix develop --offline --command just check
+nix develop --offline --command just stage3-test
 ```
 
-This proves parser/gate behavior and the local pending contract; it is not a
-live-account, second-device, or Gate 4 canary receipt. Do not inspect or commit
-generated `var/` state.
-
-## Production state provisioning (manual)
-
-The Nix deployment exposes two root-only operator commands. They launch
-transient `systemd-run --pty --wait --collect` units as `nookbridge`, inject the
-same `nookbridge-db-key` credential used by `nookd`, and bind to the fixed state
-directory `/var/lib/nookbridge`:
-
-```text
-nookbridge-provision    # interactive Notesnook login; credentials are TTY-only
-nookbridge-sync         # fetch-only sync; never performs a send/write phase
-```
-
-Both commands are manual and have no `wantedBy` activation. Run them from a
-real host TTY as root. Do not pass passwords, MFA, tokens, or account names in
-argv or environment. Do not substitute `nookctl auth live-login` or
-`nookctl sync read-only` for production state: those development CLI paths use
-the file-backed development key and can initialize a separate encrypted
-store. After provisioning and fetch-only sync, the daemon can be restarted and
-the read-only MCP acceptance checks can be run against the populated state.
-
-## Target architecture and security boundary
-
-NookBridge separates an untrusted agent-facing proxy from the credential-bearing Notesnook client so that using the bridge does not imply possession of reusable client secrets.
-
-```
-Hermes Agent (Unix user: hermes)
-│
-│ stdio MCP
-▼
-nook-mcp                              ← thin proxy; owns no Notesnook secrets
-│
-│ narrow local RPC over Unix socket
-▼
-nookd service (Unix user: nookbridge)  ← trusted Notesnook client
-├── authorization / policy layer       (root-owned, not writable by hermes)
-├── content normalization layer
-├── sync coordinator                  (coalescing, backoff, throttling)
-├── secure-key-store adapter          (runtime credential, separate from DB)
-└── @notesnook/core
-    │
-    ├── encrypted local SQLite + client state
-    └── Notesnook encrypted sync
-              │
-              ▼
-       Notesnook service
-              │
-              ▼
-       phone / laptop
-```
-
-Key security boundary properties:
-
-- The Unix socket is the only normal interface between Hermes and the authenticated bridge service. Hermes must not need or receive the Notesnook account password, MFA secret, recovery material, database encryption key, reusable authentication tokens, or direct filesystem access to the bridge's state directory.
-- Notes and metadata remain encrypted at rest; there is no plaintext Markdown mirror, plaintext SQLite index, or persistent decrypted cache. Production mode fails closed when an approved secure key backend is unavailable.
-- The bridge exposes no TCP/HTTP listener by default; local IPC is a permission-controlled Unix socket. The MCP proxy is stateless and never imports `@notesnook/core`.
-- Authorization policy is enforced inside `nookd`; Hermes configuration / approval is defense in depth, not authorization. Global profiles: `readOnly`, `readWriteNoDelete`, or `custom` (configurable allow/deny list). Delete is not implemented.
-- Notesnook cryptography, authentication, and sync are performed by upstream `@notesnook/core`, not reimplemented by the bridge.
-- Note content is treated as data; the bridge does not execute or browser-render note HTML/scripts.
-- Logs, crash reports, metrics, and diagnostic output do not contain note bodies or reusable secrets by default.
-
-This is a summary; the authoritative specification, including all MVP tools, permission profiles, packaging/deployment contracts, testing strategy, threat model, and explicit non-goals, lives in [`docs/implementation-plan-v1.5.md`](docs/implementation-plan-v1.5.md).
-
-## Documentation
-
-- [`docs/implementation-plan-v1.5.md`](docs/implementation-plan-v1.5.md) — full Development and Design Plan v1.5: goals, background research, proposed architecture, technical decisions, staged development plan and gates (Stage -1 through Stage 9 plus the production MVP), MVP interface and permission model, Linux packaging and deployment design, testing and validation strategy, security and privacy model, risks, post-MVP roadmap, recommended repository structure, definition of done, and research sources.
-
-## Current handoff
-
-The Stage 3 read-only proof is complete for its current scope: authenticated
-state reopen, fetch-only sync, bounded metadata, title/body search canaries,
-remote-change restart visibility, clean teardown, and Vault-locked-note body
-refusal all have live receipts. PR #20 merged the deterministic local conflict
-fixture. Independent live conflict visibility is deliberately deferred until
-the bridge is editing notes locally; the phone UI observation is not an
-independent fetch-only receipt. The current bounded Stage 4 artifact is the
-safe-write and explicit remote-sync path; its operator-local canary is recorded
-above. Ignore generated `var/` state and keep credentials at the
-interactive TTY boundary.
-See the [implementation-plan handoff](docs/implementation-plan-v1.5.md#137-current-implementation-status-and-codex-handoff)
-for the exact constraints and receipt.
+See the [development guide](docs/development.md) for repository workflow and
+the boundary between local development and production operations. In a source
+checkout, the administrative CLI is `node dist/cli.js`; production packaging
+may expose the same entry point as `nookctl`.
 
 ## License
 
-GPL-3.0-or-later. See [`LICENSE`](LICENSE) for the full license text. SPDX-License-Identifier: `GPL-3.0-or-later`.
+GPL-3.0-or-later. See [LICENSE](LICENSE).
