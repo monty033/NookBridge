@@ -60,6 +60,7 @@ describe("Stage 4 write contract — bounded limits", () => {
     expect([...ALLOWED_UPDATE_PATCH_FIELDS].sort()).toEqual([
       "content",
       "favorite",
+      "listKind",
       "notebookId",
       "pinned",
       "tags",
@@ -86,6 +87,7 @@ describe("Stage 4 write contract — createNote", () => {
       contentBytes: Buffer.byteLength("- milk\n- oats\n", "utf8"),
       notebookId: OTHER_ID,
       tags: ["home", "shopping"],
+      listKind: "simple-checklist",
       localCommitted: false,
       remoteSynced: false,
       pendingSync: true,
@@ -97,6 +99,9 @@ describe("Stage 4 write contract — createNote", () => {
     const plan = planCreateNote({ title: "Note", content: "body" });
     expect(Object.hasOwn(plan, "notebookId")).toBe(false);
     expect(Object.hasOwn(plan, "tags")).toBe(false);
+    // listKind always resolves to the published default; the plan
+    // surfaces it as an own slot so callers never re-resolve `undefined`.
+    expect(plan.listKind).toBe("simple-checklist");
   });
 
   it("rejects malformed inputs categorically", () => {
@@ -148,6 +153,33 @@ describe("Stage 4 write contract — createNote", () => {
       "unsupported_content",
     );
   });
+
+  it("accepts the optional listKind selector and echoes it on the plan", () => {
+    const simple = planCreateNote({
+      title: "Groceries",
+      content: "- [ ] milk\n",
+      listKind: "simple-checklist",
+    });
+    expect(simple.listKind).toBe("simple-checklist");
+    const task = planCreateNote({
+      title: "Tickets",
+      content: "- [ ] fix bug\n",
+      listKind: "task-list",
+    });
+    expect(task.listKind).toBe("task-list");
+  });
+
+  it("rejects an unknown listKind value on create", () => {
+    expect(
+      codeOf(() =>
+        planCreateNote({
+          title: "t",
+          content: "x",
+          listKind: "ordered-list" as never,
+        }),
+      ),
+    ).toBe("invalid_input");
+  });
 });
 
 describe("Stage 4 write contract — appendNote", () => {
@@ -164,6 +196,7 @@ describe("Stage 4 write contract — appendNote", () => {
       id: NOTE_ID,
       fragmentBytes: Buffer.byteLength("extra line", "utf8"),
       expectedRevision: rev,
+      listKind: "simple-checklist",
       localCommitted: false,
       remoteSynced: false,
       pendingSync: true,
@@ -198,6 +231,29 @@ describe("Stage 4 write contract — appendNote", () => {
         }),
       ),
     ).toBe("unsupported_content");
+  });
+
+  it("accepts the optional listKind selector on append", () => {
+    const plan = planAppendNote({
+      id: NOTE_ID,
+      markdownFragment: "- [x] done",
+      expectedRevision: rev,
+      listKind: "task-list",
+    });
+    expect(plan.listKind).toBe("task-list");
+  });
+
+  it("rejects an unknown listKind value on append", () => {
+    expect(
+      codeOf(() =>
+        planAppendNote({
+          id: NOTE_ID,
+          markdownFragment: "- [x] done",
+          expectedRevision: rev,
+          listKind: "bad-kind" as never,
+        }),
+      ),
+    ).toBe("invalid_input");
   });
 });
 
@@ -262,6 +318,28 @@ describe("Stage 4 write contract — updateNote", () => {
         }),
       ),
     ).toBe("unsupported_content");
+  });
+
+  it("accepts the optional listKind selector inside an update content patch", () => {
+    const plan = planUpdateNote({
+      id: NOTE_ID,
+      patch: { content: "- [ ] do\n", listKind: "task-list" },
+      expectedRevision: rev,
+    });
+    expect(plan.patchFields).toEqual(["content", "listKind"]);
+    expect(plan.listKind).toBe("task-list");
+  });
+
+  it("rejects an unknown listKind value inside an update content patch", () => {
+    expect(
+      codeOf(() =>
+        planUpdateNote({
+          id: NOTE_ID,
+          patch: { content: "- [ ] do\n", listKind: "unordered" as never },
+          expectedRevision: rev,
+        }),
+      ),
+    ).toBe("invalid_input");
   });
 });
 
@@ -892,6 +970,7 @@ describe("Stage 4 write contract — immutable allowlist, prototype-bypass proof
     expect([...ALLOWED_UPDATE_PATCH_FIELDS].sort()).toEqual([
       "content",
       "favorite",
+      "listKind",
       "notebookId",
       "pinned",
       "tags",

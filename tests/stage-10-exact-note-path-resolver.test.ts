@@ -36,6 +36,18 @@ describe("exact note path resolver", () => {
     });
   });
 
+  it("resolves a slash-containing title when notebook and title are explicit", async () => {
+    await expect(
+      resolveExactNotePath(
+        { notebookPath: "Outdoors/Canoe Trips", noteTitle: "Canoe/Trip" } as unknown as string,
+        source([{ id: "canoe", title: "Canoe/Trip", notebookId: "trips" }]),
+      ),
+    ).resolves.toEqual({
+      id: "canoe",
+      expectedRevision: revision,
+    });
+  });
+
   it("resolves a root note from a title-only path", async () => {
     const rootSource = {
       notebooks,

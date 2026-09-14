@@ -45,8 +45,8 @@
  *   `service_unavailable`-style error.
  */
 
-import { Buffer } from "node:buffer";
 import { normaliseStateDir } from "../config/state-dir.js";
+import { buildNotebookIndex, type NotebookRecord } from "../settings/notebook-index.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
@@ -59,7 +59,10 @@ import {
   type NotesnookRevisionToken,
   type UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
-import { isNotesnookReadOnlyAdapterError } from "../core/notesnook-readonly-adapter.js";
+import {
+  isNotesnookReadOnlyAdapterError,
+  type NotesnookReadOnlyContentDiagnostic,
+} from "../core/notesnook-readonly-adapter.js";
 import {
   isNotesnookWriteAdapterError,
   type AppendNoteResult,
@@ -74,9 +77,11 @@ import {
 } from "../auth/live-login-runtime.js";
 import {
   parseExactNotePath,
+  exactNotePathBytes,
   resolveExactNotePath,
   diagnoseExactNotePath,
   ExactNotePathError,
+  type ExactNotePathInput,
   type ExactNotePathDiagnostic,
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
@@ -139,6 +144,8 @@ export interface ServiceRuntime {
       }>
     >
   >;
+  /** Refresh-resolve a notebook id through the full hierarchy projection. */
+  readonly resolveNotebookPath?: (notebookId: string) => Promise<string | undefined>;
   readonly noteMetadata: (id: string) => Promise<
     | Readonly<{
         id: string;
@@ -156,11 +163,11 @@ export interface ServiceRuntime {
     | undefined
   >;
   /** Resolve one exact hierarchical note path to an opaque id and revision. */
-  readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
+  readonly resolveNotePath?: (path: ExactNotePathInput) => Promise<ExactNotePathResolution>;
   /** Execute the closed daemon-owned locked-note acceptance proof. */
-  readonly lockedNoteProof?: (path: string) => Promise<RpcLockedNoteProofResult>;
+  readonly lockedNoteProof?: (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult>;
   /** Execute the closed, read-only exact-path resolver diagnostic. */
-  readonly pathDiagnostic?: (path: string) => Promise<RpcNotesPathDiagnosticResult>;
+  readonly pathDiagnostic?: (path: ExactNotePathInput) => Promise<RpcNotesPathDiagnosticResult>;
   /** Optional bounded local note creation capability. */
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   /** Optional bounded local note append capability. */
@@ -339,6 +346,20 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           }
         };
 
+  const resolveNotebookPath =
+    listNotebooksForSettings === undefined
+      ? undefined
+      : async (notebookId: string): Promise<string | undefined> => {
+          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+          if (typeof notebookId !== "string" || notebookId.length === 0) return undefined;
+          try {
+            const records = await listNotebooksForSettings();
+            return buildNotebookIndex(records as readonly NotebookRecord[]).resolvePath(notebookId);
+          } catch {
+            throw serviceRuntimeError("service runtime notebook hierarchy listing failed");
+          }
+        };
+
   const noteMetadata = async (
     id: string,
   ): Promise<
@@ -376,7 +397,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     findNotesByTitle === undefined ||
     findNoteIdsByNotebook === undefined
       ? undefined
-      : async (path: string): Promise<ExactNotePathResolution> => {
+      : async (path: ExactNotePathInput): Promise<ExactNotePathResolution> => {
           if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
 
           // Validate and extract the title before touching the full notebook
@@ -414,25 +435,17 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           });
         };
 
-  const pathDiagnostic =
+  const _exactPathDiagnostic =
     findNotesByTitle === undefined || findNoteIdsByNotebook === undefined
       ? undefined
-      : async (path: string): Promise<RpcNotesPathDiagnosticResult> => {
-          if (typeof path !== "string") {
-            return pathDiagnosticReport(0, {
-              title: "unavailable",
-              notebook: "unavailable",
-              directMembership: "unavailable",
-              recursiveMembership: "unavailable",
-              revision: "unavailable",
-            });
-          }
-          const pathBytes = Buffer.byteLength(path, "utf8");
+      : async (path: ExactNotePathInput): Promise<RpcNotesPathDiagnosticResult> => {
+          let pathBytes: number;
           let parsed: ReturnType<typeof parseExactNotePath>;
           try {
+            pathBytes = exactNotePathBytes(path);
             parsed = parseExactNotePath(path);
           } catch {
-            return pathDiagnosticReport(pathBytes, {
+            return pathDiagnosticReport(0, {
               title: "unavailable",
               notebook: "unavailable",
               directMembership: "unavailable",
@@ -496,6 +509,20 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
             }
           }
 
+          let contentDiagnostic: NotesnookReadOnlyContentDiagnostic =
+            unavailableContentDiagnostic();
+          const contentCandidate = titleCandidates.length === 1 ? titleCandidates[0] : undefined;
+          if (
+            contentCandidate !== undefined &&
+            readOnly.noteContentDiagnostic !== undefined &&
+            typeof contentCandidate.id === "string"
+          ) {
+            try {
+              contentDiagnostic = await readOnly.noteContentDiagnostic(contentCandidate.id);
+            } catch {
+              contentDiagnostic = unavailableContentDiagnostic();
+            }
+          }
           const diagnostic = await diagnoseExactNotePath(path, {
             notebooks,
             findNotesByTitle: async () => titleCandidates,
@@ -508,8 +535,18 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
                 }),
             noteMetadata,
           });
-          return pathDiagnosticReport(pathBytes, diagnostic);
+          return pathDiagnosticReport(pathBytes, { ...diagnostic, ...contentDiagnostic });
         };
+
+  // The exact-path resolver is optional because it depends on notebook
+  // membership capabilities.  Keep the body-free content diagnostic
+  // available through the already-live title search surface when those
+  // optional capabilities are absent; membership stages remain unavailable.
+  const searchBackedPathDiagnostic = createSearchBackedPathDiagnostic(readOnly);
+  // Keep this diagnostic bounded: exact notebook membership can be slow or
+  // unavailable in the live Notesnook database.  Content classification is
+  // intentionally independent and must not wait on that optional seam.
+  const pathDiagnostic = searchBackedPathDiagnostic;
 
   const localWrite = core.handle.localWrite;
   const createNote =
@@ -599,8 +636,13 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
   const lockedNoteProof =
     resolveNotePath === undefined || updateNote === undefined || deleteNote === undefined
       ? undefined
-      : async (path: string): Promise<RpcLockedNoteProofResult> => {
-          const pathBytes = Buffer.byteLength(path, "utf8");
+      : async (path: ExactNotePathInput): Promise<RpcLockedNoteProofResult> => {
+          let pathBytes: number;
+          try {
+            pathBytes = exactNotePathBytes(path);
+          } catch {
+            pathBytes = 0;
+          }
           const report = {
             kind: "locked_note_proof" as const,
             pathBytes,
@@ -684,6 +726,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     status,
     listNotebooks,
     ...(listNotebooksForSettings === undefined ? {} : { listNotebooksForSettings }),
+    ...(resolveNotebookPath === undefined ? {} : { resolveNotebookPath }),
     noteMetadata,
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
@@ -697,13 +740,99 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
   });
 }
 
+function unavailableContentDiagnostic(): NotesnookReadOnlyContentDiagnostic {
+  return Object.freeze({
+    contentType: "unavailable",
+    htmlPrefix: "unavailable",
+    simpleChecklist: "unavailable",
+    taskList: "unavailable",
+    literalMarkdown: "unavailable",
+  });
+}
+
+export function createSearchBackedPathDiagnostic(
+  readOnly: NotesnookReadOnlyDatabase,
+): (path: ExactNotePathInput) => Promise<RpcNotesPathDiagnosticResult> {
+  return async (path: ExactNotePathInput): Promise<RpcNotesPathDiagnosticResult> => {
+    let pathBytes = 0;
+    let parsed: Readonly<{ notebookPath: string | undefined; noteTitle: string }>;
+    try {
+      pathBytes = exactNotePathBytes(path);
+      parsed = parseExactNotePath(path);
+    } catch {
+      return pathDiagnosticReport(0, {
+        title: "unavailable",
+        notebook: "unavailable",
+        directMembership: "unavailable",
+        recursiveMembership: "unavailable",
+        revision: "unavailable",
+      } satisfies ExactNotePathDiagnostic);
+    }
+
+    const unavailableMembership: Pick<
+      ExactNotePathDiagnostic,
+      "notebook" | "directMembership" | "recursiveMembership" | "revision"
+    > = {
+      notebook: parsed.notebookPath === undefined ? "not_applicable" : "unavailable",
+      directMembership: "not_applicable",
+      recursiveMembership: "not_applicable",
+      revision: "unavailable",
+    };
+
+    let hits: Awaited<ReturnType<NotesnookReadOnlyDatabase["search"]>> | undefined;
+    try {
+      hits = await Promise.race([
+        readOnly.search(parsed.noteTitle),
+        new Promise<undefined>((resolve) => {
+          globalThis.setTimeout(() => resolve(undefined), 2500);
+        }),
+      ]);
+    } catch {
+      hits = undefined;
+    }
+    if (hits === undefined || !Array.isArray(hits)) {
+      return pathDiagnosticReport(pathBytes, {
+        title: "unavailable",
+        ...unavailableMembership,
+      });
+    }
+
+    const candidates = hits.filter(
+      (hit) => hit.source === "note" && hit.title === parsed.noteTitle,
+    );
+    const title = candidates.length === 0 ? "none" : candidates.length === 1 ? "one" : "multiple";
+    let contentDiagnostic = unavailableContentDiagnostic();
+    const candidate = candidates.length === 1 ? candidates[0] : undefined;
+    if (candidate !== undefined && readOnly.noteContentDiagnostic !== undefined) {
+      try {
+        const contentResult = await Promise.race([
+          readOnly.noteContentDiagnostic(candidate.id),
+          new Promise<undefined>((resolve) => {
+            globalThis.setTimeout(() => resolve(undefined), 1500);
+          }),
+        ]);
+        if (contentResult !== undefined) contentDiagnostic = contentResult;
+      } catch {
+        contentDiagnostic = unavailableContentDiagnostic();
+      }
+    }
+
+    return pathDiagnosticReport(pathBytes, {
+      title,
+      ...unavailableMembership,
+      ...contentDiagnostic,
+    });
+  };
+}
+
 function pathDiagnosticReport(
   pathBytes: number,
-  diagnostic: ExactNotePathDiagnostic,
+  diagnostic: ExactNotePathDiagnostic & Partial<NotesnookReadOnlyContentDiagnostic>,
 ): RpcNotesPathDiagnosticResult {
   return Object.freeze({
     kind: "path_diagnostic" as const,
     pathBytes,
+    ...unavailableContentDiagnostic(),
     ...diagnostic,
   });
 }

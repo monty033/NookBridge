@@ -30,6 +30,7 @@ import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credent
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
 import {
   createProductionServiceRuntime,
+  createSearchBackedPathDiagnostic,
   type ServiceRuntime,
 } from "../src/service/service-runtime.js";
 import { releaseLock, tryAcquireLock } from "../src/config/lock.js";
@@ -77,13 +78,22 @@ function disposeState(state: TempState): void {
  * without ever observing a real Note / Notebook record.
  */
 function createFakeRealCoreModule(
-  options: Readonly<{ notebookLookupFailure?: boolean }> = {},
+  options: Readonly<{
+    notebookLookupFailure?: boolean;
+    pathDiagnosticMembershipFailure?: boolean;
+  }> = {},
 ): NotesnookRealCoreModule {
+  const titleSearchResults = {
+    ids: async () => (options.pathDiagnosticMembershipFailure ? ["task-note"] : []) as string[],
+  };
   const emptySearchResults = {
     ids: async () => [] as string[],
   };
   const emptyNotebookIds = {
-    ids: async () => (options.notebookLookupFailure ? ["broken-id"] : []) as string[],
+    ids: async () =>
+      (options.notebookLookupFailure || options.pathDiagnosticMembershipFailure
+        ? [options.pathDiagnosticMembershipFailure ? "general-id" : "broken-id"]
+        : []) as string[],
   };
   const ctor = vi.fn(function FakeDatabaseCtor() {
     return {
@@ -115,16 +125,41 @@ function createFakeRealCoreModule(
       },
       notebooks: {
         all: emptyNotebookIds,
-        notebook: async () => {
+        notebook: async (id: string) => {
           if (options.notebookLookupFailure) throw new Error("notebook lookup failed");
+          if (options.pathDiagnosticMembershipFailure && id === "general-id") {
+            return { id, title: "General", dateEdited: 1 };
+          }
           return undefined;
         },
       },
       notes: {
-        note: async () => undefined,
+        note: async (id: string) => {
+          if (options.pathDiagnosticMembershipFailure && id === "task-note") {
+            return {
+              id,
+              title: "Task list for Bernie",
+              dateEdited: 2,
+              notebooks: [{ id: "general-id" }],
+            };
+          }
+          return undefined;
+        },
+      },
+      content: {
+        findByNoteId: async (id: string) => {
+          if (options.pathDiagnosticMembershipFailure && id === "task-note") {
+            return {
+              type: "tiptap",
+              data: '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>item</p></li></ul></div>',
+            };
+          }
+          return undefined;
+        },
       },
       lookup: {
-        notes: async () => emptySearchResults,
+        notes: async () =>
+          options.pathDiagnosticMembershipFailure ? titleSearchResults : emptySearchResults,
         notebooks: async () => emptySearchResults,
       },
       lastSynced: async () => 0,
@@ -161,6 +196,33 @@ function newState(): TempState {
 // ===========================================================================
 
 describe("Stage 5 Task 3 — service-runtime constructor", () => {
+  it("uses title search to preserve body-free content markers without membership capabilities", async () => {
+    const diagnostic = createSearchBackedPathDiagnostic({
+      search: async () => [{ id: "hidden-note-id", title: "Task list for Bernie", source: "note" }],
+      noteContentDiagnostic: async () => ({
+        contentType: "tiptap",
+        htmlPrefix: "present",
+        simpleChecklist: "absent",
+        taskList: "present",
+        literalMarkdown: "absent",
+      }),
+    } as never);
+
+    await expect(diagnostic("General/Task list for Bernie")).resolves.toMatchObject({
+      kind: "path_diagnostic",
+      title: "one",
+      notebook: "unavailable",
+      directMembership: "not_applicable",
+      recursiveMembership: "not_applicable",
+      revision: "unavailable",
+      contentType: "tiptap",
+      htmlPrefix: "present",
+      simpleChecklist: "absent",
+      taskList: "present",
+      literalMarkdown: "absent",
+    });
+  });
+
   describe("production-safe key store requirement", () => {
     it("rejects a development-file backend before opening persistent storage", async () => {
       const state = newState();
@@ -341,6 +403,7 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
         expect(typeof runtime.search).toBe("function");
         expect(typeof runtime.status).toBe("function");
         expect(typeof runtime.listNotebooks).toBe("function");
+        expect(typeof runtime.resolveNotebookPath).toBe("function");
         expect(typeof runtime.noteMetadata).toBe("function");
         expect(typeof runtime.cleanup).toBe("function");
 
@@ -360,6 +423,7 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
             "noteMetadata",
             "pathDiagnostic",
             "readOnly",
+            "resolveNotebookPath",
             "resolveNotePath",
             "search",
             "status",
@@ -416,6 +480,42 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
       } finally {
         if (runtime) await runtime.cleanup();
         rmSync(tempCredentialsDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps content markers when path membership diagnosis fails", async () => {
+      const state = newState();
+      const tempCredentialsDir = mkdtempSync(
+        join(tmpdir(), "nookbridge-stage-5-service-diagnostic-content-"),
+      );
+      writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+        mode: 0o600,
+      });
+      const keys = createSystemdCredentialKeyStore({
+        credentialsDirectory: tempCredentialsDir,
+      });
+
+      let runtime: ServiceRuntime | undefined;
+      try {
+        runtime = await createProductionServiceRuntime({
+          stateDir: state.stateDir,
+          keys,
+          injectedModule: createFakeRealCoreModule({ pathDiagnosticMembershipFailure: true }),
+        });
+
+        await expect(
+          runtime.pathDiagnostic?.("General/Task list for Bernie"),
+        ).resolves.toMatchObject({
+          kind: "path_diagnostic",
+          title: "one",
+          contentType: "tiptap",
+          htmlPrefix: "present",
+          simpleChecklist: "absent",
+          taskList: "present",
+          literalMarkdown: "absent",
+        });
+      } finally {
+        if (runtime) await runtime.cleanup();
       }
     });
 

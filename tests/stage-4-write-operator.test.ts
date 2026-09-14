@@ -1183,6 +1183,81 @@ describe("Stage 4 deterministic markdown codec", () => {
     );
   });
 
+  it("renders Notesnook interactive task-list simple-checklist nodes", () => {
+    const wrap = (inner: string) => `<div data-type="document">${inner}</div>`;
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [ ] todo").data).toBe(
+      wrap('<ul class="simple-checklist"><li class="simple-checklist--item"><p>todo</p></li></ul>'),
+    );
+    expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [x] done").data).toBe(
+      wrap(
+        '<ul class="simple-checklist"><li class="checked simple-checklist--item"><p>done</p></li></ul>',
+      ),
+    );
+  });
+
+  it("HTML-escapes task-list item text while keeping simple-checklist structure", () => {
+    const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(
+      '- [x] <script>alert("x")</script> & 1 < 2',
+    );
+    expect(encoded.data).toContain('<ul class="simple-checklist">');
+    expect(encoded.data).toContain('<li class="checked simple-checklist--item"><p>');
+    expect(encoded.data).not.toContain("&lt;ul");
+    expect(encoded.data).not.toContain("&lt;li");
+    expect(encoded.data).not.toContain("<script>");
+    expect(encoded.data).toContain("&lt;script&gt;");
+    expect(encoded.data).toContain("&amp;");
+    expect(encoded.data).toContain("&quot;");
+  });
+
+  it("renders nested task lists matching tab indentation", () => {
+    const markdown =
+      "- [ ] parent\n" + "\t- [ ] child A\n" + "\t- [x] child B\n" + "\t\t- [ ] grandchild\n";
+    const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+    const inner = encoded.data.replace(/^<div data-type="document">/, "").replace(/<\/div>$/, "");
+    const ulOpens = (inner.match(/<ul class="simple-checklist">/g) ?? []).length;
+    const ulCloses = (inner.match(/<\/ul>/g) ?? []).length;
+    expect(ulOpens).toBe(3);
+    expect(ulCloses).toBe(3);
+    expect(inner).toContain(
+      '<li class="simple-checklist--item"><p>parent</p><ul class="simple-checklist">',
+    );
+    expect(inner).toContain('<li class="simple-checklist--item"><p>child A</p></li>');
+    expect(inner).toContain(
+      '<li class="checked simple-checklist--item"><p>child B</p><ul class="simple-checklist">',
+    );
+    expect(inner).toContain('<li class="simple-checklist--item"><p>grandchild</p></li>');
+    const parentLiOpen = inner.indexOf('<li class="simple-checklist--item"><p>parent');
+    const parentLiClose = inner.indexOf("</li>", parentLiOpen);
+    const parentChildUlOpen = inner.indexOf('<ul class="simple-checklist">', parentLiOpen);
+    expect(parentChildUlOpen).toBeGreaterThan(parentLiOpen);
+    expect(parentChildUlOpen).toBeLessThan(parentLiClose);
+    const childBOpen = inner.indexOf('<li class="checked simple-checklist--item"><p>child B');
+    const childBClose = inner.indexOf("</li>", childBOpen);
+    const grandchildUlOpen = inner.indexOf('<ul class="simple-checklist">', childBOpen);
+    expect(grandchildUlOpen).toBeGreaterThan(childBOpen);
+    expect(grandchildUlOpen).toBeLessThan(childBClose);
+  });
+
+  it("renders nested task lists matching space indentation", () => {
+    const markdown =
+      "- [ ] parent\n" + "    - [ ] space-child\n" + "        - [ ] space-grandchild\n";
+    const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+    const inner = encoded.data.replace(/^<div data-type="document">/, "").replace(/<\/div>$/, "");
+    const ulOpens = (inner.match(/<ul class="simple-checklist">/g) ?? []).length;
+    const ulCloses = (inner.match(/<\/ul>/g) ?? []).length;
+    expect(ulOpens).toBe(3);
+    expect(ulCloses).toBe(3);
+    expect(inner).toContain(
+      '<li class="simple-checklist--item"><p>space-child</p><ul class="simple-checklist">',
+    );
+    expect(inner).toContain('<li class="simple-checklist--item"><p>space-grandchild</p></li>');
+    const parentLiOpen = inner.indexOf('<li class="simple-checklist--item"><p>parent');
+    const parentLiClose = inner.indexOf("</li>", parentLiOpen);
+    const parentChildUlOpen = inner.indexOf('<ul class="simple-checklist">', parentLiOpen);
+    expect(parentChildUlOpen).toBeGreaterThan(parentLiOpen);
+    expect(parentChildUlOpen).toBeLessThan(parentLiClose);
+  });
+
   it("preserves stored bytes verbatim and appends exactly one block", () => {
     const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
       storedType: "html",
@@ -1267,14 +1342,27 @@ describe("Stage 4 operator write source boundaries", () => {
     expect(source).not.toMatch(/return\s+database/);
   });
 
-  it("the codec module adds no dependency beyond node:buffer", () => {
+  it("the codec module adds no dependency beyond node:buffer and the list-intent vocabulary", () => {
     const source = readSource("src/core/notesnook-write-codec.ts");
-    const imports = [...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1]);
-    expect(imports.sort()).toEqual([
-      "./notesnook-write-adapter.js",
-      "./notesnook-write-contract.js",
-      "node:buffer",
-    ]);
+    const imports = [
+      ...new Set([...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1])),
+    ].sort();
+    // The deterministic codec is allowed to import its own local
+    // modules (the Stage 4 adapter/contract pair it implements
+    // against, plus the closed-vocabulary list-intent helper that
+    // backs the optional `listKind` selector) and `node:buffer` for
+    // the bounded byte counting.  No other dependency may be
+    // introduced: there is no Markdown library, no HTML sanitiser,
+    // and no `node:fs` / network access.  The set is unique because
+    // the codec both re-exports the helper and uses it directly.
+    expect(imports).toEqual(
+      [
+        "./notesnook-write-adapter.js",
+        "./notesnook-write-contract.js",
+        "./notesnook-write-list-intent.js",
+        "node:buffer",
+      ].sort(),
+    );
   });
 
   it("the Stage 3 read-only sync boundary is unchanged and still fetch-only", () => {

@@ -110,6 +110,7 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "lockedNoteProof"
       | "requestSync"
       | "listNotebooksForSettings"
+      | "resolveNotebookPath"
     >
   >;
 
@@ -316,6 +317,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let requestSync: NookdStartupRuntime["requestSync"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
+  let resolveNotebookPath: NookdStartupRuntime["resolveNotebookPath"];
   let notebookIndex: NotebookIndex;
   let settingsPhase = false;
   try {
@@ -336,6 +338,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedLockedNoteProof = runtime.lockedNoteProof;
     const capturedRequestSync = runtime.requestSync;
     const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
+    const capturedResolveNotebookPath = runtime.resolveNotebookPath;
     const capturedCleanup = runtime.cleanup;
     if (
       typeof capturedSearch !== "function" ||
@@ -351,7 +354,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedPathDiagnostic !== undefined && typeof capturedPathDiagnostic !== "function") ||
       (capturedLockedNoteProof !== undefined && typeof capturedLockedNoteProof !== "function") ||
       (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function") ||
-      typeof capturedListNotebooksForSettings !== "function"
+      typeof capturedListNotebooksForSettings !== "function" ||
+      (capturedResolveNotebookPath !== undefined &&
+        typeof capturedResolveNotebookPath !== "function")
     ) {
       throw new Error("invalid service runtime");
     }
@@ -368,6 +373,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     lockedNoteProof = capturedLockedNoteProof;
     requestSync = capturedRequestSync;
     listNotebooksForSettings = capturedListNotebooksForSettings;
+    resolveNotebookPath = capturedResolveNotebookPath;
     runtimeCleanup = capturedCleanup;
 
     settingsPhase = true;
@@ -409,6 +415,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     ...(pathDiagnostic === undefined ? {} : { pathDiagnostic }),
     ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
+    ...(resolveNotebookPath === undefined ? {} : { resolveNotebookPath }),
     notebookIndex,
     cleanup,
   });

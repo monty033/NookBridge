@@ -75,6 +75,7 @@ import type { NotebookIndex } from "../settings/notebook-index.js";
 import {
   ExactNotePathError,
   parseExactNotePath,
+  type ExactNotePathInput,
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
 import {
@@ -150,16 +151,18 @@ export interface RpcHandlerRuntimeLike {
   >;
   /** Optional trusted Stage 10 index for resolving notebook ids to titlePaths. */
   readonly notebookIndex?: NotebookIndex;
+  /** Refresh resolver backed by the daemon's full notebook hierarchy projection. */
+  readonly resolveNotebookPath?: (notebookId: string) => Promise<string | undefined>;
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   /** Optional daemon-side resolver for exact destructive note paths. */
-  readonly resolveNotePath?: (path: string) => Promise<ExactNotePathResolution>;
+  readonly resolveNotePath?: (path: ExactNotePathInput) => Promise<ExactNotePathResolution>;
   /** Daemon-owned closed locked-note acceptance proof. */
-  readonly lockedNoteProof?: (path: string) => Promise<RpcLockedNoteProofResult>;
+  readonly lockedNoteProof?: (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult>;
   /** Daemon-owned closed read-only exact-path diagnostic. */
-  readonly pathDiagnostic?: (path: string) => Promise<RpcNotesPathDiagnosticResult>;
+  readonly pathDiagnostic?: (path: ExactNotePathInput) => Promise<RpcNotesPathDiagnosticResult>;
   readonly requestSync?: () => Promise<
     Readonly<{
       status: "idle" | "synced" | "failed";
@@ -287,7 +290,8 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       if (structural.request.method === "notes.delete") {
-        const parsedPath = parseExactNotePath(structural.request.params.path);
+        const target = exactNotePathInput(structural.request.params);
+        const parsedPath = parseExactNotePath(target);
         const settingsContext =
           parsedPath.notebookPath === undefined
             ? { noteTitle: parsedPath.noteTitle }
@@ -304,19 +308,20 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       if (structural.request.method === "notes.locked_note_proof") {
+        const target = exactNotePathInput(structural.request.params);
         const resolver = runtime.resolveNotePath;
         if (resolver === undefined) {
           return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
         try {
-          await reflectApply(resolver, runtime, [structural.request.params.path]);
+          await reflectApply(resolver, runtime, [target]);
         } catch (error) {
           if (error instanceof ExactNotePathError && error.code === "not_found") {
             return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
           }
           return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
-        const parsedPath = parseExactNotePath(structural.request.params.path);
+        const parsedPath = parseExactNotePath(target);
         const settingsContext =
           parsedPath.notebookPath === undefined
             ? { noteTitle: parsedPath.noteTitle }
@@ -441,12 +446,20 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params = objectCreate(null) as Record<string, unknown>;
     params.id = rawNoteId;
   } else if (rawMethod === "notes.create") {
-    if (
-      !hasExactKeys(paramKeys, ["title", "content"]) &&
-      !hasExactKeys(paramKeys, ["title", "content", "notebookId"])
-    ) {
-      return { kind: "err", code: "invalid_request" };
+    const allowedCreateShapes: ReadonlyArray<ReadonlyArray<string>> = [
+      ["title", "content"],
+      ["title", "content", "notebookId"],
+      ["title", "content", "listKind"],
+      ["title", "content", "notebookId", "listKind"],
+    ];
+    let createShapeMatched = false;
+    for (const shape of allowedCreateShapes) {
+      if (hasExactKeys(paramKeys, shape)) {
+        createShapeMatched = true;
+        break;
+      }
     }
+    if (!createShapeMatched) return { kind: "err", code: "invalid_request" };
     const rawTitle = readOwnStringField(rawParams, "title");
     const rawContent = readOwnStringField(rawParams, "content");
     if (
@@ -459,14 +472,14 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       rawContent.length === 0 ||
       rawContent.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
       bufferByteLength(rawContent, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(rawContent)
+      hasDisallowedControlCharacter(rawContent)
     ) {
       return { kind: "err", code: "invalid_request" };
     }
     params = objectCreate(null) as Record<string, unknown>;
     params.title = rawTitle;
     params.content = rawContent;
-    if (paramKeys.length === 3) {
+    if (paramKeys.includes("notebookId")) {
       const rawNotebookId = readOwnStringField(rawParams, "notebookId");
       if (
         rawNotebookId === undefined ||
@@ -479,10 +492,26 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       }
       params.notebookId = rawNotebookId;
     }
-  } else if (rawMethod === "notes.append") {
-    if (!hasExactKeys(paramKeys, ["id", "markdownFragment", "expectedRevision"])) {
-      return { kind: "err", code: "invalid_request" };
+    if (paramKeys.includes("listKind")) {
+      const rawListKind = readOwnStringField(rawParams, "listKind");
+      if (rawListKind !== "simple-checklist" && rawListKind !== "task-list") {
+        return { kind: "err", code: "invalid_request" };
+      }
+      params.listKind = rawListKind;
     }
+  } else if (rawMethod === "notes.append") {
+    const allowedAppendShapes: ReadonlyArray<ReadonlyArray<string>> = [
+      ["id", "markdownFragment", "expectedRevision"],
+      ["id", "markdownFragment", "expectedRevision", "listKind"],
+    ];
+    let appendShapeMatched = false;
+    for (const shape of allowedAppendShapes) {
+      if (hasExactKeys(paramKeys, shape)) {
+        appendShapeMatched = true;
+        break;
+      }
+    }
+    if (!appendShapeMatched) return { kind: "err", code: "invalid_request" };
     const rawNoteId = readOwnStringField(rawParams, "id");
     const rawFragment = readOwnStringField(rawParams, "markdownFragment");
     const rawRevision = readOwnStringField(rawParams, "expectedRevision");
@@ -501,6 +530,13 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params.id = rawNoteId;
     params.markdownFragment = rawFragment;
     params.expectedRevision = rawRevision;
+    if (paramKeys.includes("listKind")) {
+      const rawListKind = readOwnStringField(rawParams, "listKind");
+      if (rawListKind !== "simple-checklist" && rawListKind !== "task-list") {
+        return { kind: "err", code: "invalid_request" };
+      }
+      params.listKind = rawListKind;
+    }
   } else if (rawMethod === "notes.update") {
     if (!hasExactKeys(paramKeys, ["id", "expectedRevision", "patch"])) {
       return { kind: "err", code: "invalid_request" };
@@ -526,7 +562,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
         key !== "notebookId" &&
         key !== "tags" &&
         key !== "pinned" &&
-        key !== "favorite"
+        key !== "favorite" &&
+        key !== "listKind"
       ) {
         return { kind: "err", code: "invalid_request" };
       }
@@ -547,6 +584,10 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
         if (cleanTags === undefined) return { kind: "err", code: "invalid_request" };
         patch.tags = cleanTags;
         continue;
+      } else if (key === "listKind") {
+        if (value !== "simple-checklist" && value !== "task-list") {
+          return { kind: "err", code: "invalid_request" };
+        }
       } else if (typeof value !== "boolean") {
         return { kind: "err", code: "invalid_request" };
       }
@@ -562,15 +603,33 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod === "notes.locked_note_proof" ||
     rawMethod === "notes.path_diagnostic"
   ) {
-    if (!hasExactKeys(paramKeys, ["path"])) {
-      return { kind: "err", code: "invalid_request" };
-    }
-    const rawPath = readOwnStringField(rawParams, "path");
-    if (!isBoundedRpcText(rawPath, STAGE5_RPC_LIMITS.maxQueryBytes)) {
+    const hasPath = hasExactKeys(paramKeys, ["path"]);
+    const hasExplicitTitle =
+      hasExactKeys(paramKeys, ["noteTitle"]) ||
+      hasExactKeys(paramKeys, ["notebookPath", "noteTitle"]);
+    if (!hasPath && !hasExplicitTitle) {
       return { kind: "err", code: "invalid_request" };
     }
     params = objectCreate(null) as Record<string, unknown>;
-    params.path = rawPath;
+    if (hasPath) {
+      const rawPath = readOwnStringField(rawParams, "path");
+      if (!isBoundedRpcText(rawPath, STAGE5_RPC_LIMITS.maxQueryBytes)) {
+        return { kind: "err", code: "invalid_request" };
+      }
+      params.path = rawPath;
+    } else {
+      const rawTitle = readOwnStringField(rawParams, "noteTitle");
+      const rawNotebookPath = readOwnStringField(rawParams, "notebookPath");
+      if (
+        !isBoundedRpcText(rawTitle, STAGE5_RPC_LIMITS.maxTitleBytes) ||
+        (paramKeys.length === 2 &&
+          !isBoundedRpcText(rawNotebookPath, STAGE5_RPC_LIMITS.maxQueryBytes))
+      ) {
+        return { kind: "err", code: "invalid_request" };
+      }
+      params.noteTitle = rawTitle;
+      if (paramKeys.length === 2) params.notebookPath = rawNotebookPath;
+    }
   } else if (rawMethod === "notes.sync") {
     if (!hasExactKeys(paramKeys, [])) return { kind: "err", code: "invalid_request" };
     params = objectCreate(null) as Record<string, unknown>;
@@ -781,8 +840,21 @@ async function resolveCreateSettingsContext(
   // A notebook-less create has no note-specific context.  The evaluator
   // receives its empty context so the configured default still applies.
   if (notebookId === undefined) return { ok: true, context: {} };
-  const notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
-  if (notebookPath === undefined) return { ok: false, code: "not_found" };
+  let notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
+  if (notebookPath === undefined) {
+    const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
+    if (refreshResolver !== undefined) {
+      try {
+        const refreshedPath = await reflectApply(refreshResolver, runtime, [notebookId]);
+        if (typeof refreshedPath === "string") notebookPath = refreshedPath;
+      } catch {
+        return { ok: false, code: "not_found" };
+      }
+    }
+  }
+  if (notebookPath === undefined || hasControlCharacter(notebookPath)) {
+    return { ok: false, code: "not_found" };
+  }
   return { ok: true, context: { notebookPath } };
 }
 
@@ -900,6 +972,12 @@ async function runNotesCreate(
   if (request.params.notebookId !== undefined) {
     commandRecord.notebookId = request.params.notebookId;
   }
+  // Forward the optional listKind selector verbatim — the contract
+  // plan defaults it to `simple-checklist` when omitted so the wire
+  // surface never sees `undefined`.
+  if (request.params.listKind !== undefined) {
+    commandRecord.listKind = request.params.listKind;
+  }
   const command = objectFreeze(commandRecord) as unknown as CreateNoteCommand;
 
   let raw: unknown;
@@ -926,6 +1004,9 @@ async function runNotesAppend(
   commandRecord.id = request.params.id;
   commandRecord.markdownFragment = request.params.markdownFragment;
   commandRecord.expectedRevision = request.params.expectedRevision;
+  if (request.params.listKind !== undefined) {
+    commandRecord.listKind = request.params.listKind;
+  }
   const command = objectFreeze(commandRecord) as unknown as AppendNoteCommand;
 
   let raw: unknown;
@@ -949,7 +1030,15 @@ async function runNotesUpdate(
 
   const patchRecord = objectCreate(null) as Record<string, unknown>;
   const parsedPatch = request.params.patch;
-  for (const field of ["title", "content", "notebookId", "tags", "pinned", "favorite"] as const) {
+  for (const field of [
+    "title",
+    "content",
+    "notebookId",
+    "tags",
+    "pinned",
+    "favorite",
+    "listKind",
+  ] as const) {
     const value = readOwnDataField(parsedPatch as Record<string, unknown>, field);
     if (value !== undefined) patchRecord[field] = value;
   }
@@ -970,6 +1059,10 @@ async function runNotesUpdate(
   return buildResultSuccessEnvelope(id, result);
 }
 
+function exactNotePathInput(params: RpcNotesDeleteRequest["params"]): ExactNotePathInput {
+  return "path" in params ? params.path : params;
+}
+
 async function runNotesDelete(
   request: RpcNotesDeleteRequest,
   runtime: RpcHandlerRuntimeLike,
@@ -979,11 +1072,10 @@ async function runNotesDelete(
   const resolvePath = readRuntimeMethod(runtime, "resolveNotePath");
   if (fn === undefined || resolvePath === undefined)
     return buildErrorEnvelope(id, "service_unavailable");
+  const target = exactNotePathInput(request.params);
   let resolution: ExactNotePathResolution;
   try {
-    resolution = (await reflectApply(resolvePath, runtime, [
-      request.params.path,
-    ])) as ExactNotePathResolution;
+    resolution = (await reflectApply(resolvePath, runtime, [target])) as ExactNotePathResolution;
   } catch (error) {
     if (error instanceof ExactNotePathError) {
       if (error.code === "invalid_path" || error.code === "ambiguous") {
@@ -1043,9 +1135,10 @@ async function runLockedNoteProof(
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "lockedNoteProof");
   if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  const target = exactNotePathInput(request.params);
   let raw: unknown;
   try {
-    raw = await reflectApply(fn, runtime, [request.params.path]);
+    raw = await reflectApply(fn, runtime, [target]);
   } catch {
     return buildErrorEnvelope(id, "service_unavailable");
   }
@@ -1093,9 +1186,10 @@ async function runPathDiagnostic(
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "pathDiagnostic");
   if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  const target = exactNotePathInput(request.params);
   let raw: unknown;
   try {
-    raw = await reflectApply(fn, runtime, [request.params.path]);
+    raw = await reflectApply(fn, runtime, [target]);
   } catch {
     return buildErrorEnvelope(id, "service_unavailable");
   }
@@ -1110,6 +1204,11 @@ async function runPathDiagnostic(
   const directMembership = readOwnStringField(record, "directMembership");
   const recursiveMembership = readOwnStringField(record, "recursiveMembership");
   const revision = readOwnStringField(record, "revision");
+  const contentType = readOwnStringField(record, "contentType");
+  const htmlPrefix = readOwnStringField(record, "htmlPrefix");
+  const simpleChecklist = readOwnStringField(record, "simpleChecklist");
+  const taskList = readOwnStringField(record, "taskList");
+  const literalMarkdown = readOwnStringField(record, "literalMarkdown");
   const titleStatuses = ["none", "one", "multiple", "unavailable"];
   const stageStatuses = ["present", "absent", "unavailable", "not_applicable"];
   const revisionStatuses = ["valid", "invalid", "unavailable", "not_applicable"];
@@ -1128,7 +1227,17 @@ async function runPathDiagnostic(
     recursiveMembership === undefined ||
     !stageStatuses.includes(recursiveMembership) ||
     revision === undefined ||
-    !revisionStatuses.includes(revision)
+    !revisionStatuses.includes(revision) ||
+    contentType === undefined ||
+    !["tiptap", "other", "unavailable"].includes(contentType) ||
+    htmlPrefix === undefined ||
+    !stageStatuses.slice(0, 3).includes(htmlPrefix) ||
+    simpleChecklist === undefined ||
+    !stageStatuses.slice(0, 3).includes(simpleChecklist) ||
+    taskList === undefined ||
+    !stageStatuses.slice(0, 3).includes(taskList) ||
+    literalMarkdown === undefined ||
+    !stageStatuses.slice(0, 3).includes(literalMarkdown)
   ) {
     return buildErrorEnvelope(id, "service_unavailable");
   }
@@ -1151,6 +1260,26 @@ async function runPathDiagnostic(
         writable: false,
       },
       revision: { value: revision, enumerable: true, configurable: false, writable: false },
+      contentType: { value: contentType, enumerable: true, configurable: false, writable: false },
+      htmlPrefix: { value: htmlPrefix, enumerable: true, configurable: false, writable: false },
+      simpleChecklist: {
+        value: simpleChecklist,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      taskList: {
+        value: taskList,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      literalMarkdown: {
+        value: literalMarkdown,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
     }),
   ) as RpcNotesPathDiagnosticResult;
   return buildResultSuccessEnvelope(id, result);
@@ -1316,6 +1445,7 @@ function readRuntimeMethod(
     | "updateNote"
     | "deleteNote"
     | "resolveNotePath"
+    | "resolveNotebookPath"
     | "lockedNoteProof"
     | "pathDiagnostic"
     | "requestSync",

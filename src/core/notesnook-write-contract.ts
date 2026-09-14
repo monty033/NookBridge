@@ -43,6 +43,12 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
+import {
+  DEFAULT_NOTESNOOK_LIST_KIND,
+  normaliseNotesnookListKind,
+  type NotesnookListKind,
+} from "./notesnook-write-list-intent.js";
+
 // ---------------------------------------------------------------------------
 // Categorical error codes.
 // ---------------------------------------------------------------------------
@@ -172,6 +178,14 @@ export const STAGE4_WRITE_LIMITS: Stage4WriteLimits = Object.freeze({
  * and every other field are outside the contract and fail closed with
  * `unsupported_patch_field`.
  *
+ * `listKind` is a meta-field: it does not mutate a note attribute
+ * itself, it tells the codec which checklist HTML shape to emit when
+ * the patch also carries a `content` field.  Including it in the
+ * allowlist lets a wire envelope update the note body and pick the
+ * intent in a single patch; a patch that omits `content` is still
+ * valid with `listKind` set, and the contract surfaces the resolved
+ * kind on the plan so the adapter can forward it to the codec seam.
+ *
  * This is *not* a real `Set` instance.  A real `Set` exposes its internal
  * `[[SetData]]` slot to `Set.prototype.add`/`delete`/`clear` even when the
  * own mutator properties are replaced, so a caller could otherwise widen
@@ -188,6 +202,7 @@ export const ALLOWED_UPDATE_PATCH_FIELDS: ReadonlySet<NotesnookUpdatePatchField>
     "tags",
     "pinned",
     "favorite",
+    "listKind",
   ]);
 
 /**
@@ -253,7 +268,8 @@ export type NotesnookUpdatePatchField =
   | "notebookId"
   | "tags"
   | "pinned"
-  | "favorite";
+  | "favorite"
+  | "listKind";
 
 // ---------------------------------------------------------------------------
 // Opaque revision tokens.
@@ -448,6 +464,15 @@ export interface CreateNoteCommand {
   readonly content: string;
   readonly notebookId?: string;
   readonly tags?: readonly string[];
+  /**
+   * Optional intent for the Markdown → stored-content codec.  When
+   * omitted the codec defaults to `simple-checklist` (the lightweight
+   * `<ul class="simple-checklist">` HTML); setting `task-list` switches
+   * to the rich interactive `<ul class="checklist">` HTML the
+   * `@notesnook/core` task-list extension understands.  Any value
+   * outside the closed set is a categorical `invalid_input`.
+   */
+  readonly listKind?: NotesnookListKind;
 }
 
 /** `appendNote(id, markdownFragment, expectedRevision)` input. */
@@ -455,9 +480,23 @@ export interface AppendNoteCommand {
   readonly id: string;
   readonly markdownFragment: string;
   readonly expectedRevision: NotesnookRevisionToken;
+  /**
+   * Optional intent for the Markdown fragment the codec appends.
+   * See {@link CreateNoteCommand.listKind}; the same defaults and
+   * closed set apply.
+   */
+  readonly listKind?: NotesnookListKind;
 }
 
-/** Allowed `updateNote` patch. At least one field must be present. */
+/**
+ * Allowed `updateNote` patch. At least one field must be present.
+ *
+ * `listKind` is the closed-set intent the codec uses when the patch
+ * also carries a `content` field.  A patch that contains `listKind`
+ * without `content` is accepted by the contract plan and ignored by
+ * the mutation path — the codec is the only consumer of the resolved
+ * intent.
+ */
 export interface UpdateNotePatch {
   readonly title?: string;
   readonly content?: string;
@@ -465,6 +504,7 @@ export interface UpdateNotePatch {
   readonly tags?: readonly string[];
   readonly pinned?: boolean;
   readonly favorite?: boolean;
+  readonly listKind?: NotesnookListKind;
 }
 
 /** `updateNote(id, patch, expectedRevision)` input. */
@@ -502,6 +542,13 @@ export interface CreateNotePlan extends WriteOutcomeFlags {
   readonly contentBytes: number;
   readonly notebookId?: string;
   readonly tags?: readonly string[];
+  /**
+   * Resolved list-intent the codec uses for this create.  When the
+   * caller omitted the selector the contract surfaces the published
+   * default so downstream code never sees an `undefined` it must
+   * re-resolve.
+   */
+  readonly listKind: NotesnookListKind;
 }
 
 /** Bounded description of an authorised append. */
@@ -510,6 +557,8 @@ export interface AppendNotePlan extends WriteOutcomeFlags {
   readonly id: string;
   readonly fragmentBytes: number;
   readonly expectedRevision: NotesnookRevisionToken;
+  /** Resolved list-intent the codec uses for this append. */
+  readonly listKind: NotesnookListKind;
 }
 
 /** Bounded description of an authorised update. */
@@ -518,6 +567,14 @@ export interface UpdateNotePlan extends WriteOutcomeFlags {
   readonly id: string;
   readonly patchFields: readonly NotesnookUpdatePatchField[];
   readonly expectedRevision: NotesnookRevisionToken;
+  /**
+   * Resolved list-intent the codec uses for the `content` half of an
+   * update patch, when present.  Undefined when the patch did not
+   * include a content rewrite — the codec is only invoked for the
+   * `content` field, and the field does not carry a listKind outside
+   * of that context.
+   */
+  readonly listKind?: NotesnookListKind;
 }
 
 /** Bounded description of an authorised single-note delete. */
@@ -721,6 +778,22 @@ function requireTags(value: unknown): readonly string[] {
   return Object.freeze(tags);
 }
 
+/**
+ * Resolve a `listKind` selector into the closed set.  `undefined`
+ * collapses to the published default so existing call sites that
+ * never set the selector see the same stored HTML shape.  Any non-
+ * `undefined` value outside the closed set is rewritten to a
+ * categorical `invalid_input` so the plan surface stays inside the
+ * contract vocabulary.
+ */
+function requireListKind(value: unknown): NotesnookListKind {
+  try {
+    return normaliseNotesnookListKind(value);
+  } catch {
+    fail("invalid_input", "list kind is not supported");
+  }
+}
+
 function containsControlCharacters(value: string): boolean {
   // eslint-disable-next-line no-control-regex
   return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -793,14 +866,24 @@ export function planCreateNote(command: CreateNoteCommand): CreateNotePlan {
   );
   const notebookIdRaw = readProperty(record, "notebookId");
   const tagsRaw = readProperty(record, "tags");
+  const listKindRaw = readProperty(record, "listKind");
   const notebookId = notebookIdRaw === undefined ? undefined : requireId(notebookIdRaw);
   const tags = tagsRaw === undefined ? undefined : requireTags(tagsRaw);
+  // Resolve the listKind selector up front so any out-of-set value is
+  // a categorical `invalid_input` (rather than silently selecting the
+  // default).  `undefined` collapses to the published default so the
+  // existing call sites that never set the selector see the same stored
+  // HTML shape they saw before.  The selector throws a closed
+  // `NotesnookListKindError`; we rewrite it to a contract error here so
+  // the plan surface stays inside the categorical vocabulary.
+  const listKind = requireListKind(listKindRaw);
   return Object.freeze({
     operation: "create" as const,
     title,
     contentBytes,
     ...(notebookId === undefined ? {} : { notebookId }),
     ...(tags === undefined ? {} : { tags }),
+    listKind,
     ...PENDING,
   });
 }
@@ -825,11 +908,14 @@ export function planAppendNote(command: AppendNoteCommand): AppendNotePlan {
     "markdown fragment",
   );
   const expectedRevision = requireRevisionToken(readProperty(record, "expectedRevision"));
+  const listKindRaw = readProperty(record, "listKind");
+  const listKind = requireListKind(listKindRaw);
   return Object.freeze({
     operation: "append" as const,
     id,
     fragmentBytes,
     expectedRevision,
+    listKind,
     ...PENDING,
   });
 }
@@ -840,6 +926,12 @@ export function planAppendNote(command: AppendNoteCommand): AppendNotePlan {
  * Only {@link ALLOWED_UPDATE_PATCH_FIELDS} may appear.  Any other key —
  * including `deleted`, `locked`, `password`, and `force` — fails closed
  * with `unsupported_patch_field` and is not echoed back.
+ *
+ * The `listKind` patch field carries the closed-set codec intent for
+ * the `content` half of the patch.  It is only resolved when the patch
+ * includes a `content` field — a `listKind`-only patch still passes
+ * validation but the codec is never invoked, so the plan omits the
+ * resolved kind rather than fabricating a content write.
  */
 export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
   const record = requireRecord(command, "update command");
@@ -862,6 +954,7 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
   }
 
   const fields: NotesnookUpdatePatchField[] = [];
+  let patchListKind: NotesnookListKind | undefined;
   for (const key of keys as NotesnookUpdatePatchField[]) {
     const value = readProperty(patch, key);
     switch (key) {
@@ -883,15 +976,25 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
           fail("invalid_input", "a boolean patch field has a non-boolean value");
         }
         break;
+      case "listKind":
+        // Resolve up-front so an out-of-set value is a categorical
+        // `invalid_input` rather than a silent coercion.  The resolved
+        // kind is only surfaced on the plan when the patch also carries
+        // a `content` field — see the `patchHasContent` flag below.
+        patchListKind = requireListKind(value);
+        break;
     }
     fields.push(key);
   }
+  const patchHasContent = fields.includes("content");
+  const listKind = patchHasContent ? (patchListKind ?? DEFAULT_NOTESNOOK_LIST_KIND) : undefined;
 
   return Object.freeze({
     operation: "update" as const,
     id,
     patchFields: Object.freeze([...fields].sort()),
     expectedRevision,
+    ...(listKind === undefined ? {} : { listKind }),
     ...PENDING,
   });
 }

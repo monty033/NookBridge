@@ -33,6 +33,7 @@ import {
   type NotesnookWriteNoteMetadata,
   type NotesnookWriteStoredContent,
 } from "../src/core/notesnook-write-adapter.js";
+import type { NotesnookListKind } from "../src/core/notesnook-write-codec.js";
 import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
@@ -343,25 +344,30 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
 
 interface FakeCodec extends NotesnookWriteMarkdownCodec {
   encodeCalls: string[];
+  listKindCalls: Array<NotesnookListKind | undefined>;
   appendCalls: number;
-  encodeMarkdown: (markdown: string) => NotesnookStoredContent;
+  encodeMarkdown: (markdown: string, listKind?: NotesnookListKind) => NotesnookStoredContent;
   appendMarkdownToStoredContent: (input: {
     readonly storedType: "tiptap" | "html";
     readonly storedData: string;
     readonly markdownFragment: string;
+    readonly listKind?: NotesnookListKind;
   }) => NotesnookStoredContent;
 }
 
 function htmlCodec(): FakeCodec {
   const encodeCalls: string[] = [];
+  const listKindCalls: Array<NotesnookListKind | undefined> = [];
   let appendCalls = 0;
   return {
     encodeCalls,
+    listKindCalls,
     get appendCalls() {
       return appendCalls;
     },
-    encodeMarkdown: (markdown: string) => {
+    encodeMarkdown: (markdown: string, listKind?: NotesnookListKind) => {
       encodeCalls.push(markdown);
+      listKindCalls.push(listKind);
       // Deterministic, hostile-free HTML: every newline is a paragraph
       // boundary.  Tests assert exact equality so the contract is
       // auditable; no library is involved.
@@ -389,6 +395,77 @@ function htmlCodec(): FakeCodec {
         .replace(/>/g, "&gt;");
       const fragmentParagraph = `<p>${encoded.replace(/\n/g, "<br/>")}</p>`;
       return { type: storedType, data: `${storedData}${fragmentParagraph}` };
+    },
+  };
+}
+
+/**
+ * Fake codec that mirrors the production deterministic codec's interactive
+ * Notesnook simple-checklist shape: a block made entirely of `- [ ]` / `- [x]`
+ * task-list lines becomes `<ul class="simple-checklist"><li
+ * class="checked simple-checklist--item"><p>…</p></li></ul>` for completed
+ * items and `class="simple-checklist--item"` otherwise.
+ */
+function nativeChecklistCodec(): FakeCodec {
+  const encodeCalls: string[] = [];
+  const listKindCalls: Array<NotesnookListKind | undefined> = [];
+  let appendCalls = 0;
+  const encode = (markdown: string, listKind?: NotesnookListKind): NotesnookStoredContent => {
+    encodeCalls.push(markdown);
+    listKindCalls.push(listKind);
+    // simple-checklist with one item.
+    const match = /^[-*] +\[( |x|X)\] +([^\n]*)$/.exec(markdown);
+    if (match !== null) {
+      const checked = match[1] !== " ";
+      const text = match[2] ?? "";
+      const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const openTag = `<li class="${checked ? "checked " : ""}simple-checklist--item"><p>`;
+      return {
+        type: "tiptap" as const,
+        data: `<div data-type="document"><ul class="simple-checklist">${openTag}${escaped}</p></li></ul></div>`,
+      };
+    }
+    // Fall through to a simple paragraph shape for anything else so the
+    // fake remains total over accepted input.
+    const escaped = markdown.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return {
+      type: "tiptap" as const,
+      data: `<div data-type="document"><p>${escaped.replace(/\n/g, "<br/>")}</p></div>`,
+    };
+  };
+  return {
+    encodeCalls,
+    get appendCalls() {
+      return appendCalls;
+    },
+    listKindCalls,
+    encodeMarkdown: encode,
+    appendMarkdownToStoredContent: ({
+      storedType,
+      storedData,
+      markdownFragment,
+    }: {
+      storedType: "tiptap" | "html";
+      storedData: string;
+      markdownFragment: string;
+    }) => {
+      appendCalls += 1;
+      // For tiptap stored content, splice the freshly encoded block
+      // inside the existing `<div data-type="document">…</div>` root so
+      // the resulting tree stays well-formed.
+      const encoded = encode(markdownFragment);
+      if (storedType === "tiptap") {
+        const trailingMatch = /<\/div>\s*$/.exec(storedData);
+        if (trailingMatch !== null) {
+          const head = storedData.slice(0, storedData.length - trailingMatch[0].length);
+          const inner = encoded.data
+            .replace(/^<div data-type="document">/, "")
+            .replace(/<\/div>$/, "");
+          return { type: storedType, data: `${head}${inner}</div>` };
+        }
+        return { type: storedType, data: `${storedData}${encoded.data}` };
+      }
+      return { type: storedType, data: `${storedData}${encoded.data}` };
     },
   };
 }
@@ -475,6 +552,20 @@ describe("Stage 4 write adapter — createNote", () => {
     // No sync/delete/force escape hatch may have fired.
     expect(database.calls.update).toHaveLength(0);
     expect(database.calls.notebookAdd).toHaveLength(0);
+  });
+
+  it("preserves explicit listKind through the defensive command snapshot", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+
+    await adapter.createNote({
+      title: "Task intent",
+      content: "- [ ] task",
+      listKind: "task-list",
+    });
+
+    expect(codec.listKindCalls).toEqual(["task-list"]);
   });
 
   it("snapshots stateful create command getters before codec and database calls", async () => {
@@ -1591,7 +1682,7 @@ describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
     expect(database.calls.add).toHaveLength(0);
   });
 
-  it("refuses an append whose fragment contains a task list", async () => {
+  it("accepts an append whose fragment contains a task list", async () => {
     const note: FakeNote = {
       id: NOTE_ID,
       title: "Has task list",
@@ -1605,25 +1696,35 @@ describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
       id: "content-1",
       noteId: NOTE_ID,
       type: "tiptap",
-      data: "<p>old</p>",
+      data: '<div data-type="document"><p>old</p></div>',
     };
     const database = createFakeDatabase({
       notes: new Map([[NOTE_ID, note]]),
       content: new Map([[stored.id, stored]]),
     });
-    const codec = htmlCodec();
+    // Use the interactive simple-checklist fake codec so the assertion exercises
+    // the encoded task-list structure rather than the literal Markdown source.
+    const codec = nativeChecklistCodec();
     const adapter = createNotesnookWriteAdapter({ source: database, codec });
 
     const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
-    const code = await codeOfAsync(() =>
-      adapter.appendNote({
-        id: NOTE_ID,
-        markdownFragment: "- [ ] task",
-        expectedRevision,
-      }),
-    );
-    expect(code).toBe("unsupported_content");
-    expect(database.calls.contentUpdate).toHaveLength(0);
+    const result = await adapter.appendNote({
+      id: NOTE_ID,
+      markdownFragment: "- [ ] task",
+      expectedRevision,
+    });
+    expect(result.operation).toBe("append");
+    expect(result.localCommitted).toBe(true);
+    // The codec is invoked once for the new fragment; the stored prefix
+    // (the original paragraph) is preserved byte-for-byte, and the
+    // appended fragment ends up as encoded interactive task-list markup —
+    // not as the literal Markdown source.
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    const nextData = database.calls.contentUpdate[0]?.partial.data as string;
+    expect(nextData.startsWith('<div data-type="document"><p>old</p>')).toBe(true);
+    expect(nextData).toContain('<ul class="simple-checklist">');
+    expect(nextData).toContain('<li class="simple-checklist--item"><p>task</p></li>');
+    expect(nextData).not.toContain("- [ ] task");
   });
 
   it("refuses an update whose replacement content contains inline HTML", async () => {

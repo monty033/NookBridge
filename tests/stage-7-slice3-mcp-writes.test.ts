@@ -84,6 +84,10 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
       title: expect.objectContaining({ type: "string", minLength: 1 }),
       content: expect.objectContaining({ type: "string", minLength: 1 }),
       notebookId: expect.objectContaining({ type: "string", minLength: 1 }),
+      listKind: expect.objectContaining({
+        type: "string",
+        enum: expect.arrayContaining(["simple-checklist", "task-list"]),
+      }),
     });
 
     expect(schemaFor("notesnook_append_note")).toMatchObject({
@@ -94,6 +98,7 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     expect(Object.keys(schemaFor("notesnook_append_note").properties as object).sort()).toEqual([
       "expectedRevision",
       "id",
+      "listKind",
       "markdownFragment",
     ]);
 
@@ -116,7 +121,7 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     );
     expect(
       Object.keys((updateProperties.patch as Record<string, unknown>).properties as object).sort(),
-    ).toEqual(["content", "favorite", "notebookId", "pinned", "tags", "title"]);
+    ).toEqual(["content", "favorite", "listKind", "notebookId", "pinned", "tags", "title"]);
   });
 
   it("returns the opaque revision from bounded note metadata", async () => {
@@ -328,6 +333,49 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     }
   });
 
+  it("permits structural whitespace in notesnook_create_note content while still rejecting other control bytes", async () => {
+    // Live canary: headings, newlines, tabs, four-space nested task lists, and
+    // checked/unchecked task markers must all cross the MCP boundary.  NUL and
+    // other ASCII controls must remain rejected at every layer.
+    const client = makeClient();
+    const createNote = client.createNote as ReturnType<typeof vi.fn>;
+    createNote.mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-create-1",
+        ok: true,
+        result: { kind: "create", id: "note-1", titleBytes: 8, contentBytes: 80 },
+      },
+    });
+    const server = buildNookMcpServer({ client });
+
+    const allowed: string[] = [
+      "# Title\n\nbody",
+      "line1\nline2\nline3",
+      "col1\tcol2",
+      "- [ ] unchecked\n- [x] checked",
+      "- [ ] parent\n    - [ ] child tab\n        - [ ] grandchild 4-space",
+    ];
+    for (const content of allowed) {
+      const result = await server.callTool("notesnook_create_note", {
+        title: "Title",
+        content,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createNote).toHaveBeenLastCalledWith({ title: "Title", content });
+    }
+
+    const blocked: string[] = ["line\u0000null", "bell\u0007bad", "esc\u001bbad"];
+    for (const content of blocked) {
+      const result = await server.callTool("notesnook_create_note", {
+        title: "Title",
+        content,
+      });
+      expect(result.isError).toBe(true);
+      expect(payload(result)).toEqual({ code: "invalid_request", message: "Invalid request" });
+    }
+  });
+
   it("maps socket failures safely and fails closed on malformed envelopes", async () => {
     const client = makeClient();
     const appendNote = vi.spyOn(client, "appendNote");
@@ -374,6 +422,114 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
       code: "service_unavailable",
       message: "Service unavailable",
     });
+  });
+
+  it("accepts and propagates the closed listKind selector across write tools", async () => {
+    const client = makeClient();
+    const createNote = client.createNote as ReturnType<typeof vi.fn>;
+    const appendNote = vi.spyOn(client, "appendNote");
+    const updateNote = vi.spyOn(client, "updateNote");
+    createNote.mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-listKind-create",
+        ok: true,
+        result: { kind: "create", id: "note-1", titleBytes: 5, contentBytes: 4 },
+      },
+    });
+    appendNote.mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-listKind-append",
+        ok: true,
+        result: { kind: "append", id: "note-1", fragmentBytes: 4 },
+      },
+    });
+    updateNote.mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-listKind-update",
+        ok: true,
+        result: { kind: "update", id: "note-1", appliedFields: ["content"] },
+      },
+    });
+    const server = buildNookMcpServer({ client });
+
+    for (const listKind of ["simple-checklist", "task-list"] as const) {
+      const created = await server.callTool("notesnook_create_note", {
+        title: "Title",
+        content: "- [x] done",
+        listKind,
+      });
+      expect(created.isError).toBeFalsy();
+      expect(createNote).toHaveBeenLastCalledWith({
+        title: "Title",
+        content: "- [x] done",
+        listKind,
+      });
+
+      const appended = await server.callTool("notesnook_append_note", {
+        id: "note-1",
+        markdownFragment: "- [x] done",
+        expectedRevision: REVISION,
+        listKind,
+      });
+      expect(appended.isError).toBeFalsy();
+      expect(appendNote).toHaveBeenLastCalledWith({
+        id: "note-1",
+        markdownFragment: "- [x] done",
+        expectedRevision: REVISION,
+        listKind,
+      });
+
+      const updated = await server.callTool("notesnook_update_note", {
+        id: "note-1",
+        expectedRevision: REVISION,
+        patch: { content: "- [x] done", listKind },
+      });
+      expect(updated.isError).toBeFalsy();
+      expect(updateNote).toHaveBeenLastCalledWith({
+        id: "note-1",
+        expectedRevision: REVISION,
+        patch: { content: "- [x] done", listKind },
+      });
+    }
+  });
+
+  it("rejects an out-of-set listKind at the MCP boundary before invoking the daemon", async () => {
+    const client = makeClient();
+    const createNote = client.createNote as ReturnType<typeof vi.fn>;
+    const appendNote = vi.spyOn(client, "appendNote");
+    const updateNote = vi.spyOn(client, "updateNote");
+    const server = buildNookMcpServer({ client });
+
+    for (const [name, args] of [
+      ["notesnook_create_note", { title: "T", content: "- [x] done", listKind: "ordered" }],
+      [
+        "notesnook_append_note",
+        {
+          id: "note-1",
+          markdownFragment: "- [x] done",
+          expectedRevision: REVISION,
+          listKind: "ordered",
+        },
+      ],
+      [
+        "notesnook_update_note",
+        {
+          id: "note-1",
+          expectedRevision: REVISION,
+          patch: { content: "- [x] done", listKind: "ordered" },
+        },
+      ],
+    ] as const) {
+      const result = await server.callTool(name, args as Record<string, unknown>);
+      expect(result.isError).toBe(true);
+      expect(payload(result)).toEqual({ code: "invalid_request", message: "Invalid request" });
+    }
+    expect(createNote).not.toHaveBeenCalled();
+    expect(appendNote).not.toHaveBeenCalled();
+    expect(updateNote).not.toHaveBeenCalled();
   });
 
   it("passes the closed error vocabulary through unchanged (P1-6)", async () => {

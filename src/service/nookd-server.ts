@@ -53,6 +53,37 @@ const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
 const MAX_REQUESTS_PER_CONNECTION = 1_024;
 const AUDIT_METHOD_SENTINEL = "notes.search" as const;
 
+function peekRpcMethod(frame: Buffer): RpcMethod {
+  try {
+    if (frame.length < FRAME_PREFIX_BYTES) return AUDIT_METHOD_SENTINEL;
+    const payloadLength = frame.readUInt32BE(0);
+    if (payloadLength !== frame.length - FRAME_PREFIX_BYTES) return AUDIT_METHOD_SENTINEL;
+    const parsed: unknown = JSON.parse(frame.subarray(FRAME_PREFIX_BYTES).toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return AUDIT_METHOD_SENTINEL;
+    }
+    const method = (parsed as Record<string, unknown>).method;
+    if (
+      method === "notes.search" ||
+      method === "notes.status" ||
+      method === "notes.list_notebooks" ||
+      method === "notes.get" ||
+      method === "notes.create" ||
+      method === "notes.append" ||
+      method === "notes.update" ||
+      method === "notes.delete" ||
+      method === "notes.locked_note_proof" ||
+      method === "notes.path_diagnostic" ||
+      method === "notes.sync"
+    ) {
+      return method;
+    }
+  } catch {
+    // The full parser remains authoritative; this is a body-free breadcrumb.
+  }
+  return AUDIT_METHOD_SENTINEL;
+}
+
 /** The deliberately narrow runtime seam owned by the daemon. */
 export type NookdServerRuntime = RpcHandlerRuntimeLike &
   Readonly<{
@@ -368,15 +399,28 @@ export async function startNookdServer(
             destroyConnection(state);
             break;
           }
+          audit("rpc.frame.extracted", "ok");
+          audit("rpc.frame.method_peek", "ok", peekRpcMethod(next.frame));
           let request;
           try {
             request = parseRpcFrame(next.frame);
+            if (
+              request === undefined ||
+              typeof request !== "object" ||
+              request === null ||
+              typeof request.id !== "string" ||
+              typeof request.method !== "string"
+            ) {
+              throw new Error("rpc protocol: parser returned an invalid request");
+            }
           } catch {
             // A malformed frame has no trusted request id. The protocol has no
             // nullable-id response envelope, so close without an error body.
+            audit("rpc.protocol.rejected", "invalid_request");
             destroyConnection(state);
             break;
           }
+          audit("rpc.request.parsed", "ok", request.method);
           state.requestsHandled += 1;
           const requestStartedMs = Date.now();
           audit("rpc.request.received", "ok", request.method, request.id.length > 0, 0);

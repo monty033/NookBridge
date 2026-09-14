@@ -73,6 +73,20 @@ function requestFrame(id: string, query: string): Buffer {
   return frame;
 }
 
+function pathDiagnosticFrame(id: string): Buffer {
+  const payload = Buffer.from(
+    JSON.stringify({
+      id,
+      method: "notes.path_diagnostic",
+      params: { path: "General/Task list for Bernie" },
+    }),
+  );
+  const frame = Buffer.allocUnsafe(4 + payload.length);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return frame;
+}
+
 async function fixture(
   search: NookdServerRuntime["search"],
   options: Omit<Parameters<typeof startNookdServer>[0], "socketPath" | "runtime"> = {},
@@ -189,9 +203,73 @@ describe("hostile input validators", () => {
 });
 
 describe("service audit records", () => {
+  it("records a complete frame before parsing it", async () => {
+    const records: ServiceAuditRecord[] = [];
+    const { socketPath } = await fixture(async () => [], {
+      auditLogger: auditLogger(records),
+    });
+    const socket = await connect(socketPath);
+    socket.write(requestFrame("frame-marker", "marker"));
+    const response = await readFrame(socket);
+    expect(response.ok).toBe(true);
+    socket.destroy();
+    await closeOf(socket);
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.frame.extracted",
+        outcome: "ok",
+        method: "notes.search",
+        requestIdEcho: false,
+      }),
+    );
+  });
+
+  it("records protocol rejection before closing an unparseable frame", async () => {
+    const records: ServiceAuditRecord[] = [];
+    const { socketPath } = await fixture(async () => [], {
+      auditLogger: auditLogger(records),
+    });
+    const socket = await connect(socketPath);
+    socket.write(Buffer.from([0, 0, 0, 1, 0]));
+    await closeOf(socket);
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.protocol.rejected",
+        outcome: "invalid_request",
+        method: "notes.search",
+        requestIdEcho: false,
+      }),
+    );
+  });
+
+  it("peeks the allowlisted method before full parsing", async () => {
+    const records: ServiceAuditRecord[] = [];
+    const { socketPath } = await fixture(async () => [], {
+      auditLogger: auditLogger(records),
+    });
+    const socket = await connect(socketPath);
+    socket.write(pathDiagnosticFrame("method-peek-marker"));
+    const response = await readFrame(socket);
+    expect(response.ok).toBe(false);
+    socket.destroy();
+    await closeOf(socket);
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.frame.method_peek",
+        outcome: "ok",
+        method: "notes.path_diagnostic",
+        requestIdEcho: false,
+      }),
+    );
+  });
+
   it("exposes the closed vocabulary and frozen null-prototype six-field records", () => {
     expect(Object.isFrozen(SERVICE_AUDIT_EVENTS)).toBe(true);
     expect(SERVICE_AUDIT_EVENTS).toEqual([
+      "rpc.protocol.rejected",
+      "rpc.frame.extracted",
+      "rpc.request.parsed",
+      "rpc.frame.method_peek",
       "rpc.request.received",
       "rpc.request.dispatched",
       "rpc.response.sent",

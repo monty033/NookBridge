@@ -133,6 +133,92 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(calls).toEqual([{ op: "create", ctx: { notebookPath: "Personal/Projects" } }]);
   });
 
+  it("refresh-resolves a notebookId when the startup index is stale", async () => {
+    const { calls, evaluator } = makeEvaluator(true);
+    const createNote = vi.fn(async () => createResult());
+    const resolveNotebookPath = vi.fn(async (notebookId: string) =>
+      notebookId === "fresh-child" ? "Outdoors/Canoe" : undefined,
+    );
+    const response = await handleRpcRequest(
+      request("notes.create", { title: "New", content: "Body", notebookId: "fresh-child" }),
+      makeRuntime({ createNote, notebookIndex: makeIndex(), resolveNotebookPath }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(resolveNotebookPath).toHaveBeenCalledWith("fresh-child");
+    expect(createNote).toHaveBeenCalledOnce();
+    expect(calls).toEqual([{ op: "create", ctx: { notebookPath: "Outdoors/Canoe" } }]);
+  });
+
+  it("forwards listKind='simple-checklist' through the handler into createNote", async () => {
+    const createNote = vi.fn(async () => createResult());
+    const response = await handleRpcRequest(
+      request("notes.create", {
+        title: "New",
+        content: "- [x] done",
+        listKind: "simple-checklist",
+      }),
+      makeRuntime({ createNote }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+    expect(response.ok).toBe(true);
+    expect(createNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "New",
+        content: "- [x] done",
+        listKind: "simple-checklist",
+      }),
+    );
+  });
+
+  it("forwards listKind='task-list' through the handler into appendNote", async () => {
+    const appendNote = vi.fn(async () => appendResult());
+    const response = await handleRpcRequest(
+      request("notes.append", {
+        id: "0123456789abcdef0123456789abcdef",
+        markdownFragment: "- [x] done",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        listKind: "task-list",
+      }),
+      makeRuntime({ appendNote, notebookIndex: makeIndex() }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+    expect(response.ok).toBe(true);
+    expect(appendNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "0123456789abcdef0123456789abcdef",
+        markdownFragment: "- [x] done",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        listKind: "task-list",
+      }),
+    );
+  });
+
+  it("forwards listKind='task-list' through the handler into updateNote patch", async () => {
+    const updateNote = vi.fn(async () => updateResult());
+    const response = await handleRpcRequest(
+      request("notes.update", {
+        id: "0123456789abcdef0123456789abcdef",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        patch: { content: "- [x] done", listKind: "task-list" },
+      }),
+      makeRuntime({ updateNote, notebookIndex: makeIndex() }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+    expect(response.ok).toBe(true);
+    expect(updateNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "0123456789abcdef0123456789abcdef",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        patch: expect.objectContaining({
+          content: "- [x] done",
+          listKind: "task-list",
+        }),
+      }),
+    );
+  });
+
   it("resolves note context before a denied notes.get and emits no context data", async () => {
     const { calls, evaluator } = makeEvaluator(false);
     const noteMetadata = vi.fn(async () => ({
@@ -175,6 +261,30 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(calls).toEqual([
       { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
+    ]);
+    expect(resolveNotePath).not.toHaveBeenCalled();
+    expect(deleteNote).not.toHaveBeenCalled();
+  });
+
+  it("passes explicit notebook and slash-containing title context to authorization", async () => {
+    const { calls, evaluator } = makeEvaluator((_op, ctx) =>
+      ctx.notebookPath === "Personal/Projects" && ctx.noteTitle === "Roadmap/A" ? false : true,
+    );
+    const resolveNotePath = vi.fn(async () => {
+      throw new Error("delete resolver must not run after policy denial");
+    });
+    const deleteNote = vi.fn(async () => {
+      throw new Error("delete mutation must not run after policy denial");
+    });
+    const response = await handleRpcRequest(
+      request("notes.delete", { notebookPath: "Personal/Projects", noteTitle: "Roadmap/A" }),
+      makeRuntime({ resolveNotePath, deleteNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(calls).toEqual([
+      { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap/A" } },
     ]);
     expect(resolveNotePath).not.toHaveBeenCalled();
     expect(deleteNote).not.toHaveBeenCalled();
@@ -328,5 +438,36 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     const response = await handleRpcRequest(request("notes.get", { id: "note-1" }), makeRuntime());
 
     expect(response.ok).toBe(true);
+  });
+
+  it("forwards multiline Markdown create content to the runtime", async () => {
+    // Defence-in-depth structural validator: a live canary body with
+    // headings, newlines, tabs, four-space nested task lists, and
+    // checked/unchecked task markers must reach `createNote` unchanged.
+    const { evaluator } = makeEvaluator(true);
+    const createNote = vi.fn(async () => createResult());
+    const content =
+      "# Heading\n\nbody\n- [ ] unchecked\n- [x] checked\n    - [ ] nested child\n        - [ ] grandchild 4-space\n";
+    const response = await handleRpcRequest(
+      request("notes.create", { title: "New", content }),
+      makeRuntime({ createNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+    expect(response.ok).toBe(true);
+    expect(createNote).toHaveBeenCalledWith(expect.objectContaining({ title: "New", content }));
+  });
+
+  it("rejects NUL and other ASCII control bytes in create content at the handler structural layer", async () => {
+    const { evaluator } = makeEvaluator(true);
+    const createNote = vi.fn(async () => createResult());
+    for (const content of ["line\u0000null", "bell\u0007bad", "esc\u001bbad"]) {
+      const response = await handleRpcRequest(
+        request("notes.create", { title: "New", content }),
+        makeRuntime({ createNote }),
+        createReadWriteNoDeleteServicePolicy(evaluator),
+      );
+      expect(response).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    }
+    expect(createNote).not.toHaveBeenCalled();
   });
 });

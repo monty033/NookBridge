@@ -67,6 +67,11 @@ describe("read-only exact-path diagnostic", () => {
         directMembership: "present",
         recursiveMembership: "present",
         revision: "valid",
+        contentType: "tiptap",
+        htmlPrefix: "present",
+        simpleChecklist: "absent",
+        taskList: "absent",
+        literalMarkdown: "absent",
       }),
     };
     const result = await runPathDiagnostic(path, runtime);
@@ -77,6 +82,11 @@ describe("read-only exact-path diagnostic", () => {
       directMembership: "present",
       recursiveMembership: "present",
       revision: "valid",
+      contentType: "tiptap",
+      htmlPrefix: "present",
+      simpleChecklist: "absent",
+      taskList: "absent",
+      literalMarkdown: "absent",
     });
     expect(Object.isFrozen(result)).toBe(true);
     expect(formatPathDiagnostic(result)).not.toContain(path);
@@ -87,6 +97,11 @@ describe("read-only exact-path diagnostic", () => {
       "directMembership",
       "recursiveMembership",
       "revision",
+      "contentType",
+      "htmlPrefix",
+      "simpleChecklist",
+      "taskList",
+      "literalMarkdown",
     ]);
   });
 
