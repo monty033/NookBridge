@@ -58,7 +58,10 @@ function normalizeState(value: unknown): SyncCoordinatorState {
     const noteId = readOwnData(rawMarker, "noteId");
     const sequence = readOwnData(rawMarker, "sequence");
     if (
-      (operation !== "create" && operation !== "append" && operation !== "update") ||
+      (operation !== "create" &&
+        operation !== "append" &&
+        operation !== "update" &&
+        operation !== "delete") ||
       typeof noteId !== "string" ||
       noteId.length === 0 ||
       noteId.length > MAX_NOTE_ID_LENGTH ||
