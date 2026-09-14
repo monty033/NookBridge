@@ -43,6 +43,10 @@ import {
   type RpcAnySuccessEnvelope,
   type RpcSuccessEnvelope,
 } from "../service/rpc-protocol.js";
+import {
+  NOTESNOOK_LIST_KINDS,
+  type NotesnookListKind,
+} from "../core/notesnook-write-list-intent.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
@@ -357,17 +361,21 @@ function serializeRequest(
       typeof create.content !== "string" ||
       create.content.length === 0 ||
       Buffer.byteLength(create.content, "utf8") > 512 ||
-      hasControlCharacter(create.content) ||
+      hasDisallowedControlCharacter(create.content) ||
       (create.notebookId !== undefined &&
         (!isSafeIdentifier(create.notebookId) ||
-          Buffer.byteLength(create.notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes))
+          Buffer.byteLength(create.notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes)) ||
+      (create.listKind !== undefined && !isClosedListKind(create.listKind))
     ) {
       throw new TypeError("nook-mcp: create parameters are invalid");
     }
-    cleanParams =
-      create.notebookId === undefined
-        ? { title: create.title, content: create.content }
-        : { title: create.title, content: create.content, notebookId: create.notebookId };
+    const baseParams: Record<string, unknown> = {
+      title: create.title,
+      content: create.content,
+    };
+    if (create.notebookId !== undefined) baseParams.notebookId = create.notebookId;
+    if (create.listKind !== undefined) baseParams.listKind = create.listKind;
+    cleanParams = baseParams;
   } else if (method === "notes.append") {
     const append = params as RpcNotesAppendParams;
     if (
@@ -378,41 +386,26 @@ function serializeRequest(
       Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
       hasDisallowedControlCharacter(append.markdownFragment) ||
       typeof append.expectedRevision !== "string" ||
-      !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision)
+      !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision) ||
+      (append.listKind !== undefined && !isClosedListKind(append.listKind))
     ) {
       throw new TypeError("nook-mcp: append parameters are invalid");
     }
-    cleanParams = {
+    const baseParams: Record<string, unknown> = {
       id: append.id,
       markdownFragment: append.markdownFragment,
       expectedRevision: append.expectedRevision,
     };
+    if (append.listKind !== undefined) baseParams.listKind = append.listKind;
+    cleanParams = baseParams;
   } else if (method === "notes.update") {
     cleanParams = snapshotUpdateParams(params);
   } else if (method === "notes.delete") {
     cleanParams = snapshotDeleteParams(params);
   } else if (method === "notes.locked_note_proof") {
-    const proof = params as RpcNotesLockedNoteProofParams;
-    if (
-      typeof proof.path !== "string" ||
-      proof.path.length === 0 ||
-      Buffer.byteLength(proof.path, "utf8") > 512 ||
-      hasControlCharacter(proof.path)
-    ) {
-      throw new TypeError("nook-mcp: locked-note-proof path is invalid");
-    }
-    cleanParams = { path: proof.path };
+    cleanParams = snapshotDeleteParams(params);
   } else if (method === "notes.path_diagnostic") {
-    const diagnostic = params as RpcNotesPathDiagnosticParams;
-    if (
-      typeof diagnostic.path !== "string" ||
-      diagnostic.path.length === 0 ||
-      Buffer.byteLength(diagnostic.path, "utf8") > 512 ||
-      hasControlCharacter(diagnostic.path)
-    ) {
-      throw new TypeError("nook-mcp: path-diagnostic path is invalid");
-    }
-    cleanParams = { path: diagnostic.path };
+    cleanParams = snapshotDeleteParams(params);
   } else {
     if (Object.keys(params).length !== 0)
       throw new TypeError("nook-mcp: parameterless request has fields");
@@ -443,18 +436,50 @@ function serializeRequest(
  * getter or toJSON hook after validation.
  */
 function snapshotDeleteParams(value: unknown): Record<string, unknown> {
-  const values = readExactDataProperties(value, ["path"]);
-  const path = values.path;
-  if (
-    typeof path !== "string" ||
-    path.length === 0 ||
-    Buffer.byteLength(path, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
-    hasDisallowedControlCharacter(path) ||
-    path.includes("\\")
-  ) {
-    throw new TypeError("nook-mcp: delete parameters are invalid");
+  try {
+    const values = readExactDataProperties(value, ["path"]);
+    const path = values.path;
+    if (
+      typeof path !== "string" ||
+      path.length === 0 ||
+      Buffer.byteLength(path, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      hasDisallowedControlCharacter(path) ||
+      path.includes("\\")
+    ) {
+      throw new TypeError("nook-mcp: delete parameters are invalid");
+    }
+    return Object.freeze({ path });
+  } catch {
+    // Fall through to the explicit notebook/title address forms.
   }
-  return Object.freeze({ path });
+
+  for (const keys of [["noteTitle"], ["notebookPath", "noteTitle"]] as const) {
+    try {
+      const values = readExactDataProperties(value, keys);
+      const noteTitle = values.noteTitle;
+      const notebookPath = values.notebookPath;
+      if (
+        typeof noteTitle !== "string" ||
+        noteTitle.length === 0 ||
+        Buffer.byteLength(noteTitle, "utf8") > STAGE5_RPC_LIMITS.maxTitleBytes ||
+        hasDisallowedControlCharacter(noteTitle) ||
+        (keys.length === 2 &&
+          (typeof notebookPath !== "string" ||
+            notebookPath.length === 0 ||
+            Buffer.byteLength(notebookPath, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+            hasDisallowedControlCharacter(notebookPath)))
+      ) {
+        throw new TypeError("nook-mcp: delete parameters are invalid");
+      }
+      const output = Object.create(null) as Record<string, unknown>;
+      output.noteTitle = noteTitle;
+      if (keys.length === 2) output.notebookPath = notebookPath;
+      return Object.freeze(output);
+    } catch {
+      // Try the next exact closed shape.
+    }
+  }
+  throw new TypeError("nook-mcp: delete parameters are invalid");
 }
 
 function snapshotUpdateParams(value: unknown): Record<string, unknown> {
@@ -570,6 +595,15 @@ function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> 
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxQueryBytes, false);
     } else if (key === "notebookId") {
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxIdentifierBytes, true);
+    } else if (key === "listKind") {
+      // Closed-set gate: reject any value outside `simple-checklist`
+      // or `task-list` so the wire surface never sees a malformed
+      // intent.  The codec and contract surface will accept the
+      // closed-set value as-is.
+      if (!isClosedListKind(raw)) {
+        throw new TypeError("nook-mcp: update patch is invalid");
+      }
+      output[key] = raw;
     } else if (typeof raw !== "boolean") {
       throw new TypeError("nook-mcp: update patch is invalid");
     } else {
@@ -586,8 +620,19 @@ function isUpdatePatchField(value: string): boolean {
     value === "notebookId" ||
     value === "tags" ||
     value === "pinned" ||
-    value === "favorite"
+    value === "favorite" ||
+    value === "listKind"
   );
+}
+
+/**
+ * Closed list-intent gate.  The selector is rejected BEFORE the
+ * request is framed so a hostile client cannot smuggle an unknown
+ * intent past the socket boundary.  Mirrors the closed
+ * {@link NOTESNOOK_LIST_KINDS} set in the contract.
+ */
+function isClosedListKind(value: unknown): value is NotesnookListKind {
+  return typeof value === "string" && NOTESNOOK_LIST_KINDS.includes(value as NotesnookListKind);
 }
 
 function requireBoundedSocketString(value: unknown, maxBytes: number, identifier: boolean): string {
@@ -963,6 +1008,11 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       const directMembership = resultRecord.directMembership;
       const recursiveMembership = resultRecord.recursiveMembership;
       const revision = resultRecord.revision;
+      const contentType = resultRecord.contentType;
+      const htmlPrefix = resultRecord.htmlPrefix;
+      const simpleChecklist = resultRecord.simpleChecklist;
+      const taskList = resultRecord.taskList;
+      const literalMarkdown = resultRecord.literalMarkdown;
       if (
         !hasExactOwnKeys(resultRecord, [
           "kind",
@@ -972,6 +1022,11 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
           "directMembership",
           "recursiveMembership",
           "revision",
+          "contentType",
+          "htmlPrefix",
+          "simpleChecklist",
+          "taskList",
+          "literalMarkdown",
         ]) ||
         typeof resultRecord.pathBytes !== "number" ||
         !Number.isSafeInteger(resultRecord.pathBytes) ||
@@ -981,7 +1036,12 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         !isPathDiagnosticStage(notebook) ||
         !isPathDiagnosticStage(directMembership) ||
         !isPathDiagnosticStage(recursiveMembership) ||
-        !isPathDiagnosticRevision(revision)
+        !isPathDiagnosticRevision(revision) ||
+        !isPathDiagnosticContentType(contentType) ||
+        !isPathDiagnosticContentMarker(htmlPrefix) ||
+        !isPathDiagnosticContentMarker(simpleChecklist) ||
+        !isPathDiagnosticContentMarker(taskList) ||
+        !isPathDiagnosticContentMarker(literalMarkdown)
       )
         throw new Error("invalid response");
       return Object.freeze({
@@ -995,6 +1055,11 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
           directMembership,
           recursiveMembership,
           revision,
+          contentType,
+          htmlPrefix,
+          simpleChecklist,
+          taskList,
+          literalMarkdown,
         }),
       }) as unknown as RpcAnyResponseEnvelope;
     }
@@ -1079,6 +1144,16 @@ function isPathDiagnosticRevision(
     value === "unavailable" ||
     value === "not_applicable"
   );
+}
+
+function isPathDiagnosticContentType(value: unknown): value is "tiptap" | "other" | "unavailable" {
+  return value === "tiptap" || value === "other" || value === "unavailable";
+}
+
+function isPathDiagnosticContentMarker(
+  value: unknown,
+): value is "present" | "absent" | "unavailable" {
+  return value === "present" || value === "absent" || value === "unavailable";
 }
 
 function decodeNotebook(value: unknown): Readonly<Record<string, unknown>> {

@@ -56,7 +56,7 @@ import {
   type NotesnookUpdatePatchField,
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
-import { assertSupportedConstructs } from "./notesnook-write-codec.js";
+import { assertSupportedConstructs, type NotesnookListKind } from "./notesnook-write-codec.js";
 
 // ---------------------------------------------------------------------------
 // Markdown → stored-content codec seam.
@@ -84,11 +84,29 @@ export interface NotesnookStoredContent {
 }
 
 export interface NotesnookWriteMarkdownCodec {
-  readonly encodeMarkdown: (markdown: string) => NotesnookStoredContent;
+  /**
+   * Translate Markdown into the stored representation.  The optional
+   * `listKind` selector picks between Notesnook's lightweight
+   * `simple-checklist` HTML and the rich interactive `checklist`
+   * HTML.  Omitting it preserves the existing default
+   * (`simple-checklist`) so every caller that does not opt in still sees
+   * the stored HTML shape it saw before the selector was introduced.
+   */
+  readonly encodeMarkdown: (
+    markdown: string,
+    listKind?: NotesnookListKind,
+  ) => NotesnookStoredContent;
+  /**
+   * Append a freshly encoded Markdown fragment to an existing stored
+   * document.  The optional `listKind` selector carries the same
+   * intent as {@link NotesnookWriteMarkdownCodec.encodeMarkdown} and
+   * is forwarded verbatim to the codec.
+   */
   readonly appendMarkdownToStoredContent: (input: {
     readonly storedType: "tiptap" | "html";
     readonly storedData: string;
     readonly markdownFragment: string;
+    readonly listKind?: NotesnookListKind;
   }) => NotesnookStoredContent;
 }
 
@@ -305,8 +323,11 @@ export class NotesnookWriteAdapter {
     // Step 3 — translate Markdown to the stored representation via the
     // injected codec.  Any throw is normalised to `unsupported_content`.
     // The contract only stores byte counts here; the raw Markdown is
-    // never concatenated into the stored content slot.
-    const encoded = this.#encodeMarkdown(snapshot.content);
+    // never concatenated into the stored content slot.  `listKind` is
+    // forwarded verbatim from the plan so the codec picks the requested
+    // intent; a malformed value has already been rewritten to
+    // `invalid_input` by the contract plan.
+    const encoded = this.#encodeMarkdown(snapshot.content, plan.listKind);
 
     // Step 4 — perform the local mutation.  We catch every upstream
     // throw and rewrite it to a categorical failure.  The adapter
@@ -413,6 +434,12 @@ export class NotesnookWriteAdapter {
         storedType: stored.type,
         storedData: stored.data,
         markdownFragment: snapshot.markdownFragment,
+        // Forward the resolved listKind from the contract plan so the
+        // codec emits the requested intent.  A malformed value has
+        // already been rewritten to `invalid_input` by the contract
+        // plan; the codec itself refuses `undefined` defaults to
+        // `simple-checklist`.
+        listKind: plan.listKind,
       });
     } catch {
       throw adapterError(
@@ -510,7 +537,11 @@ export class NotesnookWriteAdapter {
           "Notesnook write adapter: stored content is not available",
         );
       }
-      const encoded = this.#encodeMarkdown(newContent);
+      // Forward the resolved listKind from the plan.  The contract only
+      // surfaces a `listKind` slot on the plan when the patch carries
+      // a `content` field, so this is exactly the case where the codec
+      // must run.
+      const encoded = this.#encodeMarkdown(newContent, plan.listKind);
       preparedContent = { type: stored.type, data: encoded.data };
     }
 
@@ -696,9 +727,9 @@ export class NotesnookWriteAdapter {
     }
   }
 
-  #encodeMarkdown(markdown: string): NotesnookStoredContent {
+  #encodeMarkdown(markdown: string, listKind?: NotesnookListKind): NotesnookStoredContent {
     try {
-      return this.#codec.encodeMarkdown(markdown);
+      return this.#codec.encodeMarkdown(markdown, listKind);
     } catch {
       throw adapterError(
         "unsupported_content",
@@ -775,6 +806,7 @@ const SNAPSHOT_PATCH_FIELDS: ReadonlyArray<NotesnookUpdatePatchField> = [
   "tags",
   "pinned",
   "favorite",
+  "listKind",
 ];
 
 function snapshotCreateCommand(command: CreateNoteCommand): CreateNoteCommand {
@@ -783,11 +815,13 @@ function snapshotCreateCommand(command: CreateNoteCommand): CreateNoteCommand {
   const content = snapshotProperty(record, "content");
   const notebookId = snapshotProperty(record, "notebookId");
   const tags = snapshotArray(snapshotProperty(record, "tags"));
+  const listKind = snapshotProperty(record, "listKind");
   const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   snapshot.title = title;
   snapshot.content = content;
   if (notebookId !== undefined) snapshot.notebookId = notebookId;
   if (tags !== undefined) snapshot.tags = tags;
+  if (listKind !== undefined) snapshot.listKind = listKind;
   return Object.freeze(snapshot) as unknown as CreateNoteCommand;
 }
 
@@ -797,6 +831,8 @@ function snapshotAppendCommand(command: AppendNoteCommand): AppendNoteCommand {
   snapshot.id = snapshotProperty(record, "id");
   snapshot.markdownFragment = snapshotProperty(record, "markdownFragment");
   snapshot.expectedRevision = snapshotProperty(record, "expectedRevision");
+  const listKind = snapshotProperty(record, "listKind");
+  if (listKind !== undefined) snapshot.listKind = listKind;
   return Object.freeze(snapshot) as unknown as AppendNoteCommand;
 }
 

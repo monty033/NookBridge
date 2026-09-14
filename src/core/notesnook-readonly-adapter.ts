@@ -170,6 +170,17 @@ export interface NotesnookReadOnlyStatus {
  * `moveToTrash`, `setLastSynced`, raw `database` accessor, or generic
  * call surface is exposed.
  */
+export type NotesnookReadOnlyContentType = "tiptap" | "other" | "unavailable";
+export type NotesnookReadOnlyContentMarker = "present" | "absent" | "unavailable";
+
+export type NotesnookReadOnlyContentDiagnostic = Readonly<{
+  readonly contentType: NotesnookReadOnlyContentType;
+  readonly htmlPrefix: NotesnookReadOnlyContentMarker;
+  readonly simpleChecklist: NotesnookReadOnlyContentMarker;
+  readonly taskList: NotesnookReadOnlyContentMarker;
+  readonly literalMarkdown: NotesnookReadOnlyContentMarker;
+}>;
+
 export interface NotesnookReadOnlyDatabase {
   readonly lastSynced: () => Promise<number>;
   readonly hasUnsyncedChanges: () => Promise<boolean>;
@@ -194,6 +205,8 @@ export interface NotesnookReadOnlyDatabase {
   readonly hasNoteInNotebook?: (notebookId: string, noteId: string) => Promise<boolean>;
   /** Internal categorical lock-state probe; never returns note content. */
   readonly readNoteLockState?: (id: string) => Promise<"locked" | "unlocked">;
+  /** Body-free classifier for one note's stored content representation. */
+  readonly noteContentDiagnostic?: (id: string) => Promise<NotesnookReadOnlyContentDiagnostic>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }

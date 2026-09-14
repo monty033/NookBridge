@@ -245,6 +245,37 @@ describe("nook-mcp server surface", () => {
   });
 });
 
+describe("notesnook_delete_note — explicit title address", () => {
+  it("forwards a slash-containing title without re-parsing it as hierarchy", async () => {
+    const observed: unknown[] = [];
+    const socketPath = await startFakeDaemon((request) => {
+      observed.push(request);
+      return framedResponse({
+        id: request.id,
+        ok: true,
+        result: { kind: "delete", id: "opaque-note" },
+      });
+    });
+    const server = buildNookMcpServer({ client: new NookdSocketClient({ socketPath }) });
+
+    const result = await server.callTool("notesnook_delete_note", {
+      notebookPath: "General",
+      noteTitle: "A/B",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({
+      method: "notes.delete",
+      params: { notebookPath: "General", noteTitle: "A/B" },
+    });
+  });
+});
+
+// -----------------------------------------------------------------------
+// Happy path — approval-gated outbound sync.
+// -----------------------------------------------------------------------
+
 describe("notesnook_sync — approval-gated outbound path", () => {
   it("sends notes.sync with empty params and projects categorical status", async () => {
     const observed: string[] = [];
@@ -859,5 +890,98 @@ describe("NookdSocketClient", () => {
     if (!result.ok) {
       expect(result.code).toBe("service_unavailable");
     }
+  });
+
+  it("forwards listKind on createNote / appendNote / updateNote", async () => {
+    const dir = makeTempDir();
+    const socketPath = join(dir, "listkind.sock");
+    const captured: Array<{
+      method: string;
+      params: Record<string, unknown>;
+    }> = [];
+    const server = createServer((socket) => {
+      let buffer = Buffer.alloc(0);
+      socket.on("data", (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (buffer.length < 4) return;
+        const len = buffer.readUInt32BE(0);
+        if (buffer.length < 4 + len) return;
+        const payload = JSON.parse(buffer.subarray(4, 4 + len).toString("utf8")) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        captured.push({ method: payload.method, params: payload.params });
+        const envelope = {
+          id: payload.id,
+          ok: true,
+          result:
+            payload.method === "notes.create"
+              ? { kind: "create", id: "note-1", titleBytes: 1, contentBytes: 1 }
+              : payload.method === "notes.append"
+                ? { kind: "append", id: "note-1", fragmentBytes: 1 }
+                : { kind: "update", id: "note-1", appliedFields: ["content"] },
+        };
+        const response = Buffer.from(JSON.stringify(envelope), "utf8");
+        const frame = Buffer.alloc(4 + response.length);
+        frame.writeUInt32BE(response.length, 0);
+        response.copy(frame, 4);
+        socket.write(frame);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      const client = new NookdSocketClient({ socketPath });
+      await client.createNote({
+        title: "T",
+        content: "- [x] done",
+        listKind: "task-list",
+      });
+      await client.appendNote({
+        id: "0123456789abcdef0123456789abcdef",
+        markdownFragment: "- [x] done",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        listKind: "task-list",
+      });
+      await client.updateNote({
+        id: "0123456789abcdef0123456789abcdef",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        patch: { content: "- [x] done", listKind: "task-list" },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    expect(captured.map((c) => c.method)).toEqual(["notes.create", "notes.append", "notes.update"]);
+    expect(captured[0]?.params.listKind).toBe("task-list");
+    expect(captured[1]?.params.listKind).toBe("task-list");
+    expect(captured[2]?.params.patch).toEqual({
+      content: "- [x] done",
+      listKind: "task-list",
+    });
+  });
+
+  it("rejects a listKind outside the closed set before opening the socket", async () => {
+    const dir = makeTempDir();
+    const socketPath = join(dir, "listkind-bad.sock");
+    const client = new NookdSocketClient({ socketPath });
+    const createResult = await client.createNote({
+      title: "T",
+      content: "- [x] done",
+      listKind: "ordered" as never,
+    });
+    expect(createResult).toEqual({ ok: false, code: "invalid_request" });
+    const appendResult = await client.appendNote({
+      id: "0123456789abcdef0123456789abcdef",
+      markdownFragment: "- [x] done",
+      expectedRevision: "rev_00000000000000000000000000000000",
+      listKind: "ordered" as never,
+    });
+    expect(appendResult).toEqual({ ok: false, code: "invalid_request" });
+    const updateResult = await client.updateNote({
+      id: "0123456789abcdef0123456789abcdef",
+      expectedRevision: "rev_00000000000000000000000000000000",
+      patch: { content: "- [x] done", listKind: "ordered" as never },
+    });
+    expect(updateResult).toEqual({ ok: false, code: "invalid_request" });
   });
 });

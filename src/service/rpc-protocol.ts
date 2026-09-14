@@ -29,6 +29,11 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 
+import {
+  NOTESNOOK_LIST_KINDS,
+  type NotesnookListKind,
+} from "../core/notesnook-write-list-intent.js";
+
 // Capture every mutable intrinsic used by this closed boundary before any
 // caller can pollute a shared prototype or static method.
 const objectCreate = Object.create;
@@ -132,29 +137,39 @@ export interface RpcNotesGetParams {
 
 /**
  * Bounded `notes.create` params.  The closed surface is exactly
- * `title`, `content`, and the optional `notebookId`.  Tags, MIME,
- * attachments, color, pin state, and every other upstream
- * field are intentionally absent — they are reachable only
- * through future dedicated methods and never through the
- * bounded `notes.create` envelope.
+ * `title`, `content`, the optional `notebookId`, and the optional
+ * `listKind` selector.  Tags, MIME, attachments, color, pin state, and
+ * every other upstream field are intentionally absent — they are
+ * reachable only through future dedicated methods and never through
+ * the bounded `notes.create` envelope.
  *
  * Title and content are bounded by the published
  * {@link STAGE5_RPC_LIMITS} cap (`maxTitleBytes`,
  * `maxQueryBytes` used as a generic content-byte cap).
+ *
+ * `listKind` is an optional selector between Notesnook's lightweight
+ * `simple-checklist` HTML and the rich interactive `checklist` HTML.
+ * Omitting the field preserves the existing behaviour (the codec
+ * defaults to `simple-checklist`); setting it to anything outside the
+ * closed set is rejected categorically with `invalid_request`.  The
+ * selector is published in
+ * `docs/notesnook-list-intent.md` (forthcoming) so callers know which
+ * HTML shape each value emits.
  */
 export interface RpcNotesCreateParams {
   readonly title: string;
   readonly content: string;
   readonly notebookId?: string;
+  readonly listKind?: NotesnookListKind;
 }
 
 /**
  * Bounded `notes.append` params.  The closed surface is exactly
- * `id`, `markdownFragment`, and `expectedRevision`.  The revision
- * is a well-formed opaque token (the format is published by the
- * Stage 4 write contract) — anything else is rejected
- * categorically.  Body, raw stored content, internal flags,
- * tag relations, and every other upstream field are
+ * `id`, `markdownFragment`, `expectedRevision`, and the optional
+ * `listKind` selector.  The revision is a well-formed opaque token
+ * (the format is published by the Stage 4 write contract) — anything
+ * else is rejected categorically.  Body, raw stored content,
+ * internal flags, tag relations, and every other upstream field are
  * intentionally absent; they are reachable only through future
  * dedicated methods.
  */
@@ -162,6 +177,7 @@ export interface RpcNotesAppendParams {
   readonly id: string;
   readonly markdownFragment: string;
   readonly expectedRevision: string;
+  readonly listKind?: NotesnookListKind;
 }
 
 /**
@@ -181,9 +197,12 @@ export type RpcNotesUpdatePatchField =
   | "favorite";
 
 /**
- * Bounded patch object for `notes.update`.  At least one field
- * must be present.  Values are bounded by the same Stage 5
- * limits the create / append envelopes use.
+ * Bounded patch object for `notes.update`.  At least one field must
+ * be present.  Values are bounded by the same Stage 5 limits the
+ * create / append envelopes use.  `listKind` only changes the stored
+ * representation when the patch also includes `content`; the contract
+ * plan surfaces the resolved kind on the update plan only in that
+ * case.
  */
 export interface RpcNotesUpdatePatch {
   readonly title?: string;
@@ -192,6 +211,7 @@ export interface RpcNotesUpdatePatch {
   readonly tags?: readonly string[];
   readonly pinned?: boolean;
   readonly favorite?: boolean;
+  readonly listKind?: NotesnookListKind;
 }
 
 /**
@@ -205,20 +225,20 @@ export interface RpcNotesUpdateParams {
   readonly patch: RpcNotesUpdatePatch;
 }
 
-/** Bounded `notes.delete` params. The daemon resolves the exact path and owns the revision guard. */
-export interface RpcNotesDeleteParams {
+/** Backward-compatible slash-delimited exact path. */
+export interface RpcNotesPathParams {
   readonly path: string;
 }
 
-/** Bounded operator-only locked-note acceptance proof params. */
-export interface RpcNotesLockedNoteProofParams {
-  readonly path: string;
+/** Explicit exact-note address; `noteTitle` may contain `/`. */
+export interface RpcNotesExplicitPathParams {
+  readonly notebookPath?: string;
+  readonly noteTitle: string;
 }
 
-/** Bounded operator-only exact-path resolver diagnostic params. */
-export interface RpcNotesPathDiagnosticParams {
-  readonly path: string;
-}
+export type RpcNotesDeleteParams = RpcNotesPathParams | RpcNotesExplicitPathParams;
+export type RpcNotesLockedNoteProofParams = RpcNotesPathParams | RpcNotesExplicitPathParams;
+export type RpcNotesPathDiagnosticParams = RpcNotesPathParams | RpcNotesExplicitPathParams;
 
 /** The closed set of allowed RPC methods. */
 export type RpcMethod =
@@ -430,6 +450,9 @@ export type RpcPathDiagnosticTitleStatus = "none" | "one" | "multiple" | "unavai
 export type RpcPathDiagnosticStage = "present" | "absent" | "unavailable" | "not_applicable";
 export type RpcPathDiagnosticRevision = "valid" | "invalid" | "unavailable" | "not_applicable";
 
+export type RpcPathDiagnosticContentType = "tiptap" | "other" | "unavailable";
+export type RpcPathDiagnosticContentMarker = "present" | "absent" | "unavailable";
+
 /** Closed, redacted result of the operator-only exact-path diagnostic. */
 export interface RpcNotesPathDiagnosticResult {
   readonly kind: "path_diagnostic";
@@ -439,6 +462,11 @@ export interface RpcNotesPathDiagnosticResult {
   readonly directMembership: RpcPathDiagnosticStage;
   readonly recursiveMembership: RpcPathDiagnosticStage;
   readonly revision: RpcPathDiagnosticRevision;
+  readonly contentType: RpcPathDiagnosticContentType;
+  readonly htmlPrefix: RpcPathDiagnosticContentMarker;
+  readonly simpleChecklist: RpcPathDiagnosticContentMarker;
+  readonly taskList: RpcPathDiagnosticContentMarker;
+  readonly literalMarkdown: RpcPathDiagnosticContentMarker;
 }
 
 export interface RpcSyncResult {
@@ -836,14 +864,26 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
   } else if (method === "notes.create") {
-    // Closed params surface: exactly one of the two published
-    // shapes.  Either { title, content } or
-    // { title, content, notebookId }.  Tags, MIME, attachments,
-    // and every other upstream field are rejected categorically.
-    if (
-      !keysAreExactly(paramKeys, ["title", "content"]) &&
-      !keysAreExactly(paramKeys, ["title", "content", "notebookId"])
-    ) {
+    // Closed surface params: exactly one of the three published
+    // shapes.  Either { title, content }, { title, content,
+    // notebookId }, or { title, content, listKind }, or
+    // { title, content, notebookId, listKind }.  Tags, MIME,
+    // attachments, and every other upstream field are rejected
+    // categorically.
+    const allowedCreateShapes: ReadonlyArray<ReadonlyArray<string>> = [
+      ["title", "content"],
+      ["title", "content", "notebookId"],
+      ["title", "content", "listKind"],
+      ["title", "content", "notebookId", "listKind"],
+    ];
+    let createShapeMatched = false;
+    for (const shape of allowedCreateShapes) {
+      if (keysAreExactly(paramKeys, shape)) {
+        createShapeMatched = true;
+        break;
+      }
+    }
+    if (!createShapeMatched) {
       throw rpcProtocolError("rpc protocol: create params have unexpected fields");
     }
     const title = paramsRecord.title;
@@ -862,14 +902,14 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       content.length === 0 ||
       content.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
       utf8ByteLength(content, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(content)
+      hasDisallowedControlCharacter(content)
     ) {
       throw rpcProtocolError("rpc protocol: request create content is invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.title = title;
     paramsObj.content = content;
-    if (paramKeys.length === 3) {
+    if (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookId"])) {
       const notebookId = paramsRecord.notebookId;
       if (
         typeof notebookId !== "string" ||
@@ -883,14 +923,32 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       }
       paramsObj.notebookId = notebookId;
     }
+    if (reflectApply(objectHasOwnProperty, paramsRecord, ["listKind"])) {
+      const listKind = paramsRecord.listKind;
+      if (typeof listKind !== "string" || !arrayContainsString(NOTESNOOK_LIST_KINDS, listKind)) {
+        throw rpcProtocolError("rpc protocol: request create listKind is invalid");
+      }
+      paramsObj.listKind = listKind;
+    }
   } else if (method === "notes.append") {
     // Closed params surface: exactly { id, markdownFragment,
-    // expectedRevision } in any object-key order.  Anything
-    // else — body, content, tag lists, force flags — is rejected
-    // categorically.  The revision token must match the closed
-    // `rev_<32 hex chars>` format published by the Stage 4 write
-    // contract.
-    if (!keysAreExactly(paramKeys, ["id", "markdownFragment", "expectedRevision"])) {
+    // expectedRevision, listKind? } in any object-key order.
+    // Anything else — body, content, tag lists, force flags — is
+    // rejected categorically.  The revision token must match the
+    // closed `rev_<32 hex chars>` format published by the Stage 4
+    // write contract.
+    const allowedAppendShapes: ReadonlyArray<ReadonlyArray<string>> = [
+      ["id", "markdownFragment", "expectedRevision"],
+      ["id", "markdownFragment", "expectedRevision", "listKind"],
+    ];
+    let appendShapeMatched = false;
+    for (const shape of allowedAppendShapes) {
+      if (keysAreExactly(paramKeys, shape)) {
+        appendShapeMatched = true;
+        break;
+      }
+    }
+    if (!appendShapeMatched) {
       throw rpcProtocolError("rpc protocol: append params have unexpected fields");
     }
     const noteId = paramsRecord.id;
@@ -927,6 +985,13 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj.id = noteId;
     paramsObj.markdownFragment = markdownFragment;
     paramsObj.expectedRevision = expectedRevision;
+    if (reflectApply(objectHasOwnProperty, paramsRecord, ["listKind"])) {
+      const listKind = paramsRecord.listKind;
+      if (typeof listKind !== "string" || !arrayContainsString(NOTESNOOK_LIST_KINDS, listKind)) {
+        throw rpcProtocolError("rpc protocol: request append listKind is invalid");
+      }
+      paramsObj.listKind = listKind;
+    }
   } else if (method === "notes.update") {
     // Closed params surface: exactly { id, expectedRevision, patch }.
     // The patch must itself be a closed object whose keys are a
@@ -971,6 +1036,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       "tags",
       "pinned",
       "favorite",
+      "listKind",
     ];
     for (let index = 0; index < patchKeys.length; index += 1) {
       const key = patchKeys[index] as string;
@@ -1059,6 +1125,15 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       }
       patchObj.favorite = patchRecord.favorite;
     }
+    if (patchRecord.listKind !== undefined) {
+      if (
+        typeof patchRecord.listKind !== "string" ||
+        !arrayContains(NOTESNOOK_LIST_KINDS, patchRecord.listKind)
+      ) {
+        throw rpcProtocolError("rpc protocol: update patch listKind is invalid");
+      }
+      patchObj.listKind = patchRecord.listKind;
+    }
     objectFreeze(patchObj);
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
@@ -1069,21 +1144,50 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method === "notes.locked_note_proof" ||
     method === "notes.path_diagnostic"
   ) {
-    if (!keysAreExactly(paramKeys, ["path"])) {
+    const hasPath = keysAreExactly(paramKeys, ["path"]);
+    const hasExplicitTitle =
+      keysAreExactly(paramKeys, ["noteTitle"]) ||
+      keysAreExactly(paramKeys, ["notebookPath", "noteTitle"]);
+    if (!hasPath && !hasExplicitTitle) {
       throw rpcProtocolError("rpc protocol: path params have unexpected fields");
     }
-    const path = paramsRecord.path;
-    if (
-      typeof path !== "string" ||
-      path.length === 0 ||
-      path.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      utf8ByteLength(path, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      hasControlCharacter(path)
-    ) {
-      throw rpcProtocolError("rpc protocol: request path params are invalid");
-    }
     paramsObj = objectCreate(null) as Record<string, unknown>;
-    paramsObj.path = path;
+    if (hasPath) {
+      const path = paramsRecord.path;
+      if (
+        typeof path !== "string" ||
+        path.length === 0 ||
+        path.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        utf8ByteLength(path, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        hasControlCharacter(path)
+      ) {
+        throw rpcProtocolError("rpc protocol: request path params are invalid");
+      }
+      paramsObj.path = path;
+    } else {
+      const noteTitle = paramsRecord.noteTitle;
+      const notebookPath = paramsRecord.notebookPath;
+      if (
+        typeof noteTitle !== "string" ||
+        noteTitle.length === 0 ||
+        noteTitle.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
+        utf8ByteLength(noteTitle, STAGE5_RPC_LIMITS.maxTitleBytes) >
+          STAGE5_RPC_LIMITS.maxTitleBytes ||
+        hasControlCharacter(noteTitle) ||
+        (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookPath"]) &&
+          (typeof notebookPath !== "string" ||
+            notebookPath.length === 0 ||
+            notebookPath.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+            utf8ByteLength(notebookPath, STAGE5_RPC_LIMITS.maxQueryBytes) >
+              STAGE5_RPC_LIMITS.maxQueryBytes ||
+            hasControlCharacter(notebookPath)))
+      ) {
+        throw rpcProtocolError("rpc protocol: explicit path params are invalid");
+      }
+      paramsObj.noteTitle = noteTitle;
+      if (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookPath"]))
+        paramsObj.notebookPath = notebookPath;
+    }
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");
@@ -1550,11 +1654,16 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
           "directMembership",
           "recursiveMembership",
           "revision",
+          "contentType",
+          "htmlPrefix",
+          "simpleChecklist",
+          "taskList",
+          "literalMarkdown",
         ],
         "rpc protocol: path diagnostic result has unexpected fields",
       );
       if (
-        resultKeys.length !== 7 ||
+        resultKeys.length !== 12 ||
         !keysAreExactly(resultKeys, [
           "kind",
           "pathBytes",
@@ -1563,6 +1672,11 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
           "directMembership",
           "recursiveMembership",
           "revision",
+          "contentType",
+          "htmlPrefix",
+          "simpleChecklist",
+          "taskList",
+          "literalMarkdown",
         ])
       ) {
         throw rpcProtocolError("rpc protocol: path diagnostic result has unexpected fields");
@@ -1588,7 +1702,17 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         typeof resultRecord.recursiveMembership !== "string" ||
         !stageStatuses.includes(resultRecord.recursiveMembership) ||
         typeof resultRecord.revision !== "string" ||
-        !revisionStatuses.includes(resultRecord.revision)
+        !revisionStatuses.includes(resultRecord.revision) ||
+        typeof resultRecord.contentType !== "string" ||
+        !["tiptap", "other", "unavailable"].includes(resultRecord.contentType) ||
+        typeof resultRecord.htmlPrefix !== "string" ||
+        !["present", "absent", "unavailable"].includes(resultRecord.htmlPrefix) ||
+        typeof resultRecord.simpleChecklist !== "string" ||
+        !["present", "absent", "unavailable"].includes(resultRecord.simpleChecklist) ||
+        typeof resultRecord.taskList !== "string" ||
+        !["present", "absent", "unavailable"].includes(resultRecord.taskList) ||
+        typeof resultRecord.literalMarkdown !== "string" ||
+        !["present", "absent", "unavailable"].includes(resultRecord.literalMarkdown)
       ) {
         throw rpcProtocolError("rpc protocol: path diagnostic result category is invalid");
       }
@@ -1600,6 +1724,11 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         directMembership: string;
         recursiveMembership: string;
         revision: string;
+        contentType: string;
+        htmlPrefix: string;
+        simpleChecklist: string;
+        taskList: string;
+        literalMarkdown: string;
       };
       resultPayload.kind = "path_diagnostic";
       resultPayload.pathBytes = resultRecord.pathBytes;
@@ -1608,6 +1737,11 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       resultPayload.directMembership = resultRecord.directMembership;
       resultPayload.recursiveMembership = resultRecord.recursiveMembership;
       resultPayload.revision = resultRecord.revision;
+      resultPayload.contentType = resultRecord.contentType;
+      resultPayload.htmlPrefix = resultRecord.htmlPrefix;
+      resultPayload.simpleChecklist = resultRecord.simpleChecklist;
+      resultPayload.taskList = resultRecord.taskList;
+      resultPayload.literalMarkdown = resultRecord.literalMarkdown;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
@@ -2159,6 +2293,13 @@ function arrayContains(values: ReadonlyArray<string>, candidate: string): boolea
     if (values[index] === candidate) return true;
   }
   return false;
+}
+
+function arrayContainsString(
+  values: ReadonlyArray<string>,
+  candidate: unknown,
+): candidate is string {
+  return typeof candidate === "string" && arrayContains(values, candidate);
 }
 
 /**

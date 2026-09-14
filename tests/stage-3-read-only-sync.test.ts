@@ -293,6 +293,7 @@ function createFakeLiveDatabase(
     conflictMarker?: "present" | "absent";
     breadcrumbs?: (id: string) => Promise<Array<{ id: string; title: string }>>;
     breadcrumbsThrows?: boolean;
+    contentRecord?: Readonly<Record<string, unknown>>;
   } = {},
 ): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -336,7 +337,10 @@ function createFakeLiveDatabase(
     ],
   ]);
   const contents = new Map([
-    ["note-1", { locked: false, data: "ordinary body must stay internal" }],
+    [
+      "note-1",
+      options.contentRecord ?? { locked: false, data: "ordinary body must stay internal" },
+    ],
     ["conflict-note", { locked: false, data: "conflict body must stay internal" }],
     ["locked-note", { locked: true, data: "locked note body must stay internal" }],
   ]);
@@ -401,6 +405,56 @@ function createFakeLiveDatabase(
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("classifies stored HTML versus literal Markdown without returning content", async () => {
+    const htmlSource = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({
+        contentRecord: {
+          type: "tiptap",
+          data: '<div data-type="document"><h2>Title</h2><ul class="simple-checklist"><li class="simple-checklist--item"><p>task</p></li></ul></div>',
+        },
+      }),
+    );
+    await expect(htmlSource.noteContentDiagnostic?.("note-1")).resolves.toEqual({
+      contentType: "tiptap",
+      htmlPrefix: "present",
+      simpleChecklist: "present",
+      taskList: "absent",
+      literalMarkdown: "absent",
+    });
+
+    const taskListSource = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({
+        contentRecord: {
+          type: "tiptap",
+          data: '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>task</p></li></ul></div>',
+        },
+      }),
+    );
+    await expect(taskListSource.noteContentDiagnostic?.("note-1")).resolves.toEqual({
+      contentType: "tiptap",
+      htmlPrefix: "present",
+      simpleChecklist: "absent",
+      taskList: "present",
+      literalMarkdown: "absent",
+    });
+
+    const markdownSource = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({
+        contentRecord: {
+          type: "tiptap",
+          data: "## Title\\n- [ ] task",
+        },
+      }),
+    );
+    await expect(markdownSource.noteContentDiagnostic?.("note-1")).resolves.toEqual({
+      contentType: "tiptap",
+      htmlPrefix: "absent",
+      simpleChecklist: "absent",
+      taskList: "absent",
+      literalMarkdown: "present",
+    });
+  });
+
   it("distinguishes a detecting device's local conflict marker from a fresh fetch-only projection", async () => {
     const privateTitle = "Conflict title must stay internal";
     const detectingDatabase = createFakeLiveDatabase({
@@ -942,6 +996,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "listNotebooks",
       "listNotebooksWithParents",
       "listNotes",
+      "noteContentDiagnostic",
       "noteMetadata",
       "readNoteLockState",
       "search",

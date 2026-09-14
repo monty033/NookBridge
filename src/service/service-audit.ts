@@ -21,6 +21,10 @@ const arrayIsArray = Array.isArray;
 export const MAX_AUDIT_LATENCY_MS = 10_000;
 
 export type ServiceAuditEvent =
+  | "rpc.protocol.rejected"
+  | "rpc.frame.extracted"
+  | "rpc.request.parsed"
+  | "rpc.frame.method_peek"
   | "rpc.request.received"
   | "rpc.request.dispatched"
   | "rpc.response.sent"
@@ -56,6 +60,10 @@ export interface ServiceAuditRecord {
 }
 
 export const SERVICE_AUDIT_EVENTS = objectFreeze([
+  "rpc.protocol.rejected",
+  "rpc.frame.extracted",
+  "rpc.request.parsed",
+  "rpc.frame.method_peek",
   "rpc.request.received",
   "rpc.request.dispatched",
   "rpc.response.sent",
@@ -211,7 +219,11 @@ function isMethod(value: unknown): value is RpcMethod {
     value === "notes.get" ||
     value === "notes.create" ||
     value === "notes.append" ||
-    value === "notes.update"
+    value === "notes.update" ||
+    value === "notes.delete" ||
+    value === "notes.locked_note_proof" ||
+    value === "notes.path_diagnostic" ||
+    value === "notes.sync"
   );
 }
 function isPeerCredentials(value: unknown): value is ServiceAuditPeerCredentials {

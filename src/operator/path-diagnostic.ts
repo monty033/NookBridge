@@ -21,6 +21,11 @@ function unavailable(pathBytes: number): PathDiagnosticReport {
     directMembership: "unavailable",
     recursiveMembership: "unavailable",
     revision: "unavailable",
+    contentType: "unavailable",
+    htmlPrefix: "unavailable",
+    simpleChecklist: "unavailable",
+    taskList: "unavailable",
+    literalMarkdown: "unavailable",
   });
 }
 
@@ -42,7 +47,12 @@ export async function runPathDiagnostic(
       !isStage(result.notebook) ||
       !isStage(result.directMembership) ||
       !isStage(result.recursiveMembership) ||
-      !isRevision(result.revision)
+      !isRevision(result.revision) ||
+      !isContentType(result.contentType) ||
+      !isContentMarker(result.htmlPrefix) ||
+      !isContentMarker(result.simpleChecklist) ||
+      !isContentMarker(result.taskList) ||
+      !isContentMarker(result.literalMarkdown)
     ) {
       return unavailable(pathBytes);
     }
@@ -53,6 +63,11 @@ export async function runPathDiagnostic(
       directMembership: result.directMembership,
       recursiveMembership: result.recursiveMembership,
       revision: result.revision,
+      contentType: result.contentType,
+      htmlPrefix: result.htmlPrefix,
+      simpleChecklist: result.simpleChecklist,
+      taskList: result.taskList,
+      literalMarkdown: result.literalMarkdown,
     });
   } catch {
     return unavailable(pathBytes);
@@ -102,6 +117,14 @@ function isRevision(value: unknown): value is PathDiagnosticReport["revision"] {
     value === "unavailable" ||
     value === "not_applicable"
   );
+}
+
+function isContentType(value: unknown): value is "tiptap" | "other" | "unavailable" {
+  return value === "tiptap" || value === "other" || value === "unavailable";
+}
+
+function isContentMarker(value: unknown): value is "present" | "absent" | "unavailable" {
+  return value === "present" || value === "absent" || value === "unavailable";
 }
 
 function hasControlCharacter(value: string): boolean {

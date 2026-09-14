@@ -28,12 +28,30 @@
  *
  * Supported block grammar (intentionally tiny):
  *
- *   `# `, `## `, `### `   → `<h1>` / `<h2>` / `<h3>`
- *   `- ` / `* ` lines     → `<ul><li>…</li></ul>`
- *   anything else         → `<p>…</p>`, with in-block newlines as `<br />`
+ *   `# `, `## `, `### `         → `<h1>` / `<h2>` / `<h3>`
+ *   `- [ ] item` / `- [x] item` → Notesnook **simple checklist** HTML
+ *   `- ` / `* ` lines           → `<ul><li>…</li></ul>`
+ *   anything else               → `<p>…</p>`, with in-block newlines as `<br />`
  *
- * Anything the grammar does not recognise is treated as paragraph text, so
- * the codec is total over accepted input rather than partially defined.
+ * Markdown checkbox syntax is the input construct `task-list`.  The
+ * explicit {@link NotesnookListKind} selector on the write surface
+ * chooses which Notesnook native representation the codec emits:
+ *
+ *   - `simple-checklist` (default — preserves the prior stored shape
+ *     for every existing caller) → Notesnook's lightweight checklist
+ *     (`<ul class="simple-checklist">` / `simple-checklist--item`,
+ *     read-only checkboxes).
+ *   - `task-list` → Notesnook's richer native task list
+ *     (`<ul class="checklist">` / `checklist--item`, interactive
+ *     checkboxes, `checked` / `checked--item` variants).
+ *
+ * Checklist blocks recognise two-space, tab, or four-space indentation as
+ * one nesting level; nested children are emitted as
+ * `<ul class="simple-checklist">…</ul>`
+ * inside the owning `<li>` so the resulting tree is valid HTML and the
+ * Notesnook text conversion walks every depth through the parent checklist.
+ * Task-list blocks emit the same nesting shape with the
+ * `<ul class="checklist">` / `<li class="checklist--item">` markup.
  */
 
 import { Buffer } from "node:buffer";
@@ -43,6 +61,17 @@ import type {
   NotesnookStoredContent,
   NotesnookWriteMarkdownCodec,
 } from "./notesnook-write-adapter.js";
+
+export type { NotesnookListKind } from "./notesnook-write-list-intent.js";
+export {
+  DEFAULT_NOTESNOOK_LIST_KIND,
+  NOTESNOOK_LIST_KINDS,
+  normaliseNotesnookListKind,
+} from "./notesnook-write-list-intent.js";
+import {
+  normaliseNotesnookListKind,
+  type NotesnookListKind,
+} from "./notesnook-write-list-intent.js";
 
 /**
  * Largest stored payload this codec will emit.  The stored representation
@@ -137,6 +166,7 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
     "heading-2",
     "heading-3",
     "unordered-list",
+    "task-list",
     "paragraph",
     "inline-bold",
     "inline-italic",
@@ -151,7 +181,6 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
  */
 export const UNSUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlyArray<string> = Object.freeze([
   "markdown-table",
-  "task-list",
   "attachment-reference",
   "fenced-code-block",
   "link-or-image",
@@ -174,7 +203,7 @@ export function detectMarkdownConstructs(
     if (/^#{1,3} +/.test(line)) {
       const level = line.startsWith("### ") ? 3 : line.startsWith("## ") ? 2 : 1;
       observed.add(level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3");
-    } else if (/^[-*] +\[ \] +/.test(line) || /^[-*] +\[x\] +/.test(line)) {
+    } else if (/^[-*] +\[( |x|X)\] +/.test(line)) {
       observed.add("task-list");
     } else if (/^[-*] +/.test(line)) {
       observed.add("unordered-list");
@@ -241,7 +270,7 @@ function escapeHtml(text: string): string {
   return out;
 }
 
-/** Split on blank lines into bounded blocks; drop empty blocks. */
+/** Split on blank lines and structural Markdown transitions into bounded blocks. */
 function splitBlocks(markdown: string): readonly string[] {
   const blocks: string[] = [];
   let current: string[] = [];
@@ -253,13 +282,157 @@ function splitBlocks(markdown: string): readonly string[] {
       }
       continue;
     }
+    const startsHeading = isHeadingLine(line);
+    const startsTaskList = isTaskListLine(line);
+    const currentHasNonTaskLine = current.some((currentLine) => !isTaskListLine(currentLine));
+    if (current.length > 0 && (startsHeading || (startsTaskList && currentHasNonTaskLine))) {
+      blocks.push(current.join("\n"));
+      current = [];
+    }
     current.push(line);
   }
   if (current.length > 0) blocks.push(current.join("\n"));
   return blocks;
 }
 
-function renderBlock(block: string): string {
+/**
+ * Match a single task-list item line, allowing leading tabs and/or spaces
+ * for nested children.  Captures the checkbox state (` `, `x`, or `X`) in
+ * group 1 and the item text in group 2.
+ *
+ * The indentation is intentionally generous — it accepts tabs, two-space
+ * Markdown indentation, and four-space indentation rather than requiring a
+ * single canonical unit.  The renderer normalises the count to a level after
+ * inspecting the block's smallest positive indentation.
+ */
+const TASK_LIST_LINE = /^(?:\t| )*[-*] +\[( |x|X)\] +([^\n]*)$/;
+
+function isHeadingLine(line: string): boolean {
+  return /^#{1,3} +/.test(line);
+}
+
+function isTaskListLine(line: string): boolean {
+  return TASK_LIST_LINE.test(line);
+}
+
+/**
+ * Count leading indentation in four-column tab-stop units.
+ *
+ * Tabs and four spaces both represent one conventional list indentation
+ * level.  Keeping this as a column count lets the block parser recognise
+ * the common two-space Markdown form without changing the existing tab and
+ * four-space behaviour.
+ */
+function taskListIndentColumns(line: string): number {
+  let tabs = 0;
+  let spaces = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    const code = line.charCodeAt(i);
+    if (code === 0x09) {
+      tabs += 1;
+      continue;
+    }
+    if (code === 0x20) {
+      spaces += 1;
+      continue;
+    }
+    break;
+  }
+  return tabs * 4 + spaces;
+}
+
+function taskListIndentUnit(lines: readonly string[]): number {
+  const positiveIndents = lines
+    .map((line) => taskListIndentColumns(line))
+    .filter((indent) => indent > 0);
+  const smallest = Math.min(...positiveIndents);
+  // Two spaces is the compact Markdown form; four columns also covers both
+  // literal four-space indentation and one leading tab.  Other partial runs
+  // remain deliberately ambiguous and therefore stay at the top level.
+  return smallest === 2 ? 2 : 4;
+}
+
+function taskListIndent(line: string, unit: number): number {
+  const columns = taskListIndentColumns(line);
+  return columns > 0 && columns % unit === 0 ? columns / unit : 0;
+}
+
+type TaskListItem = {
+  readonly checked: boolean;
+  readonly text: string;
+  readonly children: TaskListItem[];
+};
+
+function parseTaskListLines(lines: readonly string[]): readonly TaskListItem[] {
+  const rootChildren: TaskListItem[] = [];
+  const indentUnit = taskListIndentUnit(lines);
+  // Stack entries track the indent of the most recent open <ul> and the
+  // list of items owned by that level.  A sentinel at indent -1 owns the
+  // top-level items so the loop body can treat every item uniformly.
+  const stack: { readonly indent: number; readonly bucket: TaskListItem[] }[] = [
+    { indent: -1, bucket: rootChildren },
+  ];
+
+  for (const line of lines) {
+    const indent = taskListIndent(line, indentUnit);
+    const match = TASK_LIST_LINE.exec(line);
+    if (match === null) continue;
+    const state = match[1] as " " | "x" | "X";
+    const text = match[2] ?? "";
+    while (stack.length > 1 && (stack[stack.length - 1] as { indent: number }).indent >= indent) {
+      stack.pop();
+    }
+    const item: TaskListItem = { checked: state !== " ", text, children: [] };
+    (stack[stack.length - 1] as { bucket: TaskListItem[] }).bucket.push(item);
+    stack.push({ indent, bucket: item.children });
+  }
+
+  return rootChildren;
+}
+
+function renderTaskListItems(items: readonly TaskListItem[], listKind: NotesnookListKind): string {
+  // The simple-checklist shape uses `<ul class="simple-checklist">` with
+  // `simple-checklist--item` rows; the rich task-list shape uses
+  // `<ul class="checklist">` with `checklist--item` rows.  Both keep the
+  // same item payload (`<p>…</p>` plus nested children) so the codec
+  // emits one structural helper per kind.
+  const ulClass = listKind === "task-list" ? "checklist" : "simple-checklist";
+  const itemClass = listKind === "task-list" ? "checklist--item" : "simple-checklist--item";
+  let out = "";
+  for (const item of items) {
+    const className = item.checked ? `checked ${itemClass}` : itemClass;
+    const text = escapeHtml(item.text);
+    out += `<li class="${className}"><p>${text}</p>`;
+    if (item.children.length > 0) {
+      // Nested children inherit the same listKind so every depth uses
+      // the same class pair.
+      out += `<ul class="${ulClass}">${renderTaskListItems(item.children, listKind)}</ul>`;
+    }
+    out += "</li>";
+  }
+  return out;
+}
+
+/**
+ * Render a block made entirely of task-list item lines as a (possibly
+ * nested) Notesnook checklist tree.  The structural class pair follows
+ * `listKind`: `simple-checklist` emits `<ul class="simple-checklist">`,
+ * `task-list` emits `<ul class="checklist">`.  Returns an empty
+ * checklist for an empty block; callers should never invoke this with
+ * no lines because `renderBlock` only dispatches here when every line
+ * matched {@link TASK_LIST_LINE}.
+ *
+ * Item text is escaped with the existing {@link escapeHtml} pass so
+ * operator input cannot become markup; the structural checklist tokens
+ * are emitted by the codec itself and are never re-escaped.
+ */
+function renderTaskListBlock(lines: readonly string[], listKind: NotesnookListKind): string {
+  const roots = parseTaskListLines(lines);
+  const ulClass = listKind === "task-list" ? "checklist" : "simple-checklist";
+  return `<ul class="${ulClass}">${renderTaskListItems(roots, listKind)}</ul>`;
+}
+
+function renderBlock(block: string, listKind: NotesnookListKind): string {
   const lines = block.split("\n");
   const first = lines[0] ?? "";
 
@@ -267,6 +440,17 @@ function renderBlock(block: string): string {
   if (heading !== null && lines.length === 1) {
     const level = (heading[1] as string).length;
     return `<h${level}>${escapeHtml(heading[2] as string)}</h${level}>`;
+  }
+
+  // A block is treated as a task-list only when EVERY non-empty line is a
+  // recognisable `- [ ]` / `- [x]` / `- [X]` item (with optional leading
+  // indentation for nested children).  Mixed blocks fall through to the
+  // generic list / paragraph renderer so the adapter never silently
+  // downgrades an unsupported shape into a checklist.  The structural
+  // class pair depends on `listKind`.
+  const isTaskList = lines.every((line) => TASK_LIST_LINE.test(line));
+  if (isTaskList) {
+    return renderTaskListBlock(lines, listKind);
   }
 
   const isList = lines.every((line) => /^[-*] +/.test(line));
@@ -280,10 +464,10 @@ function renderBlock(block: string): string {
   return `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`;
 }
 
-function renderMarkdown(markdown: string): string {
+function renderMarkdown(markdown: string, listKind: NotesnookListKind): string {
   const blocks = splitBlocks(markdown);
   if (blocks.length === 0) return "<p></p>";
-  return blocks.map(renderBlock).join("");
+  return blocks.map((block) => renderBlock(block, listKind)).join("");
 }
 
 function boundedStored(type: "tiptap" | "html", data: string): NotesnookStoredContent {
@@ -331,14 +515,23 @@ function appendStored(
 
 export function createDeterministicMarkdownCodec(): NotesnookWriteMarkdownCodec {
   return Object.freeze({
-    encodeMarkdown: (markdown: string): NotesnookStoredContent => {
+    encodeMarkdown: (markdown: string, listKind?: NotesnookListKind): NotesnookStoredContent => {
       const safe = requireBoundedMarkdown(markdown, STAGE4_WRITE_LIMITS.maxContentBytes);
-      return boundedStored("tiptap", `<div data-type="document">${renderMarkdown(safe)}</div>`);
+      // Resolve the selector up-front so an out-of-set value is rejected
+      // BEFORE any HTML is generated.  `undefined` selects the published
+      // default (`simple-checklist`) so existing callers that never
+      // supply the selector see the same stored HTML they did before.
+      const resolvedKind = normaliseNotesnookListKind(listKind);
+      return boundedStored(
+        "tiptap",
+        `<div data-type="document">${renderMarkdown(safe, resolvedKind)}</div>`,
+      );
     },
     appendMarkdownToStoredContent: (input: {
       readonly storedType: "tiptap" | "html";
       readonly storedData: string;
       readonly markdownFragment: string;
+      readonly listKind?: NotesnookListKind;
     }): NotesnookStoredContent => {
       if (typeof input !== "object" || input === null) refuse();
       const storedType = requireStoredType((input as { storedType?: unknown }).storedType);
@@ -347,11 +540,12 @@ export function createDeterministicMarkdownCodec(): NotesnookWriteMarkdownCodec 
         (input as { markdownFragment?: unknown }).markdownFragment,
         STAGE4_WRITE_LIMITS.maxFragmentBytes,
       );
+      const resolvedKind = normaliseNotesnookListKind((input as { listKind?: unknown }).listKind);
       // Exactly one appended block; the existing stored bytes are preserved
       // byte-for-byte ahead of it and are never re-parsed.
       return boundedStored(
         storedType,
-        appendStored(storedType, storedData, renderMarkdown(fragment)),
+        appendStored(storedType, storedData, renderMarkdown(fragment, resolvedKind)),
       );
     },
   });

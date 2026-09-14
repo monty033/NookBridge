@@ -80,6 +80,9 @@
 import {
   createReadOnlyRevisionToken,
   isNotesnookReadOnlyAdapterError,
+  type NotesnookReadOnlyContentDiagnostic,
+  type NotesnookReadOnlyContentMarker,
+  type NotesnookReadOnlyContentType,
   type NotesnookReadOnlyDatabase,
   type NotesnookReadOnlyNoteMetadata,
 } from "./notesnook-readonly-adapter.js";
@@ -623,6 +626,19 @@ export function flattenLiveDatabaseToReadOnly(
       if (metadataLocked === true) return "locked";
       if (metadataLocked === false) return "unlocked";
       throw projectionError("Notesnook read-only projection: note lock state is unavailable");
+    },
+
+    noteContentDiagnostic: async (id: string): Promise<NotesnookReadOnlyContentDiagnostic> => {
+      if (typeof id !== "string" || id.length === 0) {
+        throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
+      }
+      if (contentFindByNoteIdFn === undefined) return unavailableContentDiagnostic();
+      const content = await callThrough(
+        contentFindByNoteIdFn,
+        [id],
+        "Notesnook read-only projection: content.findByNoteId rejected",
+      );
+      return classifyContentDiagnostic(content);
     },
 
     search: async (
@@ -1250,6 +1266,50 @@ function readOptionalContentFindByNoteId(
     "findByNoteId",
     "Notesnook read-only projection: content.findByNoteId is unavailable",
   );
+}
+
+function unavailableContentDiagnostic(): NotesnookReadOnlyContentDiagnostic {
+  return Object.freeze({
+    contentType: "unavailable" as NotesnookReadOnlyContentType,
+    htmlPrefix: "unavailable" as NotesnookReadOnlyContentMarker,
+    simpleChecklist: "unavailable" as NotesnookReadOnlyContentMarker,
+    taskList: "unavailable" as NotesnookReadOnlyContentMarker,
+    literalMarkdown: "unavailable" as NotesnookReadOnlyContentMarker,
+  });
+}
+
+function classifyContentDiagnostic(value: unknown): NotesnookReadOnlyContentDiagnostic {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return unavailableContentDiagnostic();
+  }
+  try {
+    const record = value as Record<string, unknown>;
+    if (record.locked === true || isCipherRecord(record)) return unavailableContentDiagnostic();
+    const type = record.type;
+    const data = record.data;
+    if (typeof type !== "string" || typeof data !== "string") {
+      return unavailableContentDiagnostic();
+    }
+    return Object.freeze({
+      contentType: (type === "tiptap" ? "tiptap" : "other") as NotesnookReadOnlyContentType,
+      htmlPrefix: (/^\s*</.test(data) ? "present" : "absent") as NotesnookReadOnlyContentMarker,
+      simpleChecklist: (/class=["']simple-checklist(?:["'\s>])/i.test(data)
+        ? "present"
+        : "absent") as NotesnookReadOnlyContentMarker,
+      taskList: (/class=["'](?:checked\s+)?checklist(?:--item)?(?:["'\s>])/i.test(data)
+        ? "present"
+        : "absent") as NotesnookReadOnlyContentMarker,
+      literalMarkdown: (/(?:^|[^A-Za-z0-9])#{1,6}\s|(?:^|[^A-Za-z0-9])[-*+]\s+\[[ xX]\]/.test(data)
+        ? "present"
+        : "absent") as NotesnookReadOnlyContentMarker,
+    });
+  } catch {
+    return unavailableContentDiagnostic();
+  }
+}
+
+function isCipherRecord(value: Record<string, unknown>): boolean {
+  return value.cipher !== undefined && value.iv !== undefined && value.salt !== undefined;
 }
 
 async function readLockedState(

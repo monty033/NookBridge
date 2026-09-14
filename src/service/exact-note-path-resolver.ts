@@ -60,6 +60,17 @@ export type ExactNotePathResolution = Readonly<{
   readonly pinned?: boolean;
 }>;
 
+/**
+ * A path string is retained for compatibility. The structured form keeps
+ * notebook hierarchy separate from the title so titles may contain `/`.
+ */
+export type ExactNotePathInput =
+  | string
+  | Readonly<{
+      readonly notebookPath?: string;
+      readonly noteTitle: string;
+    }>;
+
 export type ExactNotePathSource = Readonly<{
   readonly notebooks: readonly NotebookRecord[];
   /** Search-indexed candidates for the exact note title. */
@@ -433,6 +444,31 @@ export function parseExactNotePath(path: unknown): Readonly<{
   readonly notebookPath: string | undefined;
   readonly noteTitle: string;
 }> {
+  if (path !== null && typeof path === "object" && !Array.isArray(path)) {
+    const record = path as Record<string, unknown>;
+    const keys = Object.keys(record);
+    const hasNotebookPath = Object.hasOwn(record, "notebookPath");
+    if (
+      keys.length !== 1 + (hasNotebookPath ? 1 : 0) ||
+      !Object.hasOwn(record, "noteTitle") ||
+      (hasNotebookPath && typeof record.notebookPath !== "string")
+    ) {
+      throw new ExactNotePathError("invalid_path");
+    }
+    const noteTitle = record.noteTitle;
+    if (
+      typeof noteTitle !== "string" ||
+      noteTitle.length === 0 ||
+      Buffer.byteLength(noteTitle, "utf8") > MAX_PATH_BYTES ||
+      hasControlCharacter(noteTitle)
+    ) {
+      throw new ExactNotePathError("invalid_path");
+    }
+    if (!hasNotebookPath) return Object.freeze({ notebookPath: undefined, noteTitle });
+    const notebookPath = record.notebookPath as string;
+    validateNotebookPath(notebookPath);
+    return Object.freeze({ notebookPath, noteTitle });
+  }
   if (
     typeof path !== "string" ||
     path.length === 0 ||
@@ -455,6 +491,36 @@ export function parseExactNotePath(path: unknown): Readonly<{
   if (noteTitle === undefined) throw new ExactNotePathError("invalid_path");
   const notebookPath = segments.length === 1 ? undefined : segments.slice(0, -1).join("/");
   return Object.freeze({ notebookPath, noteTitle });
+}
+
+/** Return the canonical byte-budget representation without exposing its value. */
+export function exactNotePathBytes(path: ExactNotePathInput): number {
+  const parsed = parseExactNotePath(path);
+  return Buffer.byteLength(
+    parsed.notebookPath === undefined
+      ? parsed.noteTitle
+      : `${parsed.notebookPath}/${parsed.noteTitle}`,
+    "utf8",
+  );
+}
+
+function validateNotebookPath(path: string): void {
+  if (
+    path.length === 0 ||
+    Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES ||
+    hasControlCharacter(path) ||
+    path.includes("\\")
+  ) {
+    throw new ExactNotePathError("invalid_path");
+  }
+  const segments = path.split("/");
+  if (
+    segments.length === 0 ||
+    segments.length >= MAX_PATH_SEGMENTS ||
+    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    throw new ExactNotePathError("invalid_path");
+  }
 }
 
 function hasControlCharacter(value: string): boolean {

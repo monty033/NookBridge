@@ -39,6 +39,10 @@ import { z } from "zod";
 import { parseExactNotePath } from "../service/exact-note-path-resolver.js";
 import { toMcpErrorResult, type NookMcpErrorCode } from "./errors.js";
 import { NookdSocketClient, type NookdSocketFailure } from "./socket-client.js";
+import {
+  NOTESNOOK_LIST_KINDS,
+  type NotesnookListKind,
+} from "../core/notesnook-write-list-intent.js";
 
 export { NookMcpServerError, nookMcpServiceUnavailableResult } from "./errors.js";
 
@@ -244,7 +248,8 @@ const GET_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const CREATE_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_CREATE_NOTE_TOOL_NAME,
-  description: "Create a note with bounded title, content, and optional notebook identifier.",
+  description:
+    "Create a note with bounded title, content, optional notebook identifier, and optional explicit Notesnook list intent (simple-checklist or task-list).",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
@@ -258,6 +263,15 @@ const CREATE_NOTE_TOOL_DEFINITION = Object.freeze({
         type: "string",
         minLength: 1,
         maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES,
+      }),
+      listKind: Object.freeze({
+        type: "string",
+        // Closed vocabulary: `simple-checklist` (default when omitted)
+        // or `task-list`.  Documented in docs/implementation-plan-v1.5.md
+        // and reproduced verbatim from the wire-protocol schema.
+        enum: Object.freeze([...NOTESNOOK_LIST_KINDS]),
+        description:
+          "Optional Notesnook list intent.  Omit to default to `simple-checklist` (backward compatible).",
       }),
     }),
     required: Object.freeze(["title", "content"]),
@@ -274,7 +288,8 @@ const CREATE_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const APPEND_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_APPEND_NOTE_TOOL_NAME,
-  description: "Append a bounded markdown fragment using an expected note revision.",
+  description:
+    "Append a bounded markdown fragment to a note with an expected note revision and optional explicit Notesnook list intent (simple-checklist or task-list).",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
@@ -288,6 +303,12 @@ const APPEND_NOTE_TOOL_DEFINITION = Object.freeze({
         type: "string",
         minLength: NOOK_MCP_MAX_REVISION_BYTES,
         maxLength: NOOK_MCP_MAX_REVISION_BYTES,
+      }),
+      listKind: Object.freeze({
+        type: "string",
+        enum: Object.freeze([...NOTESNOOK_LIST_KINDS]),
+        description:
+          "Optional Notesnook list intent.  Omit to default to `simple-checklist` (backward compatible).",
       }),
     }),
     required: Object.freeze(["id", "markdownFragment", "expectedRevision"]),
@@ -304,7 +325,8 @@ const APPEND_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
-  description: "Update bounded note fields using an expected note revision.",
+  description:
+    "Update bounded note fields using an expected note revision and optional explicit Notesnook list intent (simple-checklist or task-list) for content rewrites.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
@@ -317,7 +339,7 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
       patch: Object.freeze({
         type: "object",
         minProperties: 1,
-        maxProperties: 6,
+        maxProperties: 7,
         properties: Object.freeze({
           title: Object.freeze({
             type: "string",
@@ -346,6 +368,12 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
           }),
           pinned: Object.freeze({ type: "boolean" }),
           favorite: Object.freeze({ type: "boolean" }),
+          listKind: Object.freeze({
+            type: "string",
+            enum: Object.freeze([...NOTESNOOK_LIST_KINDS]),
+            description:
+              "Optional Notesnook list intent applied when the patch also rewrites `content`.",
+          }),
         }),
         additionalProperties: false,
       }),
@@ -364,7 +392,8 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_DELETE_NOTE_TOOL_NAME,
-  description: "Move exactly one note to trash using its exact hierarchical path.",
+  description:
+    "Move exactly one note to trash using an exact path, or explicit notebookPath and noteTitle fields when the title contains '/'.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
@@ -372,11 +401,22 @@ const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
         type: "string",
         minLength: 1,
         maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
-        description:
-          "Exact notebook hierarchy and note title, or a root-note title without a slash.",
+        description: "Existing slash-delimited notebook hierarchy and note title form.",
+      }),
+      notebookPath: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
+        description: "Notebook hierarchy path used with noteTitle.",
+      }),
+      noteTitle: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_TITLE_BYTES,
+        description: "Exact title; may contain '/' when supplied separately.",
       }),
     }),
-    required: Object.freeze(["path"]),
+    required: Object.freeze([]),
     additionalProperties: false,
   }),
   annotations: Object.freeze({
@@ -441,6 +481,12 @@ const createNoteInputSchema = {
   title: z.string().min(1).max(NOOK_MCP_MAX_TITLE_BYTES),
   content: z.string().min(1).max(NOOK_MCP_MAX_CONTENT_BYTES),
   notebookId: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).optional(),
+  // Closed-list-intent selector.  The Zod enum is generated from the
+  // same NOTESNOOK_LIST_KINDS array the wire surface uses so the MCP
+  // boundary can never accept an unknown intent.
+  listKind: z
+    .enum(NOTESNOOK_LIST_KINDS as readonly [NotesnookListKind, ...NotesnookListKind[]])
+    .optional(),
 };
 const appendNoteInputSchema = {
   id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
@@ -449,6 +495,9 @@ const appendNoteInputSchema = {
     .string()
     .length(NOOK_MCP_MAX_REVISION_BYTES)
     .regex(/^rev_[0-9a-f]{32}$/),
+  listKind: z
+    .enum(NOTESNOOK_LIST_KINDS as readonly [NotesnookListKind, ...NotesnookListKind[]])
+    .optional(),
 };
 const updateNoteInputSchema = {
   id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES),
@@ -468,6 +517,9 @@ const updateNoteInputSchema = {
         .optional(),
       pinned: z.boolean().optional(),
       favorite: z.boolean().optional(),
+      listKind: z
+        .enum(NOTESNOOK_LIST_KINDS as readonly [NotesnookListKind, ...NotesnookListKind[]])
+        .optional(),
     })
     .strict()
     .refine((patch) => Object.keys(patch).length > 0),
@@ -478,7 +530,20 @@ const deleteNoteInputSchema = {
     .string()
     .min(1)
     .max(NOOK_MCP_MAX_NOTE_PATH_BYTES)
-    .describe("Exact notebook hierarchy and note title, or a root-note title without a slash."),
+    .optional()
+    .describe("Existing exact notebook hierarchy and note title form."),
+  notebookPath: z
+    .string()
+    .min(1)
+    .max(NOOK_MCP_MAX_NOTE_PATH_BYTES)
+    .optional()
+    .describe("Notebook hierarchy path used with noteTitle."),
+  noteTitle: z
+    .string()
+    .min(1)
+    .max(NOOK_MCP_MAX_TITLE_BYTES)
+    .optional()
+    .describe("Exact title; may contain '/' when supplied separately."),
 };
 
 const permissiveCallRequestSchema = z
@@ -767,14 +832,18 @@ interface CreateNoteInput {
   title?: unknown;
   content?: unknown;
   notebookId?: unknown;
+  listKind?: unknown;
 }
 interface AppendNoteInput {
   id?: unknown;
   markdownFragment?: unknown;
   expectedRevision?: unknown;
+  listKind?: unknown;
 }
 interface DeleteNoteInput {
   path?: unknown;
+  notebookPath?: unknown;
+  noteTitle?: unknown;
 }
 interface UpdateNoteInput {
   id?: unknown;
@@ -788,21 +857,27 @@ async function invokeCreateNote(
   client: NookdSocketClient,
   input: CreateNoteInput,
 ): Promise<CallToolResult> {
-  let params: { title: string; content: string; notebookId?: string };
+  let params: {
+    title: string;
+    content: string;
+    notebookId?: string;
+    listKind?: NotesnookListKind;
+  };
   try {
-    if (!hasExactKeys(input, ["title", "content", "notebookId"], ["title", "content"]))
+    if (!hasExactKeys(input, ["title", "content", "notebookId", "listKind"], ["title", "content"]))
       return toMcpErrorResult("invalid_request");
     const title = input.title;
     const content = input.content;
-    if (
-      !isBoundedText(title, NOOK_MCP_MAX_TITLE_BYTES) ||
-      !isBoundedText(content, NOOK_MCP_MAX_CONTENT_BYTES)
-    )
+    if (!isBoundedText(title, NOOK_MCP_MAX_TITLE_BYTES) || !isAppendableMarkdown(content))
       return toMcpErrorResult("invalid_request");
     const notebookId = input.notebookId;
     if (notebookId !== undefined && !isBoundedIdentifier(notebookId))
       return toMcpErrorResult("invalid_request");
+    const listKind = input.listKind;
+    if (listKind !== undefined && !isClosedListKind(listKind))
+      return toMcpErrorResult("invalid_request");
     params = notebookId === undefined ? { title, content } : { title, content, notebookId };
+    if (listKind !== undefined) params.listKind = listKind as NotesnookListKind;
   } catch {
     return toMcpErrorResult("invalid_request");
   }
@@ -819,9 +894,20 @@ async function invokeAppendNote(
   client: NookdSocketClient,
   input: AppendNoteInput,
 ): Promise<CallToolResult> {
-  let params: { id: string; markdownFragment: string; expectedRevision: string };
+  let params: {
+    id: string;
+    markdownFragment: string;
+    expectedRevision: string;
+    listKind?: NotesnookListKind;
+  };
   try {
-    if (!hasExactKeys(input, ["id", "markdownFragment", "expectedRevision"]))
+    if (
+      !hasExactKeys(
+        input,
+        ["id", "markdownFragment", "expectedRevision", "listKind"],
+        ["id", "markdownFragment", "expectedRevision"],
+      )
+    )
       return toMcpErrorResult("invalid_request");
     if (
       !isBoundedIdentifier(input.id) ||
@@ -829,11 +915,15 @@ async function invokeAppendNote(
       !isRevision(input.expectedRevision)
     )
       return toMcpErrorResult("invalid_request");
+    const listKind = input.listKind;
+    if (listKind !== undefined && !isClosedListKind(listKind))
+      return toMcpErrorResult("invalid_request");
     params = {
       id: input.id,
       markdownFragment: input.markdownFragment,
       expectedRevision: input.expectedRevision,
     };
+    if (listKind !== undefined) params.listKind = listKind as NotesnookListKind;
   } catch {
     return toMcpErrorResult("invalid_request");
   }
@@ -851,15 +941,38 @@ async function invokeDeleteNote(
   input: DeleteNoteInput,
 ): Promise<CallToolResult> {
   try {
-    if (!hasExactKeys(input, ["path"])) return toMcpErrorResult("invalid_request");
-    if (!isBoundedNotePath(input.path)) return toMcpErrorResult("invalid_request");
-    const result = await client.deleteNote({ path: input.path });
+    if (hasExactKeys(input, ["path"])) {
+      if (!isBoundedNotePath(input.path)) return toMcpErrorResult("invalid_request");
+      const result = await client.deleteNote({ path: input.path });
+      if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+      const value = result.envelope.result as unknown as Record<string, unknown>;
+      if (value.kind !== "delete" || typeof value.id !== "string")
+        return toMcpErrorResult("service_unavailable");
+      return {
+        content: [{ type: "text", text: JSON.stringify({ path: input.path, deleted: true }) }],
+      };
+    }
+    if (!hasExactKeys(input, ["notebookPath", "noteTitle"], ["noteTitle"])) {
+      return toMcpErrorResult("invalid_request");
+    }
+    if (!isBoundedText(input.noteTitle, NOOK_MCP_MAX_TITLE_BYTES)) {
+      return toMcpErrorResult("invalid_request");
+    }
+    if (input.notebookPath !== undefined && !isBoundedNotePath(input.notebookPath)) {
+      return toMcpErrorResult("invalid_request");
+    }
+    const params =
+      input.notebookPath === undefined
+        ? { noteTitle: input.noteTitle }
+        : { notebookPath: input.notebookPath, noteTitle: input.noteTitle };
+    parseExactNotePath(params);
+    const result = await client.deleteNote(params);
     if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
     const value = result.envelope.result as unknown as Record<string, unknown>;
     if (value.kind !== "delete" || typeof value.id !== "string")
       return toMcpErrorResult("service_unavailable");
     return {
-      content: [{ type: "text", text: JSON.stringify({ path: input.path, deleted: true }) }],
+      content: [{ type: "text", text: JSON.stringify({ ...params, deleted: true }) }],
     };
   } catch {
     return toMcpErrorResult("service_unavailable");
@@ -958,8 +1071,26 @@ function isRevision(value: unknown): value is string {
   );
 }
 
+/**
+ * Closed list-intent gate shared by the create / append / update
+ * tool callbacks.  Mirrors {@link NOTESNOOK_LIST_KINDS} so the MCP
+ * boundary cannot accept an intent the codec, contract, or wire
+ * surface would reject.
+ */
+function isClosedListKind(value: unknown): value is NotesnookListKind {
+  return typeof value === "string" && NOTESNOOK_LIST_KINDS.includes(value as NotesnookListKind);
+}
+
 function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
-  const allowed = ["title", "content", "notebookId", "tags", "pinned", "favorite"] as const;
+  const allowed = [
+    "title",
+    "content",
+    "notebookId",
+    "tags",
+    "pinned",
+    "favorite",
+    "listKind",
+  ] as const;
   if (!hasExactKeys(value, allowed, []) || Object.keys(value).length === 0)
     throw new Error("invalid patch");
   const patch: Record<string, unknown> = {};
@@ -970,6 +1101,7 @@ function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
     if (key === "content" && !isBoundedText(field, NOOK_MCP_MAX_CONTENT_BYTES))
       throw new Error("invalid patch");
     if (key === "notebookId" && !isBoundedIdentifier(field)) throw new Error("invalid patch");
+    if (key === "listKind" && !isClosedListKind(field)) throw new Error("invalid patch");
     if (key === "tags") {
       if (!Array.isArray(field) || field.length === 0 || field.length > NOOK_MCP_MAX_TAGS)
         throw new Error("invalid patch");

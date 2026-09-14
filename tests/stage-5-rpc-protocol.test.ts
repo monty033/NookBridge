@@ -83,6 +83,40 @@ describe("STAGE5_RPC_LIMITS", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseRpcFrame", () => {
+  it("accepts an explicit notebook path and slash-containing note title", () => {
+    const request = parseRpcFrame(
+      wrapFrame(
+        encode(
+          JSON.stringify({
+            id: "a",
+            method: "notes.delete",
+            params: { notebookPath: "General", noteTitle: "A/B" },
+          }),
+        ),
+      ),
+    );
+    expect(request.method).toBe("notes.delete");
+    if (request.method === "notes.delete") {
+      expect(request.params).toEqual({ notebookPath: "General", noteTitle: "A/B" });
+    }
+  });
+
+  it("rejects mixing the legacy path and explicit title forms", () => {
+    expect(() =>
+      parseRpcFrame(
+        wrapFrame(
+          encode(
+            JSON.stringify({
+              id: "a",
+              method: "notes.delete",
+              params: { path: "General/A", noteTitle: "B" },
+            }),
+          ),
+        ),
+      ),
+    ).toThrow(/rpc protocol/);
+  });
+
   // -- Frame / length-prefix plumbing --------------------------------------
 
   it("rejects an empty buffer", () => {
@@ -432,6 +466,132 @@ describe("parseRpcFrame", () => {
 // a hostile caller cannot force unbounded allocation.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// notes.create — wire-protocol acceptance for structural-whitespace content.
+// ---------------------------------------------------------------------------
+
+describe("parseRpcFrame — notes.create content", () => {
+  it("accepts headings, newlines, tabs, and nested task-list content", () => {
+    const content =
+      "# Title\n\nbody\n- [ ] unchecked\n- [x] checked\n    - [ ] nested child\n        - [ ] grandchild 4-space";
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.create",
+      params: { title: "T", content },
+    });
+    const req = parseRpcFrame(wrapFrame(encode(json)));
+    expect(req.method).toBe("notes.create");
+    if (req.method !== "notes.create") throw new Error("unexpected method");
+    expect(req.params.content).toBe(content);
+  });
+
+  it("rejects NUL and other ASCII control bytes inside content", () => {
+    const cases = ["line\u0000null", "bell\u0007bad", "esc\u001bbad"];
+    for (const content of cases) {
+      const json = JSON.stringify({
+        id: "a",
+        method: "notes.create",
+        params: { title: "T", content },
+      });
+      expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
+    }
+  });
+});
+
+describe("parseRpcFrame — listKind intent (create / append / update)", () => {
+  it("accepts the closed listKind set on notes.create", () => {
+    for (const listKind of ["simple-checklist", "task-list"] as const) {
+      const json = JSON.stringify({
+        id: "a",
+        method: "notes.create",
+        params: { title: "T", content: "x", listKind },
+      });
+      const req = parseRpcFrame(wrapFrame(encode(json)));
+      if (req.method !== "notes.create") throw new Error("unexpected method");
+      expect(req.params.listKind).toBe(listKind);
+    }
+  });
+
+  it("rejects any listKind outside the closed set on notes.create", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.create",
+      params: { title: "T", content: "x", listKind: "ordered" },
+    });
+    expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
+  });
+
+  it("accepts the closed listKind set on notes.append", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.append",
+      params: {
+        id: "0123456789abcdef0123456789abcdef",
+        markdownFragment: "- [x] done",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        listKind: "task-list",
+      },
+    });
+    const req = parseRpcFrame(wrapFrame(encode(json)));
+    if (req.method !== "notes.append") throw new Error("unexpected method");
+    expect(req.params.listKind).toBe("task-list");
+  });
+
+  it("rejects any listKind outside the closed set on notes.append", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.append",
+      params: {
+        id: "0123456789abcdef0123456789abcdef",
+        markdownFragment: "- [x] done",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        listKind: "ordered-list",
+      },
+    });
+    expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
+  });
+
+  it("accepts the closed listKind set on notes.update content patches", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.update",
+      params: {
+        id: "0123456789abcdef0123456789abcdef",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        patch: { content: "- [x] done", listKind: "task-list" },
+      },
+    });
+    const req = parseRpcFrame(wrapFrame(encode(json)));
+    if (req.method !== "notes.update") throw new Error("unexpected method");
+    expect(req.params.patch.listKind).toBe("task-list");
+  });
+
+  it("rejects any listKind outside the closed set on notes.update content patches", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.update",
+      params: {
+        id: "0123456789abcdef0123456789abcdef",
+        expectedRevision: "rev_00000000000000000000000000000000",
+        patch: { content: "- [x] done", listKind: "ordered-list" },
+      },
+    });
+    expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
+  });
+
+  it("omits listKind from the wire envelope when not supplied (default to simple-checklist)", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.create",
+      params: { title: "T", content: "x" },
+    });
+    const req = parseRpcFrame(wrapFrame(encode(json)));
+    if (req.method !== "notes.create") throw new Error("unexpected method");
+    expect(req.params.listKind).toBeUndefined();
+    expect(Object.hasOwn(req.params, "listKind")).toBe(false);
+  });
+});
+
 describe("serializeRpcResponse", () => {
   it("serializes a success envelope with the documented fields", () => {
     const envelope: RpcResponseEnvelope = {
@@ -463,6 +623,32 @@ describe("serializeRpcResponse", () => {
       result: { kind: "delete", id: "note-1" },
     });
   });
+  it("serializes a bounded path diagnostic result", () => {
+    const bytes = serializeRpcResponse({
+      id: "path-diagnostic-rpc",
+      ok: true,
+      result: {
+        kind: "path_diagnostic",
+        pathBytes: 28,
+        title: "one",
+        notebook: "present",
+        directMembership: "present",
+        recursiveMembership: "present",
+        revision: "valid",
+        contentType: "tiptap",
+        htmlPrefix: "present",
+        simpleChecklist: "absent",
+        taskList: "absent",
+        literalMarkdown: "absent",
+      },
+    });
+    expect(decode(bytes)).toMatchObject({
+      id: "path-diagnostic-rpc",
+      ok: true,
+      result: { kind: "path_diagnostic", pathBytes: 28, title: "one" },
+    });
+  });
+
   it("serializes notes as an array even when Array.prototype.toJSON is polluted", () => {
     const canary = "array-to-json-canary";
     const previous = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
