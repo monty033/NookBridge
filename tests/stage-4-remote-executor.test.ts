@@ -337,6 +337,22 @@ describe("Stage 4 live remote executor", () => {
     }
   });
 
+  it("round-trips a pending delete marker through encrypted storage", () => {
+    const fixture = persistentStateStore();
+    const state = { pending: [{ operation: "delete" as const, noteId: NOTE_ID, sequence: 1 }] };
+    try {
+      fixture.store.save(state);
+      expect(fixture.store.load()).toEqual(state);
+    } finally {
+      try {
+        fixture.storage.close();
+      } catch {
+        // already closed
+      }
+      rmSync(fixture.stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects malformed persisted JSON", () => {
     const values = new Map<string, unknown>([[SYNC_COORDINATOR_STATE_KEY, "{malformed"]]);
     const store = new PersistentSyncMetadataStateStore({
