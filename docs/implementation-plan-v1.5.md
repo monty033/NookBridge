@@ -2452,12 +2452,97 @@ local mutation, durable pending-marker/reconciliation state, and remote sync.
 
 ### Remaining scope
 
-These receipts close the locked-note protection and delete-result acceptance
-gates. They do **not** close the broader Stage 9.5 production-MVP remediation
-items, privileged host audits, long-duration stress, recovery-drill work, or
-the remaining release-readiness items listed in §13.12. Those remain separate
-planned work and must not be inferred as complete from this capability-level
-acceptance.
+These receipts close the **named closed locked-note proof** and
+**delete-result canary/reconciliation** gates only. They do **not** establish
+that every public read path enforces the same lock behavior, and they do not
+close the broader Stage 9.5 production-MVP remediation items, privileged host
+audits, long-duration stress, recovery-drill work, or the remaining
+release-readiness items listed in §13.12. Those remain separate planned work
+and must not be inferred as complete from this capability-level acceptance.
+
+## 13.14 Fresh Astra re-baseline — current production-MVP blockers
+
+**Status date:** 2026-09-14 (America/New_York)
+
+**Reviewer:** `gpt-6-astra`, reasoning effort `xhigh`, Codex `0.153.4`
+
+**Review mode:** read-only full-codebase review of canonical `upstream/main`
+at `475d190372f1c216e868b2498d0491c0ca4df0f7`. The reviewer process exited
+successfully with the exact model and reasoning provenance. No repository,
+deployment, credential, database, or live-state mutation was performed by the
+reviewer.
+
+**Verdict: RELEASE BLOCKED.** The earlier Astra review and its four-PR
+remediation sequence are historical evidence, not proof that the current
+production gate is closed. The re-baseline found both incomplete remediation
+and new source-level gaps.
+
+### Current finding disposition
+
+- **Source-fixed, but VM/production evidence remains incomplete:** P1-1
+  cross-connection serialization and P1-10 fetch-rejection bookkeeping.
+- **Partially fixed or still open:** P1-2 authoritative Vault-state failure
+  handling; P1-3 multi-step mutation atomicity; P1-4 retry classification and
+  cross-request throttling; P1-5 runtime ownership after disconnect/timeout;
+  P1-6 complete semantic error propagation; P1-7 replacement fidelity;
+  P1-8 fully non-mutating operator reads; P1-9 production-bundle recovery; and
+  P1-5a source-level query bounds.
+- **Still open or partial:** P2-1 usable continuation cursors; P2-2 durable
+  bounded undo semantics if edit/undo is enabled; P2-3 whole-operation socket
+  deadlines; P2-4 socket/ancestor ownership and `socketGroup` enforcement;
+  P2-5 contract/documentation consolidation; and P2-6 dependency inventory
+  against the shipped artifact.
+- **New current-source finding — revision advancement:** content-only
+  `updateNote` replaces the content row but does not perform the parent-note
+  timestamp touch already used by append. A successful content update can
+  therefore leave the previous revision token valid. Add a regression for
+  content-only and same-millisecond updates.
+- **New current-source finding — scoped discovery authorization:**
+  `notes.search` and `notes.list_notebooks` authorize with empty context while
+  mutation paths carry notebook context. Decide whether discovery is globally
+  visible or policy-filtered; if filtered, enforce it before returning results
+  and fail closed when hierarchy is uncertain.
+
+### Acceptance evidence versus remaining gates
+
+The parent verification independently ran the current source suite: **1,898 of
+1,898 tests passed**, with typecheck, lint, format check, and build passing.
+Those are source gates only. Astra did not execute tests, VM checks, or live
+operations. The deployed daemon remains healthy and the previously recorded
+locked-note/delete receipts remain valid for their named scenarios, but they do
+not close the source-level findings above.
+
+The following Stage 9 gates remain open: privileged RT-6/RT-8/RT-9 scans,
+outsider socket denial, production-shape recovery and post-recovery resync,
+meaningful cross-connection/write-sync race tests, long-duration mixed-load
+stress, and exact shipped-artifact dependency/license evidence.
+
+### Revised implementation order
+
+1. **Mutation integrity first:** make local mutations atomic, make every
+   content mutation advance the revision, and make pending sync intent
+   durable/recoverable across interruption.
+2. **Authorization and lock fail-closed:** close scoped discovery semantics and
+   ensure indeterminate content-lock state cannot fall through to unlocked.
+3. **Runtime ownership and bounded resources:** repair post-disconnect runtime
+   ownership, whole-operation deadlines, retry coalescing/throttling, and
+   source-level query bounds.
+4. **Recovery and operator safety:** implement production-bundle recovery with
+   WAL/SHM preservation, interruption handling, and post-recovery resync;
+   finish non-mutating operator and socket/ancestor checks.
+5. **Release candidate:** freeze one artifact, reconcile native dependencies
+   and licenses, run VM/isolation/recovery tests, privileged scans, outsider
+   checks, live races, and long-duration stress.
+
+### First implementation ticket
+
+**Make local mutation commits atomic and revision-advancing.** Acceptance
+requires a RED test for content-only update revision advancement; coverage for
+same-millisecond updates; production-factory tests for content, metadata, and
+relation failure boundaries; and a durable commit-vs-error protocol ensuring
+that no successful upstream mutation is left without recoverable sync intent.
+Keep the change local and unsubmitted until the focused tests, full source
+gates, deployed local-source canary, and required review pass.
 
 # Appendix A. Research Sources
 
