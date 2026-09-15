@@ -57,6 +57,11 @@ import {
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
 import { assertSupportedConstructs, type NotesnookListKind } from "./notesnook-write-codec.js";
+import {
+  createNotesnookRecoveryMarker,
+  type NotesnookRecoveryJournal,
+  type NotesnookRecoveryStage,
+} from "./notesnook-recovery-journal.js";
 
 // ---------------------------------------------------------------------------
 // Markdown → stored-content codec seam.
@@ -214,6 +219,8 @@ export type NotesnookWriteDatabaseSource = NotesnookWriteDatabase | (() => Notes
 export interface NotesnookWriteAdapterOptions {
   readonly source: NotesnookWriteDatabaseSource;
   readonly codec: NotesnookWriteMarkdownCodec;
+  /** Optional encrypted metadata journal for compensation failures. */
+  readonly recoveryJournal?: NotesnookRecoveryJournal;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,10 +267,12 @@ export interface DeleteNoteResult extends WriteOutcomeFlags {
 export class NotesnookWriteAdapter {
   readonly #database: NotesnookWriteDatabase;
   readonly #codec: NotesnookWriteMarkdownCodec;
+  readonly #recoveryJournal: NotesnookRecoveryJournal | undefined;
 
   constructor(options: NotesnookWriteAdapterOptions) {
     this.#database = resolveWriteDatabase(options.source);
     this.#codec = resolveCodec(options.codec);
+    this.#recoveryJournal = resolveRecoveryJournal(options.recoveryJournal);
     Object.freeze(this);
   }
 
@@ -341,28 +350,35 @@ export class NotesnookWriteAdapter {
       throw adapterError("sync_failed", "Notesnook write adapter: create failed");
     }
 
-    // Step 5 — attach the note to the allowlisted notebook and add
-    // the bounded tag relations.  These steps must run AFTER the note
-    // exists; failures here leave the note orphaned but the contract
-    // promises only that the create succeeded, so we surface the
-    // failure categorically.
+    let notebookAttached = false;
     if (plan.notebookId !== undefined) {
       try {
         await this.#safe("notebookAddNote", () =>
           this.#database.notebookAddNote(plan.notebookId as string, id),
         );
+        notebookAttached = true;
       } catch {
+        if (!(await this.#compensateCreatedNote(id, plan.notebookId, notebookAttached, []))) {
+          this.#recordRecovery("create", id, "create-notebook-attach");
+        }
         throw adapterError("sync_failed", "Notesnook write adapter: create notebook attach failed");
       }
     }
 
+    const addedTags: string[] = [];
     if (plan.tags && plan.tags.length > 0) {
       for (const tagId of plan.tags) {
         try {
           await this.#safe("relationAdd", () =>
             this.#database.relationAdd({ fromId: id, toId: tagId, type: "tag" }),
           );
+          addedTags.push(tagId);
         } catch {
+          if (
+            !(await this.#compensateCreatedNote(id, plan.notebookId, notebookAttached, addedTags))
+          ) {
+            this.#recordRecovery("create", id, "create-tag-relation");
+          }
           throw adapterError("sync_failed", "Notesnook write adapter: create tag relation failed");
         }
       }
@@ -729,6 +745,54 @@ export class NotesnookWriteAdapter {
   // -------------------------------------------------------------------------
   // Internals.
   // -------------------------------------------------------------------------
+
+  async #compensateCreatedNote(
+    id: string,
+    notebookId: string | undefined,
+    notebookAttached: boolean,
+    addedTags: readonly string[],
+  ): Promise<boolean> {
+    let complete = true;
+    for (let index = addedTags.length - 1; index >= 0; index -= 1) {
+      try {
+        await this.#safe("relationRemove", () =>
+          this.#database.relationRemove({ fromId: id, toId: addedTags[index]!, type: "tag" }),
+        );
+      } catch {
+        complete = false;
+      }
+    }
+    if (notebookAttached && notebookId !== undefined) {
+      try {
+        await this.#safe("notebookRemoveNote", () =>
+          this.#database.notebookRemoveNote(notebookId, id),
+        );
+      } catch {
+        complete = false;
+      }
+    }
+    if (this.#database.notesDelete === undefined) return false;
+    try {
+      await this.#safe("notesDelete", () => this.#database.notesDelete!(id));
+    } catch {
+      complete = false;
+    }
+    return complete;
+  }
+
+  #recordRecovery(
+    operation: "create" | "append" | "update" | "delete",
+    id: string,
+    stage: NotesnookRecoveryStage,
+  ): void {
+    if (this.#recoveryJournal === undefined) return;
+    try {
+      this.#recoveryJournal.record(createNotesnookRecoveryMarker(operation, id, stage));
+    } catch {
+      // The caller already receives sync_failed. Never replace the categorical
+      // result with a journal/storage exception or expose its details.
+    }
+  }
 
   async #validateTags(tagIds: readonly string[]): Promise<void> {
     for (const tagId of tagIds) {
@@ -1160,6 +1224,25 @@ function validateWriteDatabase(value: unknown): NotesnookWriteDatabase {
     }
   }
   return value as NotesnookWriteDatabase;
+}
+
+function resolveRecoveryJournal(value: unknown): NotesnookRecoveryJournal | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw adapterError("invalid_input", "Notesnook write adapter: invalid recovery journal");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.record !== "function" || typeof record.snapshot !== "function") {
+    throw adapterError("invalid_input", "Notesnook write adapter: invalid recovery journal");
+  }
+  return Object.freeze({
+    record: (marker: Parameters<NotesnookRecoveryJournal["record"]>[0]) =>
+      Reflect.apply(record.record as (...args: unknown[]) => unknown, value, [marker]),
+    snapshot: () =>
+      Reflect.apply(record.snapshot as (...args: unknown[]) => unknown, value, []) as ReturnType<
+        NotesnookRecoveryJournal["snapshot"]
+      >,
+  });
 }
 
 function resolveCodec(codec: unknown): NotesnookWriteMarkdownCodec {

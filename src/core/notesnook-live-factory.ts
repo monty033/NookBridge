@@ -60,6 +60,7 @@ import {
   createLiveRemoteSyncExecutor,
   type NotesnookLiveRemoteSyncCapability,
 } from "./notesnook-live-remote-sync.js";
+import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
 import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
 import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
 
@@ -212,6 +213,8 @@ export type NotesnookLiveFactoryOptions = Readonly<{
   lifecycle?: NotesnookLiveCoreLifecycle;
   /** State-store seam supplied by the owning production runtime. */
   syncStateStore?: SyncMetadataStateStore;
+  /** Encrypted journal for unrecoverable local-write compensation. */
+  recoveryJournal?: NotesnookRecoveryJournal;
 }>;
 
 /** Shared lifecycle across the runtime, narrow handle, and providers. */
@@ -322,6 +325,9 @@ export async function createNotesnookLiveCoreFactory(
             return projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
               coordinator: sharedCoordinator,
               database: db as unknown as object,
+              ...(normalized.recoveryJournal === undefined
+                ? {}
+                : { recoveryJournal: normalized.recoveryJournal }),
             });
           })()
         : undefined;
@@ -393,6 +399,7 @@ type NormalizedFactoryOptions = Readonly<{
   injectedModule?: NotesnookRealCoreModule;
   lifecycle: NotesnookLiveCoreLifecycle;
   syncStateStore?: SyncMetadataStateStore;
+  recoveryJournal?: NotesnookRecoveryJournal;
 }>;
 
 function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
@@ -406,6 +413,7 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
     const injectedModule = candidate.injectedModule;
     const lifecycle = candidate.lifecycle;
     const syncStateStore = candidate.syncStateStore;
+    const recoveryJournal = candidate.recoveryJournal;
     const validatedSetup = validateDatabaseSetupOptions(setup);
     if (typeof onCleanup !== "function") {
       throw factoryError("onCleanup hook is required");
@@ -427,6 +435,16 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
         throw factoryError("invalid sync metadata state store");
       }
     }
+    if (recoveryJournal !== undefined) {
+      if (
+        typeof recoveryJournal !== "object" ||
+        recoveryJournal === null ||
+        typeof (recoveryJournal as { record?: unknown }).record !== "function" ||
+        typeof (recoveryJournal as { snapshot?: unknown }).snapshot !== "function"
+      ) {
+        throw factoryError("invalid local-write recovery journal");
+      }
+    }
     return {
       setup: validatedSetup,
       onCleanup: onCleanup as () => void | Promise<void>,
@@ -438,6 +456,9 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
       ...(syncStateStore === undefined
         ? {}
         : { syncStateStore: syncStateStore as SyncMetadataStateStore }),
+      ...(recoveryJournal === undefined
+        ? {}
+        : { recoveryJournal: recoveryJournal as NotesnookRecoveryJournal }),
     };
   } catch (error) {
     if (isFactoryError(error) || isNotesnookAdapterError(error)) throw error;

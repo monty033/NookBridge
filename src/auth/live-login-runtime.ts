@@ -42,6 +42,7 @@ import {
   type NotesnookLiveCoreLifecycle,
 } from "../core/notesnook-live-factory.js";
 import { PersistentSyncMetadataStateStore } from "../core/notesnook-sync-state-store.js";
+import { PersistentNotesnookRecoveryJournal } from "../core/notesnook-recovery-journal.js";
 import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.js";
 import type { LiveLoginRuntime } from "./admin-command.js";
 
@@ -179,6 +180,7 @@ export async function createProductionRuntimeCore(
       // The shared coordinator created by the live factory persists only
       // bounded queue metadata through the already-open encrypted store.
       syncStateStore: new PersistentSyncMetadataStateStore(storage),
+      recoveryJournal: new PersistentNotesnookRecoveryJournal(storage),
       ...(options.injectedModule === undefined ? {} : { injectedModule: options.injectedModule }),
     });
     hardenLiveSqliteDatabases(sqliteDatabases);
