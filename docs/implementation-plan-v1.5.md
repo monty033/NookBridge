@@ -2001,8 +2001,9 @@ Rules:
 - Handles, cursors, and undo tokens are opaque, bounded, non-path identifiers;
   they are not raw database IDs or filesystem paths and must expire or be scoped
   to the owning CLI operation where practical.
-- `notes.delete` remains structurally absent. No command may synthesize deletion
-  through another method.
+- For the original Stage 9 operator slice, `notes.delete` remained structurally
+  absent. No command in that slice could synthesize deletion through another
+  method. The current post-Stage-9 mutation status is recorded in §13.13.
 
 ### Filetree contract
 
@@ -2058,8 +2059,8 @@ notes.update
 ```
 
 No new RPC/MCP/auth/sync/transport method is permitted for this feature, and
-`notes.delete` remains absent. The CLI adapter may add pagination, opaque
-handles, stdin framing, and categorical formatting, but those are local CLI
+`notes.delete` was absent from this original Stage 9 slice. The CLI adapter may add
+pagination, opaque handles, stdin framing, and categorical formatting, but those are local CLI
 concerns rather than new wire capabilities.
 
 In the current source contract, `notes.get` returns bounded note metadata, not
@@ -2138,9 +2139,9 @@ Before source implementation can be marked complete, tests must prove:
 - lock and unknown filesystem state fail closed without deleting or changing
   locks, databases, quarantine entries, or unexpected files;
 - protected state artifacts are categorized without content reads;
-- the seven-method RPC allowlist is unchanged and `notes.delete` is absent from
-  the parser, dispatcher, adapter, and MCP capability; tests may mention it
-  only as a rejected-input negative case;
+- the original Stage 9 seven-method RPC allowlist is unchanged and
+  `notes.delete` is absent from that slice's parser, dispatcher, adapter, and
+  MCP capability; tests may mention it only as a rejected-input negative case;
 - stale note revisions produce a categorical conflict without a partial update;
 - edit and undo output contains none of the supplied content, query, title,
   path, key, identifier, revision, or upstream error text;
@@ -2379,6 +2380,84 @@ recovery fixtures using a healthy single database. The plan requires
 that future closeouts distinguish **source** evidence from **VM** evidence
 from **production** evidence; a passing focused suite is supporting
 evidence, not approval. This section does not relax that requirement.
+
+## 13.13 Current implementation status — Stage 10 capabilities and live acceptance
+
+**Status date:** 2026-09-14 (America/New_York)
+
+**Status: IMPLEMENTED, DEPLOYED, AND LIVE-ACCEPTED for the merged NookBridge
+capability set below.** This section is the current status correction for the
+historical Stage 9 operator-slice constraints in §13.11. Those constraints
+remain valid as historical scope for that slice; they do not describe the
+current repository-wide RPC or MCP surface.
+
+### Merged source and deployment anchors
+
+- PR #94 merged the locked-note protection implementation.
+- PR #95 merged structured notebook/title addressing, slash-bearing note titles,
+  and explicit checklist intent.
+- PR #96 merged durable delete-marker persistence for the encrypted sync state.
+  The validator now accepts the `delete` operation marker, preventing a local
+  trash commit from being reported as `sync_failed` solely because the pending
+  marker could not be persisted.
+- The canonical NookBridge source baseline is merge commit
+  `98c445aa937d0bfc7b3511f81a5fbb045c455731`.
+- Deployment PR #335 merged at
+  `0974c9c1a1b54574763723f2bd7669689975f1e7` and repins the NixOS Hermes
+  deployment to that source baseline.
+
+### Source and Nix verification
+
+- NookBridge source verification passed: **1,898/1,898 tests**.
+- Typecheck, lint, format check, build, and diff checks passed.
+- Nix flake evaluation/checks passed.
+- The full `nixosConfigurations.hermes.config.system.build.toplevel`
+  derivation passed.
+- The deployed package is
+  `/nix/store/3wijlfvz99367rmyp7xb1ldvpqki6d79-nookbridge-0.0.0-stage.0`.
+  Its compiled sync-state validator contains the `delete` operation branch,
+  and its compiled daemon contains the locked-note proof wiring.
+
+### Live locked-note acceptance
+
+The proof used the deployed `nookctl` over `/run/nookbridge/nookbridge.sock`
+to the running `nookd`; it did not open the encrypted Notesnook database from a
+second process. A root title-only diagnostic resolved exactly one
+`Vault-locked-note canary` title with `pathBytes=24`. The closed proof returned:
+
+```json
+{"pathBytes":24,"read":"vault_locked","update":"vault_locked","delete":"vault_locked"}
+```
+
+The command exited `0`. The protected canary remained searchable,
+`hasUnsyncedChanges=false`, and `nookd.service` remained active with
+`Result=success`, `ExecMainStatus=0`, and `NRestarts=0`. No read body, opaque
+identifier, revision, credential, or upstream error detail was exposed.
+
+### Live delete-result and reconciliation acceptance
+
+A uniquely named disposable note was created in `Outdoors`, read back by exact
+title search, and deleted once through the structured `{notebookPath, noteTitle}`
+address. The delete response was:
+
+```json
+{"notebookPath":"Outdoors","noteTitle":"Bernie Delete Marker Live 20260914 F","deleted":true}
+```
+
+The exact title disappeared from search immediately after deletion. A separate
+explicit global sync then returned `synced` in one attempt with
+`pendingSync=false`; the title remained absent and the final status returned
+`hasUnsyncedChanges=false`. This closes the three delete gates independently:
+local mutation, durable pending-marker/reconciliation state, and remote sync.
+
+### Remaining scope
+
+These receipts close the locked-note protection and delete-result acceptance
+gates. They do **not** close the broader Stage 9.5 production-MVP remediation
+items, privileged host audits, long-duration stress, recovery-drill work, or
+the remaining release-readiness items listed in §13.12. Those remain separate
+planned work and must not be inferred as complete from this capability-level
+acceptance.
 
 # Appendix A. Research Sources
 
