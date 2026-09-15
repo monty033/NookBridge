@@ -258,6 +258,29 @@ export function flattenLiveDatabaseToReadOnly(
   );
   const contentFindByNoteIdFn = readOptionalContentFindByNoteId(source);
   const relationsFromFn = readOptionalRelationsFrom(source);
+  const resolveNotebookIdForNote = async (noteId: string): Promise<string | undefined> => {
+    if (notebookNotesFn === undefined) return undefined;
+    const notebookIds = truncateIds(
+      await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids"),
+      MAX_LIST_NOTEBOOKS,
+    );
+    for (const notebookId of notebookIds) {
+      const rawNoteIds = await callThrough(
+        notebookNotesFn,
+        [notebookId],
+        "Notesnook read-only projection: notebooks.notes rejected",
+      );
+      if (!Array.isArray(rawNoteIds)) {
+        throw projectionError(
+          "Notesnook read-only projection: notebooks.notes returned invalid ids",
+        );
+      }
+      for (const candidateId of rawNoteIds) {
+        if (candidateId === noteId) return notebookId;
+      }
+    }
+    return undefined;
+  };
   // Build the closed seam.  Every method is async; every throw /
   // reject maps to a categorical projection error.  Upstream
   // categorical notesnook-adapter errors propagate unchanged so
@@ -606,8 +629,13 @@ export function flattenLiveDatabaseToReadOnly(
       if (note === undefined || note === null) return undefined as never;
       const metadata = coerceUpstreamNoteToMetadata(note, true);
       if (metadata === undefined) return undefined as never;
+      const notebookId =
+        metadata.notebookId === undefined
+          ? await resolveNotebookIdForNote(id)
+          : metadata.notebookId;
+      const enrichedMetadata = notebookId === undefined ? metadata : { ...metadata, notebookId };
       const locked = await readLockedState(contentFindByNoteIdFn, id);
-      return (locked === true ? { ...metadata, locked: true } : metadata) as never;
+      return (locked === true ? { ...enrichedMetadata, locked: true } : enrichedMetadata) as never;
     },
 
     readNoteLockState: async (id: string): Promise<"locked" | "unlocked"> => {

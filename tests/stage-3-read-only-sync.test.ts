@@ -294,6 +294,7 @@ function createFakeLiveDatabase(
     breadcrumbs?: (id: string) => Promise<Array<{ id: string; title: string }>>;
     breadcrumbsThrows?: boolean;
     contentRecord?: Readonly<Record<string, unknown>>;
+    omitNotebookReference?: boolean;
   } = {},
 ): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -309,7 +310,7 @@ function createFakeLiveDatabase(
         id: "note-1",
         title: "A note",
         dateEdited: 22,
-        notebooks: [{ id: "nb-1" }],
+        ...(options.omitNotebookReference ? {} : { notebooks: [{ id: "nb-1" }] }),
         body: "secret body",
       },
     ],
@@ -405,6 +406,19 @@ function createFakeLiveDatabase(
 }
 
 describe("Stage 3 production projection and sync gate", () => {
+  it("derives notebook membership when a live note omits deprecated notebook references", async () => {
+    const source = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({ omitNotebookReference: true }),
+    );
+
+    await expect(source.noteMetadata("note-1")).resolves.toMatchObject({
+      id: "note-1",
+      title: "A note",
+      notebookId: "nb-1",
+      revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
+    });
+  });
+
   it("classifies stored HTML versus literal Markdown without returning content", async () => {
     const htmlSource = flattenLiveDatabaseToReadOnly(
       createFakeLiveDatabase({
