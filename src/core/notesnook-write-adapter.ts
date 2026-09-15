@@ -650,6 +650,21 @@ export class NotesnookWriteAdapter {
       } catch {
         throw adapterError("sync_failed", "Notesnook write adapter: content update failed");
       }
+
+      // The pinned `@notesnook/core@8.1.3` Content collection does not
+      // bump the parent note's `dateEdited` when a content row is replaced
+      // through `Content.updateByNoteId`.  Advance it explicitly so a
+      // follow-up revision token cannot remain valid after this mutation.
+      try {
+        await this.#safe("notesTouch", () =>
+          this.#database.notesTouch([plan.id], Math.max(Date.now(), observed.dateEdited + 1)),
+        );
+      } catch {
+        throw adapterError(
+          "sync_failed",
+          "Notesnook write adapter: content update failed to bump note dateEdited",
+        );
+      }
     }
 
     const result: {
