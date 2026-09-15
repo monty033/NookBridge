@@ -21,7 +21,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createNotesnookWriteAdapter,
@@ -1209,6 +1209,126 @@ describe("Stage 4 write adapter — updateNote", () => {
     const stored = database.calls.contentUpdate[0]?.partial.data as string;
     expect(stored).not.toContain("rewritten body\n");
     expect(stored).toContain("rewritten body");
+  });
+
+  it("advances the revision timestamp after a content-only update", async () => {
+    const { adapter, database, note } = setupUpdatable();
+    const previousDateEdited = note.dateEdited;
+    const expectedRevision = revisionToken(NOTE_ID, previousDateEdited);
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      patch: { content: "revision-bearing body" },
+      expectedRevision,
+    });
+
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    expect(database.calls.touch).toHaveLength(1);
+    expect(database.calls.touch[0]?.ids).toEqual([NOTE_ID]);
+    expect(database.calls.touch[0]?.dateEdited).toBeGreaterThan(previousDateEdited);
+    expect(note.dateEdited).toBe(database.calls.touch[0]?.dateEdited);
+  });
+
+  it("advances the revision timestamp when the wall clock equals the observed revision", async () => {
+    const { adapter, database, note } = setupUpdatable();
+    const previousDateEdited = note.dateEdited;
+    const expectedRevision = revisionToken(NOTE_ID, previousDateEdited);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(previousDateEdited);
+
+    try {
+      await adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "equal-clock body" },
+        expectedRevision,
+      });
+
+      expect(database.calls.contentUpdate).toHaveLength(1);
+      expect(database.calls.touch).toHaveLength(1);
+      expect(database.calls.touch[0]?.dateEdited).toBe(previousDateEdited + 1);
+      expect(note.dateEdited).toBe(previousDateEdited + 1);
+
+      const staleCode = await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          patch: { content: "must not apply" },
+          expectedRevision,
+        }),
+      );
+      expect(staleCode).toBe("stale_revision");
+      expect(database.calls.contentUpdate).toHaveLength(1);
+      expect(database.calls.touch).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("advances the revision timestamp when the wall clock is behind the observed revision", async () => {
+    const { adapter, database, note } = setupUpdatable();
+    const previousDateEdited = note.dateEdited;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(previousDateEdited - 1);
+
+    try {
+      await adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "backward-clock body" },
+        expectedRevision: revisionToken(NOTE_ID, previousDateEdited),
+      });
+
+      expect(database.calls.touch).toHaveLength(1);
+      expect(database.calls.touch[0]?.dateEdited).toBe(previousDateEdited + 1);
+      expect(note.dateEdited).toBe(previousDateEdited + 1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("does not touch the revision when the content update fails", async () => {
+    const { adapter, database } = setupUpdatable();
+    database.contentUpdateByNoteId = async () => {
+      throw new Error(`upstream content failure ${NOTE_ID}`);
+    };
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "failed body" },
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.touch).toHaveLength(0);
+  });
+
+  it("returns a redacted chain-free sync_failed when revision touch fails", async () => {
+    const { adapter, database } = setupUpdatable();
+    const upstreamMessage = `upstream touch failure ${NOTE_ID} ${CANARY}`;
+    database.notesTouch = async (ids, dateEdited) => {
+      database.calls.touch.push({ ids: [...ids], dateEdited });
+      throw new Error(upstreamMessage);
+    };
+
+    let result: unknown;
+    let error: unknown;
+    try {
+      result = await adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "touch-failure body" },
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(result).toBeUndefined();
+    expect(error).toBeDefined();
+    expect(isNotesnookWriteAdapterError(error)).toBe(true);
+    expect((error as { code: NotesnookWriteErrorCode }).code).toBe("sync_failed");
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    expect((error as { __context__?: unknown }).__context__).toBeUndefined();
+    expect(String((error as Error).message)).not.toContain(upstreamMessage);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    expect(database.calls.touch).toHaveLength(1);
   });
 
   it("rejects a stale revision with zero mutator calls", async () => {

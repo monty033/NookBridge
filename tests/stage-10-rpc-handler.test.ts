@@ -151,6 +151,30 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(calls).toEqual([{ op: "create", ctx: { notebookPath: "Outdoors/Canoe" } }]);
   });
 
+  it("refresh-resolves a note's notebook when the startup index is stale", async () => {
+    const { calls, evaluator } = makeEvaluator(true);
+    const resolveNotebookPath = vi.fn(async (notebookId: string) =>
+      notebookId === "fresh-child" ? "Outdoors/Canoe" : undefined,
+    );
+    const noteMetadata = vi.fn(async () => ({
+      id: "note-1",
+      title: "Roadmap",
+      notebookId: "fresh-child",
+    }));
+    const response = await handleRpcRequest(
+      request("notes.get", { id: "note-1" }),
+      makeRuntime({ noteMetadata, notebookIndex: makeIndex(), resolveNotebookPath }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(noteMetadata).toHaveBeenCalledOnce();
+    expect(resolveNotebookPath).toHaveBeenCalledWith("fresh-child");
+    expect(calls).toEqual([
+      { op: "read", ctx: { notebookPath: "Outdoors/Canoe", noteTitle: "Roadmap" } },
+    ]);
+  });
+
   it("forwards listKind='simple-checklist' through the handler into createNote", async () => {
     const createNote = vi.fn(async () => createResult());
     const response = await handleRpcRequest(

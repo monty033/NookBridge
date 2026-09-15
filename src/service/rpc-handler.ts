@@ -819,7 +819,18 @@ async function resolveNoteSettingsContext(
   if (notebookId === undefined || noteTitle === undefined) {
     return { ok: false, code: "not_found" };
   }
-  const notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
+  let notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
+  if (notebookPath === undefined) {
+    const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
+    if (refreshResolver !== undefined) {
+      try {
+        const refreshedPath = await reflectApply(refreshResolver, runtime, [notebookId]);
+        if (typeof refreshedPath === "string") notebookPath = refreshedPath;
+      } catch {
+        return { ok: false, code: "not_found" };
+      }
+    }
+  }
   if (notebookPath === undefined) return { ok: false, code: "not_found" };
 
   return {
