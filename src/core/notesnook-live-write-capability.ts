@@ -38,6 +38,7 @@ import {
   type NotesnookPendingSyncHandle,
 } from "./notesnook-write-composition.js";
 import { SyncCoordinator, type SyncExecutor } from "./notesnook-sync-coordinator.js";
+import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 
 /** The five collection slots the write chain consumes. */
@@ -127,6 +128,7 @@ export function createLiveLocalWriteComposition(
   const adapter = createNotesnookWriteAdapter({
     source: seam,
     codec: DETERMINISTIC_MARKDOWN_CODEC,
+    ...(options.recoveryJournal === undefined ? {} : { recoveryJournal: options.recoveryJournal }),
   });
   const coordinator =
     options.coordinator ??
@@ -154,6 +156,7 @@ export type LiveWriteCompositionOptions = Readonly<{
    * serialization — preserved for tests and injected fakes.
    */
   readonly database?: object;
+  readonly recoveryJournal?: NotesnookRecoveryJournal;
 }>;
 
 /**

@@ -60,6 +60,7 @@ const NOTE_ID = "0123456789abcdef0123456789abcdef";
 const OTHER_ID = "fedcba9876543210fedcba9876543210";
 const NOTEBOOK_ID = "cafebabecafebabecafebabecafebabe";
 const TAG_ID = "deadbeefdeadbeefdeadbeefdeadbeef";
+const SECOND_TAG_ID = "beadbeadbeadbeadbeadbeadbeadbead";
 
 interface FakeWriteDatabaseOptions {
   notes?: Map<string, FakeNote>;
@@ -67,6 +68,8 @@ interface FakeWriteDatabaseOptions {
   tags?: Map<string, FakeTag>;
   relations?: FakeRelation[];
   content?: Map<string, FakeContent>;
+  deleteFails?: boolean;
+  relationAddFailsAt?: number;
 }
 
 interface FakeNote {
@@ -126,6 +129,7 @@ interface FakeDatabaseCalls {
   contentFind: string[];
   tagAdd: Array<{ title: string }>;
   relationAdd: Array<{ fromId: string; toId: string; type: string }>;
+  delete: string[];
 }
 interface FakeDatabase extends NotesnookWriteDatabase {
   calls: FakeDatabaseCalls;
@@ -181,6 +185,7 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
     contentFind: [],
     tagAdd: [],
     relationAdd: [],
+    delete: [],
   };
 
   return {
@@ -239,6 +244,21 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
         dateEdited: 1_700_000_000_000,
       });
       return id;
+    },
+    notesDelete: async (id: string) => {
+      calls.delete.push(id);
+      if (options.deleteFails) throw new Error("delete failed");
+      notes.delete(id);
+      content.forEach((item, contentId) => {
+        if (item.noteId === id) content.delete(contentId);
+      });
+      for (const notebook of notebooks.values()) {
+        notebook.notes = notebook.notes.filter((noteId) => noteId !== id);
+      }
+      for (let index = relations.length - 1; index >= 0; index -= 1) {
+        const relation = relations[index]!;
+        if (relation.fromId === id || relation.toId === id) relations.splice(index, 1);
+      }
     },
     notesUpdate: async (ids: readonly string[], partial: Record<string, unknown>) => {
       calls.update.push({ ids: [...ids], partial: { ...partial } });
@@ -319,6 +339,9 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
     },
     relationAdd: async ({ fromId, toId, type }: { fromId: string; toId: string; type: string }) => {
       calls.relationAdd.push({ fromId, toId, type });
+      if (options.relationAddFailsAt === calls.relationAdd.length) {
+        throw new Error("relation add failed");
+      }
       relations.push({ fromId, toId, type });
     },
     relationRemove: async ({
@@ -637,6 +660,84 @@ describe("Stage 4 write adapter — createNote", () => {
       notebookId: NOTEBOOK_ID,
       noteId: result.id,
     });
+  });
+
+  it("compensates a created note when notebook attachment fails", async () => {
+    const notebooks = new Map<string, FakeNotebook>([
+      [NOTEBOOK_ID, { id: NOTEBOOK_ID, title: "Work", notes: [] }],
+    ]);
+    const database = createFakeDatabase({ notebooks });
+    database.notebookAddNote = async () => {
+      throw new Error("attachment failed");
+    };
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+
+    const code = await codeOfAsync(() =>
+      adapter.createNote({ title: "Rollback me", content: "body", notebookId: NOTEBOOK_ID }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.add).toHaveLength(1);
+    expect(database.calls.delete).toHaveLength(1);
+    expect(database.calls.delete[0]).toMatch(/^note-/);
+  });
+
+  it("removes earlier tag relations when a later create relation fails", async () => {
+    const relations: FakeRelation[] = [];
+    const database = createFakeDatabase({
+      relations,
+      tags: new Map<string, FakeTag>([
+        [TAG_ID, { id: TAG_ID, title: "home" }],
+        [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+      ]),
+      relationAddFailsAt: 2,
+    });
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+
+    const code = await codeOfAsync(() =>
+      adapter.createNote({
+        title: "Rollback relations",
+        content: "body",
+        tags: [TAG_ID, SECOND_TAG_ID],
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.relationAdd).toHaveLength(2);
+    expect(database.calls.delete).toHaveLength(1);
+    expect(relations).toEqual([]);
+  });
+
+  it("records a bounded recovery marker when create compensation fails", async () => {
+    const notebooks = new Map<string, FakeNotebook>([
+      [NOTEBOOK_ID, { id: NOTEBOOK_ID, title: "Work", notes: [] }],
+    ]);
+    const database = createFakeDatabase({ notebooks, deleteFails: true });
+    database.notebookAddNote = async () => {
+      throw new Error("attachment failed");
+    };
+    const markers: unknown[] = [];
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+
+    const code = await codeOfAsync(() =>
+      adapter.createNote({ title: "Recovery marker", content: "body", notebookId: NOTEBOOK_ID }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(markers).toEqual([
+      {
+        operation: "create",
+        noteId: expect.stringMatching(/^note-/),
+        stage: "create-notebook-attach",
+      },
+    ]);
   });
 
   it("creates notes and tag relations only via the allowlisted relation seam", async () => {

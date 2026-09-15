@@ -360,6 +360,28 @@ describe("Stage 4 write composition — local commits become pending metadata", 
     expect(executors).toEqual([]);
   });
 
+  it("does not record pending sync after a failed local create", async () => {
+    let executorCalls = 0;
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        executorCalls += 1;
+        return { status: "confirmed" };
+      },
+    });
+    const adapter = stubAdapter({
+      create: () => {
+        throw new NotesnookWriteContractError("sync_failed");
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => composition.createNote({ title: "failed", content: "body" }))).toBe(
+      "sync_failed",
+    );
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
+    expect(executorCalls).toBe(0);
+  });
+
   it("records a pending marker for a real append", async () => {
     const { adapter } = realAdapter();
     const coordinator = new SyncCoordinator({ executor: async () => ({ status: "confirmed" }) });
