@@ -137,4 +137,20 @@ describe("generic systemd installer — health rollback and retention", () => {
     expect(existsSync(join(ctx.optDir, "releases", "0.2.0"))).toBe(false);
     expect(existsSync(join(ctx.optDir, "releases", "0.1.0"))).toBe(false);
   });
+
+  it("creates the release directory on a fresh target", () => {
+    const ctx = createInstallerFakeRoot();
+    fakeRoots.push(ctx);
+    const { artifact, checksum } = createArtifact();
+    rmSync(join(ctx.optDir, "releases"), { recursive: true, force: true });
+
+    const result = spawnSync(
+      "bash",
+      [installer, "install", "--artifact", artifact, "--checksum-file", checksum],
+      { cwd: repositoryRoot, env: envFor(ctx), encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(readlinkSync(join(ctx.optDir, "current"))).toBe("releases/1.2.3");
+  });
 });

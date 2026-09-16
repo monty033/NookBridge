@@ -165,6 +165,7 @@ make_wrapper nookbridge-sync dist/sync.js
 make_wrapper nookbridge-sync-cli dist/sync.js
 make_wrapper nookbridge-health dist/health.js
 make_wrapper nookbridge-runtime-check dist/runtime-check.js
+chmod -R a+rX "$release_root"
 
 (
   cd "$release_root"
@@ -197,11 +198,13 @@ cat > "$release_root/release.json" <<EOF
   "buildTimestamp": "$build_timestamp"
 }
 EOF
+chmod 0755 "$release_root"
 
 mkdir -p "$output_dir"
 artifact="$output_dir/$release_root_name-linux-x64-gnu.tar.gz"
 tar_file="$stage_dir/release.tar"
 tar -cf "$tar_file" --sort=name --mtime="@$source_epoch" --owner=0 --group=0 --numeric-owner -C "$stage_dir" "$release_root_name" 2>/dev/null || fail
+chmod 0700 "$release_root"
 gzip -n -9 "$tar_file" 2>/dev/null || fail
 mv "$tar_file.gz" "$artifact"
 (

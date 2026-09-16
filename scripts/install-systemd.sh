@@ -359,6 +359,7 @@ install_artifact() {
   [ -n "$version" ] || die 'archive manifest verification failed'
   stage="$(mktemp -d "${OPT_DIR}.stage.XXXXXX")"
   trap 'rm -rf "$stage"' RETURN
+  mkdir -p "$OPT_DIR" "$RELEASES_DIR"
   bash "$(dirname "$0")/verify-linux-artifact.sh" --artifact "$artifact" --checksum-file "$checksum_file" >/dev/null 2>&1 \
     || die 'archive verification failed'
   top="$(archive_top_level "$artifact")"
