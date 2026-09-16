@@ -150,7 +150,8 @@ make_wrapper() {
   printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
-    'script_dir=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)' \
+    'script_path=$(readlink -f -- "$0")' \
+    'script_dir=$(CDPATH= cd -P -- "$(dirname -- "$script_path")" && pwd)' \
     "exec \"\$script_dir/../runtime/bin/node\" \"\$script_dir/../app/$entry\" \"\$@\"" \
     > "$wrapper"
   chmod 0555 "$wrapper"

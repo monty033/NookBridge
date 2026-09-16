@@ -91,7 +91,7 @@ describe("Linux artifact builder", () => {
       ["-xOzf", artifact, "nookbridge-v1.2.3/bin/nookbridge-health"],
       { encoding: "utf8" },
     );
-    expect(wrapper).toContain("cd -P");
+    expect(wrapper).toContain("readlink -f");
     expect(members).toContain("nookbridge-v1.2.3/bin/nookd");
     expect(members).toContain("nookbridge-v1.2.3/runtime/bin/node");
     expect(members).toContain("nookbridge-v1.2.3/app/node_modules/native/addon.node");
