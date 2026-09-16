@@ -309,11 +309,14 @@ transaction_exit() {
 }
 
 install_operator_wrapper() {
-  local name command gate wrapper
+  local name command gate post_success wrapper runner
   name="$1"
   command="$2"
   gate="$3"
+  post_success="${4:-}"
   wrapper="${USR_LOCAL_BIN}/${name}"
+  runner='exec systemd-run --quiet --pty --wait --collect'
+  [ "$post_success" = 'restart' ] && runner='systemd-run --quiet --pty --wait --collect'
   rm -f "$wrapper"
   {
     printf '%s\n' '#!/bin/sh' 'set -eu'
@@ -321,7 +324,7 @@ install_operator_wrapper() {
     printf '%s\n' "  printf '%s\\n' '${name}: must be run as root' >&2"
     printf '%s\n' '  exit 77' 'fi'
     printf '%s \\\n' \
-      'exec systemd-run --quiet --pty --wait --collect' \
+      "$runner" \
       "  --unit=${name}.service" \
       "  --uid=${SERVICE_USER}" \
       "  --gid=${SERVICE_GROUP}" \
@@ -345,6 +348,12 @@ install_operator_wrapper() {
       '  --property=TimeoutStartSec=10min' \
       '  --property=RuntimeMaxSec=10min'
     printf '%s\n' "  \"${CURRENT_LINK}/bin/${command}\" \"\$@\""
+    if [ "$post_success" = 'restart' ]; then
+      printf '%s\n' 'status=$?' 'if [ "$status" -ne 0 ]; then' '  exit "$status"' 'fi'
+      printf '%s\n' 'if ! systemctl restart nookd.service >/dev/null 2>&1; then' \
+        "  printf '%s\\n' '${name}: service activation failed' >&2" \
+        '  exit 1' 'fi'
+    fi
   } >"$wrapper"
   chmod 0755 "$wrapper"
 }
@@ -357,7 +366,7 @@ install_wrappers() {
     [ -x "${CURRENT_LINK}/bin/${name}" ] || continue
     ln -sfn "${CURRENT_LINK}/bin/${name}" "${USR_LOCAL_BIN}/${name}"
   done
-  install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH
+  install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH restart
   install_operator_wrapper nookbridge-sync nookbridge-sync-cli NOOKBRIDGE_ENABLE_LIVE_SYNC
 }
 
