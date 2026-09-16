@@ -158,7 +158,7 @@ describe("generic systemd installer — health rollback and retention", () => {
       false,
     );
     expect(readFileSync(join(ctx.usrLocalBinDir, "nookbridge-provision"), "utf8")).toContain(
-      "systemd-run",
+      "systemd-run --quiet --pty --wait --collect \\\n",
     );
     expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-runtime-check")).isSymbolicLink()).toBe(
       true,

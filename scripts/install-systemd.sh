@@ -320,7 +320,7 @@ install_operator_wrapper() {
     printf '%s\n' 'if [ "$(id -u)" -ne 0 ]; then'
     printf '%s\n' "  printf '%s\\n' '${name}: must be run as root' >&2"
     printf '%s\n' '  exit 77' 'fi'
-    printf '%s\n' \
+    printf '%s \\\n' \
       'exec systemd-run --quiet --pty --wait --collect' \
       "  --unit=${name}.service" \
       "  --uid=${SERVICE_USER}" \
@@ -343,8 +343,8 @@ install_operator_wrapper() {
       '  --property=ReadWritePaths=/var/lib/nookbridge' \
       '  --property=UMask=0077' \
       '  --property=TimeoutStartSec=10min' \
-      '  --property=RuntimeMaxSec=10min' \
-      "  \"${CURRENT_LINK}/bin/${command}\" \"\$@\""
+      '  --property=RuntimeMaxSec=10min'
+    printf '%s\n' "  \"${CURRENT_LINK}/bin/${command}\" \"\$@\""
   } >"$wrapper"
   chmod 0755 "$wrapper"
 }
