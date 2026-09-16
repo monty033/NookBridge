@@ -86,6 +86,12 @@ describe("Linux artifact builder", () => {
     const members = execFileSync("tar", ["-tzf", artifact], { encoding: "utf8" });
     const listing = execFileSync("tar", ["-tvzf", artifact], { encoding: "utf8" });
     expect(listing).toMatch(/drwxr-xr-x .* nookbridge-v1\.2\.3\/$/m);
+    const wrapper = execFileSync(
+      "tar",
+      ["-xOzf", artifact, "nookbridge-v1.2.3/bin/nookbridge-health"],
+      { encoding: "utf8" },
+    );
+    expect(wrapper).toContain("cd -P");
     expect(members).toContain("nookbridge-v1.2.3/bin/nookd");
     expect(members).toContain("nookbridge-v1.2.3/runtime/bin/node");
     expect(members).toContain("nookbridge-v1.2.3/app/node_modules/native/addon.node");
