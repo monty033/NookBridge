@@ -1,99 +1,179 @@
 # Generic systemd Linux installation
 
-NookBridge can run on a Linux distribution with systemd and Nix without using
-NixOS. This path is intentionally small: Nix builds the pinned application
-package, while the installer creates the service identity, protected files,
-Unix socket service, and systemd credential projection.
+NookBridge runs on Debian, Ubuntu, Fedora, and other Linux distributions with
+systemd. The generic installer consumes a reviewed, prebuilt release artifact;
+the target host does **not** need Nix, npm, or a global Node installation.
 
-This is a pre-alpha installation path. It is intended for Debian, Ubuntu,
-Fedora, and similar systemd distributions with a working Nix installation.
-Docker, macOS, and Windows remain unsupported.
+The first supported artifact target is `linux-x64-gnu` (x86_64 Linux with glibc).
+The artifact carries its Node runtime, JavaScript bundle, production dependencies,
+wrappers, and manifest. The installer renders the hardened systemd unit on the
+target host; the artifact does not embed host-specific paths or account names.
 
 ## Requirements
 
-- Linux with a systemd system manager and `systemd-run --pty`;
-- Nix with flakes enabled;
-- `x86_64-linux` or `aarch64-linux` host architecture;
-- root access for the installation step;
-- a root-owned settings JSON file;
-- a root-owned database-key file supplied by the approved provisioning process.
+- Linux with a systemd system manager;
+- x86_64 CPU and glibc;
+- root access for installation;
+- `tar`, `gzip`, `sha256sum`, `flock`, and standard POSIX utilities;
+- a reviewed artifact and its matching outer `SHA256SUMS` file;
+- optional root-readable settings JSON and database-key files.
 
 Do not put Notesnook passwords, MFA codes, tokens, or key contents in command
-arguments, environment variables, logs, or chat. The installer reads neither
-secret value; it only validates ownership and permissions, then copies the
-key into the protected system location for systemd to deliver.
+arguments, environment variables, logs, or chat. The installer only validates
+and copies the supplied files into protected locations; systemd projects them
+through fixed `LoadCredential=` labels.
 
-## Install
+## Install a release
 
-Obtain a reviewed NookBridge checkout, then inspect the installer and run it as
-root. The default source is the canonical `main` branch; production operators
-should prefer a reviewed immutable `rev=` source reference.
+Obtain the artifact and checksum file from the reviewed release. Verify that the
+artifact filename and checksum line match before invoking the installer:
 
 ```bash
-./scripts/install-systemd.sh \
+sha256sum --check --strict --status SHA256SUMS
+```
+
+Install as root:
+
+```bash
+sudo ./scripts/install-systemd.sh install \
+  --artifact ./nookbridge-v1.2.3-linux-x64-gnu.tar.gz \
+  --checksum-file ./SHA256SUMS \
   --settings-file /root/nookbridge-settings.json \
-  --db-key-file /root/nookbridge-db-key \
-  --source 'git+https://git.montycasa.net/patrick/NookBridge?rev=<reviewed-commit>'
+  --db-key-file /root/nookbridge-db-key
 ```
 
 The installer:
 
-1. builds `#nookbridge` from the selected flake source;
-2. creates the `nookbridge` service user and `nookbridge-clients` group;
-3. installs `/etc/nookbridge/service.json` and the supplied settings/key files;
-4. installs `/etc/systemd/system/nookd.service`;
-5. exposes `nookd`, `nook-mcp`, `nookctl`, provisioning, and sync commands under
-   `/usr/local/bin`;
-6. validates the service config and settings before enabling the daemon; and
-7. reloads systemd and starts `nookd.service`.
+1. acquires an exclusive transaction lock;
+2. verifies the outer checksum and the archive manifest/payload;
+3. extracts the release under `/opt/nookbridge/releases/1.2.3`;
+4. atomically switches `/opt/nookbridge/current` to that release;
+5. creates the `nookbridge` service account, private group, and client group;
+6. writes `/etc/nookbridge/service.json` and protected credential inputs;
+7. installs the hardened `nookd.service` and stable `/usr/local/bin` wrappers;
+8. reloads and activates systemd; and
+9. runs the categorical health probe before committing installer state.
 
-Existing managed files are never replaced unless `--force` is supplied. The
-installer does not delete state, reset credentials, or provide an uninstall
-operation.
+The installer writes its ledger to `/etc/nookbridge/installer-state.json`.
+Existing unmanaged `nookd.service` units are rejected. No state or credential
+is deleted by the installer.
+
+## Layout
+
+```text
+/opt/nookbridge/
+  current -> releases/1.2.3
+  releases/
+    1.2.3/
+      app/                 bundled dist and production node_modules
+      bin/                 relocatable command wrappers
+      runtime/bin/node     bundled Node runtime
+      release.json         provenance and target manifest
+      SHA256SUMS            payload inventory
+/etc/nookbridge/
+  service.json
+  settings.json            optional, mode 0640
+  db-key                   optional, mode 0400
+  installer-state.json
+/var/lib/nookbridge/       daemon state, mode 0750
+/run/nookbridge/           runtime directory, mode 0750
+```
 
 ## Verify
 
-Use only categorical diagnostics and service metadata:
+Use categorical diagnostics and service metadata only:
 
 ```bash
 systemctl is-active nookd.service
 nookd --check-config /etc/nookbridge/service.json
-nookctl settings validate
+nookbridge-runtime-check
+nookbridge-health --socket /run/nookbridge/nookbridge.sock
 systemctl status nookd.service --no-pager
 ```
 
-The daemon reads both credentials through systemd `LoadCredential=`. The
-long-running process runs as `nookbridge`, owns `/var/lib/nookbridge`, and
-binds only `/run/nookbridge/nookbridge.sock`; no TCP or HTTP listener is
-created by this installer.
+The long-running process runs as `nookbridge`, uses the private state group plus
+the `nookbridge-clients` supplementary boundary, and binds the Unix socket at
+`/run/nookbridge/nookbridge.sock`. This installer does not create a TCP or HTTP
+listener.
+
+## Upgrade, rollback, and retention
+
+Use `upgrade` with the new artifact. Do not overwrite a release directory by
+hand:
+
+```bash
+sudo ./scripts/install-systemd.sh upgrade \
+  --artifact ./nookbridge-v1.2.4-linux-x64-gnu.tar.gz \
+  --checksum-file ./SHA256SUMS \
+  --settings-file /root/nookbridge-settings.json \
+  --db-key-file /root/nookbridge-db-key
+```
+
+The previous release remains available. If a later operational check requires a
+rollback, select only a version already below the managed releases directory:
+
+```bash
+sudo ./scripts/install-systemd.sh rollback --to 1.2.3
+```
+
+Prune only after the new release is healthy. `--keep 2` is the minimum and keeps
+the active and immediate previous releases:
+
+```bash
+sudo ./scripts/install-systemd.sh prune --keep 3
+```
+
+A failed post-activation health check restores the previous `current` symlink
+and restarts the daemon against it. Do not retry a failed mutation or sync while
+the service is unhealthy; inspect the categorical service state first.
 
 ## Provision and sync
 
-From a protected host TTY, run:
+From a protected host TTY, run the installed operator wrappers:
 
 ```text
 nookbridge-provision
 nookbridge-sync
 ```
 
-Both commands are root-gated wrappers around transient hardened systemd units.
-They collect authentication material interactively and run under the same
-service identity and database credential boundary as `nookd`. The sync command
-is fetch-only; it is not a generic or full-sync command.
+Both are root-gated transient systemd operations. Authentication material is
+collected interactively and is never placed in command arguments or environment
+snapshots. The sync operation is fetch-only; it is not a generic full-sync path.
 
-## Updates
+## Building an artifact
 
-Review the new source revision and rerun the installer with `--force`, the same
-settings file, and the same database-key source. The encrypted state directory
-is not replaced by an update:
+Artifact assembly is package-manager-neutral at the target, but release builds
+must run in the pinned CI/container environment. The builder requires:
+
+- a clean Git source tree;
+- a completed `dist/` and production `node_modules/` tree;
+- the pinned Node 22.23.2 runtime;
+- explicit measured glibc and libstdc++ baseline values; and
+- a deterministic `SOURCE_DATE_EPOCH`.
+
+The canonical local command shape is:
 
 ```bash
-./scripts/install-systemd.sh --force \
-  --settings-file /root/nookbridge-settings.json \
-  --db-key-file /root/nookbridge-db-key \
-  --source 'git+https://git.montycasa.net/patrick/NookBridge?rev=<new-reviewed-commit>'
+npm ci
+npm run build
+npm prune --omit=dev
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+npm run artifact:linux -- \
+    --source-dir "$PWD" \
+    --node-runtime "$(command -v node)" \
+    --output-dir ./artifacts \
+    --version 1.2.3 \
+    --source-date-epoch "$SOURCE_DATE_EPOCH" \
+    --min-glibc 2.36 \
+    --min-libstdcxx GLIBCXX_3.4.29
 ```
 
-Before changing policy, validate the complete settings file and treat a failed
-service restart as a deployment failure. Do not run sync or mutations while the
-daemon is unhealthy.
+The builder invokes the verifier before reporting success. Release signing,
+SBOM publication, and additional architectures are separate release gates.
+
+## NixOS path
+
+NixOS continues to use the Nix package and module path. The generic artifact
+installer is an additional distribution path and must not be used to mutate a
+NixOS generation. The packaged `nookbridge-health` and
+`nookbridge-runtime-check` entry points remain available through `nix/package.nix`.
