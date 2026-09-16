@@ -85,7 +85,10 @@ require_root() {
 
 require_commands() {
   local name
-  for name in awk chown cut date dirname find flock getent grep groupadd install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl tar useradd; do
+  for name in awk chown cut date dirname find flock getent grep groupadd install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl systemd-run tar useradd; do
+    if [ "$name" = 'systemd-run' ] && [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ]; then
+      continue
+    fi
     command -v "$name" >/dev/null 2>&1 || die "required command is unavailable: ${name}"
   done
 }
@@ -305,14 +308,53 @@ transaction_exit() {
   exit "$status"
 }
 
+install_operator_wrapper() {
+  local name="$1" command="$2" gate="$3" wrapper="${USR_LOCAL_BIN}/${name}"
+  rm -f "$wrapper"
+  {
+    printf '%s\n' '#!/bin/sh' 'set -eu'
+    printf '%s\n' 'if [ "$(id -u)" -ne 0 ]; then'
+    printf '%s\n' "  printf '%s\\n' '${name}: must be run as root' >&2"
+    printf '%s\n' '  exit 77' 'fi'
+    printf '%s\n' \
+      'exec systemd-run --quiet --pty --wait --collect' \
+      "  --unit=${name}.service" \
+      "  --uid=${SERVICE_USER}" \
+      "  --gid=${SERVICE_GROUP}" \
+      '  --property=WorkingDirectory=/var/lib/nookbridge' \
+      '  --property=Environment=HOME=/var/lib/nookbridge' \
+      '  --property=Environment=PATH=/usr/bin:/bin' \
+      "  --setenv=${gate}=1" \
+      '  --property=LoadCredential=nookbridge-db-key:/etc/nookbridge/db-key' \
+      '  --property=ProtectSystem=strict' \
+      '  --property=ProtectHome=yes' \
+      '  --property=PrivateTmp=yes' \
+      '  --property=PrivateDevices=yes' \
+      '  --property=NoNewPrivileges=yes' \
+      '  --property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+      '  --property=RestrictNamespaces=yes' \
+      '  --property=CapabilityBoundingSet=' \
+      '  --property=AmbientCapabilities=' \
+      '  --property=SystemCallArchitectures=native' \
+      '  --property=ReadWritePaths=/var/lib/nookbridge' \
+      '  --property=UMask=0077' \
+      '  --property=TimeoutStartSec=10min' \
+      '  --property=RuntimeMaxSec=10min' \
+      "  \"${CURRENT_LINK}/bin/${command}\" \"\$@\""
+  } >"$wrapper"
+  chmod 0755 "$wrapper"
+}
+
 install_wrappers() {
   local name
-  # Stable nookd wrapper target: current/bin/
+  # Stable daemon/client probes target the activated current symlink.
   mkdir -p "$USR_LOCAL_BIN"
-  for name in nookd nook-mcp nookctl nookbridge-provision-cli nookbridge-sync-cli nookbridge-provision nookbridge-sync nookbridge-health nookbridge-runtime-check; do
+  for name in nookd nook-mcp nookctl nookbridge-health nookbridge-runtime-check; do
     [ -x "${CURRENT_LINK}/bin/${name}" ] || continue
     ln -sfn "${CURRENT_LINK}/bin/${name}" "${USR_LOCAL_BIN}/${name}"
   done
+  install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH
+  install_operator_wrapper nookbridge-sync nookbridge-sync-cli NOOKBRIDGE_ENABLE_LIVE_SYNC
 }
 
 run_health_gate() {

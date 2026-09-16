@@ -255,9 +255,21 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     // activated current symlink. They never point at a versioned
     // release directory or a Nix store path. The current installer
     // links against the Nix store directly — fail RED here.
-    expect(source).toMatch(/nookd[\s\S]{0,400}current\/bin\//);
-    expect(source).not.toMatch(/nookd[\s\S]{0,400}\/nix\/store\//);
+    expect(source).toContain("CURRENT_LINK");
+    expect(source).toContain("/bin/${command}");
+    expect(source).not.toMatch(/CURRENT_LINK[\s\S]{0,400}\/nix\/store\//);
     expect(source).not.toMatch(/releases\/[A-Za-z0-9._+-]+/);
+  });
+
+  it("wraps provisioning and sync in transient credentialed systemd units", () => {
+    const source = readFileSync(installer, "utf8");
+
+    expect(source).toContain("systemd-run");
+    expect(source).toContain("--pty --wait --collect");
+    expect(source).toContain("--setenv=${gate}=1");
+    expect(source).toContain("--property=LoadCredential=nookbridge-db-key:");
+    expect(source).toContain("nookbridge-provision");
+    expect(source).toContain("nookbridge-sync");
   });
 });
 
