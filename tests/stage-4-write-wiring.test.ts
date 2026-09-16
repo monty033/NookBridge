@@ -956,6 +956,15 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     expect(runtime.calls.updateNotes[0]?.partial.pinned).toBe(true);
   });
 
+  it("preserves an absent notebookId in an allowlisted rollback partial", async () => {
+    const runtime = createFakeRuntime();
+    const seam = bindNotesnookWriteRuntime(runtime);
+    await seam.notesUpdate([NOTE_ID], { notebookId: undefined });
+    const partial = runtime.calls.updateNotes[0]?.partial;
+    expect(partial).toHaveProperty("notebookId");
+    expect(partial?.notebookId).toBeUndefined();
+  });
+
   it("forwards contentAdd to content.add", async () => {
     const runtime = createFakeRuntime();
     const seam = bindNotesnookWriteRuntime(runtime);

@@ -810,7 +810,7 @@ function mapNotesPartial(value: unknown): Record<string, unknown> {
         result[key] = field;
         break;
       case "notebookId":
-        result.notebookId = requireIdentifier(field);
+        result.notebookId = field === undefined ? undefined : requireIdentifier(field);
         break;
       case "tags":
         result.tags = readStringArray(field, "invalid_input", false, 16);

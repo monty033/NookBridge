@@ -70,6 +70,7 @@ interface FakeWriteDatabaseOptions {
   content?: Map<string, FakeContent>;
   deleteFails?: boolean;
   relationAddFailsAt?: number;
+  relationAddOverride?: (count: number, input: FakeRelation) => Promise<void>;
 }
 
 interface FakeNote {
@@ -129,6 +130,7 @@ interface FakeDatabaseCalls {
   contentFind: string[];
   tagAdd: Array<{ title: string }>;
   relationAdd: Array<{ fromId: string; toId: string; type: string }>;
+  relationRemove: Array<{ fromId: string; toId: string; type: string }>;
   delete: string[];
 }
 interface FakeDatabase extends NotesnookWriteDatabase {
@@ -185,6 +187,7 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
     contentFind: [],
     tagAdd: [],
     relationAdd: [],
+    relationRemove: [],
     delete: [],
   };
 
@@ -268,8 +271,9 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
         if (typeof partial.title === "string") note.title = partial.title;
         if (typeof partial.pinned === "boolean") note.pinned = partial.pinned;
         if (typeof partial.favorite === "boolean") note.favorite = partial.favorite;
-        if (typeof partial.notebookId === "string") {
-          note.notebookId = partial.notebookId;
+        if (Object.prototype.hasOwnProperty.call(partial, "notebookId")) {
+          if (typeof partial.notebookId === "string") note.notebookId = partial.notebookId;
+          else if (partial.notebookId === undefined) delete note.notebookId;
         }
         if (Array.isArray(partial.tags)) note.tags = [...(partial.tags as string[])];
         note.dateEdited += 1;
@@ -339,6 +343,15 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
     },
     relationAdd: async ({ fromId, toId, type }: { fromId: string; toId: string; type: string }) => {
       calls.relationAdd.push({ fromId, toId, type });
+      const count = calls.relationAdd.length;
+      if (options.relationAddOverride !== undefined) {
+        await options.relationAddOverride(count, { fromId, toId, type });
+        // The override is the authoritative decision; if it didn't throw,
+        // record the relation.  If the override also wrote to the live
+        // relations array, honour that.
+        relations.push({ fromId, toId, type });
+        return;
+      }
       if (options.relationAddFailsAt === calls.relationAdd.length) {
         throw new Error("relation add failed");
       }
@@ -353,6 +366,7 @@ function createFakeDatabase(options: FakeWriteDatabaseOptions = {}): FakeDatabas
       toId: string;
       type: string;
     }) => {
+      calls.relationRemove.push({ fromId, toId, type });
       for (let i = relations.length - 1; i >= 0; i -= 1) {
         const rel = relations[i]!;
         if (rel.fromId === fromId && rel.toId === toId && rel.type === type) {
@@ -1428,7 +1442,10 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect((error as { cause?: unknown }).cause).toBeUndefined();
     expect((error as { __context__?: unknown }).__context__).toBeUndefined();
     expect(String((error as Error).message)).not.toContain(upstreamMessage);
-    expect(database.calls.contentUpdate).toHaveLength(1);
+    // The forward content update and the compensation re-apply both
+    // ran; the second call restores the original stored data so the
+    // bounded saga leaves no phantom partial state.
+    expect(database.calls.contentUpdate.length).toBe(2);
     expect(database.calls.touch).toHaveLength(1);
   });
 
@@ -1544,6 +1561,431 @@ describe("Stage 4 write adapter — updateNote", () => {
     );
     expect(code).toBe("invalid_input");
     expect(database.calls.notebookAdd).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateNote — bounded compensation slice
+//
+// These tests prove that an update mutator which fails *after* one or more
+// forward mutators have already applied leaves no phantom partial state.
+// The saga must either fully reverse the forward mutators or, when a
+// reverse op itself fails, record a bounded recovery marker so the
+// operator/runtime can reconcile.
+//
+// Existing tests above prove the *happy* and *fail-fast* update paths; the
+// tests below are deliberately scoped to the partial-progress slice that
+// the prior PR intentionally deferred.
+// ---------------------------------------------------------------------------
+
+describe("Stage 4 write adapter — updateNote compensation", () => {
+  function setupCompensationFixture(seed?: {
+    readonly initialTags?: readonly string[];
+    readonly initialNotebookId?: string;
+    readonly availableTags?: ReadonlyMap<string, FakeTag>;
+    readonly availableNotebooks?: ReadonlyMap<string, FakeNotebook>;
+    readonly existingRelations?: readonly FakeRelation[];
+    readonly relationAddOverride?: (count: number, input: FakeRelation) => Promise<void>;
+  }): {
+    adapter: NotesnookWriteAdapter;
+    database: ReturnType<typeof createFakeDatabase>;
+    note: FakeNote;
+  } {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Original",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+      ...(seed?.initialTags !== undefined ? { tags: [...seed.initialTags] } : {}),
+      ...(seed?.initialNotebookId !== undefined ? { notebookId: seed.initialNotebookId } : {}),
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "html",
+      data: "<p>original body</p>",
+    };
+    const tags =
+      seed?.availableTags ??
+      new Map<string, FakeTag>([
+        [TAG_ID, { id: TAG_ID, title: "home" }],
+        [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+      ]);
+    const notebooks =
+      seed?.availableNotebooks ??
+      new Map<string, FakeNotebook>([
+        [NOTEBOOK_ID, { id: NOTEBOOK_ID, title: "Inbox", notes: [] }],
+      ]);
+    const relations: FakeRelation[] = seed?.existingRelations
+      ? [...seed.existingRelations]
+      : seed?.initialTags
+        ? seed.initialTags.map((tagId) => ({ fromId: NOTE_ID, toId: tagId, type: "tag" }))
+        : [];
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+      tags: tags as Map<string, FakeTag>,
+      notebooks: notebooks as Map<string, FakeNotebook>,
+      relations,
+      ...(seed?.relationAddOverride !== undefined
+        ? { relationAddOverride: seed.relationAddOverride }
+        : {}),
+    });
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+    return { adapter, database, note };
+  }
+
+  it("compensates a metadata-only update when a follow-up mutator rejects", async () => {
+    // Patch renames the title AND attaches the note to a notebook.  The
+    // first metadata mutator (`notesUpdate`) must be rolled back when
+    // `notebookAddNote` rejects.
+    const { adapter, database, note } = setupCompensationFixture();
+    database.notebookAddNote = async () => {
+      throw new Error("upstream: notebook attach refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, note.dateEdited);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { title: "Renamed", notebookId: NOTEBOOK_ID },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    // The forward `notesUpdate` call ran.
+    expect(database.calls.update.length).toBeGreaterThanOrEqual(1);
+    // Compensation must have re-applied the prior title via `notesUpdate`.
+    expect(database.calls.update.length).toBe(2);
+    expect(database.calls.update[1]?.partial.title).toBe("Original");
+    expect(database.calls.notebookRemove).toEqual([]);
+    // The note's observable title is back to the pre-mutation value.
+    expect(note.title).toBe("Original");
+    expect(note.notebookId).toBeUndefined();
+  });
+
+  it("compensates metadata when tag relation inspection rejects", async () => {
+    const { adapter, database, note } = setupCompensationFixture();
+    database.relationListForNote = async () => {
+      throw new Error("upstream: relation inspection refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, note.dateEdited);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { title: "Renamed", notebookId: NOTEBOOK_ID, tags: [TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.notebookRemove).toEqual([{ notebookId: NOTEBOOK_ID, noteId: NOTE_ID }]);
+    expect(database.calls.update).toHaveLength(2);
+    expect(note.title).toBe("Original");
+    expect(note.notebookId).toBeUndefined();
+    await expect(database.notebookNotes(NOTEBOOK_ID)).resolves.toEqual([]);
+  });
+
+  it("compensates a successful notebook attach when a later tag add rejects", async () => {
+    const tags = new Map<string, FakeTag>([
+      [TAG_ID, { id: TAG_ID, title: "home" }],
+      [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+    ]);
+    const { adapter, database, note } = setupCompensationFixture({
+      availableTags: tags,
+      relationAddOverride: async (count) => {
+        if (count === 2) throw new Error("upstream: later tag relation add refused");
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, note.dateEdited);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { notebookId: NOTEBOOK_ID, tags: [TAG_ID, SECOND_TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.notebookRemove).toEqual([{ notebookId: NOTEBOOK_ID, noteId: NOTE_ID }]);
+    expect(database.calls.relationRemove).toEqual([{ fromId: NOTE_ID, toId: TAG_ID, type: "tag" }]);
+    expect(note.notebookId).toBeUndefined();
+    await expect(database.notebookNotes(NOTEBOOK_ID)).resolves.toEqual([]);
+  });
+
+  it("rolls back earlier tag adds when a later tag add rejects during an update", async () => {
+    // First tag add succeeds; the second must reject.  The first must be
+    // compensated via `relationRemove`.
+    const tags = new Map<string, FakeTag>([
+      [TAG_ID, { id: TAG_ID, title: "home" }],
+      [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+    ]);
+    const { adapter, database, note } = setupCompensationFixture({ availableTags: tags });
+    // Override relationAdd so that the second call rejects.
+    let addCalls = 0;
+    database.relationAdd = async ({ fromId, toId, type }) => {
+      addCalls += 1;
+      database.calls.relationAdd.push({ fromId, toId, type });
+      if (addCalls === 2) throw new Error("upstream: tag relation add refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { tags: [TAG_ID, SECOND_TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    // The forward call to `relationAdd` for the first tag must have run.
+    expect(addCalls).toBeGreaterThanOrEqual(1);
+    // Compensation must have invoked `relationRemove` to undo it.
+    expect(database.calls.relationRemove).toEqual([{ fromId: NOTE_ID, toId: TAG_ID, type: "tag" }]);
+    // The metadata tags field must be restored along with the relations.
+    expect(note.tags).toEqual([]);
+  });
+
+  it("rolls back an earlier tag remove when a later tag add rejects during an update", async () => {
+    // Existing tag relation must be removed before a new one is added.
+    // The remove succeeds; the add rejects; the remove must be
+    // compensated by re-adding the original relation.
+    const existing: FakeRelation[] = [{ fromId: NOTE_ID, toId: TAG_ID, type: "tag" }];
+    const tags = new Map<string, FakeTag>([
+      [TAG_ID, { id: TAG_ID, title: "home" }],
+      [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+    ]);
+    const { adapter, database } = setupCompensationFixture({
+      initialTags: [TAG_ID],
+      availableTags: tags,
+      existingRelations: existing,
+      // Fail only the FIRST relationAdd (the forward add for
+      // SECOND_TAG_ID).  Any later call (the compensation re-adding
+      // TAG_ID) must succeed so the saga can complete cleanly and we
+      // can assert that the original relation was restored.
+      relationAddOverride: async (count) => {
+        if (count === 1) throw new Error("upstream: tag relation add refused");
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { tags: [SECOND_TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    // The forward `relationRemove` ran (the existing tag was removed).
+    expect(database.calls.relationRemove).toEqual([{ fromId: NOTE_ID, toId: TAG_ID, type: "tag" }]);
+    // The forward `relationAdd` was attempted (and failed); the
+    // compensation then succeeded and re-added the original relation.
+    expect(database.calls.relationAdd).toEqual([
+      { fromId: NOTE_ID, toId: SECOND_TAG_ID, type: "tag" },
+      { fromId: NOTE_ID, toId: TAG_ID, type: "tag" },
+    ]);
+  });
+
+  it("rolls back a stored content write when the follow-up notesTouch rejects", async () => {
+    const { adapter, database } = setupCompensationFixture();
+    const originalData = "<p>original body</p>";
+    database.notesTouch = async () => {
+      throw new Error("upstream: touch refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { content: "new body" },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    // The forward content write ran once.
+    expect(database.calls.contentUpdate.length).toBe(2);
+    // Compensation must have re-applied the original stored content.
+    const compensation = database.calls.contentUpdate[1];
+    expect(compensation?.partial.data).toBe(originalData);
+    expect(database.calls.update).toHaveLength(0);
+  });
+
+  it("records an update-metadata recovery marker when the metadata compensation itself fails", async () => {
+    // First notesUpdate (forward) must succeed, then notebookAddNote
+    // rejects, then the compensation notesUpdate re-apply must also
+    // fail so the saga records an `update-metadata` marker.
+    const { database, note } = setupCompensationFixture();
+    const originalUpdate = database.notesUpdate;
+    let updateCalls = 0;
+    database.notesUpdate = async (ids, partial) => {
+      updateCalls += 1;
+      // The forward update call must succeed (and bump the note).
+      if (updateCalls === 1) {
+        await originalUpdate(ids, partial);
+        return;
+      }
+      // Any later call (the compensation re-apply) must fail.
+      throw new Error("upstream: notesUpdate refused");
+    };
+    database.notebookAddNote = async () => {
+      throw new Error("upstream: notebook attach refused");
+    };
+    const markers: unknown[] = [];
+    const adapterWithJournal = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, note.dateEdited);
+
+    const code = await codeOfAsync(() =>
+      adapterWithJournal.updateNote({
+        id: NOTE_ID,
+        patch: { title: "Renamed", notebookId: NOTEBOOK_ID },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(markers).toEqual([
+      {
+        operation: "update",
+        noteId: NOTE_ID,
+        stage: "update-metadata",
+      },
+    ]);
+  });
+
+  it("records an update-tags recovery marker when relationRemove compensation fails", async () => {
+    const tags = new Map<string, FakeTag>([
+      [TAG_ID, { id: TAG_ID, title: "home" }],
+      [SECOND_TAG_ID, { id: SECOND_TAG_ID, title: "urgent" }],
+    ]);
+    const { database } = setupCompensationFixture({ availableTags: tags });
+    let addCalls = 0;
+    database.relationAdd = async ({ fromId, toId, type }) => {
+      addCalls += 1;
+      database.calls.relationAdd.push({ fromId, toId, type });
+      if (addCalls === 2) throw new Error("upstream: tag relation add refused");
+    };
+    // Force the inverse `relationRemove` to also throw so compensation
+    // cannot complete cleanly.
+    database.relationRemove = async () => {
+      throw new Error("upstream: relation remove refused");
+    };
+    const markers: unknown[] = [];
+    const adapterWithJournal = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapterWithJournal.updateNote({
+        id: NOTE_ID,
+        patch: { tags: [TAG_ID, SECOND_TAG_ID] },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(markers).toEqual([
+      {
+        operation: "update",
+        noteId: NOTE_ID,
+        stage: "update-tags",
+      },
+    ]);
+  });
+
+  it("records an update-content recovery marker when content compensation itself fails", async () => {
+    const { database } = setupCompensationFixture();
+    const originalContentUpdate = database.contentUpdateByNoteId;
+    let contentUpdateCalls = 0;
+    database.contentUpdateByNoteId = async (partial, ...ids) => {
+      contentUpdateCalls += 1;
+      // First call is the forward content write — let it succeed.
+      if (contentUpdateCalls === 1) {
+        return originalContentUpdate(partial, ...ids);
+      }
+      // Second call is the compensation — force it to reject.
+      throw new Error("upstream: content update refused");
+    };
+    database.notesTouch = async () => {
+      throw new Error("upstream: touch refused");
+    };
+    const markers: unknown[] = [];
+    const adapterWithJournal = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapterWithJournal.updateNote({
+        id: NOTE_ID,
+        patch: { content: "rewritten body" },
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(markers).toEqual([
+      {
+        operation: "update",
+        noteId: NOTE_ID,
+        stage: "update-content",
+      },
+    ]);
+  });
+
+  it("does not record a recovery marker on a preflight rejection", async () => {
+    // Stale revision must fail closed with zero mutator calls and zero
+    // recovery markers.
+    const { database } = setupCompensationFixture();
+    const markers: unknown[] = [];
+    const adapterWithJournal = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+
+    const code = await codeOfAsync(() =>
+      adapterWithJournal.updateNote({
+        id: NOTE_ID,
+        patch: { title: "X" },
+        expectedRevision: revisionToken(NOTE_ID, 9_999_999_999),
+      }),
+    );
+
+    expect(code).toBe("stale_revision");
+    expect(database.calls.update).toHaveLength(0);
+    expect(markers).toEqual([]);
   });
 });
 
