@@ -2544,6 +2544,78 @@ that no successful upstream mutation is left without recoverable sync intent.
 Keep the change local and unsubmitted until the focused tests, full source
 gates, deployed local-source canary, and required review pass.
 
+## 13.15 Current rollout closure — update compensation and reconciliation
+
+**Status date:** 2026-09-16 (America/New_York)
+
+**Status: CLOSED for the update-compensation rollout; broader production-MVP
+release gates remain open.** This section supersedes stale deployment and
+reconciliation wording in earlier status sections without rewriting the
+historical evidence above.
+
+### Shipped scope
+
+- Source PR #101, `feat: compensate partial note updates`, merged to
+  `upstream/main` at `804e9c61a4bef3b35c68fa475589fdb7729d910d`.
+- Deployment PR #338, `chore: repin NookBridge to update compensation merge`,
+  merged to `nix-config/master` at
+  `c1a702ccd23989a557175312b934eab815fc9b52`.
+- The deployed source includes bounded update compensation for metadata,
+  notebook, tag-relation, and content failures, including compensation when
+  relation inspection itself fails. Recovery markers remain bounded to the
+  documented operation, note ID, and stage fields.
+
+### Verified source and deployment evidence
+
+- Source verification for the shipped update-compensation snapshot passed:
+  70 files / 1,922 Vitest tests, both TypeScript checks, build, ESLint,
+  Prettier, and diff checks.
+- The source merge introduced no changes beyond the reviewed PR head; the
+  deployment merge introduced no changes beyond the reviewed NookBridge pin
+  update.
+- The active NookBridge package is
+  `/nix/store/ry4m6fs6pjqngxxampx9lgj8xs8a30f4-nookbridge-0.0.0-stage.0`.
+- The rebuilt NixOS generation is
+  `/nix/store/2sn61q12x0325ijrl9byvacj88p8907s-nixos-system-unnamed-lxc-proxmox-26.05.20260910.d58a46e`.
+- `nookd.service`, `hermes-agent.service`, and `hermes-dashboard.service` are
+  active; `nookd` reports `Result=success`, exit status `0`, and zero
+  restarts. The MCP surface is connected with nine tools.
+- `nookctl doctor` passed its two available checks with zero failures; the two
+  warnings are the expected skipped decrypt probe and absent endpoint
+  configuration.
+
+### Reconciliation evidence
+
+- One explicitly authorized global sync completed with `status=synced`, one
+  attempt, and `pendingSync=false`.
+- A fresh read-only status returned `hasUnsyncedChanges=false`.
+- The protected `Vault-locked-note canary` remains visible by title.
+- No note mutation, destructive probe, or live failure injection was used in
+  this rollout.
+
+### Closure and remaining roadmap
+
+This closes the update-compensation implementation, deployment, and
+post-deployment reconciliation workstream. No further sync, rebuild, restart,
+or live mutation is required for this slice.
+
+This does **not** close the broader production-MVP release gate. The remaining
+work is the open acceptance and remediation work in §13.14: production-shaped
+mutation atomicity and durable sync intent, authoritative lock fail-closed
+behavior, runtime ownership after timeout/disconnect, retry/throttling and
+source-level query bounds, production-bundle recovery with post-recovery
+resync, non-mutating operator and socket/ancestor checks, privileged scans,
+outsider socket denial, long-duration mixed-load stress, and exact shipped
+artifact dependency/license evidence. These are separate future work and must
+not be inferred as defects in the shipped update-compensation slice.
+
+The earlier §13.14 “first implementation ticket” is superseded as an active
+instruction by PRs #99–#101: revision advancement and bounded create/update
+compensation are now shipped. If the broader roadmap resumes, the next ticket
+is a fresh production-composition review of mutation atomicity and durable
+commit-vs-error semantics; do not reopen or repeat the completed
+update-compensation implementation.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
