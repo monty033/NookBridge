@@ -85,9 +85,19 @@ require_root() {
 
 require_commands() {
   local name
-  for name in awk cut date dirname find flock grep install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl tar; do
+  for name in awk chown cut date dirname find flock getent grep groupadd install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl tar useradd; do
     command -v "$name" >/dev/null 2>&1 || die "required command is unavailable: ${name}"
   done
+}
+
+ensure_service_identity() {
+  [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ] && return
+  getent group "$PRIVATE_GROUP" >/dev/null 2>&1 || groupadd --system "$PRIVATE_GROUP"
+  getent group "$SERVICE_GROUP" >/dev/null 2>&1 || groupadd --system "$SERVICE_GROUP"
+  if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    useradd --system --home-dir "$STATE_DIR" --no-create-home \
+      --shell /usr/sbin/nologin --gid "$PRIVATE_GROUP" "$SERVICE_USER"
+  fi
 }
 
 render_unit() {
@@ -360,6 +370,12 @@ install_artifact() {
   rm -rf "$release_dir"
   mv "${stage}/${top}" "$release_dir"
   digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
+  ensure_service_identity
+  mkdir -p "$ETC_DIR" "$STATE_DIR" "$RUNTIME_DIR"
+  if [ -z "${NOOKBRIDGE_FAKE_ROOT:-}" ]; then
+    chown "$SERVICE_USER:$PRIVATE_GROUP" "$STATE_DIR" "$RUNTIME_DIR"
+    chmod 0750 "$STATE_DIR" "$RUNTIME_DIR"
+  fi
   activate_release "$version" "$release_dir"
   transaction_activated=1
   write_service_config
@@ -367,8 +383,8 @@ install_artifact() {
   [ -z "$db_key_file" ] || copy_protected_input 'database-key file' "$db_key_file" "${ETC_DIR}/db-key" 0400
   write_unit
   install_wrappers
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
   run_health_gate
   write_ledger "$version" "$digest"
   transaction_committed=1

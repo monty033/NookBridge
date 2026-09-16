@@ -232,6 +232,22 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     );
   });
 
+  it("provisions the daemon user and separate private/client groups", () => {
+    const source = readFileSync(installer, "utf8");
+
+    expect(source).toContain('groupadd --system "$SERVICE_GROUP"');
+    expect(source).toContain('useradd --system --home-dir "$STATE_DIR"');
+    expect(source).toContain('chown "$SERVICE_USER:$PRIVATE_GROUP" "$STATE_DIR"');
+  });
+
+  it("does not mask daemon activation failures", () => {
+    const source = readFileSync(installer, "utf8");
+    const activation = source.match(/systemctl enable --now[\s\S]{0,120}/)?.[0] ?? "";
+
+    expect(activation).toContain("systemctl enable --now");
+    expect(activation).not.toContain("|| true");
+  });
+
   it("exposes stable wrappers that always target /opt/nookbridge/current", () => {
     const source = readFileSync(installer, "utf8");
 
