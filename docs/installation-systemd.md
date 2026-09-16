@@ -51,8 +51,10 @@ The installer:
 5. creates the `nookbridge` service account, private group, and client group;
 6. writes `/etc/nookbridge/service.json` and protected credential inputs;
 7. installs the hardened `nookd.service` and stable `/usr/local/bin` wrappers;
-8. reloads and activates systemd; and
-9. runs the categorical health probe before committing installer state.
+8. enables the systemd unit; on a first install it leaves the daemon stopped until
+   provisioning completes, while upgrades activate it immediately;
+9. runs the categorical health probe before committing upgraded installer state;
+10. records the installer ledger.
 
 The installer writes its ledger to `/etc/nookbridge/installer-state.json`.
 Existing unmanaged `nookd.service` units are rejected. No state or credential

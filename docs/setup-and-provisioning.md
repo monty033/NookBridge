@@ -30,10 +30,10 @@ After successful provisioning, run the separate root-operated wrapper:
 nookbridge-sync
 ```
 
-This wrapper performs the bridge's fetch-only synchronization path. It must not
-be replaced by a generic or full-sync command. Once it completes, restart or
-start `nookd` through the host deployment and verify the approved MCP client
-can connect to the Unix socket.
+The provisioning wrapper starts `nookd` automatically after successful
+authentication. The sync wrapper performs the bridge's fetch-only synchronization
+path and must not be replaced by a generic or full-sync command. Once it
+completes, verify the approved MCP client can connect to the Unix socket.
 
 ## Routine operation
 

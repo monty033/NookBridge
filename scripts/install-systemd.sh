@@ -453,8 +453,12 @@ install_artifact() {
   write_unit
   install_wrappers
   systemctl daemon-reload >/dev/null 2>&1
-  systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
-  run_health_gate
+  if [ -n "$transaction_previous_target" ]; then
+    systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
+    run_health_gate
+  else
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  fi
   write_ledger "$version" "$digest"
   transaction_committed=1
   trap - EXIT
