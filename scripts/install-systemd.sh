@@ -85,7 +85,7 @@ require_root() {
 
 require_commands() {
   local name
-  for name in awk chown cut date dirname find flock getent grep groupadd install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl systemd-run tar useradd; do
+  for name in awk chown cut date dirname find flock getent grep groupadd install ln mkdir mktemp mv readlink rm sha256sum sed sleep sort stat systemctl systemd-run tar useradd; do
     if [ "$name" = 'systemd-run' ] && [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ]; then
       continue
     fi
@@ -378,14 +378,20 @@ install_wrappers() {
 }
 
 run_health_gate() {
-  local fake_bin="${NOOKBRIDGE_FAKE_BIN:-}"
-  if [ -n "$fake_bin" ] && [ -x "${fake_bin}/nookbridge-health" ]; then
-    PATH="${fake_bin}:$PATH" nookbridge-health --socket "$SOCKET_PATH" >/dev/null 2>&1 \
-      || die 'health check failed; rollback restored previous release'
-  elif command -v nookbridge-health >/dev/null 2>&1; then
-    nookbridge-health --socket "$SOCKET_PATH" >/dev/null 2>&1 \
-      || die 'health check failed; rollback restored previous release'
-  fi
+  local fake_bin="${NOOKBRIDGE_FAKE_BIN:-}" attempt
+  for ((attempt = 1; attempt <= 30; attempt += 1)); do
+    if systemctl is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
+      if [ -n "$fake_bin" ] && [ -x "${fake_bin}/nookbridge-health" ]; then
+        PATH="${fake_bin}:$PATH" nookbridge-health --socket "$SOCKET_PATH" >/dev/null 2>&1 && return 0
+      elif command -v nookbridge-health >/dev/null 2>&1; then
+        nookbridge-health --socket "$SOCKET_PATH" >/dev/null 2>&1 && return 0
+      else
+        return 0
+      fi
+    fi
+    [ "$attempt" -lt 30 ] && sleep 1
+  done
+  die 'health gate timed out; rollback restored previous release'
 }
 
 install_artifact() {
@@ -447,8 +453,12 @@ install_artifact() {
   write_unit
   install_wrappers
   systemctl daemon-reload >/dev/null 2>&1
-  systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
-  run_health_gate
+  if [ -n "$transaction_previous_target" ]; then
+    systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
+    run_health_gate
+  else
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  fi
   write_ledger "$version" "$digest"
   transaction_committed=1
   trap - EXIT

@@ -250,6 +250,20 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     expect(source).toContain('"notes.get"');
     expect(source).toContain('"notes.path_diagnostic"');
   });
+  it("polls bounded daemon readiness before failing the health gate", () => {
+    const source = readFileSync(installer, "utf8");
+
+    expect(source).toContain("systemctl is-active --quiet");
+    expect(source).toContain("sleep 1");
+    expect(source).toContain("health gate timed out");
+  });
+  it("defers first-install daemon activation until provisioning", () => {
+    const source = readFileSync(installer, "utf8");
+
+    expect(source).toContain('if [ -n "$transaction_previous_target" ]; then');
+    expect(source).toContain('systemctl enable "$SERVICE_NAME"');
+    expect(source).toContain('systemctl enable --now "$SERVICE_NAME"');
+  });
   it("does not mask daemon activation failures", () => {
     const source = readFileSync(installer, "utf8");
     const activation = source.match(/systemctl enable --now[\s\S]{0,120}/)?.[0] ?? "";

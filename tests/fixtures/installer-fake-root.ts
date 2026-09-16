@@ -203,6 +203,9 @@ export function createInstallerFakeRoot(
     { mode: 0o755 },
   );
 
+  const sleepPath = join(binDir, "sleep");
+  writeFileSync(sleepPath, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
   const installerStatePath = join(etcDir, "installer-state.json");
 
   const env: Record<string, string> = {
