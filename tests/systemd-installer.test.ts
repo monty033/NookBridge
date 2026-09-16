@@ -268,6 +268,7 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     expect(source).toContain("--pty --wait --collect");
     expect(source).toContain("--setenv=${gate}=1");
     expect(source).toContain("--property=LoadCredential=nookbridge-db-key:");
+    expect(source).toContain('"--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"');
     expect(source).toContain("nookbridge-provision");
     expect(source).toContain("nookbridge-sync");
   });

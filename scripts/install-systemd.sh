@@ -331,7 +331,7 @@ install_operator_wrapper() {
       '  --property=PrivateTmp=yes' \
       '  --property=PrivateDevices=yes' \
       '  --property=NoNewPrivileges=yes' \
-      '  --property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+      '  "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"' \
       '  --property=RestrictNamespaces=yes' \
       '  --property=CapabilityBoundingSet=' \
       '  --property=AmbientCapabilities=' \
