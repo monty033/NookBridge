@@ -36,6 +36,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "artifact:linux": "bash scripts/build-linux-artifact.sh",
+    "artifact:verify": "bash scripts/verify-linux-artifact.sh",
     "nookd": "node dist/nookd.js"
   },
   "dependencies": {

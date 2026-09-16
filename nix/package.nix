@@ -69,6 +69,10 @@ buildNpmPackage rec {
       --add-flags "$out/libexec/nookbridge/dist/provision.js"
     makeWrapper ${nodejs_22}/bin/node "$out/bin/nookbridge-sync-cli" \
       --add-flags "$out/libexec/nookbridge/dist/sync.js"
+    makeWrapper ${nodejs_22}/bin/node "$out/bin/nookbridge-runtime-check" \
+      --add-flags "$out/libexec/nookbridge/dist/runtime-check.js"
+    makeWrapper ${nodejs_22}/bin/node "$out/bin/nookbridge-health" \
+      --add-flags "$out/libexec/nookbridge/dist/health.js"
 
     runHook postInstall
   '';
