@@ -28,6 +28,7 @@ function createSourceFixture(): { source: string; nodeRuntime: string; output: s
   writeFileSync(join(source, "dist", "health.js"), "console.log('health')\n");
   writeFileSync(join(source, "dist", "runtime-check.js"), "console.log('runtime-check')\n");
   writeFileSync(join(source, "node_modules", "native", "addon.node"), "native\n");
+  symlinkSync("addon.node", join(source, "node_modules", "native", "link.node"));
   writeFileSync(join(source, "package.json"), '{"name":"nookbridge","version":"0.0.0-stage.0"}\n');
   writeFileSync(join(source, "package-lock.json"), '{"name":"nookbridge","lockfileVersion":3}\n');
   writeFileSync(join(source, "LICENSE"), "GPL-3.0-or-later\n");
@@ -86,6 +87,16 @@ describe("Linux artifact builder", () => {
     expect(members).toContain("nookbridge-v1.2.3/bin/nookd");
     expect(members).toContain("nookbridge-v1.2.3/runtime/bin/node");
     expect(members).toContain("nookbridge-v1.2.3/app/node_modules/native/addon.node");
+    expect(members).toContain("nookbridge-v1.2.3/app/node_modules/native/link.node");
+    expect(
+      execFileSync(
+        "tar",
+        ["-xOzf", artifact, "nookbridge-v1.2.3/app/node_modules/native/link.node"],
+        {
+          encoding: "utf8",
+        },
+      ),
+    ).toBe("native\n");
     expect(members).not.toContain("/nix/store");
   });
 

@@ -116,7 +116,15 @@ done
 
 while IFS= read -r link_path; do
   [[ -z "$link_path" ]] || fail
-done < <(find "$source_dir/dist" "$source_dir/node_modules" -type l -print 2>/dev/null)
+done < <(find "$source_dir/dist" -type l -print 2>/dev/null)
+while IFS= read -r link_path; do
+  [[ -z "$link_path" ]] && continue
+  resolved_link=$(readlink -f "$link_path" 2>/dev/null) || fail
+  case "$resolved_link" in
+    "$source_dir/node_modules"/*) ;;
+    *) fail ;;
+  esac
+done < <(find "$source_dir/node_modules" -type l -print 2>/dev/null)
 
 package_lock_digest=$(sha256sum "$source_dir/package-lock.json" 2>/dev/null | cut -d ' ' -f1) || fail
 [[ "$package_lock_digest" =~ ^[0-9a-f]{64}$ ]] || fail
@@ -129,7 +137,7 @@ release_root="$stage_dir/$release_root_name"
 mkdir -p "$release_root/app" "$release_root/bin" "$release_root/runtime/bin" "$release_root/licenses"
 
 cp -a "$source_dir/dist" "$release_root/app/dist"
-cp -a "$source_dir/node_modules" "$release_root/app/node_modules"
+cp -RLp "$source_dir/node_modules" "$release_root/app/node_modules"
 cp -a "$source_dir/package.json" "$release_root/app/package.json"
 cp -a "$source_dir/LICENSE" "$release_root/licenses/LICENSE"
 cp "$node_runtime_real" "$release_root/runtime/bin/node"
