@@ -1,4 +1,4 @@
-# NookBridge — pinned versions (Stage 9 review baseline)
+# NookBridge — pinned versions and deployment identity
 
 This file is the single human-readable record of every external version
 NookBridge pins in `package.json` and `flake.nix`. It is the source of
@@ -68,14 +68,17 @@ during Stage 0; any refresh must be a deliberate, reviewed commit.
 
 | Item | Value |
 |---|---|
-| Source candidate under Stage 9 review | historical `94ad5c0a` (socket-mode hardening and evidence ledger) |
-| NookBridge source revision currently deployed | `9260c6c507db02555046a905d8e7d77ad74865f0` (PR #59 merge) |
-| Nix pin-change merge applied by deployment | `1ec85850aad321fe339fe215b8d0b18e20f5e701` (nix-config PR #302; head `fe951b6aabde4bcb8d8a7d4a0c843002cb98a8b9`) |
+| Historical Stage 9 review candidate | `94ad5c0a` (socket-mode hardening and evidence ledger) |
+| NookBridge source revision currently deployed | `804e9c61a4bef3b35c68fa475589fdb7729d910d` (PR #101 merge) |
+| Nix pin-change merge applied by deployment | `c1a702ccd23989a557175312b934eab815fc9b52` (nix-config PR #338; head `2de4dd5774f9fb18d3afc2bc1f08186d376c9a3f`) |
 | Branch | `main` |
 | Package version | `0.0.0-stage.0` (`private: true`; internal Nix artifact, not a public release) |
 
-The earlier `94ad5c0a` and `1f433a42` values in older receipts are historical
-Stage 9 review baselines. The current deployed derivation is recorded in the
-addenda in `docs/engineering/stages/stage-9-source-evidence.md` and `docs/engineering/stages/stage-9-canary.md`.
+The earlier `94ad5c0a`, `1f433a42`, `9260c6c5`, and `1ec85850` values in older
+receipts are historical baselines. The current deployed derivation and
+rollout evidence are recorded in the 2026-09-16 addenda in
+`docs/implementation-plan-v1.5.md`,
+`docs/engineering/stages/stage-9-source-evidence.md`, and
+`docs/engineering/stages/stage-9-canary.md`.
 Public distribution remains blocked on the licensing and release-identity
 review.

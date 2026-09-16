@@ -15,6 +15,12 @@ and currently supported production path. Conventional systemd Linux and Docker
 are planned portability targets, not supported installation paths. Read the
 [getting-started guide](docs/getting-started.md) before attempting a deployment.
 
+The current deployed rollout includes bounded compensation for partial note
+updates and has completed its authorized sync reconciliation. The broader
+production-MVP release gates remain open; see [project status](docs/project-status.md)
+and the [implementation plan](docs/implementation-plan-v1.5.md#1315-current-rollout-closure--update-compensation-and-reconciliation)
+for the exact boundary.
+
 ## Start here
 
 - [Documentation home](docs/index.md) — choose an operator, user, or contributor path.

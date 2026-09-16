@@ -20,7 +20,21 @@
 - **PR #28 — logger-path privacy hardening:** merged at `d7155ce`. It constructs the production write runtime without an injected logger so persistent-storage path records remain suppressed by the warn-level fallback. The black-box regression checks built CLI output and cleanup rather than source text.
 - **Current remote-executor slice:** adds an encrypted, restart-safe metadata state store under the fixed `nookbridge:sync-coordinator-state:v1` key; shares one bounded `SyncCoordinator` between local-write composition and a separately named `NotesnookLiveRemoteSyncCapability`; captures only the bound `syncer.start` method; and invokes it internally with exactly `{ type: "full" }`.
 - **Offline and live receipts for the current Stage 4 slice:** 15/15 focused remote-executor/state/command tests, 101/101 targeted Stage 3/4 boundary tests, and 602/602 full tests across 23 files; strict typecheck, lint, format check, build, and `just check` passed. On 2026-08-30, an operator-local canary using an existing authenticated state reported `local-committed` with `remote: pending`, then explicit `nookctl write sync` reported `remote: synced`, `pending: no`, and `attempts: 1`; the user verified the note on Android. No broader live-account coverage is claimed.
-- **Current slice status:** the explicit remote executor and `nookctl write sync` command are implemented and verified offline plus the operator-local canary; PR #29 is open. The local-state conflict observer remains deferred.
+- **Historical slice status:** the explicit remote executor and `nookctl write sync` command were implemented and verified offline plus the operator-local canary; PR #29 was the historical source slice. The local-state conflict observer remains deferred.
+
+### Current rollout reconciliation (2026-09-16)
+
+The later source/deployment sequence has superseded the old PR #29 status:
+
+- PRs #99–#101 are merged; revision advancement and bounded create/update
+  compensation are shipped on source `804e9c61`.
+- Deployment PR #338 repinned the reference NixOS system and was rebuilt.
+- The authorized global sync completed once and read-back is clean:
+  `pendingSync=false`, `hasUnsyncedChanges=false`.
+
+This reconciles the Stage 4 implementation/deployment slice only. The broader
+production-MVP acceptance gates and the local-state conflict observer remain
+separate work in the implementation plan.
 
 ## Current bounded slice — compose local writes with pending sync metadata
 

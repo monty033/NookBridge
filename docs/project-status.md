@@ -16,6 +16,27 @@ make it safe or supported in every deployment.
 | Conventional Linux and Docker | Planned portability targets. | Do not treat them as supported installation paths yet. |
 | macOS and Windows | Explicit non-goals. | No support commitment. |
 
+## Current deployed rollout — 2026-09-16
+
+The update-compensation rollout is deployed and reconciled on the reference
+NixOS host:
+
+- Source PR #101 merged at `804e9c61`; deployment PR #338 merged at
+  `c1a702cc`.
+- Bounded update compensation covers metadata, notebook, tag-relation, and
+  content failure boundaries, including relation-inspection failure.
+- `nookd`, Hermes Agent, and the dashboard are active; MCP exposes nine tools;
+  `nookctl doctor` reports zero failures.
+- The explicitly authorized global sync completed in one attempt;
+  `pendingSync=false` and `hasUnsyncedChanges=false` on read-back.
+- The protected `Vault-locked-note canary` remains visible by title.
+
+This closes the implementation/deployment/reconciliation workstream only. It
+does not close the broader production-MVP release gate. The remaining
+production-shaped atomicity, recovery, privileged-scan, outsider-boundary,
+long-duration stress, and dependency/license sign-off work is tracked in the
+[implementation plan](implementation-plan-v1.5.md#1314-fresh-astra-re-baseline--current-production-mvp-blockers).
+
 ## Reading status claims safely
 
 “Implemented” means the repository contains the capability and its boundary

@@ -66,7 +66,7 @@ evidence. The current-pin VM check and remote-deletion canary are recorded in
 `docs/engineering/stages/stage-9-source-evidence.md`, but the throwaway-state recovery exercise
 remains open.
 
-## Current-pin throwaway-state drill (2026-09-07)
+## Historical current-pin throwaway-state drill (2026-09-07)
 
 Source/deployed revision: NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`.
 
@@ -82,3 +82,15 @@ Source/deployed revision: NookBridge `9260c6c507db02555046a905d8e7d77ad74865f0`.
 This closes the throwaway-state CLI exercise only. The clean NixOS VM drill,
 privileged production-state recovery, and post-recovery target-host policy and
 no-`notes.delete` checks remain open.
+
+## Current deployment note (2026-09-16)
+
+The reference deployment now consumes source PR #101 merge `804e9c61` through
+nix-config PR #338 merge `c1a702cc`; the rebuilt runtime is healthy and its
+post-deployment sync reconciliation is clean. No recovery workflow was run in
+that rollout, and no recovery gate is being inferred from service health or
+the successful sync.
+
+The clean VM recovery drill, production-shaped database-bundle recovery,
+post-recovery policy checks, and resync evidence remain open exactly as stated
+above.

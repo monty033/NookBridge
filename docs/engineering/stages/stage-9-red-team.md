@@ -11,7 +11,7 @@ This report records bounded, source-level evidence. It is not a release approval
 The full Stage 9 gate remains fail-closed until the target-host canary and
 recovery drill are completed.
 
-> **Current-pin note (2026-09-07):** RT-1..RT-10 below are historical evidence
+> **Historical current-pin note (2026-09-07):** RT-1..RT-10 below are historical evidence
 > for `94ad5c0a` under a `readOnly` deployment profile. They are not evidence
 > for deployed `9260c6c507db02555046a905d8e7d77ad74865f0`, whose production policy is `readWriteNoDelete`.
 
@@ -291,7 +291,7 @@ Decision: **PASS**. The RT-11 local-write race is closed; the live race
 fires the revision gate through the daemon's pre-existing
 request-budget layer.
 
-## Current-pin operational scan addendum (2026-09-07)
+## Historical current-pin operational scan addendum (2026-09-07)
 
 ### RT-4 — target-host bounded resource soak
 
@@ -375,10 +375,24 @@ errors to Hermes. The agent could not change identity to an actual non-member
 user (`setresuid` was not permitted), so outsider connection denial was not
 independently rerun. Decision: **OPEN**.
 
-## Current-pin decision
+## Historical current-pin decision (2026-09-08)
 
 The current source, isolation VM, live remote-reconciliation, bounded soak,
 RT-11 local-write race, and service-owned plaintext-scan evidence are fresh.
 Stage 9 remains **FAIL — release blocked** until the privileged RT-6/RT-8/RT-9
 checks, recovery VM/post-recovery checks, and dependency/license human sign-off
 are complete.
+
+## Current deployment reconciliation (2026-09-16)
+
+The red-team receipts above remain bound to their named historical snapshots,
+including the 2026-09-07/08 `9260c6c5` and `78ed6c0a` deployments. The current
+reference deployment consumes source PR #101 merge `804e9c61` through
+nix-config PR #338 merge `c1a702cc`.
+
+The current rollout performed only read-only health checks plus one explicitly
+authorized global sync. Services remained healthy, sync read-back was clean,
+and the protected locked-note canary remained visible. No new red-team,
+mutation, destructive, outsider-identity, recovery, or failure-injection probe
+was performed, so this reconciliation does not change the Stage 9 release
+decision or close any outstanding red-team gate.

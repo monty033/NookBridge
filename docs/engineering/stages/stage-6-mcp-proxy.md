@@ -88,12 +88,19 @@ bounded write tools while preserving the Stage 6 transport and isolation model:
   closed patch containing only `title`, `content`, `notebookId`, `tags`,
   `pinned`, or `favorite`; transport: `notes.update`.
 
-The current MCP surface therefore contains exactly seven tools: the four
-Stage 6 read tools plus these three writes. There is still no delete tool;
+At the time of this historical Stage 7 addendum, the MCP surface contained
+exactly seven tools: the four Stage 6 read tools plus these three writes. There
+was still no delete tool;
 `notes.delete` is absent from the RPC method union and every MCP allowlist.
 The `readOnly` profile admits only reads. `readWriteNoDelete` admits create,
 append, and update in addition to reads. `custom` remains an explicit closed
 allowlist selected by service configuration.
+
+The later current compiled surface is documented in
+[`docs/reference/mcp-tools.md`](../../reference/mcp-tools.md) and currently
+contains nine tools, including the separately gated exact-path delete and
+explicit synchronization capabilities. This historical record does not claim
+that the seven-tool Stage 7 snapshot is the current deployment.
 
 Write results are projected to bounded identifiers, byte counts, and applied
 field names. Raw note content, patches, adapter errors, internal lifecycle

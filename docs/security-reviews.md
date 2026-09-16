@@ -632,7 +632,7 @@ surface after PR #51 merged. It is not a VM receipt or production approval.
 
 Canonical source receipt: `docs/engineering/stages/stage-9-source-evidence.md`.
 
-## Stage 9 current deployed-pin evidence addendum (2026-09-07)
+## Stage 9 historical deployed-pin evidence addendum (2026-09-07)
 
 This entry records fresh evidence after NookBridge PR #59 and nix-config PR #302
 were applied and deployed. The NookBridge change is PR #59 merge
@@ -690,3 +690,26 @@ production recovery gates.
 **NOT CLOSED / release blocked** pending RT-11 live-race follow-up, privileged
 RT-6/RT-8/RT-9 scans, clean recovery VM and post-recovery target-host checks,
 and human/legal license sign-off.
+
+## Stage 9 current rollout reconciliation (2026-09-16)
+
+This entry supersedes the PR #302-era deployed-pin identity for current status;
+the preceding entries remain historical security evidence for their named
+snapshots.
+
+- **Source/deployment:** NookBridge PR #101 merged at `804e9c61`; nix-config
+  PR #338 merged at `c1a702cc` and was rebuilt.
+- **Runtime:** the active NookBridge package is
+  `/nix/store/ry4m6fs6pjqngxxampx9lgj8xs8a30f4-nookbridge-0.0.0-stage.0`;
+  `nookd`, Hermes Agent, and the dashboard are active; `nookd` reports success
+  with zero restarts; MCP exposes nine tools.
+- **Source evidence:** the shipped update-compensation snapshot passed 70
+  files / 1,922 tests, both TypeScript checks, build, lint, Prettier, and diff
+  checks.
+- **Reconciliation:** one explicitly authorized global sync returned `synced`
+  in one attempt; read-back returned `pendingSync=false` and
+  `hasUnsyncedChanges=false`; the protected `Vault-locked-note canary` remains
+  visible by title.
+- **Scope:** no mutation, destructive probe, red-team probe, recovery drill,
+  or live failure injection was performed in this reconciliation. The broader
+  Stage 9 security and release gates remain unchanged and open.
