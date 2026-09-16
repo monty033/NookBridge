@@ -154,6 +154,16 @@ describe("generic systemd installer — health rollback and retention", () => {
 
     expect(result.status).toBe(0);
     expect(readlinkSync(join(ctx.optDir, "current"))).toBe("releases/1.2.3");
+    const serviceConfig = JSON.parse(readFileSync(join(ctx.etcDir, "service.json"), "utf8")) as {
+      readPolicy?: unknown;
+    };
+    expect(serviceConfig.readPolicy).toEqual([
+      "notes.search",
+      "notes.status",
+      "notes.list_notebooks",
+      "notes.get",
+      "notes.path_diagnostic",
+    ]);
     expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-provision")).isSymbolicLink()).toBe(
       false,
     );

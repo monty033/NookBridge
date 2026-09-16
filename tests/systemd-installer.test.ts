@@ -240,6 +240,16 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     expect(source).toContain('chown "$SERVICE_USER:$PRIVATE_GROUP" "$STATE_DIR"');
   });
 
+  it("writes the default closed read policy into service config", () => {
+    const source = readFileSync(installer, "utf8");
+
+    expect(source).toContain('"readPolicy"');
+    expect(source).toContain('"notes.search"');
+    expect(source).toContain('"notes.status"');
+    expect(source).toContain('"notes.list_notebooks"');
+    expect(source).toContain('"notes.get"');
+    expect(source).toContain('"notes.path_diagnostic"');
+  });
   it("does not mask daemon activation failures", () => {
     const source = readFileSync(installer, "utf8");
     const activation = source.match(/systemctl enable --now[\s\S]{0,120}/)?.[0] ?? "";

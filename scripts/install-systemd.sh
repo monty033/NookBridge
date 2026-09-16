@@ -242,7 +242,14 @@ write_service_config() {
     '  "socketGroup": "nookbridge-clients",' \
     '  "backend": "systemd-credential",' \
     '  "credentialName": "nookbridge-db-key",' \
-    '  "settingsBackend": "cli"' \
+    '  "settingsBackend": "cli",' \
+    '  "readPolicy": [' \
+    '    "notes.search",' \
+    '    "notes.status",' \
+    '    "notes.list_notebooks",' \
+    '    "notes.get",' \
+    '    "notes.path_diagnostic"' \
+    '  ]' \
     '}' >"$temporary"
   chmod 0644 "$temporary"
   mv -f "$temporary" "${ETC_DIR}/service.json"
