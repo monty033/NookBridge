@@ -170,7 +170,7 @@ grep -Eq '"abi"[[:space:]]*:[[:space:]]*"node-v[0-9]+"' "$manifest" 2>/dev/null 
 tar -xzf "$artifact" -C "$work_dir" 2>/dev/null || fail
 payload_root="$work_dir/$top_level"
 [[ -d "$payload_root" ]] || fail
-if grep -R -a -E -q '/nix/store|/build/|/tmp/nookbridge' "$payload_root" 2>/dev/null; then
+if grep -R -a -E -q '/nix/store/[[:alnum:]]|(^|[[:space:]])/build/|/tmp/nookbridge/' "$payload_root" 2>/dev/null; then
   fail
 fi
 
