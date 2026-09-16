@@ -10,14 +10,15 @@ from the credential-bearing Notesnook client.
 | --- | --- |
 | Understanding the motivation and design | [Background and intent](background.md) and [architecture](architecture.md) |
 | Evaluating whether NookBridge is appropriate | [Getting started](getting-started.md), [project status](project-status.md), and [security and privacy](security-and-privacy.md) |
-| Operating the reference NixOS deployment | [NixOS installation](installation-nixos.md), then [setup and provisioning](setup-and-provisioning.md) |
+| Installing on NixOS | [NixOS installation](installation-nixos.md), then [setup and provisioning](setup-and-provisioning.md) |
+| Installing on another systemd Linux distribution | [Generic systemd installation](installation-systemd.md), then [setup and provisioning](setup-and-provisioning.md) |
 | Connecting an authorized local MCP client | [Usage](usage.md) and the [MCP proxy contract](engineering/stages/stage-6-mcp-proxy.md) |
 | Maintaining the service or deployment | [Configuration](configuration.md), [troubleshooting](troubleshooting.md), and [development](development.md) |
 
 ## Support boundary
 
-The reference deployment is NixOS. Conventional systemd Linux and Docker are
-design targets, not supported production installation methods. NookBridge is
+The reference deployment is NixOS. Generic systemd Linux is an experimental
+pre-alpha installation method; Docker remains a design target. NookBridge is
 not an official Notesnook product. Do not treat implementation-stage records as
 operator instructions unless a user guide links to them explicitly.
 

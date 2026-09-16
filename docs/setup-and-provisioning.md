@@ -5,7 +5,7 @@ an MCP capability and must never be delegated to an agent.
 
 ## First provisioning
 
-On the NixOS reference host, use a real host TTY as root:
+On the deployed host, use a real host TTY as root:
 
 ```text
 nookbridge-provision
@@ -17,9 +17,10 @@ tokens, or account names through command arguments, environment variables, or
 configuration files.
 
 The command runs as the protected service identity and uses the same
-systemd-delivered database credential as `nookd`. Development commands such as
-`nookctl auth live-login` are not substitutes for production provisioning:
-they can use a separate development store.
+systemd-delivered database credential as `nookd`. This is true for both the
+NixOS reference deployment and the generic systemd installation. Development
+commands such as `nookctl auth live-login` are not substitutes for production
+provisioning: they can use a separate development store.
 
 ## Initial read-only synchronization
 

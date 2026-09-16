@@ -12,6 +12,11 @@ deployment repository, separate from this application repository. This is
 intentional: deployment secrets and host-specific state must never be committed
 here.
 
+For a non-NixOS Linux host that still uses Nix for reproducible application
+packaging, use the [generic systemd installation](installation-systemd.md).
+That installer does not use NixOS module evaluation; it creates the equivalent
+systemd boundary explicitly.
+
 ## Required deployment properties
 
 Before provisioning, verify that the host deployment provides all of the
