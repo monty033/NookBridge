@@ -162,7 +162,6 @@ export function createInstallerFakeRoot(
     runtimeDir,
     systemdDir,
     usrLocalBinDir,
-    join(optDir, "current"),
   ]) {
     mkdirSync(directory, { recursive: true });
   }

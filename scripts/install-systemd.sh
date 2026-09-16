@@ -85,7 +85,7 @@ require_root() {
 
 require_commands() {
   local name
-  for name in awk cut date dirname flock grep install ln mkdir mktemp mv rm sha256sum sed stat systemctl tar; do
+  for name in awk cut date dirname find flock grep install ln mkdir mktemp mv readlink rm sha256sum sed sort stat systemctl tar; do
     command -v "$name" >/dev/null 2>&1 || die "required command is unavailable: ${name}"
   done
 }
@@ -268,6 +268,33 @@ activate_release() {
   mv -Tf "$next_link" "$CURRENT_LINK"
 }
 
+transaction_previous_target=''
+transaction_activated=0
+transaction_committed=0
+
+restore_previous_release() {
+  local rollback_link
+  rollback_link="${OPT_DIR}/.rollback.$$"
+  rm -f "$rollback_link"
+  if [ -n "$transaction_previous_target" ]; then
+    ln -s "$transaction_previous_target" "$rollback_link"
+    mv -Tf "$rollback_link" "$CURRENT_LINK"
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+  else
+    rm -f "$CURRENT_LINK"
+  fi
+}
+
+transaction_exit() {
+  local status="$?"
+  if [ "$transaction_activated" -eq 1 ] && [ "$transaction_committed" -eq 0 ]; then
+    restore_previous_release
+    printf '%s\n' 'health check failed; rollback restored previous release' >&2
+  fi
+  trap - EXIT
+  exit "$status"
+}
+
 install_wrappers() {
   local name
   # Stable nookd wrapper target: current/bin/
@@ -299,6 +326,14 @@ install_artifact() {
   flock -n "$lock_fd" || die 'flock: installer already locked'
   printf '%s\n' 'flock: installer transaction acquired'
 
+  transaction_previous_target=''
+  if [ -L "$CURRENT_LINK" ]; then
+    transaction_previous_target="$(readlink "$CURRENT_LINK")"
+  fi
+  transaction_activated=0
+  transaction_committed=0
+  trap transaction_exit EXIT
+
   if [ -n "$manifest_file" ]; then
     validate_manifest_file "$manifest_file"
   fi
@@ -326,6 +361,7 @@ install_artifact() {
   mv "${stage}/${top}" "$release_dir"
   digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
   activate_release "$version" "$release_dir"
+  transaction_activated=1
   write_service_config
   [ -z "$settings_file" ] || copy_protected_input 'settings file' "$settings_file" "${ETC_DIR}/settings.json" 0640
   [ -z "$db_key_file" ] || copy_protected_input 'database-key file' "$db_key_file" "${ETC_DIR}/db-key" 0400
@@ -335,6 +371,8 @@ install_artifact() {
   systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   run_health_gate
   write_ledger "$version" "$digest"
+  transaction_committed=1
+  trap - EXIT
   printf '%s\n' 'nookbridge artifact install ok'
 }
 
@@ -353,9 +391,37 @@ rollback_release() {
 }
 
 prune_releases() {
-  local keep="$1"
+  local keep="$1" current_version previous_version version keep_file kept
   [[ "$keep" =~ ^[0-9]+$ ]] || die 'prune --keep must be a non-negative integer'
   [ "$keep" -ge 2 ] || die 'prune refuses to remove current or immediate previous release; retain at least 2'
+  keep_file="$(mktemp)"
+  current_version=''
+  previous_version=''
+  if [ -L "$CURRENT_LINK" ]; then
+    current_version="$(basename "$(readlink "$CURRENT_LINK")")"
+    printf '%s\n' "$current_version" >>"$keep_file"
+  fi
+  if [ -f "$INSTALLER_STATE" ]; then
+    previous_version="$(json_top_level_string previousVersion "$INSTALLER_STATE" || true)"
+    if [ -n "$previous_version" ] && ! grep -Fxq "$previous_version" "$keep_file"; then
+      printf '%s\n' "$previous_version" >>"$keep_file"
+    fi
+  fi
+  kept="$(wc -l <"$keep_file")"
+  while IFS= read -r version; do
+    [ "$kept" -ge "$keep" ] && break
+    if ! grep -Fxq "$version" "$keep_file"; then
+      printf '%s\n' "$version" >>"$keep_file"
+      kept=$((kept + 1))
+    fi
+  done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -Vr)
+  while IFS= read -r version; do
+    [ -n "$version" ] || continue
+    if ! grep -Fxq "$version" "$keep_file"; then
+      rm -rf "${RELEASES_DIR}/${version}"
+    fi
+  done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null)
+  rm -f "$keep_file"
   printf 'nookbridge prune retain %s releases\n' "$keep"
 }
 
