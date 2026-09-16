@@ -14,8 +14,9 @@
 # so the devShell and any future flake outputs are byte-reproducible from this
 # commit. Do NOT replace this with `nixpkgs/<branch>`.
 #
-# This flake intentionally does NOT build a package yet. Stage 0 only needs
-# a devShell; Stage 8 (NixOS package) adds a `packages.default`.
+# The flake exposes a Linux package for non-NixOS systemd hosts as well as
+# the pinned development shell. The package does not install or configure a
+# service by itself; use `scripts/install-systemd.sh` for that boundary.
 {
   description = "NookBridge — reproducible development baseline (Stage 0)";
 
@@ -33,7 +34,16 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       pkgsFor = system: import nixpkgs { inherit system; };
     in {
-      devShells = forAllSystems (system:
+      packages = forAllSystems (system:
+      let
+        pkgs = pkgsFor system;
+        nookbridge = pkgs.callPackage ./nix/package.nix { };
+      in {
+        inherit nookbridge;
+        default = nookbridge;
+      });
+
+    devShells = forAllSystems (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {
             name = "nookbridge-stage-0";

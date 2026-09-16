@@ -13,7 +13,8 @@ make it safe or supported in every deployment.
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
-| Conventional Linux and Docker | Planned portability targets. | Do not treat them as supported installation paths yet. |
+| Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
+| Docker | Planned portability target. | No Docker installation path yet. |
 | macOS and Windows | Explicit non-goals. | No support commitment. |
 
 ## Current deployed rollout — 2026-09-16

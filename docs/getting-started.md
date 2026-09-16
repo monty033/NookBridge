@@ -13,7 +13,8 @@ Notesnook integration for an authorized agent or another local MCP client.
 
 ## Before you begin
 
-- You administer the target NixOS host and can manage its deployment policy.
+- You administer the target NixOS host, or a systemd Linux host with Nix, and
+  can manage its deployment policy.
 - You can provide a protected interactive TTY for Notesnook provisioning.
 - You understand that any authorized MCP client can receive only the operations
   allowed by the root-owned service policy.
@@ -22,18 +23,19 @@ Notesnook integration for an authorized agent or another local MCP client.
 
 ## Supported status
 
-NookBridge is pre-alpha. The NixOS reference deployment is the only supported
-production path. Generic Linux packages, Docker, macOS, and Windows are not
-supported installation targets. Features and policy must be verified against
-the deployed configuration; do not assume that an experimental CLI command is
-enabled for a production daemon.
+NookBridge is pre-alpha. The NixOS reference deployment is the primary
+production path. A generic systemd Linux installer is available as an
+experimental path for Debian, Ubuntu, Fedora, and similar distributions with
+Nix. Docker, macOS, and Windows are not supported installation targets.
+Features and policy must be verified against the deployed configuration; do not
+assume that an experimental CLI command is enabled for a production daemon.
 
 ## Next steps
 
 1. Read [security and privacy](security-and-privacy.md) to confirm the trust
    model meets your needs.
-2. Follow [NixOS installation](installation-nixos.md) to establish the service
-   boundary.
+2. Follow [NixOS installation](installation-nixos.md), or [generic systemd
+   installation](installation-systemd.md), to establish the service boundary.
 3. Complete [setup and provisioning](setup-and-provisioning.md) from a real
    host TTY.
 4. Connect the approved MCP client using [usage](usage.md).

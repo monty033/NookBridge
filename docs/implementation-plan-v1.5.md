@@ -1314,6 +1314,12 @@ Immediately after the NixOS production MVP, validate portability in two steps wi
 
 Portability work must fix NixOS assumptions by moving them into deployment configuration/adapters, not by forking application behavior. macOS, Windows, and Kubernetes are explicitly out of scope.
 
+The first conventional-Linux implementation slice is now present: the source
+flake exposes a reproducible Linux package and `scripts/install-systemd.sh`
+installs the package behind a dedicated user, Unix socket, protected state
+directory, and systemd credential boundary. This starts the L1 work; it does
+not close the L1 acceptance gate or declare generic-Linux production support.
+
 | **Portability gate** | **Pass condition** |
 |---|---|
 | Linux L1 | Same `nookd`/RPC behavior on a conventional systemd Linux host; dedicated service identity and socket/state isolation preserved; live sync, corruption recovery, canary scan, and LLM red-team suite pass. |

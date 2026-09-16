@@ -28,8 +28,9 @@ reviewed; it is not part of the `readWriteNoDelete` profile.
 
 ## Settings
 
-Nix-managed installations keep settings declarative in deployment
-configuration. CLI-managed installations can inspect, validate, edit, or reset
-their local settings through `nookctl settings`; that mode is not the NixOS
-reference deployment. See `nookctl settings help` for the installed binary's
-exact behavior.
+NixOS installations keep settings declarative in deployment configuration.
+Generic systemd installations use the supplied root-owned JSON file and mark
+the service configuration as CLI-managed. The root operator can inspect,
+validate, edit, or reset that file through `nookctl settings`; ordinary users
+must not be granted access to it. See `nookctl settings help` for the installed
+binary's exact behavior.
