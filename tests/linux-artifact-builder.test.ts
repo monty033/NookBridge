@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
@@ -16,6 +16,7 @@ function createSourceFixture(): { source: string; nodeRuntime: string; output: s
   const source = join(root, "source");
   const output = join(root, "output");
   const nodeRuntime = join(root, "node-runtime");
+  const realNodeRuntime = join(root, "node-runtime-real");
   mkdirSync(join(source, "dist", "mcp"), { recursive: true });
   mkdirSync(join(source, "dist"), { recursive: true });
   mkdirSync(join(source, "node_modules", "native"), { recursive: true });
@@ -31,10 +32,11 @@ function createSourceFixture(): { source: string; nodeRuntime: string; output: s
   writeFileSync(join(source, "package-lock.json"), '{"name":"nookbridge","lockfileVersion":3}\n');
   writeFileSync(join(source, "LICENSE"), "GPL-3.0-or-later\n");
   writeFileSync(
-    nodeRuntime,
+    realNodeRuntime,
     '#!/bin/sh\ncase "$1" in\n  --version) printf "v22.23.2\\n" ;;\n  -p) printf "127\\n" ;;\n  *) exit 1 ;;\nesac\n',
   );
-  execFileSync("chmod", ["0755", nodeRuntime]);
+  execFileSync("chmod", ["0755", realNodeRuntime]);
+  symlinkSync(realNodeRuntime, nodeRuntime);
   execFileSync("git", ["-C", source, "init", "-q"]);
   execFileSync("git", ["-C", source, "config", "user.email", "builder-test@example.invalid"]);
   execFileSync("git", ["-C", source, "config", "user.name", "NookBridge Builder Test"]);

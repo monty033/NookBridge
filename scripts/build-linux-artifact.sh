@@ -80,9 +80,10 @@ done
 [[ "$(uname -s 2>/dev/null)" == Linux ]] || fail
 [[ "$(uname -m 2>/dev/null)" == x86_64 ]] || fail
 [[ -d "$source_dir" && ! -L "$source_dir" ]] || fail
-[[ -f "$node_runtime" && ! -L "$node_runtime" && -x "$node_runtime" ]] || fail
+node_runtime_real=$(readlink -f "$node_runtime" 2>/dev/null) || fail
+[[ -f "$node_runtime_real" && ! -L "$node_runtime_real" && -x "$node_runtime_real" ]] || fail
 
-for command_name in cp date find git gzip mktemp sha256sum sort tar; do
+for command_name in cp date find git gzip mktemp readlink sha256sum sort tar; do
   command -v "$command_name" >/dev/null 2>&1 || fail
 done
 
@@ -91,9 +92,9 @@ is_clean=$(git -C "$source_dir" status --porcelain=v1 --untracked-files=all 2>/d
 git_commit=$(git -C "$source_dir" rev-parse --verify HEAD 2>/dev/null) || fail
 [[ "$git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
 
-node_version=$($node_runtime --version 2>/dev/null) || fail
+node_version=$($node_runtime_real --version 2>/dev/null) || fail
 [[ "$node_version" == v22.23.2 ]] || fail
-node_abi=$($node_runtime -p 'process.versions.modules' 2>/dev/null) || fail
+node_abi=$($node_runtime_real -p 'process.versions.modules' 2>/dev/null) || fail
 [[ "$node_abi" =~ ^[0-9]+$ ]] || fail
 
 required_paths=(
@@ -131,7 +132,7 @@ cp -a "$source_dir/dist" "$release_root/app/dist"
 cp -a "$source_dir/node_modules" "$release_root/app/node_modules"
 cp -a "$source_dir/package.json" "$release_root/app/package.json"
 cp -a "$source_dir/LICENSE" "$release_root/licenses/LICENSE"
-cp "$node_runtime" "$release_root/runtime/bin/node"
+cp "$node_runtime_real" "$release_root/runtime/bin/node"
 chmod 0555 "$release_root/runtime/bin/node"
 
 make_wrapper() {
