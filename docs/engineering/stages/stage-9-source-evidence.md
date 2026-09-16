@@ -140,7 +140,7 @@ The source pass does not close either operational gate.
 4. Treat any production edit canary as a separate explicit authorization and
    receipt; do not infer it from source or VM success.
 
-## Current deployed-pin addendum (2026-09-07)
+## Historical deployed-pin addendum (2026-09-07; superseded below)
 
 This addendum supersedes neither the historical receipts above nor their
 fail-closed decisions. It records fresh evidence for the deployed source and
@@ -171,3 +171,32 @@ keeps the remaining Stage 9 gates explicit.
 **Stage 9 production-MVP decision: NOT CLOSED.** The current source, VM, and
 remote-reconciliation evidence are fresh, but the red-team, recovery, and
 licensing gates remain fail-closed.
+
+## Current rollout reconciliation (2026-09-16)
+
+This addendum supersedes the 2026-09-07 deployed-pin identity for current
+status only. The older receipt remains historical evidence for the snapshot it
+names.
+
+- Source PR #101 is merged at `804e9c61a4bef3b35c68fa475589fdb7729d910d`.
+- Deployment PR #338 is merged at
+  `c1a702ccd23989a557175312b934eab815fc9b52`.
+- The active package is
+  `/nix/store/ry4m6fs6pjqngxxampx9lgj8xs8a30f4-nookbridge-0.0.0-stage.0`;
+  the active generation is
+  `/nix/store/2sn61q12x0325ijrl9byvacj88p8907s-nixos-system-unnamed-lxc-proxmox-26.05.20260910.d58a46e`.
+- Source verification for the shipped update-compensation snapshot passed:
+  70 files / 1,922 tests, both TypeScript checks, build, lint, Prettier, and
+  diff checks.
+- `nookd`, Hermes Agent, and the dashboard are active; `nookd` reports success,
+  exit status 0, and zero restarts. The connected MCP surface exposes nine
+  tools. `nookctl doctor` reports zero failures and two expected warnings.
+- One explicitly authorized global sync returned `synced` in one attempt;
+  read-back returned `pendingSync=false` and `hasUnsyncedChanges=false`.
+- The protected `Vault-locked-note canary` remains visible by title.
+- No note mutation, destructive probe, or live failure injection was used for
+  this rollout.
+
+These facts close the update-compensation deployment and reconciliation slice.
+They do not close the broader Stage 9 VM, privileged red-team, recovery, or
+licensing gates listed above.

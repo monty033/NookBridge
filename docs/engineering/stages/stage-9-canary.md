@@ -59,7 +59,7 @@ The external baseline result was insufficient for release approval until the
 source pin was updated, the VM check was rerun against the reviewed candidate,
 and the target-host canary was run against that same pin.
 
-## Current deployed-pin evidence (2026-09-07)
+## Historical deployed-pin evidence (2026-09-07; superseded below)
 
 Status: **PASS WITH FOLLOW-UP — Stage 9 release remains blocked**.
 
@@ -76,7 +76,7 @@ than a long-duration study; protected RT-6/RT-9 scans and RT-8 outsider checks
 remain incomplete; and the clean recovery VM, post-recovery checks, and license
 sign-off remain open.
 
-## Current-pin operational follow-up (2026-09-07)
+## Historical current-pin operational follow-up (2026-09-07)
 
 - **Bounded soak:** 100 rapid synthetic searches completed in 522 ms; 20
   succeeded and 80 returned the same bounded `service_unavailable` response;
@@ -100,7 +100,7 @@ sign-off remain open.
   `attempts:1`; exact-title search returned **0 hits**. The separate local-write
   race remains unexercised.
 
-## Current-pin follow-up (2026-09-08)
+## Historical current-pin follow-up (2026-09-08)
 
 NookBridge `78ed6c0adc08d25be167c26e65dbacd6432cdfdb` carries the PR-71
 `notesTouch` fix that closes the RT-11 local-write-race follow-up.
@@ -126,7 +126,7 @@ The RT-11 local-write-race follow-up is **closed**. Remaining open items
 on the plan: privileged plaintext/state/log scan, outsider recheck, clean VM
 recovery drill, post-recovery target-host checks, and license sign-off.
 
-## Current-pin follow-up (2026-09-08, RT-4 long soak)
+## Historical current-pin follow-up (2026-09-08, RT-4 long soak)
 
 - **Burst:** 1000 `notesnook_search_notes` calls spaced at 600 ms (target
   600 s); 1000 / 1000 success, 0 rejected, 0 errors; elapsed 602,714 ms
@@ -142,3 +142,20 @@ recovery drill, post-recovery target-host checks, and license sign-off.
   bounded resource usage on a single persistent connection. A multi-hour
   follow-up would be needed to characterize the long-tail slope of the
   ~9 KiB / call daemon-side growth.
+
+## Current rollout reconciliation (2026-09-16)
+
+The current deployment is source PR #101 merge `804e9c61`, consumed by
+nix-config PR #338 merge `c1a702cc`. The rebuilt package and generation are
+recorded in the current implementation-plan and source-evidence addenda.
+
+Read-only post-deployment checks confirmed that all three services are active,
+the MCP surface exposes nine tools, `nookctl doctor` has zero failures, and the
+protected `Vault-locked-note canary` remains visible. One explicitly authorized
+global sync returned `synced` in one attempt; subsequent status returned
+`pendingSync=false` and `hasUnsyncedChanges=false`.
+
+No note mutation, destructive probe, or failure injection was performed in this
+reconciliation. This is current deployment health and sync evidence, not a
+replacement for the still-open privileged outsider, recovery, stress, and
+license-release gates.
