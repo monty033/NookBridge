@@ -309,7 +309,11 @@ transaction_exit() {
 }
 
 install_operator_wrapper() {
-  local name="$1" command="$2" gate="$3" wrapper="${USR_LOCAL_BIN}/${name}"
+  local name command gate wrapper
+  name="$1"
+  command="$2"
+  gate="$3"
+  wrapper="${USR_LOCAL_BIN}/${name}"
   rm -f "$wrapper"
   {
     printf '%s\n' '#!/bin/sh' 'set -eu'

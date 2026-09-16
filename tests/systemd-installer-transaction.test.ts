@@ -2,8 +2,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   rmSync,
   symlinkSync,
@@ -152,5 +154,14 @@ describe("generic systemd installer — health rollback and retention", () => {
 
     expect(result.status).toBe(0);
     expect(readlinkSync(join(ctx.optDir, "current"))).toBe("releases/1.2.3");
+    expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-provision")).isSymbolicLink()).toBe(
+      false,
+    );
+    expect(readFileSync(join(ctx.usrLocalBinDir, "nookbridge-provision"), "utf8")).toContain(
+      "systemd-run",
+    );
+    expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-runtime-check")).isSymbolicLink()).toBe(
+      true,
+    );
   });
 });
