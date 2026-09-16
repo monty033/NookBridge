@@ -503,6 +503,33 @@ export class NotesnookWriteAdapter {
    * note immediately before mutation and derives the current revision
    * token from the freshly observed state.  Fields outside the
    * patch are never touched.
+   *
+   * Compensation slice
+   * -------------------
+   *
+   * The update path is a multi-step saga: a single
+   * `updateNote` call may issue `notesUpdate`, `notebookAddNote`,
+   * `relationRemove`/`relationAdd`, `contentUpdateByNoteId`, and
+   * `notesTouch` mutators in sequence.  When a forward mutator
+   * fails after one or more earlier mutators have already applied,
+   * the saga MUST leave the note either at its pre-mutation state
+   * (compensation succeeded) or marked as a bounded recovery entry
+   * (one of the inverse mutators also failed).  A successful
+   * `updateNote` must never claim `localCommitted: true` when the
+   * note is partially mutated; an unsuccessful `updateNote` must
+   * never leave a phantom partial state behind without a recovery
+   * marker.
+   *
+   * The slice is deliberately bounded: it uses ONLY the existing
+   * mutator slots on the {@link NotesnookWriteDatabase} seam, so
+   * the inverse path is symmetric with the forward path and no new
+   * low-level storage adapter or Kysely/SQL is introduced.  The
+   * recovery journal continues to record the bounded
+   * `{operation, noteId, stage}` shape; the only addition is that
+   * the update saga now also records `update-metadata`,
+   * `update-tags`, and `update-content` markers when its own
+   * inverse mutators fail to complete the rollback.  The journal
+   * type already includes those stages.
    */
   async updateNote(command: UpdateNoteCommand): Promise<UpdateNoteResult> {
     const snapshot = snapshotUpdateCommand(command);
@@ -530,6 +557,10 @@ export class NotesnookWriteAdapter {
       await this.#validateTags(patch.tags ?? []);
     }
 
+    // Capture the pre-mutation stored content so the content compensation
+    // can restore it after a failed forward write.  This is read-only —
+    // the forward content mutator uses the freshly-encoded representation.
+    let preStoredContent: NotesnookStoredContent | undefined;
     let preparedContent: NotesnookStoredContent | undefined;
     if (plan.patchFields.includes("content")) {
       const newContent = patch.content as string;
@@ -559,7 +590,23 @@ export class NotesnookWriteAdapter {
       // must run.
       const encoded = this.#encodeMarkdown(newContent, plan.listKind);
       preparedContent = { type: stored.type, data: encoded.data };
+      // Only the codec-encoded bytes are written forward; the stored
+      // shape must be restored verbatim on compensation.  We snapshot
+      // a closed shape (no `id`, no `noteId`, no `locked`) so the
+      // inverse writer cannot accidentally rely on stale identity.
+      preStoredContent = { type: stored.type, data: stored.data };
     }
+
+    // Compensation progress.  These locals are flipped as each forward
+    // mutator completes; the compensation saga walks them in reverse
+    // and invokes inverse mutators to undo the partial progress.  None
+    // of the values cross the public surface — they are bounded,
+    // internal state.
+    let notebookAttachSucceeded = false;
+    let notebookAttachId: string | undefined;
+    const removedTagRelations: string[] = [];
+    const addedTagRelations: string[] = [];
+    let contentMutated = false;
 
     if (metadataFields.length > 0) {
       const partialForNotes: Record<string, unknown> = {};
@@ -612,7 +659,20 @@ export class NotesnookWriteAdapter {
           await this.#safe("notebookAddNote", () =>
             this.#database.notebookAddNote(patch.notebookId as string, plan.id),
           );
+          notebookAttachSucceeded = true;
+          notebookAttachId = patch.notebookId;
         } catch {
+          await this.#compensateUpdateNote({
+            id: plan.id,
+            observed,
+            notebookAttachSucceeded: false,
+            notebookAttachId: patch.notebookId,
+            removedTagRelations,
+            addedTagRelations,
+            contentMutated: false,
+            metadataMutated: metadataFields.length > 0,
+            preStoredContent,
+          });
           throw adapterError("sync_failed", "Notesnook write adapter: notebook attach failed");
         }
       }
@@ -622,9 +682,32 @@ export class NotesnookWriteAdapter {
       // slots.
       if (patch.tags !== undefined) {
         const desired = patch.tags ?? [];
-        const existing = await this.#safe("relationListForNote", () =>
-          this.#database.relationListForNote(plan.id),
-        );
+        let existing: ReadonlyArray<{ readonly toId: string; readonly type: string }>;
+        try {
+          existing = await this.#safe("relationListForNote", () =>
+            this.#database.relationListForNote(plan.id),
+          );
+        } catch {
+          await this.#compensateUpdateNote({
+            id: plan.id,
+            observed,
+            notebookAttachSucceeded,
+            notebookAttachId,
+            removedTagRelations,
+            addedTagRelations,
+            contentMutated: false,
+            metadataMutated: metadataFields.length > 0,
+            preStoredContent,
+          });
+          throw adapterError(
+            "sync_failed",
+            "Notesnook write adapter: tag relation inspection failed",
+          );
+        }
+        // Track which existing tag relations we actually removed so the
+        // compensation can re-add them in reverse order if a later step
+        // fails.  We only count `tag`-typed relations; the schema may
+        // carry other relation types that are not part of this update.
         for (const rel of existing) {
           if (rel.type !== "tag") continue;
           if (desired.includes(rel.toId)) continue;
@@ -632,7 +715,19 @@ export class NotesnookWriteAdapter {
             await this.#safe("relationRemove", () =>
               this.#database.relationRemove({ fromId: plan.id, toId: rel.toId, type: "tag" }),
             );
+            removedTagRelations.push(rel.toId);
           } catch {
+            await this.#compensateUpdateNote({
+              id: plan.id,
+              observed,
+              notebookAttachSucceeded,
+              notebookAttachId,
+              removedTagRelations,
+              addedTagRelations,
+              contentMutated: false,
+              metadataMutated: metadataFields.length > 0,
+              preStoredContent,
+            });
             throw adapterError(
               "sync_failed",
               "Notesnook write adapter: tag relation removal failed",
@@ -645,7 +740,19 @@ export class NotesnookWriteAdapter {
             await this.#safe("relationAdd", () =>
               this.#database.relationAdd({ fromId: plan.id, toId: tagId, type: "tag" }),
             );
+            addedTagRelations.push(tagId);
           } catch {
+            await this.#compensateUpdateNote({
+              id: plan.id,
+              observed,
+              notebookAttachSucceeded,
+              notebookAttachId,
+              removedTagRelations,
+              addedTagRelations,
+              contentMutated: false,
+              metadataMutated: metadataFields.length > 0,
+              preStoredContent,
+            });
             throw adapterError("sync_failed", "Notesnook write adapter: tag relation add failed");
           }
         }
@@ -663,7 +770,19 @@ export class NotesnookWriteAdapter {
             plan.id,
           ),
         );
+        contentMutated = true;
       } catch {
+        await this.#compensateUpdateNote({
+          id: plan.id,
+          observed,
+          notebookAttachSucceeded,
+          notebookAttachId,
+          removedTagRelations,
+          addedTagRelations,
+          contentMutated: false,
+          metadataMutated: metadataFields.length > 0,
+          preStoredContent,
+        });
         throw adapterError("sync_failed", "Notesnook write adapter: content update failed");
       }
 
@@ -676,6 +795,21 @@ export class NotesnookWriteAdapter {
           this.#database.notesTouch([plan.id], Math.max(Date.now(), observed.dateEdited + 1)),
         );
       } catch {
+        // Content was written but the follow-up touch rejected.  The
+        // bounded saga must undo the content write; the touch never
+        // succeeded so the pre-mutation dateEdited is still authoritative
+        // and needs no separate inverse.
+        await this.#compensateUpdateNote({
+          id: plan.id,
+          observed,
+          notebookAttachSucceeded,
+          notebookAttachId,
+          removedTagRelations,
+          addedTagRelations,
+          contentMutated,
+          metadataMutated: metadataFields.length > 0,
+          preStoredContent,
+        });
         throw adapterError(
           "sync_failed",
           "Notesnook write adapter: content update failed to bump note dateEdited",
@@ -778,6 +912,135 @@ export class NotesnookWriteAdapter {
       complete = false;
     }
     return complete;
+  }
+
+  /**
+   * Bounded inverse of every mutator the update saga may have applied.
+   *
+   * The saga walks the captured pre-mutation state in reverse order
+   * (newest applied first) so a partial rollback still leaves the
+   * note as close to the pre-mutation state as the seam allows.  Each
+   * inverse mutator is invoked exactly as the forward mutator was: a
+   * throw is absorbed here and recorded as a bounded recovery marker
+   * for the affected stage.  The caller always observes the
+   * categorical `sync_failed` from the original forward failure; the
+   * compensation saga must never replace that error.
+   *
+   * Stages recorded:
+   *
+   *   - `update-content` — the inverse content write failed;
+   *   - `update-tags` — at least one inverse relationAdd/relationRemove
+   *     failed;
+   *   - `update-metadata` — at least one of the inverse metadata
+   *     mutators (notebook detach, notesUpdate re-apply) failed.
+   *
+   * The recovery journal marker shape (`{operation, noteId, stage}`)
+   * is unchanged; the journal type already included those three update
+   * stages so no new marker variant is introduced.
+   */
+  async #compensateUpdateNote(progress: {
+    readonly id: string;
+    readonly observed: NotesnookWriteNoteMetadata;
+    readonly notebookAttachSucceeded: boolean;
+    readonly notebookAttachId: string | undefined;
+    readonly removedTagRelations: readonly string[];
+    readonly addedTagRelations: readonly string[];
+    readonly contentMutated: boolean;
+    readonly metadataMutated: boolean;
+    readonly preStoredContent: NotesnookStoredContent | undefined;
+  }): Promise<void> {
+    // 1. Content compensation.  The forward content phase writes the
+    //    freshly-encoded body and then bumps the parent note's
+    //    `dateEdited` via `notesTouch`.  The follow-up touch is the
+    //    very last mutator of the saga: when it fails the content
+    //    write has already applied, so the inverse must rewrite the
+    //    pre-mutation stored body.  The touch itself never succeeded
+    //    on a failure path, so no separate inverse `notesTouch` is
+    //    required (the pre-mutation `dateEdited` is still authoritative
+    //    for any future revision token).  Any failure here records an
+    //    `update-content` marker.
+    if (progress.contentMutated && progress.preStoredContent !== undefined) {
+      const revertContent = progress.preStoredContent;
+      try {
+        await this.#safe("contentUpdateByNoteId", () =>
+          this.#database.contentUpdateByNoteId(
+            { type: revertContent.type, data: revertContent.data },
+            progress.id,
+          ),
+        );
+      } catch {
+        this.#recordRecovery("update", progress.id, "update-content");
+      }
+    }
+
+    // 2. Tag relation compensation.  Reverse order: re-add removed
+    //    relations, then remove added relations.  Any failure records
+    //    an `update-tags` marker.
+    if (progress.addedTagRelations.length > 0 || progress.removedTagRelations.length > 0) {
+      let tagCompensationComplete = true;
+      for (let index = progress.removedTagRelations.length - 1; index >= 0; index -= 1) {
+        const toId = progress.removedTagRelations[index]!;
+        try {
+          await this.#safe("relationAdd", () =>
+            this.#database.relationAdd({ fromId: progress.id, toId, type: "tag" }),
+          );
+        } catch {
+          tagCompensationComplete = false;
+        }
+      }
+      for (let index = progress.addedTagRelations.length - 1; index >= 0; index -= 1) {
+        const toId = progress.addedTagRelations[index]!;
+        try {
+          await this.#safe("relationRemove", () =>
+            this.#database.relationRemove({ fromId: progress.id, toId, type: "tag" }),
+          );
+        } catch {
+          tagCompensationComplete = false;
+        }
+      }
+      if (!tagCompensationComplete) {
+        this.#recordRecovery("update", progress.id, "update-tags");
+      }
+    }
+
+    // 3. Metadata compensation.  Inverse notebook detach (only if a
+    //    notebook was attached by this call), then re-apply the
+    //    pre-mutation metadata.  Any failure records an
+    //    `update-metadata` marker.
+    if (!progress.metadataMutated) return;
+    let metadataCompensationComplete = true;
+    if (progress.notebookAttachSucceeded && progress.notebookAttachId !== undefined) {
+      const notebookId = progress.notebookAttachId;
+      try {
+        await this.#safe("notebookRemoveNote", () =>
+          this.#database.notebookRemoveNote(notebookId, progress.id),
+        );
+      } catch {
+        metadataCompensationComplete = false;
+      }
+    }
+    // The pre-mutation `observed` shape is the authoritative rollback
+    // for the `notesUpdate` partial: every field the saga wrote
+    // (title, pinned, favorite, notebookId, tags) is restored verbatim
+    // from the freshly-read pre-state.  Tag relations are separately
+    // handled by the inverse relationAdd/relationRemove loop above, but
+    // the metadata tags field must still be restored here.
+    try {
+      const revertPartial: Record<string, unknown> = {};
+      revertPartial.title = progress.observed.title;
+      revertPartial.pinned = progress.observed.pinned;
+      revertPartial.favorite = progress.observed.favorite;
+      revertPartial.tags = progress.observed.tags ?? [];
+      revertPartial.notebookId = progress.observed.notebookId;
+      await this.#safe("notesUpdate", () =>
+        this.#database.notesUpdate([progress.id], revertPartial),
+      );
+    } catch {
+      metadataCompensationComplete = false;
+    }
+    if (!metadataCompensationComplete) {
+      this.#recordRecovery("update", progress.id, "update-metadata");
+    }
   }
 
   #recordRecovery(
