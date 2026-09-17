@@ -1,6 +1,14 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,5 +203,84 @@ describe("Linux artifact manifest contract", () => {
     const poisonedResult = runVerifier(poisoned.artifact, poisoned.checksumFile);
     expect(poisonedResult.status).not.toBe(0);
     expect(poisonedResult.stderr).toBe("nookbridge-artifact verification failed\n");
+  });
+
+  it("packages a runtime without executing the foreign runtime binary", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "nookbridge-builder-test-"));
+    fixtureRoots.push(tempRoot);
+    const source = join(tempRoot, "source");
+    const output = join(tempRoot, "artifacts");
+    const packagedNode = join(tempRoot, "node-v22.23.2-linux-x64", "bin", "node");
+    const runtimeTarball = join(tempRoot, "node-v22.23.2-linux-x64.tar.gz");
+    const buildNode = join(tempRoot, "build-node");
+    mkdirSync(join(source, "dist", "mcp"), { recursive: true });
+    mkdirSync(join(source, "node_modules"), { recursive: true });
+    mkdirSync(dirname(packagedNode), { recursive: true });
+    writeFileSync(join(source, "dist", "nookd.js"), "nookd\n");
+    writeFileSync(join(source, "dist", "cli.js"), "cli\n");
+    writeFileSync(join(source, "dist", "mcp", "cli.js"), "mcp\n");
+    writeFileSync(join(source, "dist", "provision.js"), "provision\n");
+    writeFileSync(join(source, "dist", "sync.js"), "sync\n");
+    writeFileSync(join(source, "dist", "health.js"), "health\n");
+    writeFileSync(join(source, "dist", "runtime-check.js"), "runtime-check\n");
+    writeFileSync(join(source, "node_modules", "native.node"), "native\n");
+    writeFileSync(join(source, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
+    writeFileSync(
+      join(source, "package-lock.json"),
+      '{"name":"fixture","version":"1.0.0","lockfileVersion":3}\n',
+    );
+    writeFileSync(join(source, "LICENSE"), "license\n");
+    execFileSync("git", ["-c", "init.defaultBranch=main", "init", "-q", source]);
+    execFileSync("git", ["-C", source, "config", "user.email", "test@example.invalid"]);
+    execFileSync("git", ["-C", source, "config", "user.name", "Artifact Test"]);
+    execFileSync("git", ["-C", source, "add", "."]);
+    execFileSync("git", ["-C", source, "commit", "-qm", "fixture"]);
+
+    writeFileSync(
+      packagedNode,
+      "#!/bin/sh\nprintf 'foreign runtime must not execute\\n' >&2\nexit 99\n",
+    );
+    chmodSync(packagedNode, 0o755);
+    execFileSync("tar", ["-czf", runtimeTarball, "-C", tempRoot, "node-v22.23.2-linux-x64"]);
+    writeFileSync(
+      buildNode,
+      "#!/bin/sh\ncase \"$1\" in --version) printf 'v22.23.2\\n' ;; -p) printf '127\\n' ;; *) exit 98 ;; esac\n",
+    );
+    chmodSync(buildNode, 0o755);
+
+    execFileSync(
+      "bash",
+      [
+        join(repositoryRoot, "scripts", "build-linux-artifact.sh"),
+        "--source-dir",
+        source,
+        "--build-node",
+        buildNode,
+        "--runtime-tarball",
+        runtimeTarball,
+        "--output-dir",
+        output,
+        "--version",
+        "1.2.3",
+        "--source-date-epoch",
+        "0",
+        "--min-glibc",
+        "2.31",
+        "--min-libstdcxx",
+        "GLIBCXX_3.4.29",
+      ],
+      { encoding: "utf8" },
+    );
+
+    const packaged = execFileSync(
+      "tar",
+      [
+        "-xOzf",
+        join(output, "nookbridge-v1.2.3-linux-x64-gnu.tar.gz"),
+        "nookbridge-v1.2.3/runtime/bin/node",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(packaged).toContain("foreign runtime must not execute");
   });
 });

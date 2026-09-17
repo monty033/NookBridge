@@ -11,12 +11,12 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: nixos
     steps:
-      - name: Bootstrap pinned Node runtime
+      - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
         run: |
           set -eu
-          for command_name in curl git g++ make sha256sum gzip tar awk; do
+          for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -35,8 +35,7 @@ jobs:
             test "$actual_sha256" = "$expected_sha256"
             tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           fi
-          printf 'PATH=%s/bin:%s\n' "$node_root" "$PATH" >> "${FORGEJO_ENV:?}"
-          export PATH="$node_root/bin:$PATH"
+          printf 'NOOKBRIDGE_RUNTIME_TARBALL=%s\n' "$archive_path" >> "${FORGEJO_ENV:?}"
           test "$(node --version)" = "v${NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
 
@@ -128,7 +127,8 @@ jobs:
           LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep '^GLIBCXX_' | sort -V | tail -n 1)"
           npm run artifact:linux -- \
             --source-dir "$PWD" \
-            --node-runtime "$(command -v node)" \
+            --build-node "$(command -v node)" \
+            --runtime-tarball "$NOOKBRIDGE_RUNTIME_TARBALL" \
             --output-dir "$PWD/artifacts" \
             --version "$VERSION" \
             --source-date-epoch "$SOURCE_DATE_EPOCH" \
