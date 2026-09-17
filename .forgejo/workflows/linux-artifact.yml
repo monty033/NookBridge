@@ -17,7 +17,7 @@ jobs:
       - name: Install native build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential ca-certificates git gzip tar
+          apt-get install -y --no-install-recommends build-essential ca-certificates curl git gzip tar
           rm -rf /var/lib/apt/lists/*
 
       - name: Install dependencies
@@ -63,3 +63,113 @@ jobs:
           name: nookbridge-linux-x64-gnu-${{ github.ref_name }}
           path: artifacts/
           if-no-files-found: error
+
+      - name: Prepare GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          VERSION="${RELEASE_TAG#v}"
+          RELEASE_DIR="$PWD/github-release"
+          ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
+          mkdir -p "$RELEASE_DIR"
+
+          installer_version="$(sed -n "s/^readonly RELEASE_VERSION='\([^']*\)'$/\1/p" scripts/install-from-github.sh)"
+          test "$installer_version" = "$VERSION"
+          cp "artifacts/$ARTIFACT" "$RELEASE_DIR/$ARTIFACT"
+          cp scripts/install-from-github.sh "$RELEASE_DIR/install.sh"
+          cp scripts/install-systemd.sh "$RELEASE_DIR/install-systemd.sh"
+          cp scripts/verify-linux-artifact.sh "$RELEASE_DIR/verify-linux-artifact.sh"
+          chmod 0755 "$RELEASE_DIR/install.sh" "$RELEASE_DIR/install-systemd.sh" "$RELEASE_DIR/verify-linux-artifact.sh"
+          (
+            cd "$RELEASE_DIR"
+            sha256sum install-systemd.sh verify-linux-artifact.sh "$ARTIFACT" > SHA256SUMS
+          )
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_RELEASE_TOKEN: ${{ secrets.GITHUB_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test -n "$GITHUB_RELEASE_TOKEN"
+          API="https://api.github.com/repos/monty033/NookBridge"
+          AUTH_HEADER="Authorization: Bearer ${GITHUB_RELEASE_TOKEN}"
+          RELEASE_DIR="$PWD/github-release"
+          RELEASE_JSON=/tmp/nookbridge-github-release.json
+
+          http_status="$(curl -sS -o "$RELEASE_JSON" -w '%{http_code}' \
+            -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            "$API/releases/tags/$RELEASE_TAG")"
+          case "$http_status" in
+            200) ;;
+            404)
+              RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
+          const fs = require('fs');
+          const tag = process.env.RELEASE_TAG;
+          const sha = process.env.RELEASE_SHA;
+          fs.writeFileSync('/tmp/nookbridge-release-payload.json', JSON.stringify({
+            tag_name: tag,
+            target_commitish: sha,
+            name: tag,
+            body: `NookBridge ${tag}\n\nGitHub one-command installer release.\n\nInstall with:\n\n    curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
+            draft: false,
+            prerelease: false,
+            generate_release_notes: false
+          }, null, 2));
+          NODE
+              curl -fsS -X POST -o "$RELEASE_JSON" \
+                -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+                -H 'Content-Type: application/json' \
+                --data-binary @/tmp/nookbridge-release-payload.json \
+                "$API/releases"
+              ;;
+            *)
+              cat "$RELEASE_JSON"
+              exit 1
+              ;;
+          esac
+
+          release_id="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')); if (!value.id) process.exit(2); process.stdout.write(String(value.id));")"
+          assets_json=/tmp/nookbridge-github-assets.json
+          curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            "$API/releases/$release_id/assets?per_page=100" -o "$assets_json"
+          upload_base="https://uploads.github.com/repos/monty033/NookBridge/releases/$release_id/assets"
+
+          for asset_path in \
+            "$RELEASE_DIR/install.sh" \
+            "$RELEASE_DIR/install-systemd.sh" \
+            "$RELEASE_DIR/verify-linux-artifact.sh" \
+            "$RELEASE_DIR/SHA256SUMS" \
+            "$RELEASE_DIR/nookbridge-v${RELEASE_TAG#v}-linux-x64-gnu.tar.gz"; do
+            asset_name="${asset_path##*/}"
+            asset_id="$(ASSET_NAME="$asset_name" node -e "const fs=require('fs'); const name=process.env.ASSET_NAME; const assets=JSON.parse(fs.readFileSync('$assets_json')); const match=assets.find((asset) => asset.name === name); if (match) process.stdout.write(String(match.id));")"
+            if [ -n "$asset_id" ]; then
+              curl -fsS -X DELETE -H "$AUTH_HEADER" "$API/releases/assets/$asset_id" >/dev/null
+            fi
+            curl -fsS -X POST \
+              -H "$AUTH_HEADER" -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$asset_path" \
+              "$upload_base?name=$asset_name" >/dev/null
+          done
+
+          curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            "$API/releases/$release_id/assets?per_page=100" -o "$assets_json"
+          RELEASE_ASSETS_JSON="$assets_json" node <<'NODE'
+          const fs = require('fs');
+          const required = new Set([
+            'install.sh',
+            'install-systemd.sh',
+            'verify-linux-artifact.sh',
+            'SHA256SUMS',
+            `nookbridge-v${process.env.RELEASE_TAG.slice(1)}-linux-x64-gnu.tar.gz`
+          ]);
+          const actual = new Set(JSON.parse(fs.readFileSync(process.env.RELEASE_ASSETS_JSON)).map((asset) => asset.name));
+          for (const name of required) {
+            if (!actual.has(name)) throw new Error(`missing GitHub release asset: ${name}`);
+          }
+          NODE
+          printf 'GitHub release published: %s\n' "$RELEASE_TAG"

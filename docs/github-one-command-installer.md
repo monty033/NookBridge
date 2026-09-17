@@ -129,14 +129,18 @@ Run the full suite:
 npm test
 ```
 
-## Release hosting steps still needed
+## Release hosting
 
-Forgejo remains the canonical development source; the public
-distribution target is `https://github.com/monty033/NookBridge`. To
-publish a release:
+Forgejo remains the canonical development source; the public distribution
+target is `https://github.com/monty033/NookBridge`. Release publishing is
+automated by `.forgejo/workflows/linux-artifact.yml` after a `v*` tag push.
+Configure the `GITHUB_RELEASE_TOKEN` Forgejo repository secret as documented
+in [Forgejo-to-GitHub release publishing](forgejo-github-release-publishing.md),
+then:
 
-1. Push the reviewed commit on `main` and tag it `v$VERSION`.
-2. Build the artifact in the pinned CI/container environment:
+1. Merge the reviewed commit on `main` and tag it `v$VERSION`.
+2. Push the tag to Forgejo. The workflow builds the artifact in the pinned
+   CI/container environment:
 
    ```bash
    npm ci
@@ -153,13 +157,6 @@ publish a release:
      --min-libstdcxx GLIBCXX_3.4.29
    ```
 
-3. Upload the artifact, `SHA256SUMS`, `scripts/install-systemd.sh`, and
-`scripts/verify-linux-artifact.sh` to a GitHub release named `v$VERSION`.
-The checksum file must contain entries for all three downloaded files.
-4. Render `scripts/install-from-github.sh` for the release version and attach
-it to the same release as `install.sh`. The bootstrap is published
-verbatim — no fork, no rewriting.
-
-This repository does **not** ship a release script that touches GitHub.
-The release-hosting steps above are intentionally a manual operator
-workflow so the Forgejo canonical source remains the source of truth.
+3. The workflow creates or updates the GitHub release and uploads the artifact,
+   `SHA256SUMS`, `scripts/install-systemd.sh`, `scripts/verify-linux-artifact.sh`,
+   and the version-pinned bootstrap as `install.sh`.
