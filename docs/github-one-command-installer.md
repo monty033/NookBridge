@@ -134,7 +134,7 @@ npm test
 Forgejo remains the canonical development source; the public distribution
 target is `https://github.com/monty033/NookBridge`. Release publishing is
 automated by `.forgejo/workflows/linux-artifact.yml` after a `v*` tag push.
-Configure the `GITHUB_RELEASE_TOKEN` Forgejo repository secret as documented
+Configure the `RELEASE_PUBLISH_TOKEN` Forgejo repository secret as documented
 in [Forgejo-to-GitHub release publishing](forgejo-github-release-publishing.md),
 then:
 
