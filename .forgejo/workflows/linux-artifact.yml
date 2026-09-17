@@ -29,14 +29,74 @@ jobs:
           fi
           git checkout -q --detach FETCH_HEAD
 
-      - name: Install dependencies
+      - name: Diagnose dependency environment
+        run: |
+          set -eu
+          diagnostic_rc=0
+          probe() {
+            label="$1"
+            shift
+            printf '\n=== probe: %s ===\n' "$label"
+            set +e
+            "$@"
+            probe_rc=$?
+            set -e
+            printf 'probe_exit=%s\n' "$probe_rc"
+            if [ "$probe_rc" -ne 0 ]; then
+              diagnostic_rc=1
+            fi
+          }
+          printf 'diagnostic_started=%s\n' "$(date -Ins)"
+          node --version
+          npm --version
+          npm config get registry
+          probe dns node -e "require('node:dns').lookup('registry.npmjs.org', (error, address) => { if (error) { console.error(error.message); process.exit(1); } console.log(address); })"
+          probe registry-http curl -sS --connect-timeout 10 --max-time 30 \
+            -o /dev/null \
+            -w 'registry_http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n' \
+            https://registry.npmjs.org/
+          probe npm-ping npm ping \
+            --registry=https://registry.npmjs.org/ \
+            --fetch-timeout=10000 \
+            --fetch-retries=0
+          printf '\ndiagnostic_exit=%s\n' "$diagnostic_rc"
+          exit "$diagnostic_rc"
+
+      - name: Install packages without lifecycle scripts
         run: |
           set -eu
           npm ci \
             --cache /tmp/nookbridge-npm-cache \
             --no-audit \
             --no-fund \
-            --foreground-scripts
+            --ignore-scripts \
+            --verbose \
+            --timing
+
+      - name: Rebuild native and lifecycle dependencies
+        run: |
+          set -eu
+          npm rebuild \
+            --cache /tmp/nookbridge-npm-cache \
+            --no-audit \
+            --no-fund \
+            --foreground-scripts \
+            --verbose \
+            --timing
+
+      - name: Report npm diagnostics
+        if: always()
+        run: |
+          set -eu
+          for log_path in /tmp/nookbridge-npm-cache/_logs/*; do
+            [ -f "$log_path" ] || continue
+            printf '\n=== npm log: %s ===\n' "$log_path"
+            LOG_PATH="$log_path" node -e '
+              const fs = require("node:fs");
+              const lines = fs.readFileSync(process.env.LOG_PATH, "utf8").split(/\r?\n/);
+              process.stdout.write(lines.slice(-200).join("\n"));
+            '
+          done
 
       - name: Build and test
         run: |
