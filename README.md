@@ -11,8 +11,8 @@ client.
 ## Status
 
 NookBridge is under active development. The NixOS deployment is the reference
-production path, and a pre-alpha generic systemd Linux installer is now
-available for hosts with Nix. Docker remains a planned portability target.
+production path, and a pre-alpha generic systemd Linux installer is available
+for Linux hosts without Nix. Docker remains a planned portability target.
 Read the
 [getting-started guide](docs/getting-started.md) before attempting a deployment.
 
@@ -30,6 +30,7 @@ for the exact boundary.
 - [Getting started](docs/getting-started.md) — purpose, support status, and prerequisites.
 - [NixOS installation](docs/installation-nixos.md) — reference deployment boundary.
 - [Generic systemd installation](docs/installation-systemd.md) — non-NixOS Linux path.
+- [GitHub one-command installer](docs/github-one-command-installer.md) — single-command bootstrap from a reviewed release asset.
 - [Setup and provisioning](docs/setup-and-provisioning.md) — safe first-login and sync workflow.
 - [Usage](docs/usage.md) — MCP and operator-facing workflows.
 - [Security and privacy](docs/security-and-privacy.md) — trust boundaries and safe-operation rules.
