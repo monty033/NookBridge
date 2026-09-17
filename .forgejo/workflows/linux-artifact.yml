@@ -35,7 +35,7 @@ jobs:
             test "$actual_sha256" = "$expected_sha256"
             tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           fi
-          printf '%s/bin\n' "$node_root" >> "$GITHUB_PATH"
+          printf 'PATH=%s/bin:%s\n' "$node_root" "$PATH" >> "${FORGEJO_ENV:?}"
           export PATH="$node_root/bin:$PATH"
           test "$(node --version)" = "v${NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
