@@ -16,7 +16,10 @@ fail() {
 }
 
 source_dir=''
-node_runtime=''
+build_node=''
+runtime_tarball=''
+legacy_node_runtime=''
+legacy_node_runtime_exec=''
 output_dir=''
 version=''
 source_epoch=''
@@ -30,9 +33,24 @@ while (($# > 0)); do
       source_dir=$2
       shift 2
       ;;
+    --build-node)
+      (($# >= 2)) || fail
+      build_node=$2
+      shift 2
+      ;;
+    --runtime-tarball)
+      (($# >= 2)) || fail
+      runtime_tarball=$2
+      shift 2
+      ;;
     --node-runtime)
       (($# >= 2)) || fail
-      node_runtime=$2
+      legacy_node_runtime=$2
+      shift 2
+      ;;
+    --node-runtime-exec)
+      (($# >= 2)) || fail
+      legacy_node_runtime_exec=$2
       shift 2
       ;;
     --output-dir)
@@ -61,7 +79,7 @@ while (($# > 0)); do
       shift 2
       ;;
     --help)
-      printf '%s\n' 'build-linux-artifact.sh --source-dir PATH --node-runtime PATH --output-dir PATH --version VERSION --source-date-epoch EPOCH --min-glibc VERSION --min-libstdcxx SYMBOL'
+      printf '%s\n' 'build-linux-artifact.sh --source-dir PATH --build-node PATH --runtime-tarball PATH --output-dir PATH --version VERSION --source-date-epoch EPOCH --min-glibc VERSION --min-libstdcxx SYMBOL'
       exit 0
       ;;
     *)
@@ -70,8 +88,15 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n "$source_dir" && -n "$node_runtime" && -n "$output_dir" ]] || fail
+if [[ -z "$build_node" && -n "$legacy_node_runtime_exec" ]]; then
+  build_node=$legacy_node_runtime_exec
+fi
+if [[ -z "$build_node" && -z "$runtime_tarball" && -n "$legacy_node_runtime" ]]; then
+  build_node=$legacy_node_runtime
+fi
+[[ -n "$source_dir" && -n "$build_node" && -n "$output_dir" ]] || fail
 [[ -n "$version" && -n "$source_epoch" && -n "$min_glibc" && -n "$min_libstdcxx" ]] || fail
+[[ -n "$runtime_tarball" || -n "$legacy_node_runtime" ]] || fail
 [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || fail
 [[ "$source_epoch" =~ ^[0-9]+$ ]] || fail
 [[ "$min_glibc" =~ ^[0-9]+\.[0-9]+$ ]] || fail
@@ -80,7 +105,18 @@ done
 [[ "$(uname -s 2>/dev/null)" == Linux ]] || fail
 [[ "$(uname -m 2>/dev/null)" == x86_64 ]] || fail
 [[ -d "$source_dir" && ! -L "$source_dir" ]] || fail
-node_runtime_real=$(readlink -f "$node_runtime" 2>/dev/null) || fail
+build_node_real=$(readlink -f "$build_node" 2>/dev/null) || fail
+[[ -f "$build_node_real" && ! -L "$build_node_real" && -x "$build_node_real" ]] || fail
+if [[ -n "$runtime_tarball" ]]; then
+  [[ -f "$runtime_tarball" && ! -L "$runtime_tarball" ]] || fail
+  runtime_extract_dir=$(mktemp -d)
+  runtime_node="$runtime_extract_dir/node"
+  tar -xOf "$runtime_tarball" 'node-v22.23.2-linux-x64/bin/node' > "$runtime_node" 2>/dev/null || fail
+  chmod 0555 "$runtime_node"
+else
+  runtime_node=$legacy_node_runtime
+fi
+node_runtime_real=$(readlink -f "$runtime_node" 2>/dev/null) || fail
 [[ -f "$node_runtime_real" && ! -L "$node_runtime_real" && -x "$node_runtime_real" ]] || fail
 
 for command_name in cp date find git gzip mktemp readlink sha256sum sort tar; do
@@ -92,9 +128,9 @@ is_clean=$(git -C "$source_dir" status --porcelain=v1 --untracked-files=all 2>/d
 git_commit=$(git -C "$source_dir" rev-parse --verify HEAD 2>/dev/null) || fail
 [[ "$git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
 
-node_version=$($node_runtime_real --version 2>/dev/null) || fail
+node_version=$($build_node_real --version 2>/dev/null) || fail
 [[ "$node_version" == v22.23.2 ]] || fail
-node_abi=$($node_runtime_real -p 'process.versions.modules' 2>/dev/null) || fail
+node_abi=$($build_node_real -p 'process.versions.modules' 2>/dev/null) || fail
 [[ "$node_abi" =~ ^[0-9]+$ ]] || fail
 
 required_paths=(
@@ -132,7 +168,7 @@ build_timestamp=$(date -u -d "@$source_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) |
 release_root_name="nookbridge-v$version"
 
 stage_dir=$(mktemp -d)
-trap 'rm -rf "$stage_dir"' EXIT
+trap 'rm -rf "$stage_dir" "${runtime_extract_dir:-}"' EXIT
 release_root="$stage_dir/$release_root_name"
 mkdir -p "$release_root/app" "$release_root/bin" "$release_root/runtime/bin" "$release_root/licenses"
 
