@@ -173,6 +173,18 @@ npm run artifact:linux -- \
 The builder invokes the verifier before reporting success. Release signing,
 SBOM publication, and additional architectures are separate release gates.
 
+## GitHub one-command installer
+
+A standalone bootstrap script (`scripts/install-from-github.sh`) is shipped
+as `install.sh` on each reviewed GitHub release. The bootstrap downloads
+the artifact + outer `SHA256SUMS`, generates a fresh database key and a
+default closed settings JSON, and hands them to the existing transactional
+installer. After install it interactively prompts for optional access
+settings editing, Notesnook provisioning, and a final fetch-only sync.
+See [github-one-command-installer.md](github-one-command-installer.md)
+for the exact UX, non-interactive escape hatches, and the security
+boundary.
+
 ## NixOS path
 
 NixOS continues to use the Nix package and module path. The generic artifact
