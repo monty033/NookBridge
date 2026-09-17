@@ -13,9 +13,11 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends build-essential ca-certificates curl git gzip tar
-          rm -rf /var/lib/apt/lists/*
+          set -eu
+          for command_name in git curl g++ make sha256sum gzip tar; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
+          done
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           checkout_ref="${GITHUB_REF:-$GITHUB_SHA}"
