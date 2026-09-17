@@ -32,23 +32,35 @@ jobs:
       - name: Diagnose dependency environment
         run: |
           set -eu
+          diagnostic_rc=0
+          probe() {
+            label="$1"
+            shift
+            printf '\n=== probe: %s ===\n' "$label"
+            set +e
+            "$@"
+            probe_rc=$?
+            set -e
+            printf 'probe_exit=%s\n' "$probe_rc"
+            if [ "$probe_rc" -ne 0 ]; then
+              diagnostic_rc=1
+            fi
+          }
           printf 'diagnostic_started=%s\n' "$(date -Ins)"
           node --version
           npm --version
           npm config get registry
-          if command -v getent >/dev/null 2>&1; then
-            getent hosts registry.npmjs.org || true
-          else
-            node -e "require('node:dns').lookup('registry.npmjs.org', (error, address) => { if (error) { console.error(error.message); process.exit(1); } console.log(address); })"
-          fi
-          curl -fsS --connect-timeout 10 --max-time 30 \
+          probe dns node -e "require('node:dns').lookup('registry.npmjs.org', (error, address) => { if (error) { console.error(error.message); process.exit(1); } console.log(address); })"
+          probe registry-http curl -sS --connect-timeout 10 --max-time 30 \
             -o /dev/null \
             -w 'registry_http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n' \
             https://registry.npmjs.org/
-          npm ping \
+          probe npm-ping npm ping \
             --registry=https://registry.npmjs.org/ \
             --fetch-timeout=10000 \
             --fetch-retries=0
+          printf '\ndiagnostic_exit=%s\n' "$diagnostic_rc"
+          exit "$diagnostic_rc"
 
       - name: Install packages without lifecycle scripts
         run: |
