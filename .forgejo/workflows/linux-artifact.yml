@@ -8,9 +8,38 @@ on:
 
 jobs:
   linux-artifact:
-    runs-on: ubuntu-latest
-    container: node:22-bookworm
+    if: github.event_name != 'pull_request'
+    runs-on: self-hosted
     steps:
+      - name: Bootstrap pinned Node runtime
+        env:
+          NODE_VERSION: 22.23.2
+        run: |
+          set -eu
+          for command_name in curl git g++ make sha256sum gzip tar awk; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
+          done
+          node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
+          archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
+          archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
+          sums_path="${RUNNER_TEMP:-/tmp}/SHASUMS256.txt"
+          if [ ! -x "$node_root/bin/node" ]; then
+            rm -rf "$node_root"
+            mkdir -p "$node_root"
+            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
+            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
+            expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
+            actual_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+            test -n "$expected_sha256"
+            test "$actual_sha256" = "$expected_sha256"
+            tar -xzf "$archive_path" -C "$node_root" --strip-components=1
+          fi
+          printf '%s/bin\n' "$node_root" >> "$GITHUB_PATH"
+          export PATH="$node_root/bin:$PATH"
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "10.9.8"
+
       - name: Checkout
         run: |
           set -eu
@@ -29,38 +58,16 @@ jobs:
           fi
           git checkout -q --detach FETCH_HEAD
 
-      - name: Diagnose dependency environment
+      - name: Verify npm registry access
         run: |
           set -eu
-          diagnostic_rc=0
-          probe() {
-            label="$1"
-            shift
-            printf '\n=== probe: %s ===\n' "$label"
-            set +e
-            "$@"
-            probe_rc=$?
-            set -e
-            printf 'probe_exit=%s\n' "$probe_rc"
-            if [ "$probe_rc" -ne 0 ]; then
-              diagnostic_rc=1
-            fi
-          }
-          printf 'diagnostic_started=%s\n' "$(date -Ins)"
           node --version
           npm --version
           npm config get registry
-          probe dns node -e "require('node:dns').lookup('registry.npmjs.org', (error, address) => { if (error) { console.error(error.message); process.exit(1); } console.log(address); })"
-          probe registry-http curl -sS --connect-timeout 10 --max-time 30 \
-            -o /dev/null \
-            -w 'registry_http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n' \
-            https://registry.npmjs.org/
-          probe npm-ping npm ping \
+          npm ping \
             --registry=https://registry.npmjs.org/ \
             --fetch-timeout=10000 \
             --fetch-retries=0
-          printf '\ndiagnostic_exit=%s\n' "$diagnostic_rc"
-          exit "$diagnostic_rc"
 
       - name: Install packages without lifecycle scripts
         run: |
