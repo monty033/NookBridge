@@ -11,7 +11,7 @@ Create a GitHub fine-grained token restricted to the
 Store it in the Forgejo repository secret:
 
 ```text
-GITHUB_RELEASE_TOKEN
+RELEASE_PUBLISH_TOKEN
 ```
 
 Do not put the token in the repository, workflow YAML, a commit, or a chat
