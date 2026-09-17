@@ -9,7 +9,7 @@ on:
 jobs:
   linux-artifact:
     if: github.event_name != 'pull_request'
-    runs-on: self-hosted
+    runs-on: nixos
     steps:
       - name: Bootstrap pinned Node runtime
         env:
