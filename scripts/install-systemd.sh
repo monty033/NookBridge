@@ -443,6 +443,8 @@ install_artifact() {
   digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
   ensure_service_identity
   mkdir -p "$ETC_DIR" "$STATE_DIR" "$RUNTIME_DIR"
+  # The service reads service.json; grant traversal without listing config files.
+  chmod o+x "$ETC_DIR"
   if [ -z "${NOOKBRIDGE_FAKE_ROOT:-}" ]; then
     chown "$SERVICE_USER:$PRIVATE_GROUP" "$STATE_DIR" "$RUNTIME_DIR"
     chmod 0750 "$STATE_DIR" "$RUNTIME_DIR"
