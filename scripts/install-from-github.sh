@@ -76,7 +76,24 @@ require_root() {
 }
 
 tty_is_available() {
+  # Test-only seam: when NOOKBRIDGE_BOOTSTRAP_FAKE_TTY points at an
+  # openable file, treat that path as the controlling TTY. Production
+  # never sets this; the harness uses it to verify the editor redirect
+  # without needing a real /dev/tty in the test runner.
+  if [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ] && [ -n "${NOOKBRIDGE_BOOTSTRAP_FAKE_TTY+x}" ]; then
+    [ -n "$NOOKBRIDGE_BOOTSTRAP_FAKE_TTY" ] && [ -e "$NOOKBRIDGE_BOOTSTRAP_FAKE_TTY" ] || return 1
+    ( : <"$NOOKBRIDGE_BOOTSTRAP_FAKE_TTY" ) 2>/dev/null
+    return $?
+  fi
   [ -e /dev/tty ] && ( : </dev/tty ) 2>/dev/null
+}
+
+tty_path() {
+  if [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ] && [ -n "${NOOKBRIDGE_BOOTSTRAP_FAKE_TTY+x}" ]; then
+    printf '%s\n' "$NOOKBRIDGE_BOOTSTRAP_FAKE_TTY"
+    return 0
+  fi
+  printf '%s\n' '/dev/tty'
 }
 
 parse_args() {
@@ -267,9 +284,20 @@ if [ "$no_edit_settings" -eq 0 ] && { [ "$force_edit_settings" -eq 1 ] || prompt
   if ! systemctl is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
     die 'settings editing requires a provisioned active service'
   fi
+  # Bind the controlling TTY on stdin, stdout, and stderr so the
+  # editor's prompts and output remain visible even when the bootstrap
+  # itself was launched without a TTY (e.g. `curl | sudo bash`,
+  # captured automation). Without this, the editor would inherit the
+  # installer pipes and silently appear to hang. Fall back to the
+  # inherited stdio when /dev/tty is unavailable so non-interactive
+  # installs still get a deterministic exit code.
   if tty_is_available; then
-    NOOKBRIDGE_SETTINGS_PATH="$SETTINGS_PATH" nookctl settings edit </dev/tty
+    tty="$(tty_path)"
+    log 'opening settings editor on the controlling TTY'
+    NOOKBRIDGE_SETTINGS_PATH="$SETTINGS_PATH" nookctl settings edit \
+      <"$tty" >"$tty" 2>"$tty"
   else
+    log 'opening settings editor on inherited stdio (no controlling TTY)'
     NOOKBRIDGE_SETTINGS_PATH="$SETTINGS_PATH" nookctl settings edit
   fi
   wait_for_health

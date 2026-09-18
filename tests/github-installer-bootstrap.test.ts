@@ -386,7 +386,137 @@ describe("GitHub one-command installer bootstrap", () => {
     expect(log).toMatch(/nookctl settings edit/);
     expect(log).toMatch(/env_NOOKBRIDGE_SETTINGS_PATH=\/etc\/nookbridge\/settings\.json/);
   });
+
+  it("binds the controlling TTY to stdin, stdout, and stderr when the settings editor is invoked", () => {
+    // Regression: the bootstrap used to redirect only stdin to /dev/tty, so
+    // the editor's UI/prompt output disappeared whenever the parent shell
+    // wasn't itself connected to a TTY (piped curl | sudo bash, captured
+    // automation, etc.). The fix must redirect all three streams to the
+    // controlling TTY and emit an installer log line so the operator can
+    // see the editor opened. This test forces the TTY path via the
+    // NOOKBRIDGE_BOOTSTRAP_FAKE_TTY seam and asserts the fake nookctl
+    // observed the controlling TTY on fd 0/1/2.
+    const { env, ctx } = buildFakeInstallerEnv();
+    // Provide a stand-in /dev/tty the bootstrap can open during the test
+    // (the test runner itself has no controlling TTY).
+    const fakeTtyPath = join(ctx.binDir, "fake-tty");
+    writeFileSync(fakeTtyPath, "");
+    // Provide a fake nookctl that records the resolved paths of its three
+    // standard streams. We cannot rely on bash command substitution here:
+    // `$(readlink /proc/self/fd/N)` runs readlink in a subshell whose fd 1
+    // is the substitution pipe, which hides the bootstrap's redirect.
+    // Instead we exec a Python helper that reads the PARENT script's
+    // /proc/<our_pid>/fd/N; the script's fds still reflect the bootstrap's
+    // redirects because the bootstrap redirects nookctl's fds BEFORE the
+    // script interpreter starts. Using `$$` (the script's own pid), not
+    // `$PPID` (the outer shell that invoked us), is critical — otherwise
+    // python sees the outer shell's pipes instead of the bootstrap's
+    // redirect targets.
+    writeFileSync(
+      join(ctx.binDir, "nookctl"),
+      [
+        "#!/usr/bin/env bash",
+        // Capture argv + env first via printf (no command substitution).
+        'printf \'nookctl %s env_NOOKBRIDGE_SETTINGS_PATH=%s\\n\' "$*" "${NOOKBRIDGE_SETTINGS_PATH-unset}" >> "$NOOKBRIDGE_FAKE_LOG"',
+        // Then introspect our parent script's fd 0/1/2 via python.
+        'python3 - "$$" "$NOOKBRIDGE_FAKE_LOG" <<\'PYEOF\' >> /dev/null',
+        "import os, sys",
+        "parent_pid = int(sys.argv[1])",
+        "out = sys.argv[2] + '.fd'",
+        "lines = []",
+        "for fd in (0, 1, 2):",
+        "    try:",
+        "        path = os.readlink(f'/proc/{parent_pid}/fd/{fd}')",
+        "    except OSError as exc:",
+        "        path = f'<{exc.errno}>'",
+        "    lines.append(f'fd{fd}={path}')",
+        "with open(out, 'w', encoding='utf-8') as fh:",
+        "    fh.write(' '.join(lines) + '\\n')",
+        "PYEOF",
+        'cat "$NOOKBRIDGE_FAKE_LOG.fd" >> "$NOOKBRIDGE_FAKE_LOG"',
+        'rm -f "$NOOKBRIDGE_FAKE_LOG.fd"',
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(ctx.binDir, "systemctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(ctx.binDir, "nookbridge-health"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--edit-settings",
+      "--no-sync",
+      "--no-provision",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).toMatch(/nookctl settings edit/);
+    // All three fds must point at the (substituted) controlling TTY.
+    expect(log).toMatch(new RegExp(`fd0=${escapeRegex(fakeTtyPath)}`));
+    expect(log).toMatch(new RegExp(`fd1=${escapeRegex(fakeTtyPath)}`));
+    expect(log).toMatch(new RegExp(`fd2=${escapeRegex(fakeTtyPath)}`));
+    expect(log).toMatch(/env_NOOKBRIDGE_SETTINGS_PATH=\/etc\/nookbridge\/settings\.json/);
+    // The bootstrap must log the editor invocation so the operator can
+    // tell the prompt opened on the controlling TTY.
+    expect(result.stdout).toMatch(/settings editor/);
+  });
+
+  it("falls back to inherited stdio when no controlling TTY is available", () => {
+    // The bootstrap must keep the existing non-TTY fallback: when
+    // /dev/tty is unavailable, nookctl is invoked with the inherited
+    // stdio and no /dev/tty redirect. The default test harness has no
+    // controlling TTY, so this case exercises the production branch
+    // without the NOOKBRIDGE_BOOTSTRAP_FAKE_TTY seam.
+    const { env, ctx } = buildFakeInstallerEnv();
+    writeFileSync(
+      join(ctx.binDir, "nookctl"),
+      [
+        "#!/usr/bin/env bash",
+        'printf \'nookctl %s\\n\' "$*" >> "$NOOKBRIDGE_FAKE_LOG"',
+        'python3 - "$$" "$NOOKBRIDGE_FAKE_LOG" <<\'PYEOF\' >> /dev/null',
+        "import os, sys",
+        "parent_pid = int(sys.argv[1])",
+        "out = sys.argv[2] + '.fd'",
+        "lines = []",
+        "for fd in (0, 1, 2):",
+        "    try:",
+        "        path = os.readlink(f'/proc/{parent_pid}/fd/{fd}')",
+        "    except OSError as exc:",
+        "        path = f'<{exc.errno}>'",
+        "    lines.append(f'fd{fd}={path}')",
+        "with open(out, 'w', encoding='utf-8') as fh:",
+        "    fh.write(' '.join(lines) + '\\n')",
+        "PYEOF",
+        'cat "$NOOKBRIDGE_FAKE_LOG.fd" >> "$NOOKBRIDGE_FAKE_LOG"',
+        'rm -f "$NOOKBRIDGE_FAKE_LOG.fd"',
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(ctx.binDir, "systemctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(ctx.binDir, "nookbridge-health"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // An explicitly missing fake TTY forces the fallback branch even on
+    // runners that happen to expose /dev/tty.
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: join(ctx.binDir, "missing-tty") },
+      "--edit-settings",
+      "--no-sync",
+      "--no-provision",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).toMatch(/nookctl settings edit/);
+    // None of the three fds must resolve to /dev/tty in the fallback path.
+    expect(log).not.toMatch(/fd0=\/dev\/tty\b/);
+    expect(log).not.toMatch(/fd1=\/dev\/tty\b/);
+    expect(log).not.toMatch(/fd2=\/dev\/tty\b/);
+  });
 });
+
+function escapeRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
 
 describe("bootstrap argument parser shellcheck", () => {
   it("parses with `bash -n` without syntax errors", () => {
