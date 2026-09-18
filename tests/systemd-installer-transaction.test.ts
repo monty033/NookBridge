@@ -146,6 +146,7 @@ describe("generic systemd installer — health rollback and retention", () => {
     fakeRoots.push(ctx);
     const { artifact, checksum } = createArtifact();
     rmSync(ctx.optDir, { recursive: true, force: true });
+    rmSync(ctx.etcDir, { recursive: true, force: true });
 
     const result = spawnSync(
       "bash",
@@ -163,6 +164,7 @@ describe("generic systemd installer — health rollback and retention", () => {
     expect(result.status).toBe(0);
     expect(statSync(ctx.optDir).mode & 0o777).toBe(0o701);
     expect(statSync(join(ctx.optDir, "releases")).mode & 0o777).toBe(0o701);
+    expect(statSync(ctx.etcDir).mode & 0o777).toBe(0o701);
   });
 
   it("creates the release directory on a fresh target", () => {
