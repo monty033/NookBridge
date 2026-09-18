@@ -512,6 +512,153 @@ describe("GitHub one-command installer bootstrap", () => {
     expect(log).not.toMatch(/fd1=\/dev\/tty\b/);
     expect(log).not.toMatch(/fd2=\/dev\/tty\b/);
   });
+
+  // Helper: write a fake /dev/tty fixture whose first line is read by
+  // prompt_yes_no via the existing NOOKBRIDGE_BOOTSTRAP_FAKE_TTY seam.
+  // The bootstrap reopens the path for each prompt, so every reached prompt
+  // sees the fixture's first line. Tests below use --no-provision / --no-sync
+  // to control which prompt is reached.
+  function writeFakeTtyReply(ctx: FakeInstallerContext, reply: string): string {
+    const path = join(ctx.binDir, "fake-tty-reply");
+    writeFileSync(path, reply);
+    return path;
+  }
+
+  function writeFakeNookctlRecorder(ctx: FakeInstallerContext): void {
+    writeFileSync(
+      join(ctx.binDir, "nookctl"),
+      [
+        "#!/usr/bin/env bash",
+        'printf \'nookctl %s env_NOOKBRIDGE_SETTINGS_PATH=%s\\n\' "$*" "${NOOKBRIDGE_SETTINGS_PATH-unset}" >> "$NOOKBRIDGE_FAKE_LOG"',
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(ctx.binDir, "systemctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(ctx.binDir, "nookbridge-health"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // The real /run/current-system/sw/bin/nookbridge-provision requires
+    // root; tests below exercise the prompt path that *invokes* it, so
+    // shadow it with a recording stub that exits 0 unconditionally.
+    writeFileSync(
+      join(ctx.binDir, "nookbridge-provision"),
+      [
+        "#!/usr/bin/env bash",
+        'printf \'nookbridge-provision args=%s env_NOOKBRIDGE_SETTINGS_PATH=%s\\n\' "$*" "${NOOKBRIDGE_SETTINGS_PATH-unset}" >> "$NOOKBRIDGE_FAKE_LOG"',
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  it("opens the settings editor when explicit 'y' is answered to the default-n prompt", () => {
+    // Regression: the installer used to skip the editor even when the
+    // operator typed 'y' to "Edit access settings now? [y/N]". The
+    // prompt parser returned false on explicit 'y' when the default
+    // was 'n', so the editor branch was never entered. The fix must
+    // treat an explicit 'y' reply as yes regardless of the prompt
+    // default, and route the read through the fake TTY seam so the
+    // test can drive the real prompt path.
+    const { env, ctx } = buildFakeInstallerEnv();
+    const fakeTtyPath = writeFakeTtyReply(ctx, "y\n");
+    writeFakeNookctlRecorder(ctx);
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--no-provision",
+      "--no-sync",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).toMatch(/nookctl settings edit/);
+    expect(log).toMatch(/env_NOOKBRIDGE_SETTINGS_PATH=\/etc\/nookbridge\/settings\.json/);
+    expect(result.stdout).toMatch(/settings editor/);
+  });
+
+  it("skips provisioning when explicit 'n' is answered to the default-y prompt", () => {
+    // Regression coverage for the inverse case: typing 'n' to
+    // "Provision Notesnook account now? [Y/n]" must reject
+    // provisioning regardless of the default. The buggy parser
+    // happened to return false here too (matching on default=n),
+    // but the fix must make the binding explicit so a future
+    // re-coupling doesn't accidentally accept the user reply.
+    const { env, ctx } = buildFakeInstallerEnv();
+    // Reply fixture first line: provision='n' (default y, explicit n),
+    // and any later reached prompt also reads 'n' because the bootstrap
+    // reopens the fake TTY path for each prompt. Both provisioning and
+    // the default-n editor prompt must therefore stay skipped.
+    const fakeTtyPath = writeFakeTtyReply(ctx, "n\n\n");
+    writeFakeNookctlRecorder(ctx);
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--no-sync",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).not.toMatch(/nookbridge-provision/);
+    expect(result.stdout).toMatch(/provisioning skipped/);
+  });
+
+  it("treats a blank reply as the prompt default (default-n skips the editor)", () => {
+    // Regression: blank input must follow the prompt default. The
+    // default-n editor prompt should therefore stay skipped when no
+    // reply is given, so operators who press Enter at the wrong moment
+    // don't accidentally launch the settings editor.
+    const { env, ctx } = buildFakeInstallerEnv();
+    const fakeTtyPath = writeFakeTtyReply(ctx, "\n");
+    writeFakeNookctlRecorder(ctx);
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--no-provision",
+      "--no-sync",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).not.toMatch(/nookctl settings edit/);
+    expect(result.stdout).not.toMatch(/settings editor/);
+  });
+
+  it("treats a blank reply as the prompt default (default-y accepts provisioning)", () => {
+    // Regression: blank input on the default-y provision prompt must
+    // accept provisioning. The fix routes the read through tty_path()
+    // so the fake TTY seam can supply an empty line; the parser then
+    // resolves empty input to the configured default.
+    const { env, ctx } = buildFakeInstallerEnv();
+    // Reply sequence: provision='' (default y, follows default →
+    // provision runs), edit-settings='' (default n, follows default
+    // → skipped), sync is gated behind --no-sync.
+    const fakeTtyPath = writeFakeTtyReply(ctx, "\n\n");
+    writeFakeNookctlRecorder(ctx);
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--no-sync",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).toMatch(/nookbridge-provision/);
+    expect(result.stdout).toMatch(/starting interactive provisioning/);
+  });
+
+  it("rejects explicit 'n' for a default-n prompt (the editor must stay closed)", () => {
+    // Regression coverage for the structural defect behind the
+    // public installer bug: the parser tied an explicit 'n' reply to
+    // "the default is n", which accidentally returned TRUE for a
+    // default-n prompt. The fix must bind explicit 'n' to FALSE
+    // unconditionally so an operator who types 'no' at a default-n
+    // prompt is never silently overridden by the default.
+    const { env, ctx } = buildFakeInstallerEnv();
+    const fakeTtyPath = writeFakeTtyReply(ctx, "n\n");
+    writeFakeNookctlRecorder(ctx);
+    const result = runBootstrap(
+      { ...env, NOOKBRIDGE_BOOTSTRAP_FAKE_TTY: fakeTtyPath },
+      "--no-provision",
+      "--no-sync",
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const log = readFakeLog(ctx.fakeLog);
+    expect(log).not.toMatch(/nookctl settings edit/);
+    expect(result.stdout).not.toMatch(/settings editor/);
+  });
 });
 
 function escapeRegex(value: string): string {
