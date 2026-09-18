@@ -124,7 +124,8 @@ jobs:
           RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
-          LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep '^GLIBCXX_' | sort -V | tail -n 1)"
+          LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep -E '^GLIBCXX_[0-9]+(\.[0-9]+){1,2}$' | sort -V | tail -n 1)"
+          test -n "$LIBSTDCXX_BASELINE"
           npm run artifact:linux -- \
             --source-dir "$PWD" \
             --build-node "$(command -v node)" \

@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const verifier = join(repositoryRoot, "scripts", "verify-linux-artifact.sh");
 const manifestSchema = join(repositoryRoot, "packaging", "linux", "release-manifest.schema.json");
+const linuxArtifactWorkflow = join(repositoryRoot, ".forgejo", "workflows", "linux-artifact.yml");
 
 const topLevel = "nookbridge-v1.2.3";
 const fixtureRoots: string[] = [];
@@ -102,6 +103,14 @@ function runVerifier(artifact: string, checksumFile: string) {
 }
 
 describe("Linux artifact manifest contract", () => {
+  it("selects only numeric GLIBCXX ABI symbols in the release workflow", () => {
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(workflow).toContain("grep -E '^GLIBCXX_[0-9]+(\\.[0-9]+){1,2}$'");
+    expect(workflow).not.toContain("grep '^GLIBCXX_' | sort -V");
+    expect(workflow).toContain('test -n "$LIBSTDCXX_BASELINE"');
+  });
+
   it("defines the strict x86_64 glibc release metadata shape", () => {
     const schema = JSON.parse(readFileSync(manifestSchema, "utf8")) as {
       required: string[];
