@@ -125,7 +125,7 @@ parse_args() {
 }
 
 prompt_yes_no() {
-  local question="$1" default="$2" reply suffix
+  local question="$1" default="$2" reply suffix tty
   if [ "$assume_yes" -eq 1 ]; then
     [ "$default" = 'y' ]
     return
@@ -137,17 +137,24 @@ prompt_yes_no() {
   esac
   tty_is_available || return 1
   printf '%s %s ' "$question" "$suffix" >&2
-  IFS= read -r reply </dev/tty || return 1
+  # Route the reply through tty_path() so the NOOKBRIDGE_BOOTSTRAP_FAKE_TTY
+  # test seam can drive the real prompt from the test harness. Production
+  # callers resolve tty_path() to /dev/tty.
+  tty="$(tty_path)"
+  IFS= read -r reply <"$tty" || return 1
+  # Bind explicit yes/no replies to a fixed truth value independent of
+  # the prompt default; only empty or unrecognised input falls back to
+  # the configured default.
   case "$reply" in
-    ''|[Yy]|[Yy][Ee][Ss]) [ "$default" = 'y' ] ;;
-    [Nn]|[Nn][Oo]) [ "$default" = 'n' ] ;;
+    [Yy]|[Yy][Ee][Ss]) true ;;
+    [Nn]|[Nn][Oo]) false ;;
     *) [ "$default" = 'y' ] ;;
   esac
 }
 
 run_tty_command() {
   if tty_is_available; then
-    "$@" </dev/tty
+    "$@" <"$(tty_path)"
   else
     "$@"
   fi
