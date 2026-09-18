@@ -11,6 +11,7 @@ describe("Stage 4 write CLI output boundary", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "nookbridge-stage4-cli-"));
     const title = "NookBridge Stage 4 output-boundary canary";
     const distCli = join(process.cwd(), "dist/cli.js");
+    const hadDistCli = existsSync(distCli);
 
     try {
       execFileSync("npm", ["run", "build"], { stdio: "ignore" });
@@ -33,7 +34,7 @@ describe("Stage 4 write CLI output boundary", () => {
       expect(output).not.toContain(title);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
-      if (existsSync(distCli)) rmSync(distCli);
+      if (!hadDistCli && existsSync(distCli)) rmSync(distCli);
     }
   });
 });
