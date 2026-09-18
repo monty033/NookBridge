@@ -8,6 +8,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -138,6 +139,30 @@ describe("generic systemd installer — health rollback and retention", () => {
     expect(existsSync(join(ctx.optDir, "releases", "0.3.0"))).toBe(true);
     expect(existsSync(join(ctx.optDir, "releases", "0.2.0"))).toBe(false);
     expect(existsSync(join(ctx.optDir, "releases", "0.1.0"))).toBe(false);
+  });
+
+  it("keeps the release tree traversable under a restrictive installer umask", () => {
+    const ctx = createInstallerFakeRoot();
+    fakeRoots.push(ctx);
+    const { artifact, checksum } = createArtifact();
+    rmSync(ctx.optDir, { recursive: true, force: true });
+
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        'umask 077; exec bash "$1" install --artifact "$2" --checksum-file "$3"',
+        "bash",
+        installer,
+        artifact,
+        checksum,
+      ],
+      { cwd: repositoryRoot, env: envFor(ctx), encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(statSync(ctx.optDir).mode & 0o777).toBe(0o701);
+    expect(statSync(join(ctx.optDir, "releases")).mode & 0o777).toBe(0o701);
   });
 
   it("creates the release directory on a fresh target", () => {
