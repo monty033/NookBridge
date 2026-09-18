@@ -24,7 +24,7 @@ jobs:
           archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
           archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
           sums_path="${RUNNER_TEMP:-/tmp}/SHASUMS256.txt"
-          if [ ! -x "$node_root/bin/node" ]; then
+          if [ ! -x "$node_root/bin/node" ] || [ ! -f "$archive_path" ]; then
             rm -rf "$node_root"
             mkdir -p "$node_root"
             curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
@@ -35,7 +35,6 @@ jobs:
             test "$actual_sha256" = "$expected_sha256"
             tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           fi
-          printf 'NOOKBRIDGE_RUNTIME_TARBALL=%s\n' "$archive_path" >> "${FORGEJO_ENV:?}"
           test "$(node --version)" = "v${NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
 
@@ -122,13 +121,14 @@ jobs:
         run: |
           set -eu
           VERSION="${RELEASE_VERSION#v}"
+          RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
           LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep '^GLIBCXX_' | sort -V | tail -n 1)"
           npm run artifact:linux -- \
             --source-dir "$PWD" \
             --build-node "$(command -v node)" \
-            --runtime-tarball "$NOOKBRIDGE_RUNTIME_TARBALL" \
+            --runtime-tarball "$RUNTIME_TARBALL" \
             --output-dir "$PWD/artifacts" \
             --version "$VERSION" \
             --source-date-epoch "$SOURCE_DATE_EPOCH" \
