@@ -316,22 +316,48 @@ transaction_exit() {
 }
 
 install_operator_wrapper() {
-  local name command gate post_success wrapper runner
+  # The fourth argument selects the daemon-lifecycle shape:
+  #   - restart: restart nookd.service after the wrapper exits 0
+  #     (the post-auth bring-up path used by nookbridge-provision).
+  #   - suspend: stop nookd.service BEFORE the transient unit runs,
+  #     then restart it unconditionally via an EXIT trap so the
+  #     daemon is always restored, even on a categorical sync
+  #     failure (the single-instance-lock collision path used by
+  #     nookbridge-sync).
+  #   - unset:  no daemon-lifecycle change; the transient unit
+  #     assumes nookd is already in the desired state.
+  local name command gate post_success wrapper suspend
   name="$1"
   command="$2"
   gate="$3"
   post_success="${4:-}"
   wrapper="${USR_LOCAL_BIN}/${name}"
-  runner='exec systemd-run --quiet --pty --wait --collect'
-  [ "$post_success" = 'restart' ] && runner='systemd-run --quiet --pty --wait --collect'
+  suspend=0
+  if [ "$post_success" = 'restart' ]; then
+    suspend=0
+  elif [ "$post_success" = 'suspend' ]; then
+    suspend=1
+  fi
   rm -f "$wrapper"
   {
     printf '%s\n' '#!/bin/sh' 'set -eu'
     printf '%s\n' 'if [ "$(id -u)" -ne 0 ]; then'
     printf '%s\n' "  printf '%s\\n' '${name}: must be run as root' >&2"
     printf '%s\n' '  exit 77' 'fi'
+    if [ "$suspend" -eq 1 ]; then
+      # Restore nookd on every exit path: normal completion, a
+      # stop failure, set -e abort, or signal. The restart is
+      # best-effort so a transient restart failure does NOT mask the
+      # sync or stop command's categorical exit status.
+      printf '%s\n' "trap 'systemctl start nookd.service >/dev/null 2>&1 || :' EXIT INT TERM HUP"
+      # Stop the live nookd so the transient sync unit is the only
+      # DB-owning process on nookbridge.lock. Do not continue when
+      # stop fails: launching sync against a still-live daemon would
+      # recreate the single-instance-lock collision this mode fixes.
+      printf '%s\n' 'systemctl stop nookd.service >/dev/null 2>&1'
+    fi
     printf '%s \\\n' \
-      "$runner" \
+      'systemd-run --quiet --pty --wait --collect' \
       "  --unit=${name}.service" \
       "  --uid=${SERVICE_USER}" \
       "  --gid=${SERVICE_GROUP}" \
@@ -374,7 +400,12 @@ install_wrappers() {
     ln -sfn "${CURRENT_LINK}/bin/${name}" "${USR_LOCAL_BIN}/${name}"
   done
   install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH restart
-  install_operator_wrapper nookbridge-sync nookbridge-sync-cli NOOKBRIDGE_ENABLE_LIVE_SYNC
+  # The fetch-only sync wrapper uses the suspend mode so the
+  # transient unit never collides with the active nookd on
+  # nookbridge.lock; the daemon is restarted unconditionally on
+  # the wrapper exit path so a sync failure never leaves nookd
+  # down.
+  install_operator_wrapper nookbridge-sync nookbridge-sync-cli NOOKBRIDGE_ENABLE_LIVE_SYNC suspend
 }
 
 run_health_gate() {

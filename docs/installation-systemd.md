@@ -142,6 +142,13 @@ Both are root-gated transient systemd operations. Authentication material is
 collected interactively and is never placed in command arguments or environment
 snapshots. The sync operation is fetch-only; it is not a generic full-sync path.
 
+The fetch-only sync wrapper briefly stops `nookd.service` before invoking the
+sync transient unit so the transient unit is the only process holding
+`/var/lib/nookbridge/nookbridge.lock`. `nookd.service` is restarted on every
+sync-wrapper exit path (success or failure) so a categorical sync failure
+never leaves the daemon stopped. The wrapper preserves the sync command's
+exit status; a sync failure surfaces to the operator unchanged.
+
 ## Building an artifact
 
 Artifact assembly is package-manager-neutral at the target, but release builds
