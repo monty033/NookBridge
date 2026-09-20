@@ -107,6 +107,77 @@ describe("daemon-owned operator socket", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it("carries resolved group names through to the authorizer", async () => {
+    // The production helper resolves the peer's numeric groups to POSIX group
+    // names, because the authorization policy matches on names. Emitting bare
+    // numbers here left every real peer denied while name-injecting fixtures
+    // stayed green.
+    const path = socketPath();
+    const dir = mkdtempSync("/tmp/nookbridge-peer-helper-");
+    const helper = `${dir}/peer-helper.mjs`;
+    writeFileSync(
+      helper,
+      '#!/usr/bin/env node\nprocess.stdout.write("123 456 789 nookbridge-clients users\\n");\n',
+      "utf8",
+    );
+    chmodSync(helper, 0o700);
+    let observed: unknown;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      peerCredentialHelperPath: helper,
+      authorize: (method, peer) => {
+        observed = peer;
+        return { allowed: true, method };
+      },
+      handle: async (request) => ({
+        id: request.id,
+        ok: true,
+        result: { kind: "operation-list", handles: [] },
+      }),
+    });
+    try {
+      await roundTrip(path, requestFrame("notes.operation-list"));
+      expect(observed).toEqual({
+        uid: 123,
+        gid: 456,
+        groups: ["nookbridge-clients", "users"],
+      });
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("fails closed when the helper emits an unsafe group token", async () => {
+    const path = socketPath();
+    const dir = mkdtempSync("/tmp/nookbridge-peer-helper-");
+    const helper = `${dir}/peer-helper.mjs`;
+    writeFileSync(
+      helper,
+      '#!/usr/bin/env node\nprocess.stdout.write("123 456 789 bad/token\\n");\n',
+      "utf8",
+    );
+    chmodSync(helper, 0o700);
+    let dispatched = false;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      peerCredentialHelperPath: helper,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => {
+        dispatched = true;
+        return { id: "request-1", ok: true, result: { kind: "operation-list", handles: [] } };
+      },
+    });
+    try {
+      const socket = net.createConnection(path);
+      await new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      expect(dispatched).toBe(false);
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("rejects a denied peer before dispatching the request", async () => {
     const path = socketPath();
     let dispatched = false;

@@ -21,6 +21,14 @@ const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES = 65_536;
 const DEFAULT_SOCKET_MODE = 0o660;
 const SOCKET_ROOT = "/run/nookbridge";
+/**
+ * The token shape accepted for a peer's group entry: a POSIX group name as
+ * resolved by the credential helper, or the numeric id it falls back to when
+ * no name mapping exists. Mirrors the conservative group-name validation the
+ * service config applies, and rejects every other shape (separators,
+ * whitespace, over-long tokens) so a malformed helper fails closed.
+ */
+const GROUP_NAME_TOKEN = /^[A-Za-z0-9_.+-]{1,64}$/u;
 
 type PeerSocket = net.Socket & {
   readonly _handle?: {
@@ -216,15 +224,25 @@ function resolveNativePeer(
     if (result.status !== 0 || result.signal !== null || typeof result.stdout !== "string")
       return undefined;
     const fields = result.stdout.trim().split(/\s+/u);
-    if (fields.length < 3 || fields.length > 67 || !fields.every((field) => /^\d+$/u.test(field)))
+    if (fields.length < 3 || fields.length > 67) return undefined;
+    const uidText = fields[0];
+    const gidText = fields[1];
+    const pidText = fields[2];
+    if (uidText === undefined || gidText === undefined || pidText === undefined) return undefined;
+    if (!/^\d+$/u.test(uidText) || !/^\d+$/u.test(gidText) || !/^\d+$/u.test(pidText))
       return undefined;
-    const [uidText, gidText, pidText, ...groups] = fields;
     const uid = Number(uidText);
     const gid = Number(gidText);
     const pid = Number(pidText);
     if (![uid, gid, pid].every((value) => Number.isSafeInteger(value) && value >= 0))
       return undefined;
+    const groups = fields.slice(3);
     if (groups.length === 0 || groups.length > 64) return undefined;
+    // The helper resolves each group to its POSIX name, because the
+    // authorization policy matches on names; a group with no name mapping
+    // falls back to its numeric id. Accept both, and reject every other shape
+    // so a malformed helper fails closed.
+    if (!groups.every((group) => GROUP_NAME_TOKEN.test(group))) return undefined;
     return Object.freeze({ uid, gid, groups: Object.freeze(groups) });
   } catch {
     return undefined;
