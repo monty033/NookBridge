@@ -212,4 +212,37 @@ describe("generic systemd installer — health rollback and retention", () => {
       true,
     );
   });
+
+  /**
+   * Regression: `systemctl enable --now` is a no-op for an already-running
+   * unit.  Using it on the upgrade path left the *previous* release's process
+   * serving while `current` and the ledger advanced to the new version, and
+   * the health gate then passed against that stale process.  An upgrade must
+   * restart the daemon, and it must do so before the health gate runs.
+   */
+  it("restarts the daemon on upgrade, before the health gate", () => {
+    const ctx = createInstallerFakeRoot();
+    fakeRoots.push(ctx);
+    const { artifact, checksum } = createArtifact();
+    mkdirSync(join(ctx.optDir, "releases", "0.9.0", "bin"), { recursive: true });
+    symlinkSync("releases/0.9.0", join(ctx.optDir, "current"));
+
+    const logPath = join(ctx.rootDir, "invocations.log");
+    const result = spawnSync(
+      "bash",
+      [installer, "upgrade", "--artifact", artifact, "--checksum-file", checksum],
+      {
+        cwd: repositoryRoot,
+        env: { ...ctx.env, NOOKBRIDGE_FAKE_LOG: logPath },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status).toBe(0);
+
+    const invocations = readFileSync(logPath, "utf8");
+    expect(invocations).toContain("systemctl restart nookd.service");
+    expect(invocations.indexOf("systemctl restart nookd.service")).toBeLessThan(
+      invocations.indexOf("nookbridge-health"),
+    );
+  });
 });

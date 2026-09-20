@@ -489,7 +489,13 @@ install_artifact() {
   install_wrappers
   systemctl daemon-reload >/dev/null 2>&1
   if [ -n "$transaction_previous_target" ]; then
-    systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
+    # An upgrade replaces the release behind `current`.  `enable --now` only
+    # *starts* an inactive unit, so against an already-running daemon it is a
+    # no-op: the previous release's process would keep serving while the ledger
+    # claims the new version, and the health gate would then pass against that
+    # stale process.  Restart explicitly, then gate.
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1
     run_health_gate
   else
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
