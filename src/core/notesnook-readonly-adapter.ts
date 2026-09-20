@@ -48,6 +48,7 @@
  *     Stage 3 runner that decides when a sync attempt is authorised.
  */
 
+import { Buffer } from "node:buffer";
 import { isNotesnookAdapterError } from "./notesnook-core-adapter.js";
 import { createRevisionToken, type NotesnookRevisionToken } from "./notesnook-write-contract.js";
 
@@ -173,6 +174,11 @@ export interface NotesnookReadOnlyStatus {
 export type NotesnookReadOnlyContentType = "tiptap" | "other" | "unavailable";
 export type NotesnookReadOnlyContentMarker = "present" | "absent" | "unavailable";
 
+export type NotesnookReadOnlyNoteContent = Readonly<{
+  readonly type: "html" | "tiptap";
+  readonly data: string;
+}>;
+
 export type NotesnookReadOnlyContentDiagnostic = Readonly<{
   readonly contentType: NotesnookReadOnlyContentType;
   readonly htmlPrefix: NotesnookReadOnlyContentMarker;
@@ -207,6 +213,7 @@ export interface NotesnookReadOnlyDatabase {
   readonly readNoteLockState?: (id: string) => Promise<"locked" | "unlocked">;
   /** Body-free classifier for one note's stored content representation. */
   readonly noteContentDiagnostic?: (id: string) => Promise<NotesnookReadOnlyContentDiagnostic>;
+  readonly readNoteContent?: (id: string) => Promise<NotesnookReadOnlyNoteContent>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }
@@ -410,6 +417,20 @@ export class NotesnookReadOnlyAdapter {
       throw readOnlyAdapterError("vault_locked");
     }
     throw readOnlyAdapterError("unsupported_content");
+  }
+
+  async readNoteContent(id: string): Promise<NotesnookReadOnlyNoteContent> {
+    if (typeof id !== "string" || id.length === 0) {
+      throw readOnlyAdapterError("Notesnook read-only adapter: note id must be a non-empty string");
+    }
+    const reader = this.#database.readNoteContent;
+    if (typeof reader !== "function") throw readOnlyAdapterError("unsupported_content");
+    try {
+      return coerceNoteContent(await this.#safeCall("readNoteContent", () => reader(id)));
+    } catch (error) {
+      if (isNotesnookAdapterError(error) || isReadOnlyAdapterError(error)) throw error;
+      throw readOnlyAdapterError("Notesnook read-only adapter: failed to read note content");
+    }
   }
 
   /**
@@ -638,6 +659,19 @@ function coerceNotebookSummary(value: unknown): NotesnookReadOnlyNotebookSummary
     ...(typeof record.dateCreated === "number" ? { dateCreated: record.dateCreated } : {}),
     ...(typeof record.dateModified === "number" ? { dateModified: record.dateModified } : {}),
   };
+}
+
+function coerceNoteContent(value: unknown): NotesnookReadOnlyNoteContent {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
+  const record = value as Record<string, unknown>;
+  if ((record.type !== "html" && record.type !== "tiptap") || typeof record.data !== "string")
+    throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
+  if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > 256 * 1024)
+    throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
+  if (/\p{Cc}/u.test(record.data))
+    throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
+  return Object.freeze({ type: record.type, data: record.data });
 }
 
 function coerceNoteMetadata(value: unknown): NotesnookReadOnlyNoteMetadata {

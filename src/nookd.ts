@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import process from "node:process";
-import { isAbsolute, resolve } from "node:path";
+import { resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -45,12 +45,27 @@ import {
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "./service/service-abuse-bounds.js";
 import { createLogger } from "./logging/logger.js";
 import type { RpcMethod } from "./service/rpc-protocol.js";
+import { asRevisionToken } from "./core/notesnook-write-contract.js";
 import { createServicePolicyFromMethods, type ServicePolicy } from "./service/service-policy.js";
 import {
   buildNotebookIndex,
   type NotebookIndex,
   type NotebookRecord,
 } from "./settings/notebook-index.js";
+import { createOperatorDiscoveryHandler } from "./service/operator-discovery-handler.js";
+import type { OperatorMethod } from "./service/operator-methods.js";
+import {
+  createOperatorDiscoveryRuntime,
+  createOperatorHandleRegistry,
+} from "./service/operator-discovery-runtime.js";
+import { createOperatorWriteRuntime } from "./service/notes-operator-write-runtime.js";
+import { createNotesUndoStore } from "./service/notes-undo-store.js";
+import {
+  createOperationStoreFs,
+  deriveOperationStoreKey,
+} from "./service/notes-operation-store-fs.js";
+import { authorizeOperatorMethod, createOperatorPolicy } from "./service/operator-policy.js";
+import { peerToAuthorizationContext, type OperatorPeer } from "./service/operator-server.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
 
@@ -98,6 +113,7 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
   Partial<
     Pick<
       ServiceRuntime,
+      | "readOnly"
       | "status"
       | "listNotebooks"
       | "noteMetadata"
@@ -316,6 +332,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let lockedNoteProof: NookdStartupRuntime["lockedNoteProof"];
   let requestSync: NookdStartupRuntime["requestSync"];
   let runtimeCleanup: NookdStartupRuntime["cleanup"] | undefined;
+  let readOnly: ServiceRuntime["readOnly"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
   let resolveNotebookPath: NookdStartupRuntime["resolveNotebookPath"];
   let notebookIndex: NotebookIndex;
@@ -325,6 +342,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     if (typeof runtime !== "object" || runtime === null) {
       throw new Error("invalid service runtime");
     }
+    const capturedReadOnly = runtime.readOnly;
     const capturedSearch = runtime.search;
     const capturedStatus = runtime.status;
     const capturedListNotebooks = runtime.listNotebooks;
@@ -341,6 +359,11 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedResolveNotebookPath = runtime.resolveNotebookPath;
     const capturedCleanup = runtime.cleanup;
     if (
+      (capturedReadOnly !== undefined &&
+        (typeof capturedReadOnly !== "object" ||
+          capturedReadOnly === null ||
+          typeof capturedReadOnly.listNotes !== "function" ||
+          typeof capturedReadOnly.search !== "function")) ||
       typeof capturedSearch !== "function" ||
       typeof capturedCleanup !== "function" ||
       (capturedStatus !== undefined && typeof capturedStatus !== "function") ||
@@ -360,6 +383,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ) {
       throw new Error("invalid service runtime");
     }
+    readOnly = capturedReadOnly;
     search = capturedSearch;
     status = capturedStatus;
     listNotebooks = capturedListNotebooks;
@@ -420,11 +444,113 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     cleanup,
   });
 
+  const operatorHandles = createOperatorHandleRegistry();
+
+  // T07 — the daemon-owned operation store and mutation runtime.
+  //
+  // The store holds encrypted native preimages, so its key is derived from
+  // the daemon's own key material with a domain-separated HKDF rather than
+  // reusing the database key directly.  Startup stays best-effort: if the
+  // private store directory cannot be prepared we serve reads and leave
+  // mutations categorically unavailable, instead of failing the whole
+  // daemon (the MCP surface must keep working).
+  let operatorStore: Awaited<ReturnType<typeof createNotesUndoStore>> | undefined;
+  let operatorWrite: ReturnType<typeof createOperatorWriteRuntime> | undefined;
+  if (readOnly !== undefined && updateNote !== undefined) {
+    try {
+      const databaseKey = keys.getDatabaseKey();
+      if (typeof databaseKey === "string" && databaseKey.length > 0) {
+        operatorStore = await createNotesUndoStore({
+          fs: createOperationStoreFs(resolve(config.stateDir, "operations")),
+          daemonKey: deriveOperationStoreKey(databaseKey),
+        });
+        operatorWrite = createOperatorWriteRuntime({
+          store: operatorStore,
+          resolveHandle: (handle) => operatorHandles.resolve(handle),
+          source: {
+            read: async (noteId: string) => {
+              const metadata = await readOnly.noteMetadata(noteId);
+              const reader = readOnly.readNoteContent;
+              if (metadata === undefined || reader === undefined) return undefined;
+              const revision = metadata.revision;
+              if (typeof revision !== "string" || revision.length === 0) return undefined;
+              const content = await reader(noteId);
+              return { revision, content };
+            },
+            update: async (command: {
+              readonly noteId: string;
+              readonly expectedRevision: string;
+              readonly content: { readonly type: "tiptap" | "html"; readonly data: string };
+            }) => {
+              try {
+                await updateNote({
+                  id: command.noteId,
+                  expectedRevision: asRevisionToken(command.expectedRevision),
+                  patch: { storedContent: command.content },
+                });
+              } catch (error) {
+                const code =
+                  error !== null && typeof error === "object"
+                    ? (error as { readonly code?: unknown }).code
+                    : undefined;
+                if (code === "stale_revision" || code === "conflict") return { kind: "conflict" };
+                if (code === "vault_locked") return { kind: "locked" };
+                return { kind: "error" };
+              }
+              // Honest revision reporting: read back what the daemon actually
+              // stored rather than predicting the next token.
+              const after = await readOnly.noteMetadata(command.noteId);
+              const revision = after?.revision;
+              if (typeof revision !== "string" || revision.length === 0) return { kind: "error" };
+              return { kind: "updated", revision };
+            },
+          },
+        });
+      }
+    } catch {
+      operatorStore = undefined;
+      operatorWrite = undefined;
+    }
+  }
+
+  const operator =
+    readOnly === undefined
+      ? undefined
+      : {
+          socketPath: resolve(dirname(config.socketPath), "operator.sock"),
+          authorize: (method: OperatorMethod, peer: OperatorPeer) =>
+            authorizeOperatorMethod(
+              createOperatorPolicy((candidate, context) => {
+                const groups = context.operatorGroupMembership ?? [];
+                if (
+                  !groups.includes("nookbridge-clients") &&
+                  !groups.includes("nookbridge-operators")
+                ) {
+                  return { allowed: false, reason: "permission_denied" };
+                }
+                return { allowed: true, method: candidate };
+              }),
+              method,
+              peerToAuthorizationContext(peer),
+            ),
+          handle: createOperatorDiscoveryHandler({
+            ...createOperatorDiscoveryRuntime(
+              {
+                readOnly,
+                ...(createNote === undefined ? {} : { createNote }),
+              } as ServiceRuntime,
+              operatorHandles,
+            ),
+            ...(operatorWrite === undefined ? {} : operatorWrite),
+          }),
+        };
+
   let serverShutdown: () => Promise<void>;
   try {
     const server = await factories.startServer({
       socketPath: config.socketPath,
       runtime: serverRuntime,
+      ...(operator === undefined ? {} : { operator }),
       policy,
       abuseBounds: DEFAULT_SERVICE_ABUSE_BOUNDS,
       auditLogger: createLogger({ bindings: { component: "nookd" } }),
@@ -456,6 +582,15 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       await serverShutdown();
     } catch {
       failed = true;
+    }
+    // Close the operation store so its derived key is zeroed with the rest
+    // of the daemon's secrets.  A close failure must not mask shutdown.
+    if (operatorStore !== undefined) {
+      try {
+        await operatorStore.close();
+      } catch {
+        failed = true;
+      }
     }
     try {
       await cleanup();

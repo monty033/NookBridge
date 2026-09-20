@@ -203,6 +203,7 @@ export const ALLOWED_UPDATE_PATCH_FIELDS: ReadonlySet<NotesnookUpdatePatchField>
     "pinned",
     "favorite",
     "listKind",
+    "storedContent",
   ]);
 
 /**
@@ -269,7 +270,25 @@ export type NotesnookUpdatePatchField =
   | "tags"
   | "pinned"
   | "favorite"
-  | "listKind";
+  | "listKind"
+  | "storedContent";
+
+/**
+ * An already-encoded native stored-content envelope for the update path.
+ *
+ * The operator edit path decodes the stored document, applies the
+ * editor's Markdown, and re-encodes it natively so untouched opaque
+ * subtrees survive byte-for-byte.  Routing that result back through the
+ * Markdown codec would lose them, so the contract admits the exact
+ * `{type, data}` envelope instead.  This is a **closed** shape: an
+ * unknown content type, an unexpected key, or an oversize body fails
+ * closed.  `storedContent` and `content` are mutually exclusive — a
+ * patch must pick exactly one content channel.
+ */
+export interface NotesnookStoredContentPatch {
+  readonly type: "tiptap" | "html";
+  readonly data: string;
+}
 
 // ---------------------------------------------------------------------------
 // Opaque revision tokens.
@@ -284,7 +303,6 @@ export type NotesnookUpdatePatchField =
  * equality is meaningful.
  */
 export type NotesnookRevisionToken = string & { readonly __brand: "NotesnookRevisionToken" };
-
 /** Observed note revision state used to derive a revision token. */
 export interface NotesnookRevisionState {
   readonly id: string;
@@ -306,6 +324,19 @@ const REVISION_TOKEN_PATTERN = /^rev_[0-9a-f]{32}$/;
  * own — the guard only ever compares two tokens the caller already
  * holds.
  */
+/**
+ * Validate and brand a revision token that arrived as a plain string.
+ *
+ * A daemon-side read returns the observed revision as an ordinary string;
+ * this is the one place that turns it back into the branded token while
+ * still enforcing the published shape.  A malformed value fails closed
+ * with the categorical contract error, so callers never hand-brand a
+ * string with a cast.
+ */
+export function asRevisionToken(value: unknown): NotesnookRevisionToken {
+  return requireRevisionToken(value);
+}
+
 export function createRevisionToken(state: NotesnookRevisionState): NotesnookRevisionToken {
   if (!state || typeof state !== "object") {
     fail("invalid_input", "revision state must be an object");
@@ -500,6 +531,11 @@ export interface AppendNoteCommand {
 export interface UpdateNotePatch {
   readonly title?: string;
   readonly content?: string;
+  /**
+   * Exact native stored content.  Mutually exclusive with `content`
+   * and `listKind`: a patch picks one content channel, never both.
+   */
+  readonly storedContent?: NotesnookStoredContentPatch;
   readonly notebookId?: string;
   readonly tags?: readonly string[];
   readonly pinned?: boolean;
@@ -575,6 +611,13 @@ export interface UpdateNotePlan extends WriteOutcomeFlags {
    * of that context.
    */
   readonly listKind?: NotesnookListKind;
+  /**
+   * The exact native stored-content envelope the adapter must write for
+   * a `storedContent` patch.  Present only when the patch supplied one;
+   * the adapter writes it verbatim and never consults the Markdown
+   * codec.
+   */
+  readonly storedContent?: NotesnookStoredContentPatch;
 }
 
 /** Bounded description of an authorised single-note delete. */
@@ -955,6 +998,8 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
 
   const fields: NotesnookUpdatePatchField[] = [];
   let patchListKind: NotesnookListKind | undefined;
+  let patchStoredContent: NotesnookStoredContentPatch | undefined;
+  let patchHasMarkdownContent = false;
   for (const key of keys as NotesnookUpdatePatchField[]) {
     const value = readProperty(patch, key);
     switch (key) {
@@ -963,7 +1008,14 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
         break;
       case "content":
         requireBoundedBody(value, STAGE4_WRITE_LIMITS.maxContentBytes, "content");
+        patchHasMarkdownContent = true;
         break;
+      case "storedContent":
+        patchStoredContent = requireStoredContentPatch(value);
+        // A native write is a content write: the plan reports it on the
+        // `content` channel so downstream consumers see one vocabulary.
+        fields.push("content" as NotesnookUpdatePatchField);
+        continue;
       case "notebookId":
         requireId(value);
         break;
@@ -980,14 +1032,24 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
         // Resolve up-front so an out-of-set value is a categorical
         // `invalid_input` rather than a silent coercion.  The resolved
         // kind is only surfaced on the plan when the patch also carries
-        // a `content` field — see the `patchHasContent` flag below.
+        // a `content` field — see the `patchHasMarkdownContent` flag below.
         patchListKind = requireListKind(value);
         break;
     }
     fields.push(key);
   }
-  const patchHasContent = fields.includes("content");
-  const listKind = patchHasContent ? (patchListKind ?? DEFAULT_NOTESNOOK_LIST_KIND) : undefined;
+  // One content channel per patch.  A native envelope and a Markdown
+  // body (or a list-intent selector, which only means anything for
+  // Markdown) cannot both be present.
+  if (
+    patchStoredContent !== undefined &&
+    (patchHasMarkdownContent || patchListKind !== undefined)
+  ) {
+    fail("unsupported_patch_field", "update patch mixes a native envelope with Markdown content");
+  }
+  const listKind = patchHasMarkdownContent
+    ? (patchListKind ?? DEFAULT_NOTESNOOK_LIST_KIND)
+    : undefined;
 
   return Object.freeze({
     operation: "update" as const,
@@ -995,8 +1057,38 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
     patchFields: Object.freeze([...fields].sort()),
     expectedRevision,
     ...(listKind === undefined ? {} : { listKind }),
+    ...(patchStoredContent === undefined ? {} : { storedContent: patchStoredContent }),
     ...PENDING,
   });
+}
+
+/**
+ * Validate a closed native stored-content envelope.
+ *
+ * Exactly `{type, data}` is admitted: `type` must be one of the two
+ * stored kinds the pinned runtime understands, and `data` must be a
+ * bounded UTF-8 string.  Any extra key — including a note id or a
+ * `locked` flag smuggled alongside the body — fails closed without
+ * echoing the offending key.
+ */
+function requireStoredContentPatch(value: unknown): NotesnookStoredContentPatch {
+  const record = requireRecord(value, "stored content");
+  const keys = readOwnKeys(record);
+  if (keys.length !== 2 || !keys.includes("type") || !keys.includes("data")) {
+    fail("unsupported_patch_field", "stored content has unexpected fields");
+  }
+  const type = readProperty(record, "type");
+  if (type !== "tiptap" && type !== "html") {
+    fail("invalid_input", "stored content type is outside the closed set");
+  }
+  const data = readProperty(record, "data");
+  if (typeof data !== "string") {
+    fail("invalid_input", "stored content data must be a string");
+  }
+  if (Buffer.byteLength(data, "utf8") > STAGE4_WRITE_LIMITS.maxContentBytes) {
+    fail("invalid_input", "stored content exceeds the bounded byte limit");
+  }
+  return Object.freeze({ type, data });
 }
 
 /**

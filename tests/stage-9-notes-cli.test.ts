@@ -37,10 +37,9 @@ import {
   MAX_NOTES_QUERY_BYTES,
   parseNotesCommand,
   parseNotesSearchQuery,
-  parseNotesEditStdin,
-  parseNotesUndoStdin,
   formatNotesHelp,
   formatNotesResult,
+  isBoundedOpaqueValue,
   runNotesCommand,
   type NotesCommandRuntimeFactory,
   type NotesCommandRuntime,
@@ -474,6 +473,29 @@ describe("parseNotesCommand — `notes get`", () => {
   it("rejects extra positional arguments after `get`", () => {
     expectError(parseNotesCommand(["get", "--handle", "hnd_ok_12345678", "extra"], emptyEnv()));
   });
+
+  /**
+   * The daemon mints its own opaque families, and they use a ONE-letter
+   * prefix: `h_` note handles (from `notes.browse`), `op_` operation
+   * handles (from `notes.operation-list`) and `cur_` cursors.  The
+   * grammar was written against a fictional three-letter shape, so real
+   * handles coming back from the daemon were rejected as invalid input —
+   * `notes get --handle <real handle>` could never work.
+   */
+  it.each([
+    ["a daemon note handle", `h_${"Ab1-".repeat(6)}`],
+    ["a daemon operation handle", `op_${"a1".repeat(32)}`],
+    ["a daemon cursor", `cur_${"Zx9_".repeat(6)}`],
+  ])("accepts %s minted by the daemon", (_label, value) => {
+    expect(isBoundedOpaqueValue(value)).toBe(true);
+    expect(parseNotesCommand(["get", "--handle", value], emptyEnv()).kind).toBe("parsed");
+  });
+
+  it("still rejects traversal and credential-shaped values after widening", () => {
+    for (const value of ["/etc/passwd", "../etc/passwd", "hunter2", "a_b", "rev_abc"]) {
+      expect(isBoundedOpaqueValue(value)).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -484,62 +506,48 @@ describe("parseNotesCommand — `notes edit` exact approval gate", () => {
   const VALID_HANDLE = "hnd_ok_12345678";
 
   it("requires the exact `--approve-edit` flag", () => {
-    const err = expectError(
-      parseNotesCommand(["edit", "--handle", VALID_HANDLE, "--stdin"], emptyEnv()),
-    );
+    const err = expectError(parseNotesCommand(["edit", "--handle", VALID_HANDLE], emptyEnv()));
     expect(err.message).toContain(APPROVE_EDIT_FLAG);
   });
 
-  it("requires `--stdin` (note bodies arrive only via bounded stdin)", () => {
-    expectError(
-      parseNotesCommand(["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG], emptyEnv()),
-    );
-  });
-
-  it("requires `--handle <opaque-handle>`", () => {
-    expectError(parseNotesCommand(["edit", APPROVE_EDIT_FLAG, "--stdin"], emptyEnv()));
-  });
-
-  it("parses the exact `edit --handle <opaque> --approve-edit --stdin` shape", () => {
-    const command = expectParsed(
+  it("rejects `--stdin`: bodies are edited in $EDITOR, never piped in", () => {
+    const err = expectError(
       parseNotesCommand(
         ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin"],
         emptyEnv(),
       ),
     );
+    expect(err.message).toContain("$EDITOR");
+  });
+
+  it("parses the exact `edit --handle <opaque> --approve-edit` shape", () => {
+    const command = expectParsed(
+      parseNotesCommand(["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG], emptyEnv()),
+    );
     expect(command.kind).toBe("edit");
     if (command.kind !== "edit") return;
     expect(command.handle).toBe(VALID_HANDLE);
+    // The parsed command carries NO content or token channel at all.
+    expect(Object.keys(command).sort()).toEqual(["handle", "kind", "subcommand"]);
   });
 
-  it("accepts the flags in either order (handle vs approve vs stdin)", () => {
-    const variants: ReadonlyArray<readonly string[]> = [
-      ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin"],
-      ["edit", "--handle", VALID_HANDLE, "--stdin", APPROVE_EDIT_FLAG],
-      ["edit", APPROVE_EDIT_FLAG, "--handle", VALID_HANDLE, "--stdin"],
-      ["edit", APPROVE_EDIT_FLAG, "--stdin", "--handle", VALID_HANDLE],
-      ["edit", "--stdin", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG],
-      ["edit", "--stdin", APPROVE_EDIT_FLAG, "--handle", VALID_HANDLE],
-    ];
-    for (const argv of variants) {
-      const command = expectParsed(parseNotesCommand(argv, emptyEnv()));
-      expect(command.kind).toBe("edit");
+  it("accepts the flags in either order", () => {
+    for (const argv of [
+      ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG],
+      ["edit", APPROVE_EDIT_FLAG, "--handle", VALID_HANDLE],
+    ]) {
+      expect(expectParsed(parseNotesCommand(argv, emptyEnv())).kind).toBe("edit");
     }
+  });
+
+  it("requires `--handle <opaque-handle>`", () => {
+    expectError(parseNotesCommand(["edit", APPROVE_EDIT_FLAG], emptyEnv()));
   });
 
   it("rejects duplicate `--approve-edit` flags", () => {
     expectError(
       parseNotesCommand(
-        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, APPROVE_EDIT_FLAG, "--stdin"],
-        emptyEnv(),
-      ),
-    );
-  });
-
-  it("rejects duplicate `--stdin` flags", () => {
-    expectError(
-      parseNotesCommand(
-        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin", "--stdin"],
+        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, APPROVE_EDIT_FLAG],
         emptyEnv(),
       ),
     );
@@ -548,7 +556,7 @@ describe("parseNotesCommand — `notes edit` exact approval gate", () => {
   it("rejects duplicate `--handle` flags", () => {
     expectError(
       parseNotesCommand(
-        ["edit", "--handle", VALID_HANDLE, "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin"],
+        ["edit", "--handle", VALID_HANDLE, "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG],
         emptyEnv(),
       ),
     );
@@ -556,59 +564,45 @@ describe("parseNotesCommand — `notes edit` exact approval gate", () => {
 
   it("rejects any extra positional argument", () => {
     expectError(
-      parseNotesCommand(
-        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin", "extra"],
-        emptyEnv(),
-      ),
+      parseNotesCommand(["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "extra"], emptyEnv()),
     );
   });
 
   it("rejects an unknown flag even when the rest is well-formed", () => {
     expectError(
       parseNotesCommand(
-        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--stdin", "--unknown", "value"],
+        ["edit", "--handle", VALID_HANDLE, APPROVE_EDIT_FLAG, "--unknown", "value"],
         emptyEnv(),
       ),
     );
   });
 
-  it("rejects an --expect-revision argv carrier on edit (revisions are not argv)", () => {
-    expectError(
-      parseNotesCommand(
-        [
-          "edit",
-          "--handle",
-          VALID_HANDLE,
-          APPROVE_EDIT_FLAG,
-          "--stdin",
-          "--expect-revision",
-          "rev_abcdefabcdefabcdefabcdefabcdefab",
-        ],
-        emptyEnv(),
-      ),
-    );
-  });
-
-  it("rejects an --expect-revision argv carrier in the =value form on edit", () => {
-    expectError(
-      parseNotesCommand(
-        [
-          "edit",
-          "--handle",
-          VALID_HANDLE,
-          APPROVE_EDIT_FLAG,
-          "--stdin",
-          "--expect-revision=rev_abcdefabcdefabcdefabcdefabcdefab",
-        ],
-        emptyEnv(),
-      ),
-    );
+  it("rejects revision carriers on edit (revisions are not argv)", () => {
+    for (const argv of [
+      [
+        "edit",
+        "--handle",
+        VALID_HANDLE,
+        APPROVE_EDIT_FLAG,
+        "--expect-revision",
+        "rev_abcdefabcdefabcdefabcdefabcdefab",
+      ],
+      [
+        "edit",
+        "--handle",
+        VALID_HANDLE,
+        APPROVE_EDIT_FLAG,
+        "--expect-revision=rev_abcdefabcdefabcdefabcdefabcdefab",
+      ],
+    ]) {
+      expectError(parseNotesCommand(argv, emptyEnv()));
+    }
   });
 
   it("rejects a revision-shaped handle (handle is opaque, not a revision)", () => {
     expectError(
       parseNotesCommand(
-        ["edit", "--handle", "rev_abcdefabcdefabcdefabcdefabcdefab", APPROVE_EDIT_FLAG, "--stdin"],
+        ["edit", "--handle", "rev_abcdefabcdefabcdefabcdefabcdefab", APPROVE_EDIT_FLAG],
         emptyEnv(),
       ),
     );
@@ -616,114 +610,97 @@ describe("parseNotesCommand — `notes edit` exact approval gate", () => {
 
   it("rejects path-shaped handles (handle is opaque, not a path)", () => {
     expectError(
-      parseNotesCommand(
-        ["edit", "--handle", "/etc/passwd", APPROVE_EDIT_FLAG, "--stdin"],
-        emptyEnv(),
-      ),
+      parseNotesCommand(["edit", "--handle", "/etc/passwd", APPROVE_EDIT_FLAG], emptyEnv()),
     );
   });
 
   it("rejects credential-shaped handles", () => {
     expectError(
-      parseNotesCommand(
-        ["edit", "--handle", "supersecret", APPROVE_EDIT_FLAG, "--stdin"],
-        emptyEnv(),
-      ),
+      parseNotesCommand(["edit", "--handle", "supersecret", APPROVE_EDIT_FLAG], emptyEnv()),
     );
   });
 
   it("rejects handles that exceed the opaque bound", () => {
     const tooLong = "x".repeat(129);
-    expectError(
-      parseNotesCommand(["edit", "--handle", tooLong, APPROVE_EDIT_FLAG, "--stdin"], emptyEnv()),
-    );
+    expectError(parseNotesCommand(["edit", "--handle", tooLong, APPROVE_EDIT_FLAG], emptyEnv()));
   });
 });
 
 // ---------------------------------------------------------------------------
-// `notes undo` — exact approval gate, no handle, exact shape.
+// `notes undo` — approval gate, selector flags, no token transport.
 // ---------------------------------------------------------------------------
 
 describe("parseNotesCommand — `notes undo` exact approval gate", () => {
   it("requires the exact `--approve-edit` flag", () => {
-    const err = expectError(parseNotesCommand(["undo", "--stdin"], emptyEnv()));
+    const err = expectError(parseNotesCommand(["undo", "--list"], emptyEnv()));
     expect(err.message).toContain(APPROVE_EDIT_FLAG);
   });
 
-  it("requires `--stdin` (undo payloads arrive only via bounded stdin)", () => {
-    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG], emptyEnv()));
+  it("parses the bare `undo --approve-edit` shape (interactive selection)", () => {
+    const command = expectParsed(parseNotesCommand(["undo", APPROVE_EDIT_FLAG], emptyEnv()));
+    expect(command.kind).toBe("undo");
+    if (command.kind !== "undo") return;
+    expect(command.selector).toBeUndefined();
   });
 
-  it("parses the exact `undo --approve-edit --stdin` shape", () => {
-    const command = expectParsed(
-      parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--stdin"], emptyEnv()),
-    );
-    expect(command.kind).toBe("undo");
+  it("parses `undo --approve-edit --status` and `--list`", () => {
+    for (const [flag, selector] of [
+      ["--status", "status"],
+      ["--list", "list"],
+    ] as const) {
+      const command = expectParsed(
+        parseNotesCommand(["undo", APPROVE_EDIT_FLAG, flag], emptyEnv()),
+      );
+      expect(command.kind).toBe("undo");
+      if (command.kind !== "undo") continue;
+      expect(command.selector).toBe(selector);
+    }
   });
 
   it("accepts the flags in either order", () => {
-    const command = expectParsed(
-      parseNotesCommand(["undo", "--stdin", APPROVE_EDIT_FLAG], emptyEnv()),
-    );
-    expect(command.kind).toBe("undo");
+    expect(
+      expectParsed(parseNotesCommand(["undo", "--list", APPROVE_EDIT_FLAG], emptyEnv())).kind,
+    ).toBe("undo");
+  });
+
+  /**
+   * The frozen rule: no undo token may cross argv or env.  Every spelling
+   * of a token/body carrier is refused, including the legacy `--stdin`.
+   */
+  it("refuses every token or stdin carrier", () => {
+    for (const argv of [
+      ["undo", APPROVE_EDIT_FLAG, "--token", "unt_abcdefgh"],
+      ["undo", APPROVE_EDIT_FLAG, "--token=unt_abcdefgh"],
+      ["undo", APPROVE_EDIT_FLAG, "--stdin"],
+      ["undo", APPROVE_EDIT_FLAG, "--handle", "hnd_ok_12345678"],
+    ]) {
+      expectError(parseNotesCommand(argv, emptyEnv()));
+    }
+  });
+
+  it("rejects duplicate selectors", () => {
+    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--list", "--status"], emptyEnv()));
   });
 
   it("rejects duplicate `--approve-edit` flags", () => {
-    expectError(
-      parseNotesCommand(["undo", APPROVE_EDIT_FLAG, APPROVE_EDIT_FLAG, "--stdin"], emptyEnv()),
-    );
-  });
-
-  it("rejects duplicate `--stdin` flags", () => {
-    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--stdin", "--stdin"], emptyEnv()));
-  });
-
-  it("rejects any `--handle` (undo is the inverse update, not a get)", () => {
-    expectError(
-      parseNotesCommand(
-        ["undo", "--handle", "hnd_ok_12345678", APPROVE_EDIT_FLAG, "--stdin"],
-        emptyEnv(),
-      ),
-    );
+    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, APPROVE_EDIT_FLAG], emptyEnv()));
   });
 
   it("rejects any extra positional argument", () => {
-    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--stdin", "extra"], emptyEnv()));
+    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "extra"], emptyEnv()));
   });
 
   it("rejects an unknown flag even when the rest is well-formed", () => {
-    expectError(
-      parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--stdin", "--unknown", "value"], emptyEnv()),
-    );
+    expectError(parseNotesCommand(["undo", APPROVE_EDIT_FLAG, "--unknown", "value"], emptyEnv()));
   });
 
-  it("rejects an --expect-revision argv carrier on undo", () => {
-    expectError(
-      parseNotesCommand(
-        [
-          "undo",
-          APPROVE_EDIT_FLAG,
-          "--stdin",
-          "--expect-revision",
-          "rev_abcdefabcdefabcdefabcdefabcdefab",
-        ],
-        emptyEnv(),
-      ),
-    );
-  });
-
-  it("rejects an --expect-revision argv carrier in the =value form on undo", () => {
-    expectError(
-      parseNotesCommand(
-        [
-          "undo",
-          APPROVE_EDIT_FLAG,
-          "--stdin",
-          "--expect-revision=rev_abcdefabcdefabcdefabcdefabcdefab",
-        ],
-        emptyEnv(),
-      ),
-    );
+  it("rejects revision carriers on undo", () => {
+    for (const argv of [
+      ["undo", APPROVE_EDIT_FLAG, "--expect-revision", "rev_abcdefabcdefabcdefabcdefabcdefab"],
+      ["undo", APPROVE_EDIT_FLAG, "--expect-revision=rev_abcdefabcdefabcdefabcdefabcdefab"],
+    ]) {
+      expectError(parseNotesCommand(argv, emptyEnv()));
+    }
   });
 });
 
@@ -752,24 +729,21 @@ describe("parseNotesCommand — malformed input guard", () => {
   });
 });
 
-describe("bounded edit and undo stdin envelopes", () => {
-  it("accepts only the closed edit JSON envelope", () => {
-    expect(
-      parseNotesEditStdin(JSON.stringify({ content: "body", undoToken: "unt_token" })),
-    ).toEqual({
-      content: "body",
-      undoToken: "unt_token",
-    });
-    expect(
-      parseNotesEditStdin(JSON.stringify({ content: "body", undoToken: "rev_bad", extra: 1 })),
-    ).toBeUndefined();
-    expect(parseNotesEditStdin("body")).toBeUndefined();
-  });
-
-  it("accepts one optional trailing newline for an opaque undo token only", () => {
-    expect(parseNotesUndoStdin("unt_token\n")).toBe("unt_token");
-    expect(parseNotesUndoStdin(" unt_token\n")).toBeUndefined();
-    expect(parseNotesUndoStdin("unt_token\n\n")).toBeUndefined();
+/**
+ * The forbidden stdin body/token transport is gone: there is exactly one
+ * admittable stdin payload on this surface, the bounded `search` query.
+ * Its contract is pinned by the `parseNotesSearchQuery` suite below.
+ */
+describe("notes stdin surface is query-only", () => {
+  it("exports no edit-envelope or undo-token parser", async () => {
+    const module = await import("../src/operator/notes-cli.js");
+    const exported = Object.keys(module);
+    expect(exported).not.toContain("parseNotesEditStdin");
+    expect(exported).not.toContain("parseNotesUndoStdin");
+    expect(exported).not.toContain("NotesEditStdin");
+    expect(exported).not.toContain("MAX_NOTES_EDIT_STDIN_BYTES");
+    // The query parser is the only remaining stdin entry point.
+    expect(exported).toContain("parseNotesSearchQuery");
   });
 });
 
@@ -805,7 +779,7 @@ describe("runNotesCommand — runtime factory gating", () => {
   it("does NOT construct a runtime on approval gate failure", async () => {
     const factory = vi.fn();
     const result = await runNotesCommand({
-      argv: ["edit", "--handle", "hnd_ok_12345678", "--stdin"],
+      argv: ["edit", "--handle", "hnd_ok_12345678"],
       env: {},
       createRuntime: factory,
     });
@@ -902,39 +876,105 @@ describe("runNotesCommand — runtime factory gating", () => {
   });
 
   it("constructs a runtime exactly once for a valid edit (approval present)", async () => {
+    const edit = vi.fn().mockResolvedValue({ kind: "updated" });
     const factory = vi.fn().mockResolvedValue({
       browse: vi.fn(),
       search: vi.fn(),
       get: vi.fn(),
-      edit: async (): Promise<NotesCategoricalResult> => ({ kind: "updated" }),
+      edit,
+      operations: vi.fn(),
       undo: vi.fn(),
     });
     const result = await runNotesCommand({
-      argv: ["edit", "--handle", "hnd_ok_12345678", APPROVE_EDIT_FLAG, "--stdin"],
+      argv: ["edit", "--handle", "hnd_ok_12345678", APPROVE_EDIT_FLAG],
       env: {},
       createRuntime: factory,
-      editInput: JSON.stringify({ content: "new", undoToken: "unt_token" }),
     });
     expect(factory).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("updated");
+    // No body/token crosses the boundary: only the opaque handle.
+    expect(edit).toHaveBeenCalledWith({ handle: "hnd_ok_12345678" });
   });
 
-  it("constructs a runtime exactly once for a valid undo (approval present)", async () => {
+  it("lists pending operations for `undo --list` without selecting anything", async () => {
+    const operationHandle = `op_${"a".repeat(64)}`;
+    const operations = vi
+      .fn()
+      .mockResolvedValue({ kind: "operations", handles: [operationHandle] });
+    const undo = vi.fn();
     const factory = vi.fn().mockResolvedValue({
       browse: vi.fn(),
       search: vi.fn(),
       get: vi.fn(),
       edit: vi.fn(),
-      undo: async (): Promise<NotesCategoricalResult> => ({ kind: "undone" }),
+      operations,
+      undo,
     });
     const result = await runNotesCommand({
-      argv: ["undo", APPROVE_EDIT_FLAG, "--stdin"],
+      argv: ["undo", APPROVE_EDIT_FLAG, "--list"],
       env: {},
       createRuntime: factory,
-      undoInput: "unt_token",
     });
-    expect(factory).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ kind: "operations", handles: [operationHandle] });
+    expect(undo).not.toHaveBeenCalled();
+  });
+
+  it("interactively selects a daemon-minted handle for a bare `undo`", async () => {
+    const operationHandle = `op_${"a".repeat(64)}`;
+    const operations = vi
+      .fn()
+      .mockResolvedValue({ kind: "operations", handles: [operationHandle] });
+    const undo = vi.fn().mockResolvedValue({ kind: "undone" });
+    const select = vi.fn().mockResolvedValue(operationHandle);
+    const factory = vi.fn().mockResolvedValue({
+      browse: vi.fn(),
+      search: vi.fn(),
+      get: vi.fn(),
+      edit: vi.fn(),
+      operations,
+      undo,
+    });
+    const result = await runNotesCommand({
+      argv: ["undo", APPROVE_EDIT_FLAG],
+      env: {},
+      createRuntime: factory,
+      interactive: { tty: true, select },
+    });
+    expect(select).toHaveBeenCalledWith([operationHandle]);
+    expect(undo).toHaveBeenCalledWith({ operationHandle });
     expect(result.kind).toBe("undone");
+  });
+
+  it("refuses a bare `undo` with no TTY without touching the daemon", async () => {
+    const factory = vi.fn();
+    const result = await runNotesCommand({
+      argv: ["undo", APPROVE_EDIT_FLAG],
+      env: {},
+      createRuntime: factory,
+    });
+    expect(result.kind).toBe("invalid-input");
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("refuses a selected handle the daemon never minted", async () => {
+    const operationHandle = `op_${"a".repeat(64)}`;
+    const undo = vi.fn();
+    const factory = vi.fn().mockResolvedValue({
+      browse: vi.fn(),
+      search: vi.fn(),
+      get: vi.fn(),
+      edit: vi.fn(),
+      operations: vi.fn().mockResolvedValue({ kind: "operations", handles: [operationHandle] }),
+      undo,
+    });
+    const result = await runNotesCommand({
+      argv: ["undo", APPROVE_EDIT_FLAG],
+      env: {},
+      createRuntime: factory,
+      interactive: { tty: true, select: async () => `op_${"b".repeat(64)}` },
+    });
+    expect(result.kind).toBe("invalid-input");
+    expect(undo).not.toHaveBeenCalled();
   });
 
   it("returns the categorical closed result unchanged when the runtime emits one", async () => {
@@ -1191,6 +1231,20 @@ describe("formatNotesResult — closed output boundary", () => {
     expect(output).not.toContain("canary");
   });
 
+  it("prints bounded Markdown for an operator note view", () => {
+    expect(
+      formatNotesResult({
+        kind: "note",
+        content: { markdown: "---\nnookbridge-format: 1\n---\n\nHello **world**\n", bytes: 46 },
+      }),
+    ).toContain("Hello **world**\n");
+  });
+
+  it("rejects a Markdown byte-count mismatch", () => {
+    expect(formatNotesResult({ kind: "note", content: { markdown: "secret", bytes: 999 } })).toBe(
+      "nookctl notes: error\n",
+    );
+  });
   it("never forwards runtime error text or help text", () => {
     expect(
       formatNotesResult({

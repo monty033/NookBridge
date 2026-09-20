@@ -563,18 +563,6 @@ export class NotesnookWriteAdapter {
     let preStoredContent: NotesnookStoredContent | undefined;
     let preparedContent: NotesnookStoredContent | undefined;
     if (plan.patchFields.includes("content")) {
-      const newContent = patch.content as string;
-      // Fidelity gate.  Refuse Markdown constructs the codec cannot
-      // round-trip before any mutator fires (Astra finding P1-7).
-      try {
-        assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
-      } catch {
-        throw adapterError(
-          "unsupported_content",
-          "Notesnook write adapter: update content uses an unsupported construct",
-        );
-      }
-      contentBytes = Buffer.byteLength(newContent, "utf8");
       const stored = await this.#safe("contentFindByNoteId", () =>
         this.#database.contentFindByNoteId(plan.id),
       );
@@ -584,16 +572,38 @@ export class NotesnookWriteAdapter {
           "Notesnook write adapter: stored content is not available",
         );
       }
-      // Forward the resolved listKind from the plan.  The contract only
-      // surfaces a `listKind` slot on the plan when the patch carries
-      // a `content` field, so this is exactly the case where the codec
-      // must run.
-      const encoded = this.#encodeMarkdown(newContent, plan.listKind);
-      preparedContent = { type: stored.type, data: encoded.data };
-      // Only the codec-encoded bytes are written forward; the stored
-      // shape must be restored verbatim on compensation.  We snapshot
-      // a closed shape (no `id`, no `noteId`, no `locked`) so the
-      // inverse writer cannot accidentally rely on stale identity.
+      if (plan.storedContent !== undefined) {
+        // Native path.  The caller already decoded the stored document,
+        // applied the editor's Markdown, and re-encoded it so untouched
+        // opaque subtrees survive byte-for-byte.  Re-running the Markdown
+        // codec here would destroy them, so the envelope is written
+        // verbatim and re-pinned to the note's existing slot type.
+        preparedContent = { type: stored.type, data: plan.storedContent.data };
+        contentBytes = Buffer.byteLength(plan.storedContent.data, "utf8");
+      } else {
+        const newContent = patch.content as string;
+        // Fidelity gate.  Refuse Markdown constructs the codec cannot
+        // round-trip before any mutator fires (Astra finding P1-7).
+        try {
+          assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
+        } catch {
+          throw adapterError(
+            "unsupported_content",
+            "Notesnook write adapter: update content uses an unsupported construct",
+          );
+        }
+        contentBytes = Buffer.byteLength(newContent, "utf8");
+        // Forward the resolved listKind from the plan.  The contract only
+        // surfaces a `listKind` slot on the plan when the patch carries
+        // a `content` field, so this is exactly the case where the codec
+        // must run.
+        const encoded = this.#encodeMarkdown(newContent, plan.listKind);
+        preparedContent = { type: stored.type, data: encoded.data };
+      }
+      // Only the prepared bytes are written forward; the stored shape
+      // must be restored verbatim on compensation.  We snapshot a closed
+      // shape (no `id`, no `noteId`, no `locked`) so the inverse writer
+      // cannot accidentally rely on stale identity.
       preStoredContent = { type: stored.type, data: stored.data };
     }
 
@@ -1149,7 +1159,29 @@ const SNAPSHOT_PATCH_FIELDS: ReadonlyArray<NotesnookUpdatePatchField> = [
   "pinned",
   "favorite",
   "listKind",
+  "storedContent",
 ];
+
+/**
+ * Snapshot a nested native stored-content envelope into a frozen,
+ * null-prototype copy so a later mutation of the caller's object cannot
+ * change what is written.  Non-objects pass through unchanged and are
+ * rejected by the contract, keeping the closed-shape check in one place.
+ */
+function snapshotStoredContent(value: unknown): unknown {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw adapterError("invalid_input", "Notesnook write adapter: update patch rejected");
+  }
+  if (value === null || typeof value !== "object" || isArray) return value;
+  const source = value as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  snapshot.type = snapshotProperty(source, "type");
+  snapshot.data = snapshotProperty(source, "data");
+  return Object.freeze(snapshot);
+}
 
 function snapshotCreateCommand(command: CreateNoteCommand): CreateNoteCommand {
   const record = command as unknown as Record<string, unknown>;
@@ -1269,7 +1301,12 @@ function snapshotPatch(value: unknown): unknown {
       continue;
     }
     const captured = snapshotProperty(source, key);
-    snapshot[key] = key === "tags" ? snapshotArray(captured) : captured;
+    snapshot[key] =
+      key === "tags"
+        ? snapshotArray(captured)
+        : key === "storedContent"
+          ? snapshotStoredContent(captured)
+          : captured;
   }
   return Object.freeze(snapshot);
 }

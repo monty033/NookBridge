@@ -63,6 +63,7 @@ describe("Stage 4 write contract — bounded limits", () => {
       "listKind",
       "notebookId",
       "pinned",
+      "storedContent",
       "tags",
       "title",
     ]);
@@ -340,6 +341,61 @@ describe("Stage 4 write contract — updateNote", () => {
         }),
       ),
     ).toBe("invalid_input");
+  });
+});
+
+describe("Stage 4 write contract — native stored-content patches", () => {
+  const rev = revision(NOTE_ID, 1_700_000_000_000);
+  const native = { type: "tiptap" as const, data: '<div data-type="document"><p>body</p></div>' };
+
+  it("admits a native storedContent patch and does not resolve a list intent", () => {
+    const plan = planUpdateNote({
+      id: NOTE_ID,
+      patch: { storedContent: native },
+      expectedRevision: rev,
+    });
+    expect(plan.patchFields).toEqual(["content"]);
+    // The codec is never consulted for a native write, so no list kind is resolved.
+    expect(plan.listKind).toBeUndefined();
+  });
+
+  it("refuses a patch that carries both content and storedContent", () => {
+    expect(
+      codeOf(() =>
+        planUpdateNote({
+          id: NOTE_ID,
+          patch: { content: "markdown body", storedContent: native },
+          expectedRevision: rev,
+        }),
+      ),
+    ).toBe("unsupported_patch_field");
+  });
+
+  it("refuses storedContent combined with a list kind selector", () => {
+    expect(
+      codeOf(() =>
+        planUpdateNote({
+          id: NOTE_ID,
+          patch: { storedContent: native, listKind: "simple-checklist" },
+          expectedRevision: rev,
+        }),
+      ),
+    ).toBe("unsupported_patch_field");
+  });
+
+  it.each([
+    ["an unknown content type", { type: "json", data: "<p>x</p>" }],
+    ["an unexpected field", { type: "tiptap", data: "<p>x</p>", noteId: "leak" }],
+    ["a non-string body", { type: "tiptap", data: 7 }],
+  ])("refuses %s in a storedContent patch", (_label, value) => {
+    const code = codeOf(() =>
+      planUpdateNote({
+        id: NOTE_ID,
+        patch: { storedContent: value as never },
+        expectedRevision: rev,
+      }),
+    );
+    expect(["invalid_input", "unsupported_patch_field"]).toContain(code);
   });
 });
 
@@ -973,6 +1029,7 @@ describe("Stage 4 write contract — immutable allowlist, prototype-bypass proof
       "listKind",
       "notebookId",
       "pinned",
+      "storedContent",
       "tags",
       "title",
     ]);

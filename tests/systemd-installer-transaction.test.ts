@@ -55,6 +55,10 @@ function createArtifact(): { artifact: string; checksum: string } {
   writeFileSync(join(source, "package.json"), '{"name":"fixture"}\n');
   writeFileSync(join(source, "package-lock.json"), '{"lockfileVersion":3}\n');
   writeFileSync(join(source, "LICENSE"), "fixture license\n");
+  // The portable artifact must ship the operator peer-credential helper.
+  const peercredHelper = join(root, "operator-peercred-helper");
+  writeFileSync(peercredHelper, "#!/bin/sh\nexit 0\n");
+  chmodSync(peercredHelper, 0o755);
   writeFileSync(
     runtime,
     '#!/bin/sh\ncase "$1" in --version) printf "%s\\n" v22.23.2 ;; -p) printf "%s\\n" 127 ;; esac\n',
@@ -71,6 +75,8 @@ function createArtifact(): { artifact: string; checksum: string } {
     source,
     "--node-runtime",
     runtime,
+    "--operator-peercred-helper",
+    peercredHelper,
     "--output-dir",
     output,
     "--version",

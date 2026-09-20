@@ -66,7 +66,6 @@ import {
   formatNotesResult,
   parseNotesCommand,
   runNotesCommand,
-  MAX_NOTES_EDIT_STDIN_BYTES,
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
@@ -75,6 +74,7 @@ import {
   formatLockedNoteProof,
   runLockedNoteProof,
 } from "./operator/locked-note-proof.js";
+import { createNotesUndoSelection } from "./operator/notes-undo-prompt.js";
 import {
   createProductionPathDiagnosticRuntime,
   formatPathDiagnostic,
@@ -440,16 +440,24 @@ async function runNotes(args: Args): Promise<number> {
 
   const searchQuery =
     parsed.command.kind === "search" ? readBoundedNotesStdin(MAX_NOTES_QUERY_BYTES) : undefined;
-  const editInput =
-    parsed.command.kind === "edit" ? readBoundedNotesStdin(MAX_NOTES_EDIT_STDIN_BYTES) : undefined;
-  const undoInput = parsed.command.kind === "undo" ? readBoundedNotesStdin(256) : undefined;
+  // `edit` and `undo` deliberately read NOTHING from stdin: the edit body
+  // is produced by the operator's editor against a daemon-captured
+  // preimage, and an undo is selected by daemon-minted opaque handle.  A
+  // stdin read here would both block the command and reintroduce the
+  // forbidden body/token transport.
   let cleanup: (() => void | Promise<void>) | undefined;
   const result = await runNotesCommand({
     argv,
     env: environment,
     ...(searchQuery === undefined ? {} : { searchQuery }),
-    ...(editInput === undefined ? {} : { editInput }),
-    ...(undoInput === undefined ? {} : { undoInput }),
+    // A bare `notes undo` selects a daemon-minted operation handle over
+    // an interactive terminal.  When either stream is not a TTY the seam
+    // reports `{ tty: false }` and the command fails categorical rather
+    // than reversing an operation nobody chose.
+    interactive: createNotesUndoSelection({
+      input: process.stdin,
+      output: process.stdout,
+    }),
     createRuntime: async () => {
       const injected = _internal.notesRuntimeFactory;
       if (injected !== undefined) return injected();

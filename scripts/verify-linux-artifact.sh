@@ -17,6 +17,7 @@ fail() {
 
 artifact=''
 checksum_file=''
+expect_git_commit=''
 
 while (($# > 0)); do
   case "$1" in
@@ -30,8 +31,13 @@ while (($# > 0)); do
       checksum_file=$2
       shift 2
       ;;
+    --expect-git-commit)
+      (($# >= 2)) || fail
+      expect_git_commit=$2
+      shift 2
+      ;;
     --help)
-      printf '%s\n' 'verify-linux-artifact.sh --artifact PATH --checksum-file PATH'
+      printf '%s\n' 'verify-linux-artifact.sh --artifact PATH --checksum-file PATH [--expect-git-commit SHA]'
       exit 0
       ;;
     *)
@@ -41,6 +47,7 @@ while (($# > 0)); do
 done
 
 [[ -n "$artifact" && -n "$checksum_file" ]] || fail
+[[ -z "$expect_git_commit" || "$expect_git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
 [[ -f "$artifact" && ! -L "$artifact" ]] || fail
 [[ -f "$checksum_file" && ! -L "$checksum_file" ]] || fail
 [[ "${artifact##*/}" == nookbridge-v*.tar.gz ]] || fail
@@ -104,6 +111,11 @@ for required in "${required_members[@]}"; do
   grep -Fqx "$required" <<< "$members" 2>/dev/null || fail
 done
 
+# The operator socket resolves peer credentials by spawning
+# <app>/operator-peercred-helper.  A release without it ships an install whose
+# operator CLI surface fails closed, so verification must reject it.
+grep -Fqx "$top_level/app/operator-peercred-helper" <<< "$members" 2>/dev/null || fail
+
 grep -Fq "$top_level/app/dist/" <<< "$members" 2>/dev/null || fail
 grep -Fq "$top_level/app/node_modules/" <<< "$members" 2>/dev/null || fail
 grep -Fq "$top_level/licenses/" <<< "$members" 2>/dev/null || fail
@@ -150,6 +162,9 @@ build_timestamp=$(json_value buildTimestamp)
 [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || fail
 [[ "$top_level" == "nookbridge-v$version" ]] || fail
 [[ "$git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
+# Source SHA association: the caller names the commit being released, and the
+# artifact must record exactly that commit.  Format alone proves nothing.
+[[ -z "$expect_git_commit" || "${git_commit,,}" == "${expect_git_commit,,}" ]] || fail
 [[ "$min_glibc" =~ ^[0-9]+\.[0-9]+$ ]] || fail
 [[ "$min_libstdcxx" =~ ^GLIBCXX_[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || fail
 [[ "$lock_digest" =~ ^[0-9a-f]{64}$ ]] || fail
@@ -173,5 +188,8 @@ payload_root="$work_dir/$top_level"
 if grep -R -a -E -q '/nix/store/[[:alnum:]]|(^|[[:space:]])/build/|/tmp/nookbridge/' "$payload_root" 2>/dev/null; then
   fail
 fi
+
+peercred_helper="$payload_root/app/operator-peercred-helper"
+[[ -f "$peercred_helper" && ! -L "$peercred_helper" && -x "$peercred_helper" ]] || fail
 
 printf '%s\n' "$OK_LINE"

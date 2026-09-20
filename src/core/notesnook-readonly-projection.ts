@@ -77,6 +77,8 @@
  * no `__context__`, no upstream message bytes are forwarded.
  */
 
+import { Buffer } from "node:buffer";
+
 import {
   createReadOnlyRevisionToken,
   isNotesnookReadOnlyAdapterError,
@@ -667,6 +669,26 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: content.findByNoteId rejected",
       );
       return classifyContentDiagnostic(content);
+    },
+
+    readNoteContent: async (id: string) => {
+      if (typeof id !== "string" || id.length === 0)
+        throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
+      if (contentFindByNoteIdFn === undefined) throw projectionError("unsupported_content");
+      const value = await callThrough(
+        contentFindByNoteIdFn,
+        [id],
+        "Notesnook read-only projection: content.findByNoteId rejected",
+      );
+      if (value === undefined || value === null || typeof value !== "object")
+        throw projectionError("unsupported_content");
+      const record = value as Record<string, unknown>;
+      if (record.locked === true || isCipherRecord(record)) throw projectionError("vault_locked");
+      if ((record.type !== "html" && record.type !== "tiptap") || typeof record.data !== "string")
+        throw projectionError("unsupported_content");
+      if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > 256 * 1024)
+        throw projectionError("unsupported_content");
+      return Object.freeze({ type: record.type, data: record.data });
     },
 
     search: async (

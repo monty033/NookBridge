@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const verifier = join(repositoryRoot, "scripts", "verify-linux-artifact.sh");
@@ -82,6 +83,10 @@ function createValidArtifact(): {
   }
   writeFileSync(join(root, "runtime", "bin", "node"), "node runtime placeholder\n");
   writeFileSync(join(root, "app", "package.json"), '{"name":"nookbridge-runtime"}\n');
+  // The operator socket spawns this helper to read SO_PEERCRED; the verifier
+  // rejects an artifact that omits it.
+  writeFileSync(join(root, "app", "operator-peercred-helper"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(root, "app", "operator-peercred-helper"), 0o755);
   writeFileSync(join(root, "app", "dist", "nookd.js"), "runtime payload\n");
   writeFileSync(join(root, "app", "node_modules", "native.node"), "native payload\n");
   writeFileSync(join(root, "licenses", "NOTICE"), "license notices\n");
@@ -96,10 +101,12 @@ function writeChecksum(artifact: string, checksumFile: string): void {
   writeFileSync(checksumFile, `${digest}  ${artifact.split("/").pop()}\n`);
 }
 
-function runVerifier(artifact: string, checksumFile: string) {
-  return spawnSync("bash", [verifier, "--artifact", artifact, "--checksum-file", checksumFile], {
-    encoding: "utf8",
-  });
+function runVerifier(artifact: string, checksumFile: string, extraArgs: readonly string[] = []) {
+  return spawnSync(
+    "bash",
+    [verifier, "--artifact", artifact, "--checksum-file", checksumFile, ...extraArgs],
+    { encoding: "utf8" },
+  );
 }
 
 describe("Linux artifact manifest contract", () => {
@@ -239,6 +246,9 @@ describe("Linux artifact manifest contract", () => {
       '{"name":"fixture","version":"1.0.0","lockfileVersion":3}\n',
     );
     writeFileSync(join(source, "LICENSE"), "license\n");
+    const peercredHelper = join(tempRoot, "operator-peercred-helper");
+    writeFileSync(peercredHelper, "#!/bin/sh\nexit 0\n");
+    chmodSync(peercredHelper, 0o755);
     execFileSync("git", ["-c", "init.defaultBranch=main", "init", "-q", source]);
     execFileSync("git", ["-C", source, "config", "user.email", "test@example.invalid"]);
     execFileSync("git", ["-C", source, "config", "user.name", "Artifact Test"]);
@@ -267,6 +277,8 @@ describe("Linux artifact manifest contract", () => {
         buildNode,
         "--runtime-tarball",
         runtimeTarball,
+        "--operator-peercred-helper",
+        peercredHelper,
         "--output-dir",
         output,
         "--version",
@@ -291,5 +303,89 @@ describe("Linux artifact manifest contract", () => {
       { encoding: "utf8" },
     );
     expect(packaged).toContain("foreign runtime must not execute");
+  });
+
+  /**
+   * T12 — source SHA association.  The verifier must be able to prove the
+   * artifact was built from the commit being released; a manifest that merely
+   * contains a well-formed 40-hex string proves nothing on its own.
+   */
+  it("binds the artifact to the expected source commit", () => {
+    const fixture = createValidArtifact();
+    const result = runVerifier(fixture.artifact, fixture.checksumFile, [
+      "--expect-git-commit",
+      "0123456789abcdef0123456789abcdef01234567",
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("nookbridge-artifact verification ok\n");
+    expect(result.stderr).toBe("");
+  });
+
+  it("rejects an artifact built from a different source commit", () => {
+    const fixture = createValidArtifact();
+    const result = runVerifier(fixture.artifact, fixture.checksumFile, [
+      "--expect-git-commit",
+      "f".repeat(40),
+    ]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nookbridge-artifact verification failed\n");
+  });
+
+  it("rejects a malformed expected source commit", () => {
+    const fixture = createValidArtifact();
+    const result = runVerifier(fixture.artifact, fixture.checksumFile, [
+      "--expect-git-commit",
+      "not-a-sha",
+    ]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toBe("nookbridge-artifact verification failed\n");
+  });
+
+  it("stays usable without an expected commit so downloaders can still verify", () => {
+    const fixture = createValidArtifact();
+    const result = runVerifier(fixture.artifact, fixture.checksumFile);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("nookbridge-artifact verification ok\n");
+  });
+
+  it("pins the released artifact to the building source SHA in the workflow", () => {
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(workflow).toContain("--expect-git-commit");
+    expect(workflow).toContain("GITHUB_SHA");
+  });
+
+  /**
+   * T12 — candidate promotion.  A tag push must never land on the general
+   * install path: the candidate is published as a prerelease and an explicit
+   * promotion step re-verifies provenance before clearing that flag.
+   */
+  it("publishes a tag push as a candidate and gates promotion behind a separate ref", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const doc = parseYaml(raw) as {
+      on: { push: { tags: string[] } };
+      jobs: Record<string, { if?: string }>;
+    };
+
+    const buildJob = doc.jobs["linux-artifact"];
+    const promoteJob = doc.jobs["promote-release"];
+
+    expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
+    expect(buildJob?.if).toContain("!startsWith(github.ref, 'refs/tags/promote-v')");
+    expect(promoteJob?.if).toContain("refs/tags/promote-v");
+
+    // The candidate is created off the general install path...
+    expect(raw).toContain("prerelease: true");
+    // ...and promotion is the only thing that clears the flag.
+    expect(raw).toContain('{"prerelease":false}');
+    // Promotion re-verifies provenance against the release's own target commit.
+    expect(raw).toContain('--expect-git-commit "$target_commit"');
+    // Promotion reads the state back; a successful PATCH is not proof.
+    expect(raw).toMatch(/test "\$promoted" = "false"/);
   });
 });

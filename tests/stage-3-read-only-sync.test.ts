@@ -112,6 +112,7 @@ describe("NotesnookReadOnlyAdapter", () => {
       "listNotes",
       "noteMetadata",
       "readNoteBody",
+      "readNoteContent",
       "search",
     ]);
     expect((adapter as unknown as { database?: unknown }).database).toBeUndefined();
@@ -192,6 +193,23 @@ describe("NotesnookReadOnlyAdapter", () => {
     const malformed = createNotesnookReadOnlyAdapter({ source: malformedSource });
     await expect(malformed.readNoteBody("malformed-note")).rejects.toMatchObject({
       message: "Notesnook read-only adapter: note lock marker is invalid",
+    });
+  });
+
+  it("reads bounded native content and rejects ciphertext", async () => {
+    const source = Object.assign(createFakeDatabase(), {
+      readNoteContent: async (id: string) =>
+        id === "note-1"
+          ? { type: "html", data: "<p>Hello</p>" }
+          : { locked: true, cipher: "secret", iv: "iv", salt: "salt" },
+    });
+    const adapter = createNotesnookReadOnlyAdapter({ source });
+    await expect(adapter.readNoteContent("note-1")).resolves.toEqual({
+      type: "html",
+      data: "<p>Hello</p>",
+    });
+    await expect(adapter.readNoteContent("locked-note")).rejects.toMatchObject({
+      message: "Notesnook read-only adapter: note content is invalid",
     });
   });
 
@@ -1012,6 +1030,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "listNotes",
       "noteContentDiagnostic",
       "noteMetadata",
+      "readNoteContent",
       "readNoteLockState",
       "search",
       "sync",

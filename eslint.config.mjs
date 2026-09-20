@@ -37,6 +37,15 @@ export default [
     },
   },
   {
+    // These Node globals have no importable `node:` module (`node:abort` does
+    // not exist), so the repository's explicit-import convention cannot apply
+    // to them while the `no-undef` check remains meaningful for everything else.
+    files: ["**/*.ts"],
+    languageOptions: {
+      globals: { AbortController: "readonly", AbortSignal: "readonly" },
+    },
+  },
+  {
     files: ["**/*.cjs", "**/*.mjs"],
     languageOptions: {
       ecmaVersion: 2022,

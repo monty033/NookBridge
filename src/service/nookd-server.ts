@@ -39,6 +39,11 @@ import {
   serializeRpcResponse,
   type RpcMethod,
 } from "./rpc-protocol.js";
+import {
+  startOperatorSocketServer,
+  type StartOperatorSocketServerOptions,
+  type OperatorSocketServerHandle,
+} from "./operator-socket-server.js";
 import type { Logger } from "../logging/logger.js";
 
 const FRAME_PREFIX_BYTES = 4;
@@ -95,6 +100,8 @@ export type StartNookdServerOptions = Readonly<{
   socketPath: string;
   /** The bounded service runtime; no raw Notesnook handle is accepted here. */
   runtime: NookdServerRuntime;
+  /** Optional daemon-owned operator endpoint; omitted disables it. */
+  operator?: StartOperatorSocketServerOptions;
   /** The frozen service-side authorization policy; defaults to readOnly. */
   policy?: ServicePolicy;
   /** Optional socket permission bits, applied after a successful bind. Defaults to 0770. */
@@ -115,6 +122,7 @@ export type StartNookdServerOptions = Readonly<{
 
 export interface NookdServerHandle {
   readonly socketPath: string;
+  readonly operatorSocketPath?: string;
   readonly shutdown: () => Promise<void>;
   /** Alias for callers that use the conventional server lifecycle name. */
   readonly close: () => Promise<void>;
@@ -165,6 +173,7 @@ export async function startNookdServer(
   const inFlight = new Set<Promise<void>>();
   let accepting = true;
   let ownedSocketIdentity: { readonly dev: number; readonly ino: number } | undefined;
+  let operatorServer: OperatorSocketServerHandle | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let signalHandlersInstalled = false;
   let admissionTokens = normalized.abuseBounds.perProcessBurstSize;
@@ -283,6 +292,16 @@ export async function startNookdServer(
     throw nookdServerError("nookd Unix socket could not be created");
   }
 
+  if (normalized.operator !== undefined) {
+    try {
+      operatorServer = await startOperatorSocketServer(normalized.operator);
+    } catch {
+      await closeServer(server);
+      await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
+      throw nookdServerError("nookd operator socket could not be created");
+    }
+  }
+
   const removeSignalHandlers = (): void => {
     if (!signalHandlersInstalled) return;
     process.removeListener("SIGTERM", onSignal);
@@ -300,6 +319,7 @@ export async function startNookdServer(
       admissionTokens = 0;
       await waitForInFlight(inFlight, normalized.shutdownTimeoutMs);
       await serverClosed;
+      await operatorServer?.close();
       await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
       try {
         await normalized.runtime.cleanup();
@@ -322,7 +342,12 @@ export async function startNookdServer(
     signalHandlersInstalled = true;
   }
 
-  return Object.freeze({ socketPath: normalized.socketPath, shutdown, close: shutdown });
+  return Object.freeze({
+    socketPath: normalized.socketPath,
+    ...(operatorServer === undefined ? {} : { operatorSocketPath: operatorServer.socketPath }),
+    shutdown,
+    close: shutdown,
+  });
 
   function clearIdleTimer(state: ConnectionState): void {
     if (state.idleTimer === undefined) return;
@@ -546,6 +571,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
   try {
     const socketPath = options.socketPath;
     const runtime = options.runtime;
+    const operator = options.operator;
     const policy = options.policy;
     const socketMode = options.socketMode;
     const shutdownTimeoutMs = options.shutdownTimeoutMs;
@@ -557,6 +583,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
     return Object.freeze({
       socketPath,
       runtime,
+      ...(operator === undefined ? {} : { operator }),
       ...(policy === undefined ? {} : { policy }),
       ...(socketMode === undefined ? {} : { socketMode }),
       ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs }),

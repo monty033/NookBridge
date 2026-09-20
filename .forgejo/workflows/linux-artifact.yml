@@ -3,12 +3,12 @@ name: Linux artifact
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "promote-v*"]
   pull_request:
 
 jobs:
   linux-artifact:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/promote-v')
     runs-on: nixos
     steps:
       - name: Verify pinned Node runtime and prepare portable runtime
@@ -126,10 +126,19 @@ jobs:
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
           LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep -E '^GLIBCXX_[0-9]+(\.[0-9]+){1,2}$' | sort -V | tail -n 1)"
           test -n "$LIBSTDCXX_BASELINE"
+          # The operator socket spawns this helper to read SO_PEERCRED.  Static
+          # linking keeps it off the artifact's glibc/libstdcxx baseline floor.
+          command -v cc >/dev/null 2>&1 \
+            || { printf 'missing runner command: %s\n' cc >&2; exit 1; }
+          HELPER="${RUNNER_TEMP:-/tmp}/nookbridge-operator-peercred-helper"
+          cc -O2 -static -o "$HELPER" native/operator-peercred.c \
+            || cc -O2 -o "$HELPER" native/operator-peercred.c
+          chmod 0755 "$HELPER"
           npm run artifact:linux -- \
             --source-dir "$PWD" \
             --build-node "$(command -v node)" \
             --runtime-tarball "$RUNTIME_TARBALL" \
+            --operator-peercred-helper "$HELPER" \
             --output-dir "$PWD/artifacts" \
             --version "$VERSION" \
             --source-date-epoch "$SOURCE_DATE_EPOCH" \
@@ -137,7 +146,8 @@ jobs:
             --min-libstdcxx "$LIBSTDCXX_BASELINE"
           npm run artifact:verify -- \
             --artifact "$PWD/artifacts/nookbridge-v${VERSION}-linux-x64-gnu.tar.gz" \
-            --checksum-file "$PWD/artifacts/SHA256SUMS"
+            --checksum-file "$PWD/artifacts/SHA256SUMS" \
+            --expect-git-commit "$GITHUB_SHA"
 
       - name: Prepare GitHub release assets
         if: startsWith(github.ref, 'refs/tags/v')
@@ -190,9 +200,13 @@ jobs:
             tag_name: tag,
             target_commitish: sha,
             name: tag,
-            body: `NookBridge ${tag}\n\nGitHub one-command installer release.\n\nInstall with:\n\n    curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
+            body: `NookBridge ${tag}\n\nCandidate release. Verified by the Linux artifact job and awaiting clean-LXC rendered acceptance before promotion.\n\nInstall once promoted:\n\n    curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
             draft: false,
-            prerelease: false,
+            // Candidate gate: a tag push must never publish to the general
+            // install path.  Promotion to a normal release is a separate,
+            // explicit step (push a promote-<tag> ref) that re-verifies the
+            // artifact before flipping this flag.
+            prerelease: true,
             generate_release_notes: false
           }, null, 2));
           NODE
@@ -248,3 +262,73 @@ jobs:
           }
           NODE
           printf 'GitHub release published: %s\n' "$RELEASE_TAG"
+
+  promote-release:
+    # Candidate promotion.  A `v*` tag push only ever produces a prerelease;
+    # this is the explicit step that moves a candidate onto the general install
+    # path.  It re-verifies the published artifact against the release's own
+    # target commit before flipping the flag, so promotion cannot bless a
+    # candidate that does not match the commit it claims.
+    if: startsWith(github.ref, 'refs/tags/promote-v')
+    runs-on: nixos
+    steps:
+      - name: Checkout promotion tooling
+        run: |
+          set -eu
+          for command_name in git curl; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
+          done
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_REF:-$GITHUB_SHA}"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Re-verify the candidate artifact and promote it
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          PROMOTE_REF: ${{ github.ref_name }}
+        run: |
+          set -eu
+          test -n "$RELEASE_PUBLISH_TOKEN"
+          API="https://api.github.com/repos/monty033/NookBridge"
+          AUTH_HEADER="Authorization: Bearer ${RELEASE_PUBLISH_TOKEN}"
+          REL_TAG="${PROMOTE_REF#promote-}"
+          VERSION="${REL_TAG#v}"
+          ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
+          RELEASE_JSON=/tmp/nookbridge-promote.json
+
+          curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
+          release_id="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')); if (!value.id) process.exit(2); process.stdout.write(String(value.id));")"
+          prerelease="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
+          target_commit="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')).target_commitish; if (!/^[0-9a-f]{40,64}$/.test(value || '')) process.exit(2); process.stdout.write(value);")"
+
+          # Only a candidate may be promoted, and only once.
+          test "$prerelease" = "true"
+
+          work_dir="$(mktemp -d)"
+          for asset_name in "$ARTIFACT" SHA256SUMS; do
+            curl -fsSL \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
+              -o "$work_dir/$asset_name"
+          done
+
+          # Provenance gate: the artifact must record the release's own target
+          # commit before it is allowed onto the general install path.
+          bash scripts/verify-linux-artifact.sh \
+            --artifact "$work_dir/$ARTIFACT" \
+            --checksum-file "$work_dir/SHA256SUMS" \
+            --expect-git-commit "$target_commit"
+
+          curl -fsS -X PATCH -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"prerelease":false}' \
+            "$API/releases/$release_id" -o "$RELEASE_JSON"
+
+          # Read back the promoted state; a successful PATCH is not proof.
+          curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
+            "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
+          promoted="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
+          test "$promoted" = "false"
+          printf 'release promoted: %s\n' "$REL_TAG"

@@ -1,0 +1,236 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  createOperatorWriteRuntime,
+  type OperatorStoredContent,
+  type OperatorWriteSource,
+} from "../src/service/notes-operator-write-runtime.js";
+import { createNotesUndoStore, type OperationStoreFs } from "../src/service/notes-undo-store.js";
+
+const HANDLE = "h_noteone";
+const NOTE_ID = "note-1";
+const REVISION_1 = `rev_${"1".repeat(32)}`;
+const REVISION_2 = `rev_${"2".repeat(32)}`;
+const REVISION_3 = `rev_${"3".repeat(32)}`;
+
+const wrap = (s: string) => ({
+  type: "tiptap" as const,
+  data: `<div data-type="document">${s}</div>`,
+});
+
+class MemoryFs implements OperationStoreFs {
+  files = new Map<string, Uint8Array>();
+  async list(limit: number) {
+    return [...this.files.keys()].slice(0, limit);
+  }
+  async read(name: string, limit: number) {
+    const bytes = this.files.get(name)!;
+    if (bytes.length > limit) throw Error("oversize");
+    return bytes.slice();
+  }
+  async writeExclusive(name: string, bytes: Uint8Array) {
+    if (this.files.has(name)) throw Error("exists");
+    this.files.set(name, bytes.slice());
+  }
+  async syncFile() {}
+  async rename(from: string, to: string) {
+    this.files.set(to, this.files.get(from)!);
+    this.files.delete(from);
+  }
+  async syncDirectory() {}
+  async remove(name: string) {
+    this.files.delete(name);
+  }
+}
+
+async function fixture(options: { readonly native?: string } = {}) {
+  const state: { revision: string; content: OperatorStoredContent; writes: number } = {
+    revision: REVISION_1,
+    content: wrap(options.native ?? "<p>before</p>") as OperatorStoredContent,
+    writes: 0,
+  };
+  const events: string[] = [];
+  const source: OperatorWriteSource = {
+    async read(noteId: string) {
+      if (noteId !== NOTE_ID) return undefined;
+      return { revision: state.revision, content: { ...state.content } };
+    },
+    async update(command) {
+      events.push(`update:${command.expectedRevision}`);
+      if (command.noteId !== NOTE_ID) return { kind: "missing" as const };
+      if (command.expectedRevision !== state.revision) return { kind: "conflict" as const };
+      state.writes += 1;
+      state.content = { ...command.content };
+      state.revision = command.expectedRevision === REVISION_1 ? REVISION_2 : REVISION_3;
+      return { kind: "updated" as const, revision: state.revision };
+    },
+  };
+  const store = await createNotesUndoStore({
+    fs: new MemoryFs(),
+    daemonKey: new Uint8Array(32).fill(9),
+    now: () => 1000,
+  });
+  return { state, events, source, store };
+}
+
+const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {}) =>
+  createOperatorWriteRuntime({
+    source: f.source,
+    store: f.store,
+    resolveHandle: (handle) => (handle === HANDLE ? NOTE_ID : undefined),
+    now: () => 1000,
+    ttlMs: 60_000,
+    ...extra,
+  });
+
+describe("daemon operator write runtime", () => {
+  it("captures a trusted preimage without writing", async () => {
+    const f = await fixture();
+    const view = await runtime(f).editPreimage({ id: HANDLE });
+    expect(view.kind).toBe("preimage");
+    expect(view.id).toBe(HANDLE);
+    expect(view.revision).toBe(REVISION_1);
+    expect(view.markdown).toContain("before");
+    expect(f.state.writes).toBe(0);
+  });
+
+  it("refuses an edit whose expected revision is stale, without writing", async () => {
+    const f = await fixture();
+    f.state.revision = REVISION_3;
+    await expect(
+      runtime(f).applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: "x" }),
+    ).rejects.toMatchObject({ code: "stale_revision" });
+    expect(f.state.writes).toBe(0);
+  });
+
+  it("treats an unchanged document as a no-op with no journal entry", async () => {
+    const f = await fixture();
+    const rt = runtime(f, { audit: (_event: string) => void 0 });
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    const result = await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: preimage.revision,
+      markdown: preimage.markdown,
+    });
+    expect(result.kind).toBe("edit");
+    expect(result.revision).toBe(REVISION_1);
+    expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
+  });
+
+  it("commits an edit, records a committed operation, and returns the actual revision", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    const markdown = preimage.markdown.replace("before", "after");
+    const result = await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown,
+    });
+    expect(result.revision).toBe(REVISION_2);
+    expect(f.state.writes).toBe(1);
+    const records = await f.store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.state).toBe("committed");
+    expect(JSON.stringify(records)).not.toContain("after");
+  });
+
+  it("marks an uncertain write unresolved instead of claiming success", async () => {
+    const f = await fixture();
+    const failing: OperatorWriteSource = {
+      read: f.source.read,
+      async update() {
+        return { kind: "error" as const };
+      },
+    };
+    const rt = createOperatorWriteRuntime({
+      source: failing,
+      store: f.store,
+      resolveHandle: () => NOTE_ID,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await expect(
+      rt.applyEdit({
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      }),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    const records = await f.store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.state).toBe("unresolved");
+  });
+
+  it("undoes a committed edit by restoring the stored preimage", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    const [record] = await f.store.list();
+    const undone = await rt.applyUndo({
+      id: HANDLE,
+      operationHandle: record!.handle,
+      expectedRevision: REVISION_2,
+    });
+    expect(undone.kind).toBe("undo");
+    expect(undone.revision).toBe(REVISION_3);
+    expect(f.state.content.data).toContain("before");
+    await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "undone" });
+  });
+
+  it("refuses undo after a concurrent change and retains the record", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    const [record] = await f.store.list();
+    f.state.revision = `rev_${"f".repeat(32)}`;
+    await expect(
+      rt.applyUndo({ id: HANDLE, operationHandle: record!.handle, expectedRevision: REVISION_2 }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "committed" });
+  });
+
+  it("rejects a forged opaque sentinel before any mutation", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    const forged = `${preimage.markdown}\n:::nookbridge opaque unknownNode\nref:1:native-html:FORGED\n:::\n`;
+    await expect(
+      rt.applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: forged }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
+  });
+
+  it("exposes only bounded operation summaries", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    const [record] = await f.store.list();
+    const status = await rt.operationStatus({ operationHandle: record!.handle });
+    expect(status).toEqual({
+      kind: "operation-status",
+      operationHandle: record!.handle,
+      state: "committed",
+    });
+    const list = await rt.operationList();
+    expect(list).toEqual({ kind: "operation-list", handles: [record!.handle] });
+  });
+});
