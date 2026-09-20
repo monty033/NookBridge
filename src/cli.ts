@@ -975,15 +975,15 @@ function printHelp(): void {
   );
 }
 
-// CLI entry-point.
-if (import.meta.url === `file://${process.argv[1]}`) {
-  run(process.argv).then((code) => {
-    process.exit(code);
-  });
-}
-
 // Convenience re-export for tests that exercise the CLI in-process
 // without spawning a child process.
+//
+// Declared BEFORE the entry-point guard, deliberately.  The guard starts
+// `run`, whose synchronous prefix reaches `createRuntime`, which reads
+// `_internal`.  Declaring this after the guard left `_internal` in its
+// temporal dead zone for that prefix, so every `nookctl notes ...` command
+// that constructs a runtime died with a ReferenceError the moment the CLI
+// was the entry point (the only path tests never exercised).
 export const _internal: {
   readonly dirname: typeof dirname;
   readonly join: typeof join;
@@ -994,4 +994,11 @@ export const _internal: {
   }>;
   treeRuntimeFactory?: (stateDir: string) => TreeCommandRuntime | Promise<TreeCommandRuntime>;
 } = { dirname, join };
+
+// CLI entry-point.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  run(process.argv).then((code) => {
+    process.exit(code);
+  });
+}
 export { formatAuthHelp, parseAuthCommand };
