@@ -680,6 +680,10 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   if (typeof installSignalHandlers !== "boolean") {
     throw nookdServerError("invalid nookd signal-handler option");
   }
+  const operator = options.operator;
+  if (operator !== undefined && (typeof operator !== "object" || operator === null)) {
+    throw nookdServerError("invalid nookd operator options");
+  }
   return {
     socketPath: options.socketPath,
     runtime: options.runtime,
@@ -691,6 +695,10 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     abuseBounds,
     auditLogger,
     installSignalHandlers,
+    // Must be carried through explicitly: this return value is a hand-written
+    // whitelist, and `operator` is optional on the normalized type, so dropping
+    // it here disables the operator endpoint silently with no startup error.
+    ...(operator === undefined ? {} : { operator }),
   };
 }
 
