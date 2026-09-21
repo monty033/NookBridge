@@ -7,6 +7,7 @@ import { OperatorSocketClient, type OperatorSocketResult } from "./operator-sock
 import { runNotesEditor } from "./notes-editor-runner.js";
 import { readSafeOperatorEnvironment } from "./production-runtime.js";
 import {
+  deriveCreateTitle,
   isBoundedOpaqueValue,
   type NotesCategoricalResult,
   type NotesCommandRuntime,
@@ -57,6 +58,11 @@ export interface NotesOperatorWriteOptions {
    * seam that reads a body from argv, env or stdin.
    */
   readonly editBody?: (markdown: string) => Promise<NotesEditorOutcome>;
+  /**
+   * Editor seam for `notes create`, run over an empty document.  Defaults to
+   * the same reviewed runner as {@link NotesOperatorWriteOptions.editBody}.
+   */
+  readonly createBody?: (markdown: string) => Promise<NotesEditorOutcome>;
 }
 
 type NotesReadOnlySurface = Pick<
@@ -175,6 +181,7 @@ export function createNotesCommandRuntimeFromReadOnly(
     search: async (command) => mapReadResult(await readRuntime.search(command)),
     get: async (command) => mapReadResult(await readRuntime.get(command)),
     edit: async () => UNAVAILABLE_RESULT,
+    create: async () => UNAVAILABLE_RESULT,
     undo: async () => UNAVAILABLE_RESULT,
     operations: async () => UNAVAILABLE_RESULT,
   };
@@ -187,6 +194,7 @@ export function createNotesCommandRuntimeFromOperatorSocket(
   options: NotesOperatorWriteOptions = {},
 ): NotesCommandRuntime {
   const editBody = options.editBody ?? defaultEditBody;
+  const createBody = options.createBody ?? editBody;
 
   const runtime: NotesCommandRuntime = {
     browse: async (command: { readonly cursor?: string; readonly limit?: number }) =>
@@ -228,6 +236,39 @@ export function createNotesCommandRuntimeFromOperatorSocket(
       if (!applied.ok) return mapOperatorError(applied);
       if (applied.result.kind !== "edit") return UNAVAILABLE_RESULT;
       return { kind: "updated" };
+    },
+
+    /**
+     * Compose a new note in the operator's editor, then create it.
+     *
+     * The editor opens on an EMPTY document — there is no preimage to
+     * capture, because nothing exists yet.  The title is the text of the
+     * first level-1 heading (D11) and that heading stays in the body, so
+     * what the operator typed is what the daemon stores.  A document with
+     * no usable H1 is refused categorical: guessing a title from prose
+     * would silently invent a name for the note.
+     */
+    create: async (command: { readonly notebookId?: string }) => {
+      let edited: NotesEditorOutcome;
+      try {
+        edited = await createBody("");
+      } catch {
+        return EDITOR_UNAVAILABLE_RESULT;
+      }
+      if (edited.kind === "refused") return EDITOR_UNAVAILABLE_RESULT;
+      if (edited.kind === "unchanged") return { kind: "invalid-input" };
+
+      const title = deriveCreateTitle(edited.markdown);
+      if (title === undefined) return { kind: "invalid-input" };
+
+      const created = await client.request("notes.create", {
+        title,
+        content: edited.markdown,
+        ...(command.notebookId === undefined ? {} : { notebookId: command.notebookId }),
+      });
+      if (!created.ok) return mapOperatorError(created);
+      if (created.result.kind !== "create") return UNAVAILABLE_RESULT;
+      return { kind: "created" };
     },
 
     operations: async () => {

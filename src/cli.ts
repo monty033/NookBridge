@@ -955,7 +955,7 @@ function printHelp(): void {
       "  nookctl sync <status|read-only|help>",
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
-      "  nookctl notes <help|browse|search|get|edit|undo>",
+      "  nookctl notes <help|browse|search|get|create|edit|undo>",
       "  nookctl settings <show|validate|edit|reset|help>",
       "  nookctl tree <help|list>",
       "",

@@ -213,6 +213,16 @@ export type ParsedNotesCommand =
       handle: string;
     }>
   | Readonly<{
+      kind: "create";
+      subcommand: "create";
+      /**
+       * Optional bounded notebook selector.  The daemon owns the notebook
+       * hierarchy and resolves it; no title or body is ever accepted from
+       * argv, env or stdin.
+       */
+      notebookId?: string;
+    }>
+  | Readonly<{
       kind: "edit";
       subcommand: "edit";
       handle: string;
@@ -272,6 +282,11 @@ export type NotesCategoricalResult =
    * created, so reporting an update would be a small lie.
    */
   | Readonly<{ kind: "unchanged" }>
+  /**
+   * A note was created.  Categorical on purpose: the derived title and the
+   * daemon's note id stay behind the boundary.
+   */
+  | Readonly<{ kind: "created" }>
   /** Bounded list of pending undo operations, as opaque operation handles. */
   | Readonly<{ kind: "operations"; handles: readonly string[] }>
   | Readonly<{ kind: "undone" }>
@@ -323,6 +338,14 @@ export interface NotesCommandRuntime {
    * token bytes are ever accepted from argv, env or stdin.
    */
   readonly edit: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
+  /**
+   * Bounded create.  The body does NOT cross this interface: the runtime
+   * runs the operator's editor over an empty document, derives the title
+   * from its first level-1 heading (D11), and creates the note with the
+   * heading retained in the body.  No body or title bytes are ever accepted
+   * from argv, env or stdin — only the optional notebook selector.
+   */
+  readonly create: (command: { readonly notebookId?: string }) => Promise<NotesCategoricalResult>;
   /** Pending undo operations as opaque operation handles (no note reference). */
   readonly operations: () => Promise<NotesCategoricalResult>;
   /**
@@ -418,7 +441,8 @@ export function formatNotesHelp(): string {
     "  nookctl notes help",
     "  nookctl notes browse [--cursor <opaque-cursor>] [--limit <1..100>]",
     "  nookctl notes search --stdin [--cursor <opaque-cursor>] [--limit <1..100>]",
-    "  nookctl notes get --handle <opaque-handle>",
+    `  nookctl notes get --handle <opaque-handle>`,
+    `  nookctl notes create ${APPROVE_EDIT_FLAG} [--notebook-id <id>]`,
     `  nookctl notes edit --handle <opaque-handle> ${APPROVE_EDIT_FLAG}`,
     `  nookctl notes undo ${APPROVE_EDIT_FLAG} [--status|--list]`,
     "",
@@ -426,7 +450,8 @@ export function formatNotesHelp(): string {
     "  --cursor <opaque-cursor>   pagination cursor from a prior `notes` page",
     "  --limit  <1..100>          bounded page size",
     "  --handle <opaque-handle>   opaque note handle from `notes browse`/`search`",
-    `  ${APPROVE_EDIT_FLAG}        exact approval flag required for edit and undo`,
+    `  --notebook-id <id>         optional notebook for \`notes create\``,
+    `  ${APPROVE_EDIT_FLAG}        exact approval flag required for create, edit and undo`,
     "  --stdin                    read the bounded search query from stdin",
     "  --status | --list          print pending undo operations as opaque handles",
     "",
@@ -435,12 +460,16 @@ export function formatNotesHelp(): string {
     "  browse                     paginate bounded note metadata (read-only)",
     "  search                     paginate search matches (read-only, stdin query)",
     "  get                        return a single bounded note view (read-only)",
+    "  create                     new note in $EDITOR (approval-gated)",
     "  edit                       bounded edit in $EDITOR (approval-gated)",
     "  undo                       reverse a prior edit (approval-gated, by opaque handle)",
     "",
     "Notes:",
     "  - queries arrive only via bounded stdin",
-    "  - edit bodies are edited in $EDITOR; they never cross argv, env or stdin",
+    "  - `notes create` takes its title from the first level-1 heading of the",
+    "    editor document and keeps that heading in the body; a document with",
+    "    no level-1 heading is refused as invalid-input rather than guessed",
+    "  - create and edit bodies are edited in $EDITOR; they never cross argv, env or stdin",
     "  - undo selects a daemon-minted opaque handle; no token is accepted",
     "  - credentials, keys, paths, and revisions are not accepted through argv or env",
     "  - `notes delete` is intentionally absent",
@@ -503,6 +532,8 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
         return "nookctl notes: updated\n";
       case "unchanged":
         return "nookctl notes: unchanged\n";
+      case "created":
+        return "nookctl notes: created\n";
       case "operations": {
         if (
           !Array.isArray(result.handles) ||
@@ -644,6 +675,8 @@ export function parseNotesCommand(
         return parseBrowseOrSearch("search", stringArgv.slice(1), { requireStdin: true });
       case "get":
         return parseGet(stringArgv.slice(1));
+      case "create":
+        return parseCreate(stringArgv.slice(1));
       case "edit":
         return parseEdit(stringArgv.slice(1));
       case "undo":
@@ -867,6 +900,98 @@ function parseEdit(rest: readonly string[]): ParseNotesCommandResult {
 }
 
 // ---------------------------------------------------------------------------
+// create.
+//
+// Exact shapes:
+//   --approve-edit
+//   --approve-edit --notebook-id <id>
+//
+// in any flag order, with no extras and no duplicates.  There is NO body
+// channel and NO title channel: the document is composed in $EDITOR, the
+// title is derived from its first level-1 heading (D11), and the daemon
+// mints the note.  A `--stdin` attempt is refused with a message naming
+// the reason rather than silently ignoring the payload.
+// ---------------------------------------------------------------------------
+
+function parseCreate(rest: readonly string[]): ParseNotesCommandResult {
+  let approveCount = 0;
+  let notebookId: string | undefined;
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (token === undefined) return invalidParseInput();
+
+    if (token === APPROVE_EDIT_FLAG) {
+      approveCount += 1;
+      if (approveCount > 1) return invalidParseInput();
+      continue;
+    }
+    if (token === "--notebook-id") {
+      if (notebookId !== undefined) return invalidParseInput();
+      const value = rest[i + 1];
+      if (typeof value !== "string") return invalidParseInput();
+      if (value.startsWith("--")) return invalidParseInput();
+      if (!isBoundedNotebookId(value)) return invalidParseInput();
+      notebookId = value;
+      i += 1;
+      continue;
+    }
+    if (token === "--stdin") {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl notes create: bodies are edited in $EDITOR, not supplied on stdin",
+      };
+    }
+    return invalidParseInput();
+  }
+
+  if (approveCount !== 1) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: `nookctl notes create: requires ${APPROVE_EDIT_FLAG}`,
+    };
+  }
+
+  return {
+    kind: "parsed",
+    command:
+      notebookId === undefined
+        ? { kind: "create", subcommand: "create" }
+        : { kind: "create", subcommand: "create", notebookId },
+  };
+}
+
+/**
+ * D11 — the title of a created note is the text of the **first level-1
+ * heading**, and that heading stays in the body.
+ *
+ * The scan is deliberately literal: only an ATX `#` followed by whitespace
+ * starts a heading (CommonMark), so `#hashtag` is prose and `## Section` is
+ * not a title.  A heading with no text is skipped, later H1s are ignored,
+ * and a document with no usable H1 returns `undefined` so the caller fails
+ * categorical with `invalid-input` rather than inventing a title from a
+ * paragraph, a list item, or an H2.
+ */
+export function deriveCreateTitle(markdown: string): string | undefined {
+  if (typeof markdown !== "string" || markdown.length === 0) return undefined;
+  for (const line of markdown.split("\n")) {
+    const match = /^#[ \t]+(\S.*?)[ \t]*$/.exec(line);
+    if (match === null) continue;
+    const title = match[1];
+    if (typeof title === "string" && title.length > 0) return title;
+  }
+  return undefined;
+}
+
+/** Bounded opaque notebook selector: an id the daemon minted, never a path. */
+function isBoundedNotebookId(value: string): boolean {
+  if (value.length === 0 || value.length > OPAQUE_VALUE_MAX_LENGTH) return false;
+  return /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+// ---------------------------------------------------------------------------
 // undo.
 //
 // Exact shapes:
@@ -1065,6 +1190,13 @@ export async function runNotesCommand(
         // trusted preimage, runs the operator's editor, and applies the
         // result.  Only the opaque handle is passed down.
         return await runtime.edit({ handle: command.handle });
+      case "create":
+        // The body never crosses this boundary either: the runtime runs the
+        // operator's editor over an empty document, derives the title from
+        // the first level-1 heading (D11), and creates the note.
+        return await runtime.create(
+          command.notebookId === undefined ? {} : { notebookId: command.notebookId },
+        );
       case "undo":
         return await runUndo(runtime, command, normalized.interactive);
     }
