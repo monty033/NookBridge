@@ -204,6 +204,76 @@ describe("daemon operator write runtime", () => {
     await expect(rt.editPreimage({ id: HANDLE })).rejects.toMatchObject({ code: "vault_locked" });
   });
 
+  it("reports a locked refusal on apply-edit and apply-undo too", async () => {
+    // All three write paths read through `load`, so all three must carry the
+    // category; finding 5 was only proven for editPreimage at first.  The source
+    // is mutable so both handles are established legitimately before the vault
+    // locks, which is what makes each refusal come from the lock and not from a
+    // rejected request.
+    const f = await fixture();
+    let locked = false;
+    const source: OperatorWriteSource = {
+      async read(options) {
+        if (locked) {
+          throw Object.assign(new Error("ERR_VAULT_LOCKED"), { code: "ERR_VAULT_LOCKED" });
+        }
+        return f.source.read(options);
+      },
+      update: f.source.update,
+    };
+    const rt = createOperatorWriteRuntime({
+      source,
+      store: f.store,
+      resolveHandle: () => NOTE_ID,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    const [record] = await f.store.list();
+    locked = true;
+    await expect(
+      rt.applyEdit({
+        id: HANDLE,
+        expectedRevision: REVISION_2,
+        markdown: preimage.markdown,
+      }),
+    ).rejects.toMatchObject({ code: "vault_locked" });
+    await expect(
+      rt.applyUndo({
+        id: HANDLE,
+        operationHandle: record!.handle,
+        expectedRevision: REVISION_2,
+      }),
+    ).rejects.toMatchObject({ code: "vault_locked" });
+  });
+
+  it("keeps every other read failure generic", async () => {
+    // Guard: the widened predicate must not turn an ordinary failure into a
+    // categorical lock refusal.
+    const f = await fixture();
+    const broken: OperatorWriteSource = {
+      async read(): Promise<never> {
+        throw new Error("connection reset");
+      },
+      update: f.source.update,
+    };
+    const rt = createOperatorWriteRuntime({
+      source: broken,
+      store: f.store,
+      resolveHandle: () => NOTE_ID,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    await expect(rt.editPreimage({ id: HANDLE })).rejects.toMatchObject({
+      code: "service_unavailable",
+    });
+  });
+
   it("undoes a committed edit by restoring the stored preimage", async () => {
     const f = await fixture();
     const rt = runtime(f);
