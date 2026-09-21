@@ -357,13 +357,18 @@ function inline(nodes: HtmlNode[], marks: NoteInlineMark[] = []): NoteInline[] {
       continue;
     }
     if (n.tag === "br") {
-      attrs(n);
+      // A line break carries no attributes in the canonical model, so any
+      // attribute would be silently dropped: preserve the containing block.
+      attrsStrict(n);
       out.push(marks.length ? { text: "\n", marks } : { text: "\n" });
       continue;
     }
     let mark: NoteInlineMark;
     if (n.tag === "a") {
-      attrs(n, { href: /./ });
+      // A link's canonical form carries exactly one attribute.  Anything else
+      // cannot be expressed, so preserve the containing block rather than drop
+      // it silently.
+      if (Object.keys(n.attrs).some((key) => key !== "href")) preserve();
       if (!n.attrs.href) preserve();
       mark = { type: "link", href: url(n.attrs.href) };
     } else {

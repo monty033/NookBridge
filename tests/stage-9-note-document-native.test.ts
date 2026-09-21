@@ -431,3 +431,36 @@ describe("T13 document container tolerance", () => {
     expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
   });
 });
+
+describe("T13 inline attribute strictness", () => {
+  // Inline marks and links have no place to carry presentation attributes in the
+  // canonical model, so an attribute the decoder cannot express must preserve the
+  // element rather than be silently dropped.  Tolerating decoration is a
+  // block-level concession only.
+  it("preserves a paragraph whose link carries an attribute other than href", () => {
+    const decoded = decodeNoteDocumentNative(
+      wrap('<p><a href="https://example.com" data-attachment-id="payload">t</a></p>'),
+      binding,
+    );
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("still decodes a link that carries only href", () => {
+    const decoded = decodeNoteDocumentNative(
+      wrap('<p><a href="https://example.com">t</a></p>'),
+      binding,
+    );
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(false);
+    expect(JSON.stringify(decoded.document.blocks)).toContain("https://example.com");
+  });
+
+  it("preserves a paragraph whose line break carries an attribute", () => {
+    const decoded = decodeNoteDocumentNative(wrap('<p>a<br class="soft">b</p>'), binding);
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("still decodes a plain line break", () => {
+    const decoded = decodeNoteDocumentNative(wrap("<p>a<br>b</p>"), binding);
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(false);
+  });
+});
