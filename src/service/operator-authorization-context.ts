@@ -22,10 +22,14 @@ import type { SettingsOperation } from "../settings/settings-types.js";
  * `notes.edit-preimage`, `notes.operation-list`, `notes.operation-status`,
  * `notes.browse`, `notes.search-operator`) deliberately stay out: a locked note
  * can still be read and listed, and only mutation is refused.
+ *
+ * `notes.create` is included: it writes a note, so it needs the operator
+ * capability even though it has no existing target to be locked.
  */
 export const OPERATOR_MUTATING_METHODS: ReadonlySet<OperatorMethod> = new Set<OperatorMethod>([
   "notes.apply-edit",
   "notes.apply-undo",
+  "notes.create",
 ] satisfies OperatorMethod[]);
 
 /** The published operation-handle shape; matches the write runtime's own token. */

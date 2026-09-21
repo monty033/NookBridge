@@ -53,7 +53,6 @@ import {
   type NotebookRecord,
 } from "./settings/notebook-index.js";
 import { createOperatorDiscoveryHandler } from "./service/operator-discovery-handler.js";
-import type { OperatorMethod } from "./service/operator-methods.js";
 import {
   createOperatorDiscoveryRuntime,
   createOperatorHandleRegistry,
@@ -64,14 +63,7 @@ import {
   createOperationStoreFs,
   deriveOperationStoreKey,
 } from "./service/notes-operation-store-fs.js";
-import { authorizeOperatorMethod, createOperatorPolicy } from "./service/operator-policy.js";
-import {
-  OPERATOR_MUTATING_METHODS,
-  resolveOperatorRequestLockState,
-} from "./service/operator-authorization-context.js";
-import type { OperatorNoteLockState } from "./service/operator-policy.js";
-import type { RpcRequest } from "./service/rpc-protocol.js";
-import { peerToAuthorizationContext, type OperatorPeer } from "./service/operator-server.js";
+import { createOperatorAuthorizer } from "./service/operator-authorizer.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
 
@@ -342,6 +334,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
   let resolveNotebookPath: NookdStartupRuntime["resolveNotebookPath"];
   let notebookIndex: NotebookIndex;
+  // Hoisted out of the settings try-block: the operator authorizer needs it to
+  // decide per-notebook overrides, and it would otherwise be block-scoped.
+  let settingsEvaluator: ReturnType<typeof createSettingsEvaluator> | undefined;
   let settingsPhase = false;
   try {
     const runtime = await factories.createRuntime({ stateDir: config.stateDir, keys });
@@ -420,7 +415,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       }
     }
     notebookIndex = buildNotebookIndex(notebookRecords as readonly NotebookRecord[]);
-    const settingsEvaluator = createSettingsEvaluator(settings, notebookIndex);
+    settingsEvaluator = createSettingsEvaluator(settings, notebookIndex);
     policy = createServicePolicyFromMethods(config.readPolicy, settingsEvaluator);
   } catch {
     if (runtimeCleanup !== undefined) await swallowCleanup(onceAsync(runtimeCleanup));
@@ -524,56 +519,38 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       ? undefined
       : {
           socketPath: resolve(dirname(config.socketPath), "operator.sock"),
-          authorize: async (method: OperatorMethod, peer: OperatorPeer, request?: RpcRequest) => {
-            // Finding 7: resolve the lock context of the target before the
-            // synchronous seam runs, so a mutation of a locked note is refused
-            // categorically instead of reaching the write path.
-            const context = peerToAuthorizationContext(peer) as ReturnType<
-              typeof peerToAuthorizationContext
-            > & { noteLockState?: OperatorNoteLockState };
-            const lockState = await resolveOperatorRequestLockState({
-              method,
-              request,
-              resolveHandle: (handle) => operatorHandles.resolve(handle),
-              // A bare apply-undo names only an operation handle, so the note it
-              // targets is resolved from the daemon's own committed record -
-              // otherwise the seam would see no target and skip the lock check.
-              resolveOperationNoteId: async (operationHandle) => {
-                if (operatorStore === undefined) return undefined;
-                try {
-                  const record = await operatorStore.get(operationHandle);
-                  const payload = JSON.parse(record.payload) as { noteId?: unknown };
-                  return typeof payload.noteId === "string" && payload.noteId.length > 0
-                    ? payload.noteId
-                    : undefined;
-                } catch {
-                  return undefined;
-                }
-              },
-              readNoteLockState: readOnly.readNoteLockState,
-            });
-            if (lockState !== undefined) context.noteLockState = lockState;
-            return authorizeOperatorMethod(
-              createOperatorPolicy((candidate, evaluatorContext) => {
-                const groups = evaluatorContext.operatorGroupMembership ?? [];
-                if (
-                  !groups.includes("nookbridge-clients") &&
-                  !groups.includes("nookbridge-operators")
-                ) {
-                  return { allowed: false, reason: "permission_denied" };
-                }
-                if (
-                  evaluatorContext.noteLockState?.locked === true &&
-                  OPERATOR_MUTATING_METHODS.has(candidate)
-                ) {
-                  return { allowed: false, reason: "vault_locked" };
-                }
-                return { allowed: true, method: candidate };
-              }),
-              method,
-              context,
-            );
-          },
+          // The production authorizer: admission, the operator capability for
+          // mutations, the lock context, and the notebook policy.
+          authorize: createOperatorAuthorizer({
+            resolveHandle: (handle) => operatorHandles.resolve(handle),
+            // A bare apply-undo names only an operation handle, so the note it
+            // targets is resolved from the daemon's own committed record -
+            // otherwise the seam would see no target and skip the lock check.
+            resolveOperationNoteId: async (operationHandle) => {
+              if (operatorStore === undefined) return undefined;
+              try {
+                const record = await operatorStore.get(operationHandle);
+                const payload = JSON.parse(record.payload) as { noteId?: unknown };
+                return typeof payload.noteId === "string" && payload.noteId.length > 0
+                  ? payload.noteId
+                  : undefined;
+              } catch {
+                return undefined;
+              }
+            },
+            readNoteLockState: readOnly.readNoteLockState,
+            readNoteNotebookPath: async (noteId) => {
+              const metadata = await readOnly.noteMetadata(noteId);
+              const notebookId = (metadata as { notebookId?: unknown } | undefined)?.notebookId;
+              if (typeof notebookId !== "string" || notebookId.length === 0) return undefined;
+              return resolveNotebookPath?.(notebookId);
+            },
+            evaluateNotebookPolicy:
+              settingsEvaluator === undefined
+                ? undefined
+                : (operation, notebookPath) =>
+                    settingsEvaluator(operation, { notebookPath }).allowed,
+          }),
           handle: createOperatorDiscoveryHandler({
             ...createOperatorDiscoveryRuntime(
               {
