@@ -24,6 +24,7 @@ import {
   runSyncCommand,
 } from "../src/core/notesnook-sync-admin.js";
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
+import { isExactFetchRequest } from "../src/core/readonly-sync-shape.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { serializeRpcResponse, type RpcNotesGetRequest } from "../src/service/rpc-protocol.js";
@@ -276,6 +277,32 @@ describe("NotesnookReadOnlyAdapter", () => {
     await expect(adapter.sync(withPrototype)).rejects.toMatchObject(rejection);
 
     expect(database.syncCalls).toEqual([]);
+  });
+
+  describe("shared sync shape rule", () => {
+    // The adapter and the projection both expose the read-only sync boundary, so
+    // they share one implementation.  The projection cannot be unit-tested in
+    // isolation without a live-database fixture, so the rule itself is pinned
+    // here and both call sites use it.
+    it('accepts exactly { type: "fetch" } and rejects every other shape', () => {
+      expect(isExactFetchRequest({ type: "fetch" })).toBe(true);
+
+      expect(isExactFetchRequest({ type: "fetch", extra: 1 })).toBe(false);
+      expect(isExactFetchRequest({ type: "fetch", force: true })).toBe(false);
+      expect(isExactFetchRequest({ type: "full" })).toBe(false);
+      expect(isExactFetchRequest({})).toBe(false);
+      expect(isExactFetchRequest(null)).toBe(false);
+      expect(isExactFetchRequest("fetch")).toBe(false);
+
+      const withSymbol = { type: "fetch", [Symbol("extra")]: 1 };
+      expect(isExactFetchRequest(withSymbol)).toBe(false);
+
+      const withHidden = { type: "fetch" };
+      Object.defineProperty(withHidden, "extra", { value: 1, enumerable: false });
+      expect(isExactFetchRequest(withHidden)).toBe(false);
+
+      expect(isExactFetchRequest(Object.create({ type: "fetch" }))).toBe(false);
+    });
   });
 
   it("coalesces concurrent sync calls to one upstream attempt", async () => {

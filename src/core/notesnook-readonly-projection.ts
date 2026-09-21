@@ -89,6 +89,7 @@ import {
   type NotesnookReadOnlyNoteMetadata,
 } from "./notesnook-readonly-adapter.js";
 import type { NotesnookLiveDatabase } from "./notesnook-core-adapter.js";
+import { isExactFetchRequest } from "./readonly-sync-shape.js";
 
 type ReadOnlyRevisionToken = NonNullable<NotesnookReadOnlyNoteMetadata["revision"]>;
 
@@ -327,6 +328,15 @@ export function flattenLiveDatabaseToReadOnly(
       }
       if (options?.force !== undefined) {
         throw projectionError("Notesnook read-only projection: sync force is out of scope");
+      }
+      if (!isExactFetchRequest(options)) {
+        // The same shape rule the read-only adapter enforces: only `type` may be
+        // present, as an own property of a plain object.  Silently dropping an
+        // extra field let a caller believe it asked for something this boundary
+        // never honoured.
+        throw projectionError(
+          'Notesnook read-only projection: sync request must carry only "type"',
+        );
       }
       const syncArgs: { type: NotesnookReadOnlyProjectionSyncType } = {
         type: syncType,

@@ -50,6 +50,7 @@
 
 import { Buffer } from "node:buffer";
 import { isNotesnookAdapterError } from "./notesnook-core-adapter.js";
+import { isExactFetchRequest } from "./readonly-sync-shape.js";
 import { createRevisionToken, type NotesnookRevisionToken } from "./notesnook-write-contract.js";
 
 // ---------------------------------------------------------------------------
@@ -290,16 +291,11 @@ export class NotesnookReadOnlyAdapter {
     if (options.force !== undefined) {
       throw readOnlyAdapterError("Notesnook read-only adapter: sync force is out of scope");
     }
-    // Stronger than an own-enumerable-keys check: a symbol key, a non-enumerable
-    // property, or a property inherited from a prototype would each smuggle a
-    // field past `Object.keys`.  The request must be a plain object whose only
-    // own key is `type`.
-    const prototype = Object.getPrototypeOf(options);
-    if (
-      (prototype !== null && prototype !== Object.prototype) ||
-      !Object.hasOwn(options, "type") ||
-      Reflect.ownKeys(options).some((key) => key !== "type")
-    ) {
+    // The shape rule is shared with the read-only projection so the two layers
+    // cannot drift: only `type` may be present, as an own property of a plain
+    // object.  A symbol key, a non-enumerable property, or a property inherited
+    // from a prototype each smuggle a field past a naive `Object.keys` check.
+    if (!isExactFetchRequest(options)) {
       throw readOnlyAdapterError(
         'Notesnook read-only adapter: sync request must carry only "type"',
       );
