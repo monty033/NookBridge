@@ -38,7 +38,7 @@ export interface OperatorDiscoveryRuntime {
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
   ) => Promise<RpcNotesApplyEditResult>;
   readonly applyUndo?: (
-    params: Readonly<{ id: string; operationHandle: string; expectedRevision: string }>,
+    params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
   ) => Promise<RpcNotesApplyUndoResult>;
   readonly operationStatus?: (
     params: Readonly<{ operationHandle: string }>,

@@ -272,11 +272,18 @@ export interface RpcOperatorApplyEditParams {
   readonly markdown: string;
 }
 
-/** Bounded apply-undo params; canonical closed shape. */
+/**
+ * Bounded apply-undo params; closed shape, two admitted forms.
+ *
+ * `id` and `expectedRevision` are optional because the operator form carries
+ * only the daemon-minted `operationHandle`: the daemon resolves the note and
+ * the guarding revision from its own committed operation record, so neither
+ * crosses the socket.  A caller that already holds both may still send them.
+ */
 export interface RpcOperatorApplyUndoParams {
-  readonly id: string;
+  readonly id?: string;
   readonly operationHandle: string;
-  readonly expectedRevision: string;
+  readonly expectedRevision?: string;
 }
 
 export interface RpcOperatorPageParams {
@@ -1493,39 +1500,58 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj.expectedRevision = expectedRevision;
     paramsObj.markdown = markdown;
   } else if (method === "notes.apply-undo") {
-    // T04 — closed `notes.apply-undo` params: exactly
-    // { id, operationHandle, expectedRevision }.  The
-    // `operationHandle` is a daemon-minted opaque handle and never
-    // crosses argv / env in production (T00.7 #1).
-    if (!keysAreExactly(paramKeys, ["id", "operationHandle", "expectedRevision"])) {
+    // T04 — closed `notes.apply-undo` params.  Two shapes are admitted:
+    //
+    //   { operationHandle }
+    //   { id, operationHandle, expectedRevision }
+    //
+    // The handle-only form is the operator contract: the daemon resolves the
+    // note id and the guarding revision from its own committed record, so
+    // neither crosses the socket.  The explicit form stays for callers that
+    // already hold the note handle and the revision.  Requiring the three-field
+    // form refused the CLI's `notes undo` before the request ever reached the
+    // runtime, and the protocol error closed the connection with no envelope.
+    const handleOnlyShape = keysAreExactly(paramKeys, ["operationHandle"]);
+    const explicitShape = keysAreExactly(paramKeys, ["id", "operationHandle", "expectedRevision"]);
+    if (!handleOnlyShape && !explicitShape) {
       throw rpcProtocolError("rpc protocol: apply-undo params have unexpected fields");
     }
     const noteId = paramsRecord.id;
     const operationHandle = paramsRecord.operationHandle;
     const expectedRevision = paramsRecord.expectedRevision;
     if (
-      typeof noteId !== "string" ||
-      noteId.length === 0 ||
-      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
-        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(noteId) ||
       typeof operationHandle !== "string" ||
       operationHandle.length === 0 ||
       operationHandle.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
       utf8ByteLength(operationHandle, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
         STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(operationHandle) ||
-      typeof expectedRevision !== "string" ||
-      expectedRevision.length === 0 ||
-      !isWellFormedRevisionToken(expectedRevision)
+      hasControlCharacter(operationHandle)
     ) {
-      throw rpcProtocolError("rpc protocol: apply-undo params are invalid");
+      throw rpcProtocolError("rpc protocol: apply-undo operationHandle is invalid");
+    }
+    if (
+      noteId !== undefined &&
+      (typeof noteId !== "string" ||
+        noteId.length === 0 ||
+        noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(noteId))
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-undo id is invalid");
+    }
+    if (
+      expectedRevision !== undefined &&
+      (typeof expectedRevision !== "string" ||
+        expectedRevision.length === 0 ||
+        !isWellFormedRevisionToken(expectedRevision))
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-undo expectedRevision is invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
-    paramsObj.id = noteId;
     paramsObj.operationHandle = operationHandle;
-    paramsObj.expectedRevision = expectedRevision;
+    if (noteId !== undefined) paramsObj.id = noteId;
+    if (expectedRevision !== undefined) paramsObj.expectedRevision = expectedRevision;
   } else if (method === "notes.operation-status") {
     // T04 — closed `notes.operation-status` params: exactly one field,
     // `operationHandle` (daemon-minted opaque handle).

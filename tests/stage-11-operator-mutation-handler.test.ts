@@ -18,7 +18,13 @@ describe("operator mutation handler", () => {
       },
       applyUndo: async ({ id, operationHandle, expectedRevision }) => {
         calls.push(`undo:${id}:${operationHandle}:${expectedRevision}`);
-        return { kind: "undo", id, appliedFields: ["content"], revision: "rev_3", contentBytes: 6 };
+        return {
+          kind: "undo",
+          ...(id === undefined ? {} : { id }),
+          appliedFields: ["content"],
+          revision: "rev_3",
+          contentBytes: 6,
+        };
       },
       operationStatus: async ({ operationHandle }) => ({
         kind: "operation-status",

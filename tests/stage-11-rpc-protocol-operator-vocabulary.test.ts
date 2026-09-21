@@ -277,3 +277,46 @@ describe("rpc-protocol — operator method-specific frame bounds", () => {
     expect(serialized.byteLength).toBe(frame.byteLength);
   });
 });
+
+describe("rpc-protocol — notes.apply-undo admits the operator's handle-only form", () => {
+  it("admits { operationHandle } alone", () => {
+    // The operator contract is that the daemon resolves the note id and the
+    // guarding revision from its own committed record, so neither crosses the
+    // socket: the CLI's undo runtime sends exactly this shape.  The wire parser
+    // required the explicit three-field form instead, so `nookctl notes undo`
+    // was refused before it reached the runtime and the socket was closed with
+    // no envelope, surfacing as a generic CLI error.
+    const request = parseRpcFrame(
+      frameOf({
+        id: "undo-handle-only",
+        method: "notes.apply-undo",
+        params: {
+          operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+      } as RpcRequest),
+    );
+    expect(request.method).toBe("notes.apply-undo");
+    expect(request.params).toEqual({
+      operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+  });
+
+  it("still admits the explicit three-field form", () => {
+    const request = parseRpcFrame(
+      frameOf({
+        id: "undo-explicit",
+        method: "notes.apply-undo",
+        params: {
+          id: "opaque-handle",
+          operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          expectedRevision: "rev_0123456789abcdef0123456789abcdef",
+        },
+      } as RpcRequest),
+    );
+    expect(request.params).toEqual({
+      id: "opaque-handle",
+      operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      expectedRevision: "rev_0123456789abcdef0123456789abcdef",
+    });
+  });
+});

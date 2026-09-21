@@ -142,7 +142,7 @@ export interface OperatorWriteRuntime {
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
   ) => Promise<OperatorEditApplied>;
   readonly applyUndo: (
-    params: Readonly<{ id: string; operationHandle: string; expectedRevision: string }>,
+    params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
   ) => Promise<OperatorUndoApplied>;
   readonly operationStatus: (
     params: Readonly<{ operationHandle: string }>,
