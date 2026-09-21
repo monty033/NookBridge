@@ -290,10 +290,16 @@ export class NotesnookReadOnlyAdapter {
     if (options.force !== undefined) {
       throw readOnlyAdapterError("Notesnook read-only adapter: sync force is out of scope");
     }
-    // The boundary is structurally exact, not merely permissive: an extra field
-    // would be forwarded nowhere and silently discarded, letting a caller
-    // believe it asked for something the adapter never honoured.
-    if (Object.keys(options ?? {}).some((key) => key !== "type")) {
+    // Stronger than an own-enumerable-keys check: a symbol key, a non-enumerable
+    // property, or a property inherited from a prototype would each smuggle a
+    // field past `Object.keys`.  The request must be a plain object whose only
+    // own key is `type`.
+    const prototype = Object.getPrototypeOf(options);
+    if (
+      (prototype !== null && prototype !== Object.prototype) ||
+      !Object.hasOwn(options, "type") ||
+      Reflect.ownKeys(options).some((key) => key !== "type")
+    ) {
       throw readOnlyAdapterError(
         'Notesnook read-only adapter: sync request must carry only "type"',
       );

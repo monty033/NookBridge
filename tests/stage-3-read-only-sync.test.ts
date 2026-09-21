@@ -253,6 +253,31 @@ describe("NotesnookReadOnlyAdapter", () => {
     expect(database.syncCalls).toEqual([]);
   });
 
+  it("rejects extra fields that are not plain own enumerable properties", async () => {
+    // Guard: an own-keys check alone is evadable.  A symbol key, a
+    // non-enumerable property, or a property inherited from a prototype all
+    // carry a request field the naive check never sees.
+    const database = createFakeDatabase();
+    const adapter = createNotesnookReadOnlyAdapter({ source: database });
+    const rejection = {
+      message: 'Notesnook read-only adapter: sync request must carry only "type"',
+    };
+
+    const withSymbol = { type: "fetch" as const, [Symbol("extra")]: 1 };
+    await expect(adapter.sync(withSymbol)).rejects.toMatchObject(rejection);
+
+    const withHidden = { type: "fetch" as const };
+    Object.defineProperty(withHidden, "extra", { value: 1, enumerable: false });
+    await expect(adapter.sync(withHidden)).rejects.toMatchObject(rejection);
+
+    const withPrototype = Object.create({ type: "fetch", extra: 1 }) as {
+      type: "fetch";
+    };
+    await expect(adapter.sync(withPrototype)).rejects.toMatchObject(rejection);
+
+    expect(database.syncCalls).toEqual([]);
+  });
+
   it("coalesces concurrent sync calls to one upstream attempt", async () => {
     let release!: (value: boolean) => void;
     const database = createFakeDatabase();
