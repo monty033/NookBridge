@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { startOperatorSocketServer } from "../src/service/operator-socket-server.js";
 import { OperatorSocketClient } from "../src/operator/operator-socket-client.js";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
+import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.js";
 
 const socketPath = () =>
   `/tmp/operator-client-${process.pid}-${Math.random().toString(16).slice(2)}.sock`;
@@ -80,9 +81,11 @@ describe("operator socket client", () => {
           search: async () => ({ notes: [], next: null }),
           editPreimage: async () => PREIMAGE,
           applyEdit: async () => {
-            const error = new Error("categorical") as Error & { code: string };
-            error.code = code;
-            throw error;
+            // Use the real categorical failure type: a plain Error with a
+            // fabricated `code` field is exactly the shape the handler must not
+            // trust, so a stub that threw one would be testing the loose
+            // contract rather than the one the runtime actually provides.
+            throw new OperatorWriteError(code);
           },
         },
         async (client) => {
