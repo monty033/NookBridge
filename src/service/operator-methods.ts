@@ -1,7 +1,7 @@
 /**
  * T04 — canonical operator RPC vocabulary.
  *
- * The frozen T00 operator vocabulary is exactly:
+ * T00 froze seven operator methods:
  *
  *   notes.get-view
  *   notes.edit-preimage
@@ -10,6 +10,16 @@
  *   notes.create
  *   notes.operation-status
  *   notes.operation-list
+ *
+ * The discovery surface added two more for browsing and searching, so the
+ * closed set an operator listener accepts today is nine:
+ *
+ *   notes.browse
+ *   notes.search-operator
+ *
+ * Both halves are published literals of the operator transport; the header and
+ * the constant must agree, and `tests/stage-11-operator-discovery-handler.test.ts`
+ * pins the exact set so neither can drift silently.
  *
  * This module is a tiny frozen-constant surface — every other
  * T04 module (`rpc-protocol`, `service-policy`, `operator-server`,
@@ -53,7 +63,7 @@ export type OperatorMethod = OperatorMethodLiteral;
 
 /**
  * Test membership in the canonical operator vocabulary.  Returns
- * `true` only for one of the seven published literals; every other
+ * `true` only for one of the nine published literals; every other
  * string, the empty string, and every non-string candidate is
  * `false`.  The check is intentionally O(n) over the small frozen
  * list — the alternative is a `Set`, but a Set's iterator surface

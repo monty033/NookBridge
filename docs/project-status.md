@@ -61,14 +61,28 @@ which includes a send phase — so a later daemon-side full sync would drain tha
 queue. The accurate position is "not automatically uploaded", not "may never be
 uploaded". This is tracked as an open defect, not a closed boundary.
 
-Also open: the dedicated lock proof (`notes locked-note-proof`) still reports
-`service_unavailable` for a locked note and `permission_denied` for an unlocked
-control; the daemon records `peerCredentials: "unknown"`, and a locked note's own
-path resolution is collapsed into the generic code. The read-only sync proof
-reports a pass against an empty store, because its state directory is derived from
-the working directory when the environment variable is unset. An independent
-read-only review of source PR #125 returned `REQUEST_CHANGES` with seven findings,
-all open and none disputed; they are enumerated in the PR description.
+Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
+categorical `vault_locked` for a locked note and `permission_denied` for the
+unlocked control — proven live on 1.3.9 — but the daemon still records
+`peerCredentials: "unknown"` for the peer, and the proof's own path resolution
+collapses every failure other than `not_found` into the generic code. The
+read-only sync proof reports a pass against an empty store, because its state
+directory is derived from the working directory when the environment variable is
+unset.
+
+An independent read-only review of source PR #125 returned `REQUEST_CHANGES`
+twice. Round 1 raised seven findings; four are now fixed — list-class semantics
+(`f119808`), inline attribute strictness (`f31e017`), the sync request shape
+(`053c322`), and the lock category on the write paths (`52c0231`, with the
+remaining paths covered in `4da0fe9`). One deferral was upheld (unknown tags are
+separable from this PR). One was corrected as documentation rather than code
+(creates are not automatically uploaded). One was reclassified: authorization is
+not notebook- or lock-aware, which is a defect against the frozen T00
+requirement rather than a future improvement, and it blocks the merge. Round 2
+additionally found that `categoricalCode` trusted arbitrary error text
+(`03ebb32`) and that the operator vocabulary header contradicted its own
+constant; the shape check from round 1 was also found evadable and is now
+un-evadable (`2f9b66b`).
 
 ## Reading status claims safely
 

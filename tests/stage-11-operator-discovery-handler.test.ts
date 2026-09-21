@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
+import { OPERATOR_METHODS } from "../src/service/operator-methods.js";
 
 describe("operator discovery handler", () => {
+  it("publishes an exact set of nine operator methods", () => {
+    // Review finding: the module header claimed the vocabulary was "exactly"
+    // seven while the constant held nine, so the documented contract and the
+    // code disagreed.  Pinning the set here means a future alias, addition, or
+    // removal has to update this test as well as the header.
+    expect(OPERATOR_METHODS).toHaveLength(9);
+    expect([...OPERATOR_METHODS]).toEqual([
+      "notes.get-view",
+      "notes.edit-preimage",
+      "notes.apply-edit",
+      "notes.apply-undo",
+      "notes.create",
+      "notes.operation-status",
+      "notes.operation-list",
+      "notes.browse",
+      "notes.search-operator",
+    ]);
+  });
+
   it("dispatches browse and returns only the bounded page projection", async () => {
     const handler = createOperatorDiscoveryHandler({
       browse: async (params) => ({
