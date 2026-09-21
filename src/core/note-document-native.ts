@@ -550,11 +550,16 @@ export function decodeNoteDocumentNative(
     const roots = elements(nodes);
     if (!roots.length && r.data.trim()) fail();
     let content: HtmlNode[] = roots;
+    // The document container is structural, not content: it contributes no
+    // blocks of its own, so attributes on it cannot change what the document
+    // says.  Requiring it to carry exactly one attribute made every container
+    // that a real serializer decorates decode as one opaque block, which made
+    // written notes unreadable and uneditable.  Content-level strictness is
+    // unaffected -- a root element declaring any other type is still preserved.
     if (
       roots.length === 1 &&
       roots[0]!.tag === "div" &&
-      roots[0]!.attrs["data-type"] === "document" &&
-      Object.keys(roots[0]!.attrs).length === 1
+      roots[0]!.attrs["data-type"] === "document"
     )
       content = roots[0]!.children;
     const payloads = new Map<string, string>();

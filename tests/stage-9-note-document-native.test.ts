@@ -316,3 +316,61 @@ describe("T03 native HTML adapter", () => {
     ).toThrow();
   });
 });
+
+describe("T13 document container tolerance", () => {
+  const body = "<h1>Title</h1><p>Body with <strong>mark</strong>.</p>";
+
+  it("unwraps the document container when it carries presentation attributes", () => {
+    // Notesnook's own serializer decorates the root container.  Requiring that
+    // container to carry exactly one attribute meant every note it stored
+    // decoded as a single opaque block, so the write path could create a note
+    // the read path could neither show nor edit.  The container holds no
+    // content of its own, so its other attributes cannot change what the
+    // document says.
+    const clean = decodeNoteDocumentNative(wrap(body), binding).document;
+    const decorated: Array<[string, string]> = [
+      ["data-id", `<div data-type="document" data-id="abc123">${body}</div>`],
+      ["class", `<div class="note" data-type="document">${body}</div>`],
+      ["class+data", `<div class="note" data-id="abc123" data-type="document">${body}</div>`],
+    ];
+    for (const [name, data] of decorated) {
+      const decoded = decodeNoteDocumentNative({ type: "tiptap", data }, binding);
+      expect(decoded.document, `container decorated with ${name}`).toEqual(clean);
+    }
+  });
+
+  it("refuses a container carrying attributes the parser rejects outright", () => {
+    // Boundary, not a downgrade: the HTML parser refuses `style` and `id`
+    // anywhere in a stored document, so the read is refused categorically
+    // rather than silently returning a document with decoration dropped.
+    for (const decoration of ['style="padding:0"', 'id="root"']) {
+      expect(() =>
+        decodeNoteDocumentNative(
+          { type: "tiptap", data: `<div ${decoration} data-type="document">${body}</div>` },
+          binding,
+        ),
+      ).toThrow();
+    }
+  });
+
+  it("keeps container strictness for any other root type", () => {
+    // Guard: a root element declaring some other type is not the document
+    // container and must still be preserved rather than guessed at.
+    const decoded = decodeNoteDocumentNative(
+      {
+        type: "tiptap",
+        data: '<div data-type="attachment" data-id="local-reference"><p>Body</p></div>',
+      },
+      binding,
+    );
+    expect(decoded.document.blocks).toHaveLength(1);
+    expect(decoded.document.blocks[0]!.type).toBe("opaque");
+  });
+
+  it("still preserves stray attributes inside content it cannot interpret", () => {
+    // Guard: the container fix must not relax block-level strictness.
+    const decoded = decodeNoteDocumentNative(wrap('<p data-custom="kept">x</p>'), binding);
+    expect(decoded.document.blocks.length).toBeGreaterThan(0);
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+});
