@@ -98,6 +98,35 @@ the `nookbridge-clients` supplementary boundary, and binds the Unix socket at
 `/run/nookbridge/nookbridge.sock`. This installer does not create a TCP or HTTP
 listener.
 
+### The operator group is the mutation capability
+
+The installer creates three groups:
+
+| group | purpose |
+| --- | --- |
+| `nookbridge` | private state group; owns the state directory |
+| `nookbridge-clients` | the read boundary — browse, search, view, status |
+| `nookbridge-operators` | the **mutation** capability — apply-edit, apply-undo, create |
+
+`nookbridge-operators` is created but nobody is added to it. That is deliberate:
+membership is what allows a peer to change a note, so it should be granted as a
+decision rather than inherited. Add the identity that runs your operator CLI:
+
+```bash
+sudo usermod -aG nookbridge-operators "$OPERATOR_USER"
+```
+
+A peer may be in both groups. `nookbridge-clients` alone is enough to read and
+list notes — including a locked one — but it is **not** enough to mutate: the
+daemon refuses a mutating method for a peer without the operator group. A locked
+note refuses mutation outright (`vault_locked`), and an operation the note's
+notebook policy forbids is refused (`permission_denied`); per-notebook overrides
+live in the settings file.
+
+The operator socket is a separate path from the service socket
+(`/run/nookbridge/operator.sock`). Grouping it with `nookbridge-operators` gives
+filesystem-level enforcement alongside the daemon's own check.
+
 ## Upgrade, rollback, and retention
 
 Use `upgrade` with the new artifact. Do not overwrite a release directory by
