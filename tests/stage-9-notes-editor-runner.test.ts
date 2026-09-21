@@ -132,3 +132,54 @@ describe("notes editor runner", () => {
     await expect(stat(marker)).rejects.toThrow();
   });
 });
+
+describe("notes editor runner — line endings", () => {
+  it("normalizes the editor's line endings so a CRLF document is not refused", async () => {
+    // An editor that saves CRLF (a Windows editor, or a paste out of one)
+    // handed a document containing \r to the write path, where the fidelity
+    // gate refused the entire note.  Normalizing at the editor boundary keeps
+    // the canonical form LF, so the save succeeds instead of failing opaquely.
+    const root = await scratch();
+    const result = await runNotesEditor("", {
+      env: {
+        ...baseEnv,
+        EDITOR: editor(
+          `require('fs').writeFileSync(process.argv[1], ${JSON.stringify("# Title\r\n\r\nBody\r\n")})`,
+        ),
+      },
+      tmpRoot: root,
+    });
+    expect(result.markdown).toBe("# Title\n\nBody\n");
+    expect(result.markdown.includes("\r")).toBe(false);
+  });
+
+  it("treats a CRLF rewrite of identical content as unchanged", async () => {
+    // A no-op save must stay a no-op: if the line-ending form alone counted as
+    // an edit, opening and closing a note would rewrite it.
+    const root = await scratch();
+    const result = await runNotesEditor("# Title\n\nBody\n", {
+      env: {
+        ...baseEnv,
+        EDITOR: editor(
+          `require('fs').writeFileSync(process.argv[1], ${JSON.stringify("# Title\r\n\r\nBody\r\n")})`,
+        ),
+      },
+      tmpRoot: root,
+    });
+    expect(result.changed).toBe(false);
+  });
+
+  it("normalizes a lone carriage return", async () => {
+    const root = await scratch();
+    const result = await runNotesEditor("", {
+      env: {
+        ...baseEnv,
+        EDITOR: editor(
+          `require('fs').writeFileSync(process.argv[1], ${JSON.stringify("# Title\r\rBody\r")})`,
+        ),
+      },
+      tmpRoot: root,
+    });
+    expect(result.markdown).toBe("# Title\n\nBody\n");
+  });
+});

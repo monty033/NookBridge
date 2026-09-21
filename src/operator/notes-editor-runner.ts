@@ -86,11 +86,26 @@ export async function runNotesEditor(
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
     await runChild(parsed.executable, [...parsed.args, file], childOptions);
-    const markdown = await readPrivateMarkdown(file);
+    const markdown = normalizeEditorLineEndings(await readPrivateMarkdown(file));
     return Object.freeze({ markdown, changed: markdown !== initialMarkdown });
   } finally {
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * Normalize the line endings an editor wrote back to the canonical LF form.
+ *
+ * The document the rest of the system consumes is LF-only by design: the
+ * fidelity gate refuses content containing a carriage return, and the preimage
+ * comparison is byte-bound.  An editor that saves CRLF — a Windows editor, or a
+ * paste out of one — therefore made an otherwise valid save fail with no usable
+ * diagnostic.  Normalizing at the boundary keeps the canonical form in exactly
+ * one place, is a no-op for an editor that already writes LF, and makes the
+ * saved-line-ending form irrelevant to whether a save counts as a change.
+ */
+export function normalizeEditorLineEndings(markdown: string): string {
+  return markdown.replace(/\r\n?/g, "\n");
 }
 
 function resolveEditor(env: Readonly<Record<string, string | undefined>>): string {
