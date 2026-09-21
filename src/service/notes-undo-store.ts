@@ -46,7 +46,7 @@ const DOMAIN = "nookbridge/daemon-operation-store/v1";
 const transitions: Record<OperationState, readonly OperationState[]> = {
   prepared: ["committing", "aborted"],
   committing: ["committed", "unresolved", "aborted"],
-  committed: ["undone"],
+  committed: ["undone", "unresolved"],
   unresolved: ["committed", "aborted"],
   undone: [],
   aborted: [],

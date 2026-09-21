@@ -355,6 +355,38 @@ describe("daemon operator write runtime", () => {
     await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "committed" });
   });
 
+  it("marks undo unresolved when the source outcome is uncertain", async () => {
+    const f = await fixture();
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    const [record] = await f.store.list();
+    const uncertain = createOperatorWriteRuntime({
+      source: {
+        read: f.source.read,
+        async update() {
+          return { kind: "error" as const };
+        },
+      },
+      store: f.store,
+      resolveHandle: () => NOTE_ID,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    await expect(
+      uncertain.applyUndo({
+        id: HANDLE,
+        operationHandle: record!.handle,
+        expectedRevision: REVISION_2,
+      }),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "unresolved" });
+  });
+
   it("rejects a forged opaque sentinel before any mutation", async () => {
     const f = await fixture();
     const rt = runtime(f);

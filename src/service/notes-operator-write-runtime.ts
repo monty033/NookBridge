@@ -663,6 +663,17 @@ export function createOperatorWriteRuntime(
         content: restore,
       });
     } catch {
+      try {
+        await options.store.transition(
+          record.handle,
+          "committed",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
+      } catch {
+        // Preserve the original categorical failure.
+      }
       return fail("service_unavailable");
     }
     if (result.kind === "conflict") {
@@ -671,7 +682,20 @@ export function createOperatorWriteRuntime(
     }
     if (result.kind === "locked") return fail("vault_locked");
     if (result.kind === "missing") return fail("not_found");
-    if (result.kind !== "updated") return fail("service_unavailable");
+    if (result.kind !== "updated") {
+      try {
+        await options.store.transition(
+          record.handle,
+          "committed",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
+      } catch {
+        // Preserve the original categorical failure.
+      }
+      return fail("service_unavailable");
+    }
     if (typeof result.revision !== "string" || !REVISION_TOKEN.test(result.revision)) {
       return fail("service_unavailable");
     }
