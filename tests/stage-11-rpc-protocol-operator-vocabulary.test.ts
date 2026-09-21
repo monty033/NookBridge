@@ -320,3 +320,31 @@ describe("rpc-protocol — notes.apply-undo admits the operator's handle-only fo
     });
   });
 });
+
+describe("rpc-protocol — bare undo response may omit the note id", () => {
+  it("serializes an undo result without an id field", () => {
+    // A bare `notes undo` addresses the operation alone, and the daemon must not
+    // answer with the raw note id (D8), so `id` is absent from the result.
+    // Requiring it threw *after* the undo had already committed, so the operator
+    // saw an error over a note that had in fact been changed.
+    const frame = serializeRpcResponse({
+      id: "undo-bare",
+      ok: true,
+      result: {
+        kind: "undo",
+        appliedFields: ["content"],
+        revision: "rev_0123456789abcdef0123456789abcdef",
+        contentBytes: 4,
+      },
+    } as never);
+    const payload = JSON.parse(Buffer.from(frame).subarray(4).toString("utf8"));
+    expect(payload.ok).toBe(true);
+    expect(payload.result.kind).toBe("undo");
+    expect(Object.keys(payload.result).sort()).toEqual([
+      "appliedFields",
+      "contentBytes",
+      "kind",
+      "revision",
+    ]);
+  });
+});

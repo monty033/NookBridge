@@ -2371,9 +2371,18 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         ["kind", "id", "appliedFields", "revision", "contentBytes"],
         "rpc protocol: undo result has unexpected fields",
       );
+      // `id` is optional; either four or five keys are accepted.  A bare
+      // `notes undo` addresses the operation alone, and the daemon must not
+      // answer with the raw note id (D8), so the field is omitted.  Requiring
+      // it failed the response *after* the undo had already committed, so the
+      // operator saw an error over a note that had in fact been changed.
       if (
-        resultKeys.length !== 5 ||
-        !keysAreExactly(resultKeys, ["kind", "id", "appliedFields", "revision", "contentBytes"])
+        !(
+          (resultKeys.length === 4 &&
+            keysAreExactly(resultKeys, ["kind", "appliedFields", "revision", "contentBytes"])) ||
+          (resultKeys.length === 5 &&
+            keysAreExactly(resultKeys, ["kind", "id", "appliedFields", "revision", "contentBytes"]))
+        )
       ) {
         throw rpcProtocolError("rpc protocol: undo result has unexpected fields");
       }
@@ -2381,9 +2390,11 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const appliedFields = resultRecord.appliedFields;
       const revision = resultRecord.revision;
       const contentBytes = resultRecord.contentBytes;
-      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "undo id");
+      if (noteId !== undefined) {
+        assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "undo id");
+      }
       assertBoundedString(revision, 64, "undo revision");
-      preflightResponseStringField(noteId, rawSum);
+      if (noteId !== undefined) preflightResponseStringField(noteId, rawSum);
       preflightResponseStringField(revision, rawSum);
       if (
         !arrayIsArray(appliedFields) ||
@@ -2397,13 +2408,13 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       }
       const resultPayload = objectCreate(null) as {
         kind: "undo";
-        id: string;
+        id?: string;
         appliedFields: ReadonlyArray<"content">;
         revision: string;
         contentBytes: number;
       };
       resultPayload.kind = "undo";
-      resultPayload.id = noteId;
+      if (noteId !== undefined) resultPayload.id = noteId;
       resultPayload.appliedFields = ["content"];
       resultPayload.revision = revision;
       resultPayload.contentBytes = contentBytes;
