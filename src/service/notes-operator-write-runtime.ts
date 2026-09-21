@@ -737,6 +737,7 @@ export function createOperatorWriteRuntime(
       return fail("service_unavailable");
     }
     const owned = records.filter((record) => {
+      if (record.kind !== "edit" || record.state !== "committed") return false;
       try {
         return (JSON.parse(record.payload) as { owner?: unknown }).owner === ownerKey(peer);
       } catch {

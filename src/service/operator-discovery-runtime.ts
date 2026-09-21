@@ -14,8 +14,9 @@ const MAX_LIMIT = 100;
 const MAX_CURSOR_COUNT = 512;
 const MAX_HANDLE_COUNT = 10_000;
 const DEFAULT_HANDLE_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_CURSOR_TTL_MS = 24 * 60 * 60 * 1000;
 
-type CursorState = Readonly<{ query?: string; offset: number }>;
+type CursorState = Readonly<{ query?: string; offset: number; owner: string; expiresAt: number }>;
 
 /**
  * The daemon-side opaque handle registry.
@@ -149,6 +150,12 @@ export function createOperatorDiscoveryRuntime(
     const limit = normalizeLimit(params.limit);
     const state = params.cursor === undefined ? undefined : cursors.get(params.cursor);
     if (params.cursor !== undefined && state === undefined) throw new Error("cursor unavailable");
+    if (state !== undefined && state.expiresAt <= Date.now()) {
+      cursors.delete(params.cursor!);
+      throw new Error("cursor unavailable");
+    }
+    if (state !== undefined && state.owner !== operatorPeerKey(peer))
+      throw new Error("cursor unavailable");
     if (state !== undefined && state.query !== query) throw new Error("cursor query mismatch");
     const offset = state?.offset ?? 0;
     const selected = source.slice(offset, offset + limit);
@@ -160,18 +167,28 @@ export function createOperatorDiscoveryRuntime(
     const nextOffset = offset + selected.length;
     const next =
       nextOffset < source.length
-        ? mintCursor(query === undefined ? { offset: nextOffset } : { query, offset: nextOffset })
+        ? mintCursor(
+            query === undefined ? { offset: nextOffset } : { query, offset: nextOffset },
+            peer,
+          )
         : null;
     return { notes, next };
   }
 
-  function mintCursor(state: CursorState): string {
+  function mintCursor(
+    state: Readonly<{ query?: string; offset: number }>,
+    peer?: OperatorPeer,
+  ): string {
     const cursor = `cur_${randomBytes(18).toString("base64url")}`;
     if (cursors.size >= MAX_CURSOR_COUNT) {
       const oldest = cursors.keys().next().value;
       if (typeof oldest === "string") cursors.delete(oldest);
     }
-    cursors.set(cursor, state);
+    cursors.set(cursor, {
+      ...state,
+      owner: operatorPeerKey(peer),
+      expiresAt: Date.now() + DEFAULT_CURSOR_TTL_MS,
+    });
     return cursor;
   }
 }

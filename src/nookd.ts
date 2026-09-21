@@ -561,7 +561,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
             ...createOperatorDiscoveryRuntime(
               {
                 readOnly,
-                ...(createNote === undefined ? {} : { createNote }),
+                ...(operatorWrite?.create === undefined || createNote === undefined
+                  ? {}
+                  : { createNote }),
               } as ServiceRuntime,
               operatorHandles,
             ),
