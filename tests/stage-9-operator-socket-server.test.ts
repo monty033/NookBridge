@@ -1,8 +1,10 @@
 import { Buffer } from "node:buffer";
+import { spawnSync } from "node:child_process";
 import process from "node:process";
 import { chmodSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import net from "node:net";
+import { fileURLToPath, URL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   startOperatorSocketServer,
@@ -163,6 +165,48 @@ describe("daemon-owned operator socket", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it("uses the native peer-credential helper on the default resolver path", async () => {
+    const path = socketPath();
+    const dir = mkdtempSync("/tmp/nookbridge-native-peer-helper-");
+    const helper = `${dir}/operator-peercred-helper`;
+    const compiled = spawnSync(
+      "cc",
+      [
+        "-O2",
+        fileURLToPath(new URL("../native/operator-peercred.c", import.meta.url)),
+        "-o",
+        helper,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(compiled.status, compiled.stderr).toBe(0);
+    let observed: { uid: number; gid: number; groups: readonly string[] } | undefined;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      peerCredentialHelperPath: helper,
+      authorize: (method, peer) => {
+        observed = peer;
+        return { allowed: true, method };
+      },
+      handle: async (request) => ({
+        id: request.id,
+        ok: true,
+        result: { kind: "operation-list", handles: [] },
+      }),
+    });
+    try {
+      await roundTrip(path, requestFrame("notes.operation-list"));
+      expect(observed?.uid).toBe(process.getuid?.() ?? 0);
+      expect(observed?.gid).toBe(process.getgid?.() ?? 0);
+      expect(observed?.groups.length).toBeGreaterThan(0);
+      expect(observed?.groups.every((group) => /^[A-Za-z0-9_.+-]{1,64}$/u.test(group))).toBe(true);
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("carries resolved group names through to the authorizer", async () => {
     // The production helper resolves the peer's numeric groups to POSIX group
     // names, because the authorization policy matches on names. Emitting bare
