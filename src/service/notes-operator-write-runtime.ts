@@ -155,8 +155,13 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const OPERATION_HANDLE = /^op_[a-f0-9]{64}$/;
 const REVISION_TOKEN = /^rev_[0-9a-f]{32}$/;
 
-/** Categorical operator write failure; `code` is from the closed RPC vocabulary. */
-class OperatorWriteError extends Error {
+/**
+ * Categorical operator write failure; `code` is from the closed RPC vocabulary.
+ *
+ * Exported so consumers can identify a failure we raised rather than trusting a
+ * `code` field on an arbitrary thrown object.
+ */
+export class OperatorWriteError extends Error {
   public readonly code: RpcErrorCode;
 
   constructor(code: RpcErrorCode) {

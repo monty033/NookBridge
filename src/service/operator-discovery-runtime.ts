@@ -106,9 +106,12 @@ export function createOperatorDiscoveryRuntime(
     create: async (params) => {
       if (service.createNote === undefined) throw new Error("create unavailable");
       const result = await service.createNote(params);
+      // Raw note IDs never cross the socket (see the module contract above), so
+      // the created note is addressed by a daemon-minted handle like every other
+      // surface.  Returning `result.id` here leaked the raw Notesnook ID.
       return {
         kind: "create",
-        id: result.id,
+        id: registry.mint(result.id),
         titleBytes: result.titleBytes,
         contentBytes: result.contentBytes,
       };

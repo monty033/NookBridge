@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
 import { OPERATOR_METHODS } from "../src/service/operator-methods.js";
+import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.js";
 
 describe("operator discovery handler", () => {
   it("publishes an exact set of nine operator methods", () => {
@@ -83,6 +84,49 @@ describe("operator discovery handler", () => {
       id: "3",
       ok: false,
       error: { code: "service_unavailable" },
+    });
+  });
+
+  it("does not trust a code property on an error we did not raise", async () => {
+    // Review finding: the code path accepted ANY thrown object whose `code`
+    // matched the vocabulary, so an unrelated upstream error carrying
+    // `code: "vault_locked"` was still reported to the operator as a lock
+    // refusal.  Trust has to come from identity, not from a field.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw Object.assign(new Error("upstream"), { code: "vault_locked" });
+      },
+    });
+    const response = await handler(
+      { id: "4", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "4",
+      ok: false,
+      error: { code: "service_unavailable" },
+    });
+  });
+
+  it("still carries the code of a categorical write failure", async () => {
+    // Guard: the trusted producer keeps its category.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw new OperatorWriteError("vault_locked");
+      },
+    });
+    const response = await handler(
+      { id: "5", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "5",
+      ok: false,
+      error: { code: "vault_locked" },
     });
   });
 

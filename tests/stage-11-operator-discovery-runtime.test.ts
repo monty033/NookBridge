@@ -60,4 +60,29 @@ describe("daemon operator discovery runtime", () => {
     const page = await runtime.search({ query: "n", limit: 10 });
     expect(page.notes.map((note) => note.label)).toEqual(["Note"]);
   });
+
+  it("mints an opaque handle instead of leaking the raw id of a created note", async () => {
+    // Review finding: create returned the raw Notesnook note id, contradicting
+    // the registry contract at the top of this module that raw note IDs never
+    // cross the socket.  Every other surface mints a handle, so create must too -
+    // and the handle must resolve, so hiding the id costs the caller nothing.
+    const resolved: string[] = [];
+    const runtime = createOperatorDiscoveryRuntime({
+      readOnly: {
+        listNotes: async () => [],
+        noteMetadata: async (id: string) => {
+          resolved.push(id);
+          return { id, title: "Created", revision: `rev_${"2".repeat(32)}` };
+        },
+        readNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
+      },
+      createNote: async () => ({ id: "raw-created-1", titleBytes: 5, contentBytes: 10 }),
+    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const created = await runtime.create?.({ title: "Created", content: "<p>x</p>" });
+    if (created === undefined) throw new Error("missing create result");
+    expect(created.id).toMatch(/^h_[A-Za-z0-9_-]+$/);
+    expect(created.id).not.toContain("raw-created-1");
+    await runtime.view?.({ id: created.id });
+    expect(resolved).toEqual(["raw-created-1"]);
+  });
 });

@@ -11,6 +11,7 @@ import type {
 } from "./rpc-protocol.js";
 import { RPC_ERROR_MESSAGES } from "./rpc-protocol.js";
 import { isNotesnookReadOnlyProjectionError } from "../core/notesnook-readonly-projection.js";
+import { OperatorWriteError } from "./notes-operator-write-runtime.js";
 import type { NotesnookListKind } from "../core/notesnook-write-list-intent.js";
 import type { OperatorSocketHandler } from "./operator-socket-server.js";
 
@@ -147,11 +148,12 @@ function mutationSuccess(
  * the closed set; anything else collapses to `service_unavailable`.
  */
 function categoricalCode(error: unknown): RpcErrorCode {
+  // Trust must come from identity, not from a field.  Accepting any thrown
+  // object whose `code` matched the vocabulary let an unrelated upstream error
+  // carrying `code: "vault_locked"` (or any other category) be reported to the
+  // operator as that category.
+  if (error instanceof OperatorWriteError) return error.code;
   if (error !== null && typeof error === "object") {
-    const code = (error as { readonly code?: unknown }).code;
-    if (typeof code === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, code)) {
-      return code as RpcErrorCode;
-    }
     // A projection refusal carries the vocabulary name as its MESSAGE rather
     // than as a `code` property.  Only a class-identity-checked projection error
     // may be read that way: accepting any thrown object whose message happened
