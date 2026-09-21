@@ -27,35 +27,75 @@ export const OPERATOR_MUTATING_METHODS: ReadonlySet<OperatorMethod> = new Set<Op
   "notes.apply-undo",
 ] satisfies OperatorMethod[]);
 
-/** The handle field a mutating request carries, or `undefined`. */
-function requestHandle(request: RpcRequest): string | undefined {
+/** The published operation-handle shape; matches the write runtime's own token. */
+const OPERATION_HANDLE = /^op_[a-f0-9]{64}$/;
+
+/** The handle field a request carries, or `undefined`. */
+function requestStringField(
+  request: RpcRequest,
+  field: "id" | "operationHandle",
+): string | undefined {
   const params = request.params;
   if (params === null || typeof params !== "object") return undefined;
-  const id = (params as { readonly id?: unknown }).id;
-  return typeof id === "string" && id.length > 0 ? id : undefined;
+  const value = (params as Record<string, unknown>)[field];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The note this request targets, or `undefined` when the request names none.
+ *
+ * A bare `notes.apply-undo` carries only an opaque operation handle — the note
+ * identity lives in the daemon's own committed record — so it is resolved
+ * through the operation store rather than skipped.  The handle is matched
+ * against the published shape before the store is consulted, so a malformed or
+ * forged value never drives a lookup.
+ */
+function targetNoteId(input: {
+  readonly method: OperatorMethod;
+  readonly request: RpcRequest;
+  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly resolveOperationNoteId?:
+    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
+}): string | undefined | Promise<string | undefined> {
+  const handle = requestStringField(input.request, "id");
+  if (handle !== undefined) return input.resolveHandle(handle);
+  if (input.method !== "notes.apply-undo") return undefined;
+  const operationHandle = requestStringField(input.request, "operationHandle");
+  if (operationHandle === undefined || !OPERATION_HANDLE.test(operationHandle)) {
+    return undefined;
+  }
+  if (input.resolveOperationNoteId === undefined) return undefined;
+  return input.resolveOperationNoteId(operationHandle);
 }
 
 /**
  * Resolve the lock state the evaluator should see for this request.
  *
  * Returns `undefined` — "no lock context" — unless the method mutates a note and
- * the request names a handle the registry can resolve.  A handle that does not
- * resolve yields no context: authorization is not the place to report a forged
- * handle, and the dispatch path already answers `not_found` for it.
+ * the request names a target that resolves.  A target that does not resolve
+ * yields no context: authorization is not the place to report a forged handle,
+ * and the dispatch path already answers `not_found` for it.
  */
 export async function resolveOperatorRequestLockState(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest | undefined;
   readonly resolveHandle: (handle: string) => string | undefined;
+  readonly resolveOperationNoteId?:
+    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
   readonly readNoteLockState: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
 }): Promise<OperatorNoteLockState | undefined> {
   if (input.request === undefined) return undefined;
   if (!OPERATOR_MUTATING_METHODS.has(input.method)) return undefined;
-  const handle = requestHandle(input.request);
-  if (handle === undefined) return undefined;
-  const noteId = input.resolveHandle(handle);
-  if (noteId === undefined) return undefined;
   if (input.readNoteLockState === undefined) return undefined;
+  const noteId = await targetNoteId({
+    method: input.method,
+    request: input.request,
+    resolveHandle: input.resolveHandle,
+    resolveOperationNoteId: input.resolveOperationNoteId,
+  });
+  if (noteId === undefined) return undefined;
   const state = await input.readNoteLockState(noteId);
   return { id: noteId, locked: state === "locked" };
 }

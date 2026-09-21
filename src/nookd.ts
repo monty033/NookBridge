@@ -535,6 +535,21 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               method,
               request,
               resolveHandle: (handle) => operatorHandles.resolve(handle),
+              // A bare apply-undo names only an operation handle, so the note it
+              // targets is resolved from the daemon's own committed record -
+              // otherwise the seam would see no target and skip the lock check.
+              resolveOperationNoteId: async (operationHandle) => {
+                if (operatorStore === undefined) return undefined;
+                try {
+                  const record = await operatorStore.get(operationHandle);
+                  const payload = JSON.parse(record.payload) as { noteId?: unknown };
+                  return typeof payload.noteId === "string" && payload.noteId.length > 0
+                    ? payload.noteId
+                    : undefined;
+                } catch {
+                  return undefined;
+                }
+              },
               readNoteLockState: readOnly.readNoteLockState,
             });
             if (lockState !== undefined) context.noteLockState = lockState;

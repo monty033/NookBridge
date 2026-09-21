@@ -57,8 +57,49 @@ describe("operator request lock context", () => {
         method: "notes.apply-edit",
         request: mutating({ id: "h_one" }),
         resolveHandle,
+        resolveOperationNoteId: undefined,
         readNoteLockState: undefined,
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("resolves the lock state of a bare apply-undo through its operation handle", async () => {
+    // Review finding: a bare apply-undo carries only an opaque operation handle,
+    // so the authorization seam saw no target and skipped the lock check.  The
+    // runtime refused the mutation anyway, but the seam is meant to be the first
+    // line, so it must resolve the note from the operation record too.
+    const read = vi.fn(async () => "locked" as const);
+    const operationHandle = `op_${"a".repeat(64)}`;
+    await expect(
+      resolveOperatorRequestLockState({
+        method: "notes.apply-undo",
+        request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+        resolveHandle,
+        resolveOperationNoteId: (handle) =>
+          handle === operationHandle ? "note_from_op" : undefined,
+        readNoteLockState: read,
+      }),
+    ).resolves.toEqual({ id: "note_from_op", locked: true });
+    expect(read).toHaveBeenCalledWith("note_from_op");
+  });
+
+  it("ignores a malformed or unresolvable operation handle", async () => {
+    // Guard: a handle that is not the published shape, or that resolves to
+    // nothing, must not cause a database read on an untrusted value.
+    const read = vi.fn(async () => "locked" as const);
+    const resolveOperationNoteId = vi.fn(() => undefined);
+    for (const operationHandle of ["op_nothex", "h_one", ""]) {
+      await expect(
+        resolveOperatorRequestLockState({
+          method: "notes.apply-undo",
+          request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+          resolveHandle,
+          resolveOperationNoteId,
+          readNoteLockState: read,
+        }),
+      ).resolves.toBeUndefined();
+    }
+    expect(resolveOperationNoteId).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
   });
 });
