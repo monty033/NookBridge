@@ -151,6 +151,17 @@ function categoricalCode(error: unknown): RpcErrorCode {
     if (typeof code === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, code)) {
       return code as RpcErrorCode;
     }
+    // The read projection signals a categorical refusal by throwing an error
+    // whose MESSAGE is the vocabulary name (`vault_locked`) and which carries
+    // no `code` property.  Reading only `code` collapsed every such refusal
+    // into `service_unavailable`: a locked note was reported to the operator as
+    // a generic failure, and the locked-note acceptance proof could never
+    // return `vault_locked`.  Only an exact vocabulary match is accepted, so
+    // free text still collapses and no upstream detail crosses the boundary.
+    const message = (error as { readonly message?: unknown }).message;
+    if (typeof message === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, message)) {
+      return message as RpcErrorCode;
+    }
   }
   return "service_unavailable";
 }
