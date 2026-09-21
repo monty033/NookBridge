@@ -144,6 +144,29 @@ describe("notes create — D11 title rule", () => {
     expect(deriveCreateTitle("```\n# not a heading\n```\n\n# Real\n")).toBe("Real");
   });
 
+  it("does not treat an indented fence marker as a fence", () => {
+    // Four spaces of indent makes it a code block, not a fence (CommonMark),
+    // so the heading after it is real prose and sets the title.
+    expect(deriveCreateTitle("    ```\n# real heading\n    ```\n")).toBe("real heading");
+    expect(deriveCreateTitle("   ```\n# fenced\n   ```\n# after\n")).toBe("after");
+  });
+
+  it("closes a fence only with the matching fence character", () => {
+    // A `~~~` line does not close a ``` fence, so the heading between them is
+    // still code and must not become the title.
+    expect(deriveCreateTitle("```\n~~~\n# not a heading\n~~~\n```\n# Real\n")).toBe("Real");
+    // And the converse.
+    expect(deriveCreateTitle("~~~\n```\n# not a heading\n```\n~~~\n# Real\n")).toBe("Real");
+  });
+
+  it("skips a heading whose text is only hash characters", () => {
+    // `# ###` has no text once the closing sequence is stripped, so there is
+    // no usable H1 rather than a title of hashes.
+    expect(deriveCreateTitle("# ###\n")).toBeUndefined();
+    expect(deriveCreateTitle("# ############\n")).toBeUndefined();
+    expect(deriveCreateTitle("# ###\n\n# Real\n")).toBe("Real");
+  });
+
   it("returns undefined when there is no H1 at all", () => {
     expect(deriveCreateTitle("just prose\n\n- a list item\n")).toBeUndefined();
     expect(deriveCreateTitle("")).toBeUndefined();

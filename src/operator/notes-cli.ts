@@ -978,23 +978,35 @@ function parseCreate(rest: readonly string[]): ParseNotesCommandResult {
  *  - Any Markdown line ending ends a line (`\r\n`, `\r`, `\n`), so a document
  *    authored or pasted on Windows still yields its title instead of being
  *    refused as heading-less.
- *  - A trailing run of `#` is the ATX closing sequence, not part of the text.
+ *  - A trailing run of `#` is the ATX closing sequence, not part of the text;
+ *    a heading left with no text at all is skipped rather than titled `###`.
  *  - A fenced code block is not prose: an indented `#` line inside a fence is
- *    code, so a fence suppresses heading recognition until it closes.
+ *    code, so a fence suppresses heading recognition until it closes.  A fence
+ *    marker is up to three spaces of indent and three or more backticks or
+ *    tildes (four spaces is an indented code block, not a fence), and it closes
+ *    only on a run of the same character at least as long as the opener.
  */
 export function deriveCreateTitle(markdown: string): string | undefined {
   if (typeof markdown !== "string" || markdown.length === 0) return undefined;
-  let insideFence = false;
+  let fence: string | undefined;
   for (const line of markdown.split(/\r\n|\r|\n/)) {
-    if (/^[ \t]*(?:```|~~~)/.test(line)) {
-      insideFence = !insideFence;
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker !== undefined) {
+      if (fence === undefined) {
+        fence = marker;
+      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = undefined;
+      }
       continue;
     }
-    if (insideFence) continue;
+    if (fence !== undefined) continue;
     const match = /^#[ \t]+(\S.*?)[ \t]*$/.exec(line);
     if (match === null) continue;
     const text = match[1] ?? "";
-    const title = text.replace(/[ \t]+#+$/, "").trim();
+    const title = text
+      .replace(/[ \t]+#+$/, "")
+      .replace(/^#+$/, "")
+      .trim();
     if (title.length > 0) return title;
   }
   return undefined;
