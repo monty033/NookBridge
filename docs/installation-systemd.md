@@ -124,8 +124,11 @@ notebook policy forbids is refused (`permission_denied`); per-notebook overrides
 live in the settings file.
 
 The operator socket is a separate path from the service socket
-(`/run/nookbridge/operator.sock`). Grouping it with `nookbridge-operators` gives
-filesystem-level enforcement alongside the daemon's own check.
+(`/run/nookbridge/operator.sock`). The daemon's peer-credential authorization
+is the enforcement boundary for that socket: filesystem ownership remains the
+service user's runtime ownership because both listeners are created by the same
+hardened, unprivileged daemon. Do not treat membership in
+`nookbridge-operators` as a substitute for the daemon check, or vice versa.
 
 ## Upgrade, rollback, and retention
 

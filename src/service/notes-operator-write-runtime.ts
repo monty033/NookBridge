@@ -37,6 +37,7 @@ import {
 } from "../core/note-document-markdown.js";
 import { isVaultLockedRefusal } from "../core/notesnook-readonly-projection.js";
 import type { RpcErrorCode } from "./rpc-protocol.js";
+import type { OperatorPeer } from "./operator-server.js";
 import type { OperationRecord, OperationState } from "./notes-undo-store.js";
 
 /** Bounded native stored content envelope. */
@@ -69,13 +70,14 @@ export interface OperatorOperationStore {
     readonly payload: string;
     readonly ttlMs: number;
   }) => Promise<OperationRecord>;
-  readonly get: (handle: string) => Promise<OperationRecord>;
-  readonly list: () => Promise<ReadonlyArray<OperationRecord>>;
+  readonly get: (handle: string, owner?: string) => Promise<OperationRecord>;
+  readonly list: (owner?: string) => Promise<ReadonlyArray<OperationRecord>>;
   readonly transition: (
     handle: string,
     expected: OperationState,
     next: OperationState,
     payload?: string,
+    owner?: string,
   ) => Promise<OperationRecord>;
 }
 
@@ -91,7 +93,7 @@ export interface OperatorWriteRuntimeOptions {
   readonly source: OperatorWriteSource;
   readonly store: OperatorOperationStore;
   /** Daemon-side opaque handle resolution; raw note ids never cross the socket. */
-  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly audit?: (event: OperatorWriteAuditEvent) => void;
@@ -138,17 +140,23 @@ export interface OperatorOperationList {
 }
 
 export interface OperatorWriteRuntime {
-  readonly editPreimage: (params: Readonly<{ id: string }>) => Promise<OperatorEditPreimage>;
+  readonly editPreimage: (
+    params: Readonly<{ id: string }>,
+    peer?: OperatorPeer,
+  ) => Promise<OperatorEditPreimage>;
   readonly applyEdit: (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
+    peer?: OperatorPeer,
   ) => Promise<OperatorEditApplied>;
   readonly applyUndo: (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
+    peer?: OperatorPeer,
   ) => Promise<OperatorUndoApplied>;
   readonly operationStatus: (
     params: Readonly<{ operationHandle: string }>,
+    peer?: OperatorPeer,
   ) => Promise<OperatorOperationStatus>;
-  readonly operationList: () => Promise<OperatorOperationList>;
+  readonly operationList: (peer?: OperatorPeer) => Promise<OperatorOperationList>;
 }
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -168,6 +176,11 @@ export class OperatorWriteError extends Error {
     super(code);
     this.code = code;
   }
+}
+
+function ownerKey(peer?: OperatorPeer): string {
+  if (peer === undefined) return "legacy";
+  return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
 }
 
 function fail(code: RpcErrorCode): never {
@@ -230,10 +243,10 @@ export function createOperatorWriteRuntime(
     }
   }
 
-  function resolve(id: unknown): string {
+  function resolve(id: unknown, peer?: OperatorPeer): string {
     if (typeof id !== "string" || id.length === 0 || id.length > 256)
       return fail("invalid_request");
-    const noteId = options.resolveHandle(id);
+    const noteId = options.resolveHandle(id, peer);
     if (typeof noteId !== "string" || noteId.length === 0) return fail("not_found");
     return noteId;
   }
@@ -244,8 +257,11 @@ export function createOperatorWriteRuntime(
     return t;
   }
 
-  const editPreimage = async (params: Readonly<{ id: string }>): Promise<OperatorEditPreimage> => {
-    const noteId = resolve(params?.id);
+  const editPreimage = async (
+    params: Readonly<{ id: string }>,
+    peer?: OperatorPeer,
+  ): Promise<OperatorEditPreimage> => {
+    const noteId = resolve(params?.id, peer);
     const { revision, document } = await load(noteId);
     let markdown: string;
     try {
@@ -264,8 +280,9 @@ export function createOperatorWriteRuntime(
 
   const applyEdit = async (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
+    peer?: OperatorPeer,
   ): Promise<OperatorEditApplied> => {
-    const noteId = resolve(params?.id);
+    const noteId = resolve(params?.id, peer);
     if (
       typeof params.expectedRevision !== "string" ||
       !REVISION_TOKEN.test(params.expectedRevision)
@@ -401,6 +418,7 @@ export function createOperatorWriteRuntime(
         "committing",
         "committed",
         JSON.stringify({
+          owner: ownerKey(peer),
           noteId,
           revision: trusted.revision,
           content: trusted.content,
@@ -423,6 +441,7 @@ export function createOperatorWriteRuntime(
 
   const applyUndo = async (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
+    peer?: OperatorPeer,
   ): Promise<OperatorUndoApplied> => {
     if (
       typeof params.operationHandle !== "string" ||
@@ -433,13 +452,13 @@ export function createOperatorWriteRuntime(
 
     let record: OperationRecord;
     try {
-      record = await options.store.get(params.operationHandle);
+      record = await options.store.get(params.operationHandle, ownerKey(peer));
     } catch {
       return fail("not_found");
     }
     if (record.kind !== "edit" || record.state !== "committed") return fail("conflict");
 
-    let payload: { noteId?: unknown; content?: unknown; postRevision?: unknown };
+    let payload: { owner?: unknown; noteId?: unknown; content?: unknown; postRevision?: unknown };
     try {
       payload = JSON.parse(record.payload) as {
         noteId?: unknown;
@@ -457,10 +476,11 @@ export function createOperatorWriteRuntime(
     // caller to resend them would make undo impossible.  A caller that
     // does supply them must agree with the record, so a mismatched or
     // forged value can never retarget the restore.
+    if (payload.owner !== ownerKey(peer)) return fail("not_found");
     if (typeof payload.noteId !== "string" || payload.noteId.length === 0) {
       return fail("service_unavailable");
     }
-    if (params.id !== undefined && resolve(params.id) !== payload.noteId) {
+    if (params.id !== undefined && resolve(params.id, peer) !== payload.noteId) {
       return fail("not_found");
     }
     if (typeof payload.postRevision !== "string" || !REVISION_TOKEN.test(payload.postRevision)) {
@@ -509,7 +529,13 @@ export function createOperatorWriteRuntime(
     }
 
     try {
-      await options.store.transition(record.handle, "committed", "undone");
+      await options.store.transition(
+        record.handle,
+        "committed",
+        "undone",
+        undefined,
+        ownerKey(peer),
+      );
     } catch {
       return fail("service_unavailable");
     }
@@ -525,6 +551,7 @@ export function createOperatorWriteRuntime(
 
   const operationStatus = async (
     params: Readonly<{ operationHandle: string }>,
+    peer?: OperatorPeer,
   ): Promise<OperatorOperationStatus> => {
     if (
       typeof params?.operationHandle !== "string" ||
@@ -534,10 +561,17 @@ export function createOperatorWriteRuntime(
     }
     let record: OperationRecord;
     try {
-      record = await options.store.get(params.operationHandle);
+      record = await options.store.get(params.operationHandle, ownerKey(peer));
     } catch {
       return fail("not_found");
     }
+    let statusPayload: { owner?: unknown };
+    try {
+      statusPayload = JSON.parse(record.payload) as { owner?: unknown };
+    } catch {
+      return fail("service_unavailable");
+    }
+    if (statusPayload.owner !== ownerKey(peer)) return fail("not_found");
     // Deliberately no `id`: the raw database note id must never cross the
     // operator socket (handles are daemon-minted and scoped).
     return {
@@ -547,16 +581,23 @@ export function createOperatorWriteRuntime(
     };
   };
 
-  const operationList = async (): Promise<OperatorOperationList> => {
+  const operationList = async (peer?: OperatorPeer): Promise<OperatorOperationList> => {
     let records: ReadonlyArray<OperationRecord>;
     try {
-      records = await options.store.list();
+      records = await options.store.list(ownerKey(peer));
     } catch {
       return fail("service_unavailable");
     }
+    const owned = records.filter((record) => {
+      try {
+        return (JSON.parse(record.payload) as { owner?: unknown }).owner === ownerKey(peer);
+      } catch {
+        return false;
+      }
+    });
     return {
       kind: "operation-list",
-      handles: records.map((record) => record.handle),
+      handles: owned.map((record) => record.handle),
     };
   };
 

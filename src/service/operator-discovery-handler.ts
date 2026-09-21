@@ -14,6 +14,7 @@ import { isNotesnookReadOnlyProjectionError } from "../core/notesnook-readonly-p
 import { OperatorWriteError } from "./notes-operator-write-runtime.js";
 import type { NotesnookListKind } from "../core/notesnook-write-list-intent.js";
 import type { OperatorSocketHandler } from "./operator-socket-server.js";
+import type { OperatorPeer } from "./operator-server.js";
 
 export interface OperatorDiscoveryPage {
   readonly notes: ReadonlyArray<Readonly<{ handle: string; label: string; bytes: number }>>;
@@ -30,22 +31,33 @@ export interface OperatorNoteView {
 export interface OperatorDiscoveryRuntime {
   readonly browse: (
     params: Readonly<{ cursor?: string; limit?: number }>,
+    peer?: OperatorPeer,
   ) => Promise<OperatorDiscoveryPage>;
   readonly search: (
     params: Readonly<{ query: string; cursor?: string; limit?: number }>,
+    peer?: OperatorPeer,
   ) => Promise<OperatorDiscoveryPage>;
-  readonly view?: (params: Readonly<{ id: string }>) => Promise<OperatorNoteView>;
-  readonly editPreimage?: (params: Readonly<{ id: string }>) => Promise<RpcNotesEditPreimageResult>;
+  readonly view?: (
+    params: Readonly<{ id: string }>,
+    peer?: OperatorPeer,
+  ) => Promise<OperatorNoteView>;
+  readonly editPreimage?: (
+    params: Readonly<{ id: string }>,
+    peer?: OperatorPeer,
+  ) => Promise<RpcNotesEditPreimageResult>;
   readonly applyEdit?: (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
+    peer?: OperatorPeer,
   ) => Promise<RpcNotesApplyEditResult>;
   readonly applyUndo?: (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
+    peer?: OperatorPeer,
   ) => Promise<RpcNotesApplyUndoResult>;
   readonly operationStatus?: (
     params: Readonly<{ operationHandle: string }>,
+    peer?: OperatorPeer,
   ) => Promise<RpcNotesOperationStatusResult>;
-  readonly operationList?: () => Promise<RpcNotesOperationListResult>;
+  readonly operationList?: (peer?: OperatorPeer) => Promise<RpcNotesOperationListResult>;
   readonly create?: (
     params: Readonly<{
       title: string;
@@ -53,6 +65,7 @@ export interface OperatorDiscoveryRuntime {
       notebookId?: string;
       listKind?: NotesnookListKind;
     }>,
+    peer?: OperatorPeer,
   ) => Promise<RpcCreatedNoteResult>;
 }
 
@@ -60,44 +73,44 @@ export interface OperatorDiscoveryRuntime {
 export function createOperatorDiscoveryHandler(
   runtime: OperatorDiscoveryRuntime,
 ): OperatorSocketHandler {
-  return async (request: RpcRequest): Promise<RpcAnyResponseEnvelope> => {
+  return async (request: RpcRequest, peer: OperatorPeer): Promise<RpcAnyResponseEnvelope> => {
     try {
       if (request.method === "notes.browse") {
-        const result = await runtime.browse(request.params);
+        const result = await runtime.browse(request.params, peer);
         return success(request.id, result);
       }
       if (request.method === "notes.search-operator") {
-        const result = await runtime.search(request.params);
+        const result = await runtime.search(request.params, peer);
         return success(request.id, result);
       }
       if (request.method === "notes.get-view") {
         if (runtime.view === undefined) return failure(request.id, "service_unavailable");
-        return viewSuccess(request.id, await runtime.view(request.params));
+        return viewSuccess(request.id, await runtime.view(request.params, peer));
       }
       if (request.method === "notes.edit-preimage") {
         if (runtime.editPreimage === undefined) return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.editPreimage(request.params));
+        return mutationSuccess(request.id, await runtime.editPreimage(request.params, peer));
       }
       if (request.method === "notes.apply-edit") {
         if (runtime.applyEdit === undefined) return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.applyEdit(request.params));
+        return mutationSuccess(request.id, await runtime.applyEdit(request.params, peer));
       }
       if (request.method === "notes.apply-undo") {
         if (runtime.applyUndo === undefined) return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.applyUndo(request.params));
+        return mutationSuccess(request.id, await runtime.applyUndo(request.params, peer));
       }
       if (request.method === "notes.operation-status") {
         if (runtime.operationStatus === undefined)
           return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.operationStatus(request.params));
+        return mutationSuccess(request.id, await runtime.operationStatus(request.params, peer));
       }
       if (request.method === "notes.operation-list") {
         if (runtime.operationList === undefined) return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.operationList());
+        return mutationSuccess(request.id, await runtime.operationList(peer));
       }
       if (request.method === "notes.create") {
         if (runtime.create === undefined) return failure(request.id, "service_unavailable");
-        return mutationSuccess(request.id, await runtime.create(request.params));
+        return mutationSuccess(request.id, await runtime.create(request.params, peer));
       }
       return failure(request.id, "invalid_request");
     } catch (error) {

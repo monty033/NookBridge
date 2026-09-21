@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { createOperatorDiscoveryRuntime } from "../src/service/operator-discovery-runtime.js";
+import type { OperatorPeer } from "../src/service/operator-server.js";
+
+const PEER_A: OperatorPeer = Object.freeze({
+  uid: 1001,
+  gid: 100,
+  groups: ["nookbridge-operators"],
+});
+const PEER_B: OperatorPeer = Object.freeze({
+  uid: 1002,
+  gid: 100,
+  groups: ["nookbridge-operators"],
+});
 
 describe("daemon operator discovery runtime", () => {
   it("mints opaque handles and paginates source-side", async () => {
@@ -46,6 +58,25 @@ describe("daemon operator discovery runtime", () => {
     expect(view?.id).toBe(handle);
     expect(view?.markdown).toContain("Hello **world**");
     expect(view?.markdown).not.toContain("raw-note");
+  });
+
+  it("scopes note handles to the peer that discovered them", async () => {
+    const runtime = createOperatorDiscoveryRuntime({
+      readOnly: {
+        listNotes: async () => [{ id: "raw-note", title: "Body" }],
+        noteMetadata: async () => ({
+          id: "raw-note",
+          title: "Body",
+          revision: `rev_${"1".repeat(32)}`,
+        }),
+        readNoteContent: async () => ({ type: "html", data: "<p>Body</p>" }),
+      },
+    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const page = await runtime.browse({ limit: 1 }, PEER_A);
+    const handle = page.notes[0]?.handle;
+    if (handle === undefined) throw new Error("missing test handle");
+    await expect(runtime.view?.({ id: handle }, PEER_B)).rejects.toThrow("handle unavailable");
+    await expect(runtime.view?.({ id: handle }, PEER_A)).resolves.toMatchObject({ id: handle });
   });
 
   it("filters notebook search hits before minting note handles", async () => {

@@ -266,24 +266,32 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
         });
       });
     },
-    get(handle: string) {
+    get(handle: string, owner?: string) {
       return run(async () => {
         await expire();
-        return lookup(handle);
+        return ownedLookup(handle, owner);
       });
     },
-    list() {
+    list(owner?: string) {
       return run(async () => {
         await expire();
-        return [...records.values()].map((r) => r.record);
+        return [...records.values()]
+          .map((r) => r.record)
+          .filter((record) => owner === undefined || recordOwner(record) === owner);
       });
     },
     /** Expected-state CAS; unresolved -> aborted requires explicit reconciliation
      * by the daemon caller. Payload can carry actual revisions, never predictions. */
-    transition(handle: string, expected: OperationState, next: OperationState, payload?: string) {
+    transition(
+      handle: string,
+      expected: OperationState,
+      next: OperationState,
+      payload?: string,
+      owner?: string,
+    ) {
       return run(async () => {
         await expire();
-        const r = lookup(handle);
+        const r = ownedLookup(handle, owner);
         if (r.state !== expected || !transitions[r.state].includes(next)) fail("conflict");
         if (payload !== undefined && typeof payload !== "string") fail("invalid-input");
         return persist({ ...r, state: next, payload: payload ?? r.payload });
@@ -303,4 +311,19 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
       });
     },
   });
+
+  function recordOwner(record: OperationRecord): string | undefined {
+    try {
+      const payload = JSON.parse(record.payload) as { owner?: unknown };
+      return typeof payload.owner === "string" ? payload.owner : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function ownedLookup(handle: string, owner: string | undefined): OperationRecord {
+    const record = lookup(handle);
+    if (owner !== undefined && recordOwner(record) !== owner) fail("missing");
+    return record;
+  }
 }

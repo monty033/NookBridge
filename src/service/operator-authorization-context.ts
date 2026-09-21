@@ -16,6 +16,7 @@ import type { RpcRequest } from "./rpc-protocol.js";
 import type { OperatorMethod } from "./operator-methods.js";
 import type { OperatorNoteLockState, OperatorNotebookPolicy } from "./operator-policy.js";
 import type { SettingsOperation } from "../settings/settings-types.js";
+import type { OperatorPeer } from "./operator-server.js";
 
 /**
  * The operator methods that mutate a note.  Reads (`notes.get-view`,
@@ -58,20 +59,24 @@ function requestStringField(
 function targetNoteId(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest;
-  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly peer: OperatorPeer | undefined;
+  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
-    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | ((
+        operationHandle: string,
+        peer?: OperatorPeer,
+      ) => string | undefined | Promise<string | undefined>)
     | undefined;
 }): string | undefined | Promise<string | undefined> {
   const handle = requestStringField(input.request, "id");
-  if (handle !== undefined) return input.resolveHandle(handle);
+  if (handle !== undefined) return input.resolveHandle(handle, input.peer);
   if (input.method !== "notes.apply-undo") return undefined;
   const operationHandle = requestStringField(input.request, "operationHandle");
   if (operationHandle === undefined || !OPERATION_HANDLE.test(operationHandle)) {
     return undefined;
   }
   if (input.resolveOperationNoteId === undefined) return undefined;
-  return input.resolveOperationNoteId(operationHandle);
+  return input.resolveOperationNoteId(operationHandle, input.peer);
 }
 
 /**
@@ -85,9 +90,13 @@ function targetNoteId(input: {
 export async function resolveOperatorRequestLockState(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest | undefined;
-  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly peer?: OperatorPeer;
+  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
-    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | ((
+        operationHandle: string,
+        peer?: OperatorPeer,
+      ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteLockState: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
 }): Promise<OperatorNoteLockState | undefined> {
@@ -97,6 +106,7 @@ export async function resolveOperatorRequestLockState(input: {
   const noteId = await targetNoteId({
     method: input.method,
     request: input.request,
+    peer: input.peer,
     resolveHandle: input.resolveHandle,
     resolveOperationNoteId: input.resolveOperationNoteId,
   });
@@ -141,9 +151,13 @@ export function settingsOperationForMethod(method: OperatorMethod): SettingsOper
 export async function resolveOperatorRequestNotebookPolicy(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest | undefined;
-  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly peer?: OperatorPeer;
+  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
-    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | ((
+        operationHandle: string,
+        peer?: OperatorPeer,
+      ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteNotebookPath: ((noteId: string) => Promise<string | undefined>) | undefined;
   readonly evaluateNotebookPolicy:
@@ -156,6 +170,7 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
   const noteId = await targetNoteId({
     method: input.method,
     request: input.request,
+    peer: input.peer,
     resolveHandle: input.resolveHandle,
     resolveOperationNoteId: input.resolveOperationNoteId,
   });

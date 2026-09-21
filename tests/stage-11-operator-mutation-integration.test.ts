@@ -81,7 +81,7 @@ async function compose() {
   const discovery = createOperatorDiscoveryRuntime({ readOnly } as ServiceRuntime, registry);
   const write = createOperatorWriteRuntime({
     store,
-    resolveHandle: (handle) => registry.resolve(handle),
+    resolveHandle: (handle, peer) => registry.resolve(handle, peer),
     now: () => 1000,
     ttlMs: 60_000,
     source: {
@@ -177,6 +177,79 @@ describe("daemon operator mutation wiring", () => {
     )) as { ok: boolean; result: { revision: string } };
     expect(undone.ok).toBe(true);
     expect(state.content.data).toContain("before");
+  });
+
+  it("returns not_found when a different peer replays a note handle", async () => {
+    const { handler, peer, state } = await compose();
+    const handle = await mintHandle(handler, peer);
+    const stranger = { uid: peer.uid + 1, gid: peer.gid, groups: peer.groups };
+    const response = (await handler(
+      {
+        id: "foreign",
+        method: "notes.apply-edit",
+        params: {
+          id: handle,
+          expectedRevision: REVISION_1,
+          markdown: "<p>tampered</p>",
+        },
+      } as RpcRequest,
+      stranger,
+    )) as { ok: boolean; error: { code: string; message: string } };
+    expect(response).toEqual({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+      id: "foreign",
+    });
+    expect(state.content.data).toContain("before");
+
+    const preimage = (await handler(
+      { id: "owner-preimage", method: "notes.edit-preimage", params: { id: handle } } as RpcRequest,
+      peer,
+    )) as { result: { markdown: string; revision: string } };
+    const ownerEdit = (await handler(
+      {
+        id: "owner-edit",
+        method: "notes.apply-edit",
+        params: {
+          id: handle,
+          expectedRevision: preimage.result.revision,
+          markdown: preimage.result.markdown.replace("before", "owner edit"),
+        },
+      } as RpcRequest,
+      peer,
+    )) as { ok: boolean };
+    expect(ownerEdit.ok).toBe(true);
+    const ownerList = (await handler(
+      { id: "owner-list", method: "notes.operation-list", params: {} } as RpcRequest,
+      peer,
+    )) as { result: { handles: ReadonlyArray<string> } };
+    const operationHandle = ownerList.result.handles[0];
+    if (operationHandle === undefined) throw new Error("missing operation handle");
+    const foreignList = (await handler(
+      { id: "foreign-list", method: "notes.operation-list", params: {} } as RpcRequest,
+      stranger,
+    )) as { ok: boolean; result: { handles: ReadonlyArray<string> } };
+    expect(foreignList).toMatchObject({ ok: true, result: { handles: [] } });
+    const foreignStatus = (await handler(
+      {
+        id: "foreign-status",
+        method: "notes.operation-status",
+        params: { operationHandle },
+      } as RpcRequest,
+      stranger,
+    )) as { ok: boolean; error: { code: string; message: string } };
+    expect(foreignStatus).toMatchObject({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+    });
+    const foreignUndo = (await handler(
+      { id: "foreign-undo", method: "notes.apply-undo", params: { operationHandle } } as RpcRequest,
+      stranger,
+    )) as { ok: boolean; error: { code: string; message: string } };
+    expect(foreignUndo).toMatchObject({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+    });
   });
 
   it("refuses an unknown handle rather than mutating the wrong note", async () => {

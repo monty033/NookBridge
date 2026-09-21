@@ -7,7 +7,7 @@ import type {
   OperatorDiscoveryPage,
   OperatorDiscoveryRuntime,
 } from "./operator-discovery-handler.js";
-
+import type { OperatorPeer } from "./operator-server.js";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MAX_CURSOR_COUNT = 512;
@@ -26,16 +26,22 @@ type CursorState = Readonly<{ query?: string; offset: number }>;
  */
 export interface OperatorHandleRegistry {
   /** Mint a fresh opaque handle for a note id, evicting the oldest if needed. */
-  readonly mint: (noteId: string) => string;
-  /** Resolve an opaque handle back to its note id, or `undefined` if unknown. */
-  readonly resolve: (handle: string) => string | undefined;
+  readonly mint: (noteId: string, peer?: OperatorPeer) => string;
+  /** Resolve an opaque handle only for its owning peer. */
+  readonly resolve: (handle: string, peer?: OperatorPeer) => string | undefined;
 }
 
-/** Build a process-local, session-scoped handle registry. */
-export function createOperatorHandleRegistry(): OperatorHandleRegistry {
-  const handles = new Map<string, string>();
+export function operatorPeerKey(peer?: OperatorPeer): string {
+  if (peer === undefined) return "legacy";
+  return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
+}
 
-  const mint = (noteId: string): string => {
+/** Build a process-local, peer-scoped handle registry. */
+export function createOperatorHandleRegistry(): OperatorHandleRegistry {
+  const handles = new Map<string, Readonly<{ noteId: string; owner: string }>>();
+
+  const mint = (noteId: string, peer?: OperatorPeer): string => {
+    const owner = operatorPeerKey(peer);
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const handle = `h_${randomBytes(18).toString("base64url")}`;
       if (!handles.has(handle)) {
@@ -43,7 +49,7 @@ export function createOperatorHandleRegistry(): OperatorHandleRegistry {
           const oldest = handles.keys().next().value;
           if (typeof oldest === "string") handles.delete(oldest);
         }
-        handles.set(handle, noteId);
+        handles.set(handle, { noteId, owner });
         return handle;
       }
     }
@@ -52,7 +58,10 @@ export function createOperatorHandleRegistry(): OperatorHandleRegistry {
 
   return Object.freeze({
     mint,
-    resolve: (handle: string): string | undefined => handles.get(handle),
+    resolve: (handle: string, peer?: OperatorPeer): string | undefined => {
+      const entry = handles.get(handle);
+      return entry?.owner === operatorPeerKey(peer) ? entry.noteId : undefined;
+    },
   });
 }
 
@@ -67,15 +76,16 @@ export function createOperatorDiscoveryRuntime(
   const cursors = new Map<string, CursorState>();
 
   return {
-    browse: async (params) => {
+    browse: async (params, peer) => {
       const notes = await service.readOnly.listNotes();
       return page(
         notes.map((note) => ({ id: note.id, title: note.title })),
         params,
         undefined,
+        peer,
       );
     },
-    search: async (params) => {
+    search: async (params, peer) => {
       const hits = await service.readOnly.search(params.query);
       return page(
         hits
@@ -83,10 +93,11 @@ export function createOperatorDiscoveryRuntime(
           .map((hit) => ({ id: hit.id, title: hit.title })),
         params,
         params.query,
+        peer,
       );
     },
-    view: async ({ id }) => {
-      const noteId = registry.resolve(id);
+    view: async ({ id }, peer) => {
+      const noteId = registry.resolve(id, peer);
       if (noteId === undefined) throw new Error("handle unavailable");
       const reader = service.readOnly.readNoteContent;
       if (reader === undefined) throw new Error("content unavailable");
@@ -103,15 +114,12 @@ export function createOperatorDiscoveryRuntime(
         contentBytes: Buffer.byteLength(markdown, "utf8"),
       };
     },
-    create: async (params) => {
+    create: async (params, peer) => {
       if (service.createNote === undefined) throw new Error("create unavailable");
       const result = await service.createNote(params);
-      // Raw note IDs never cross the socket (see the module contract above), so
-      // the created note is addressed by a daemon-minted handle like every other
-      // surface.  Returning `result.id` here leaked the raw Notesnook ID.
       return {
         kind: "create",
-        id: registry.mint(result.id),
+        id: registry.mint(result.id, peer),
         titleBytes: result.titleBytes,
         contentBytes: result.contentBytes,
       };
@@ -122,6 +130,7 @@ export function createOperatorDiscoveryRuntime(
     source: ReadonlyArray<Readonly<{ id: string; title: string }>>,
     params: Readonly<{ cursor?: string; limit?: number }>,
     query: string | undefined,
+    peer: OperatorPeer | undefined,
   ): Promise<OperatorDiscoveryPage> {
     const limit = normalizeLimit(params.limit);
     const state = params.cursor === undefined ? undefined : cursors.get(params.cursor);
@@ -130,7 +139,7 @@ export function createOperatorDiscoveryRuntime(
     const offset = state?.offset ?? 0;
     const selected = source.slice(offset, offset + limit);
     const notes = selected.map((note) => ({
-      handle: registry.mint(note.id),
+      handle: registry.mint(note.id, peer),
       label: note.title,
       bytes: Buffer.byteLength(note.title, "utf8"),
     }));

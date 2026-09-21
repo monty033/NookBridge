@@ -47,10 +47,13 @@ export const OPERATOR_MUTATION_GROUP = "nookbridge-operators";
 
 export interface OperatorAuthorizerDependencies {
   /** Resolve a note handle to a note id, per peer. */
-  readonly resolveHandle: (handle: string) => string | undefined;
-  /** Resolve an operation handle to the note it targets, from the daemon's record. */
+  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  /** Resolve an operation handle to its note, scoped to its owner. */
   readonly resolveOperationNoteId?:
-    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | ((
+        operationHandle: string,
+        peer?: OperatorPeer,
+      ) => string | undefined | Promise<string | undefined>)
     | undefined;
   /** Trusted lock-state reader. */
   readonly readNoteLockState?: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
@@ -77,6 +80,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
     const lockState = await resolveOperatorRequestLockState({
       method,
       request,
+      peer,
       resolveHandle: deps.resolveHandle,
       resolveOperationNoteId: deps.resolveOperationNoteId,
       readNoteLockState: deps.readNoteLockState,
@@ -85,6 +89,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
     const notebookPolicy = await resolveOperatorRequestNotebookPolicy({
       method,
       request,
+      peer,
       resolveHandle: deps.resolveHandle,
       resolveOperationNoteId: deps.resolveOperationNoteId,
       readNoteNotebookPath: deps.readNoteNotebookPath,

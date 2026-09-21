@@ -56,6 +56,7 @@ import { createOperatorDiscoveryHandler } from "./service/operator-discovery-han
 import {
   createOperatorDiscoveryRuntime,
   createOperatorHandleRegistry,
+  operatorPeerKey,
 } from "./service/operator-discovery-runtime.js";
 import { createOperatorWriteRuntime } from "./service/notes-operator-write-runtime.js";
 import { createNotesUndoStore } from "./service/notes-undo-store.js";
@@ -467,7 +468,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
         });
         operatorWrite = createOperatorWriteRuntime({
           store: operatorStore,
-          resolveHandle: (handle) => operatorHandles.resolve(handle),
+          resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
           source: {
             read: async (noteId: string) => {
               const metadata = await readOnly.noteMetadata(noteId);
@@ -522,15 +523,16 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           // The production authorizer: admission, the operator capability for
           // mutations, the lock context, and the notebook policy.
           authorize: createOperatorAuthorizer({
-            resolveHandle: (handle) => operatorHandles.resolve(handle),
+            resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
             // A bare apply-undo names only an operation handle, so the note it
             // targets is resolved from the daemon's own committed record -
             // otherwise the seam would see no target and skip the lock check.
-            resolveOperationNoteId: async (operationHandle) => {
+            resolveOperationNoteId: async (operationHandle, peer) => {
               if (operatorStore === undefined) return undefined;
               try {
-                const record = await operatorStore.get(operationHandle);
-                const payload = JSON.parse(record.payload) as { noteId?: unknown };
+                const record = await operatorStore.get(operationHandle, operatorPeerKey(peer));
+                const payload = JSON.parse(record.payload) as { noteId?: unknown; owner?: unknown };
+                if (payload.owner !== operatorPeerKey(peer)) return undefined;
                 return typeof payload.noteId === "string" && payload.noteId.length > 0
                   ? payload.noteId
                   : undefined;
