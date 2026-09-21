@@ -80,6 +80,28 @@ export function formatLockedNoteProof(report: LockedNoteProofReport): string {
   return JSON.stringify(report);
 }
 
+/**
+ * Map a closed daemon error code onto a categorical proof code.
+ *
+ * Only `not_found` used to survive this mapping.  Every other code — including
+ * a categorical `vault_locked` — collapsed to `service_unavailable`, so a lock
+ * refusal was indistinguishable from a broken daemon and the acceptance proof
+ * could never demonstrate that the lock was actually enforced.  Codes that
+ * carry no categorical meaning still report as unavailable.
+ */
+export function lockedNoteProofCodeForError(code: unknown): LockedNoteProofCode {
+  switch (code) {
+    case "vault_locked":
+      return "vault_locked";
+    case "not_found":
+      return "not_found";
+    case "permission_denied":
+      return "permission_denied";
+    default:
+      return "service_unavailable";
+  }
+}
+
 /** Construct the operator facade over the already-running nookd daemon. */
 export async function createProductionLockedNoteProofRuntime(
   environment: Readonly<Record<string, string | undefined>>,
@@ -91,12 +113,13 @@ export async function createProductionLockedNoteProofRuntime(
       lockedNoteProof: async (path: string): Promise<RpcLockedNoteProofResult> => {
         const response = await client.lockedNoteProof({ path });
         if (!response.ok) {
+          const code = lockedNoteProofCodeForError(response.code);
           return Object.freeze({
             kind: "locked_note_proof",
             pathBytes: Buffer.byteLength(path, "utf8"),
-            read: response.code === "not_found" ? "not_found" : "service_unavailable",
-            update: response.code === "not_found" ? "not_found" : "service_unavailable",
-            delete: response.code === "not_found" ? "not_found" : "service_unavailable",
+            read: code,
+            update: code,
+            delete: code,
           });
         }
         const result = response.envelope.result;
