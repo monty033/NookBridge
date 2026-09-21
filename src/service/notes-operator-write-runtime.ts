@@ -35,6 +35,7 @@ import {
   parseNoteDocumentMarkdown,
   serializeNoteDocumentMarkdown,
 } from "../core/note-document-markdown.js";
+import { isVaultLockedRefusal } from "../core/notesnook-readonly-projection.js";
 import type { RpcErrorCode } from "./rpc-protocol.js";
 import type { OperationRecord, OperationState } from "./notes-undo-store.js";
 
@@ -197,8 +198,12 @@ export function createOperatorWriteRuntime(
     let observed: Awaited<ReturnType<OperatorWriteSource["read"]>>;
     try {
       observed = await options.source.read(noteId);
-    } catch {
-      return fail("service_unavailable");
+    } catch (error) {
+      // A locked note is a categorical refusal, not a service failure.  Catching
+      // every read failure as `service_unavailable` made a working lock
+      // indistinguishable from a broken daemon on edit-preimage, apply-edit, and
+      // apply-undo.  Every other failure stays generic.
+      return fail(isVaultLockedRefusal(error) ? "vault_locked" : "service_unavailable");
     }
     if (observed === undefined) return fail("not_found");
     if (typeof observed.revision !== "string" || !REVISION_TOKEN.test(observed.revision)) {

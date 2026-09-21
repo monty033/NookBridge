@@ -183,6 +183,27 @@ describe("daemon operator write runtime", () => {
     expect(records[0]!.state).toBe("unresolved");
   });
 
+  it("reports a locked refusal categorically instead of a service failure", async () => {
+    // The read projection raises a locked note as `vault_locked`.  Collapsing
+    // that into a generic failure made a working lock indistinguishable from a
+    // broken daemon on edit-preimage, apply-edit, and apply-undo.
+    const f = await fixture();
+    const locked: OperatorWriteSource = {
+      async read(): Promise<never> {
+        throw Object.assign(new Error("ERR_VAULT_LOCKED"), { code: "ERR_VAULT_LOCKED" });
+      },
+      update: f.source.update,
+    };
+    const rt = createOperatorWriteRuntime({
+      source: locked,
+      store: f.store,
+      resolveHandle: () => NOTE_ID,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    await expect(rt.editPreimage({ id: HANDLE })).rejects.toMatchObject({ code: "vault_locked" });
+  });
+
   it("undoes a committed edit by restoring the stored preimage", async () => {
     const f = await fixture();
     const rt = runtime(f);

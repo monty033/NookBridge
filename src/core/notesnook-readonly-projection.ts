@@ -1421,9 +1421,19 @@ function readOptionalNoteLockedMarker(value: unknown): boolean | undefined {
   }
 }
 
-function isVaultLockedRefusal(error: unknown): boolean {
+export function isVaultLockedRefusal(error: unknown): boolean {
   if (error === null || (typeof error !== "object" && typeof error !== "function")) {
     return false;
+  }
+  // This projection raises a locked note itself, so its own error must be
+  // recognised here too: the operator write paths read through this module, and
+  // collapsing its refusal into a generic failure hid a working lock.
+  if (isNotesnookReadOnlyProjectionError(error)) {
+    try {
+      return error.message === "vault_locked";
+    } catch {
+      return false;
+    }
   }
   if (isNotesnookReadOnlyAdapterError(error)) {
     try {
