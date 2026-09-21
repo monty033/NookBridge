@@ -51,17 +51,24 @@ on the reference Debian host:
 - A CRLF document creates, where it previously failed input validation.
 - A locked note returns a categorical `locked` refusal while an unlocked note
   beside it still returns its projection.
-- Nothing created through this surface is ever uploaded: the read-only sync
-  boundary accepts only `{ type: "fetch" }`.
+- Nothing is uploaded *by this surface*: the operator socket has no `sync` verb, and
+  every sync run during this work used the fetch-only read-only path.
 
-**What this does not prove.** The dedicated lock proof
-(`notes locked-note-proof`) still reports `service_unavailable` for a locked note
-and `permission_denied` for an unlocked control; the daemon records
-`peerCredentials: "unknown"`, so the proof denies regardless, and a locked note's
-own path resolution is collapsed into the generic code. The read-only sync proof
-also reports a pass against an empty store, because its state directory is derived
-from the working directory when the environment variable is unset. Both are
-tracked as open, not closed.
+**What this does not prove.** An earlier statement here claimed operator-created
+notes are never uploaded. **That was wrong.** Operator creates are recorded with
+`pendingSync: true`, and the remote executor invokes upstream `{ type: "full" }`,
+which includes a send phase — so a later daemon-side full sync would drain that
+queue. The accurate position is "not automatically uploaded", not "may never be
+uploaded". This is tracked as an open defect, not a closed boundary.
+
+Also open: the dedicated lock proof (`notes locked-note-proof`) still reports
+`service_unavailable` for a locked note and `permission_denied` for an unlocked
+control; the daemon records `peerCredentials: "unknown"`, and a locked note's own
+path resolution is collapsed into the generic code. The read-only sync proof
+reports a pass against an empty store, because its state directory is derived from
+the working directory when the environment variable is unset. An independent
+read-only review of source PR #125 returned `REQUEST_CHANGES` with seven findings,
+all open and none disputed; they are enumerated in the PR description.
 
 ## Reading status claims safely
 
