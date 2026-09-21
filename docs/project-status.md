@@ -12,6 +12,7 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; under review as source PR #125. The dedicated lock proof and the read-only sync proof remain open — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
@@ -37,6 +38,30 @@ does not close the broader production-MVP release gate. The remaining
 production-shaped atomicity, recovery, privileged-scan, outsider-boundary,
 long-duration stress, and dependency/license sign-off work is tracked in the
 [implementation plan](implementation-plan-v1.5.md#1314-fresh-astra-re-baseline--current-production-mvp-blockers).
+
+## Operator notes surface — 2026-09-21
+
+The operator `notes` surface is implemented on the sole daemon and live-validated
+on the reference Debian host:
+
+- A note created through `nookctl notes create --approve-edit` reads back as real
+  markdown — heading, inline bold and code, and both checklist states render.
+  Before this work every content block came back opaque, so the write path could
+  create a note the read path could neither display nor edit.
+- A CRLF document creates, where it previously failed input validation.
+- A locked note returns a categorical `locked` refusal while an unlocked note
+  beside it still returns its projection.
+- Nothing created through this surface is ever uploaded: the read-only sync
+  boundary accepts only `{ type: "fetch" }`.
+
+**What this does not prove.** The dedicated lock proof
+(`notes locked-note-proof`) still reports `service_unavailable` for a locked note
+and `permission_denied` for an unlocked control; the daemon records
+`peerCredentials: "unknown"`, so the proof denies regardless, and a locked note's
+own path resolution is collapsed into the generic code. The read-only sync proof
+also reports a pass against an empty store, because its state directory is derived
+from the working directory when the environment variable is unset. Both are
+tracked as open, not closed.
 
 ## Reading status claims safely
 
