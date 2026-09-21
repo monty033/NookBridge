@@ -261,7 +261,13 @@ describe("rpc-protocol — operator method-specific frame bounds", () => {
       JSON.stringify({
         id: "abc",
         ok: true,
-        result: { kind: "create", id: "n1", titleBytes: 5, contentBytes: 5 },
+        result: {
+          kind: "create",
+          id: "n1",
+          operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          titleBytes: 5,
+          contentBytes: 5,
+        },
       }),
       "utf8",
     );
@@ -272,7 +278,13 @@ describe("rpc-protocol — operator method-specific frame bounds", () => {
     const serialized = serializeRpcResponse({
       id: "abc",
       ok: true,
-      result: { kind: "create", id: "n1", titleBytes: 5, contentBytes: 5 },
+      result: {
+        kind: "create",
+        id: "n1",
+        operationHandle: "op_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        titleBytes: 5,
+        contentBytes: 5,
+      },
     });
     expect(serialized.byteLength).toBe(frame.byteLength);
   });

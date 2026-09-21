@@ -575,6 +575,17 @@ export function createOperatorWriteRuntime(
         ownerKey(peer),
       );
     } catch {
+      try {
+        await options.store.transition(
+          record.handle,
+          "committing",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
+      } catch {
+        // Preserve the categorical failure.
+      }
       return fail("service_unavailable");
     }
     audit("edit.committed");
@@ -697,6 +708,17 @@ export function createOperatorWriteRuntime(
       return fail("service_unavailable");
     }
     if (typeof result.revision !== "string" || !REVISION_TOKEN.test(result.revision)) {
+      try {
+        await options.store.transition(
+          record.handle,
+          "committed",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
+      } catch {
+        // Preserve the categorical failure.
+      }
       return fail("service_unavailable");
     }
 
@@ -709,6 +731,17 @@ export function createOperatorWriteRuntime(
         ownerKey(peer),
       );
     } catch {
+      try {
+        await options.store.transition(
+          record.handle,
+          "committed",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
+      } catch {
+        // Preserve the categorical failure.
+      }
       return fail("service_unavailable");
     }
     audit("undo.undone");

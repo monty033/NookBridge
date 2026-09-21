@@ -474,7 +474,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
             ...(createNote === undefined ? {} : { create: createNote }),
             read: async (noteId: string) => {
               const metadata = await readOnly.noteMetadata(noteId);
-              const reader = readOnly.readNoteContent;
+              const reader = readOnly.readOperatorNoteContent;
               if (metadata === undefined || reader === undefined) return undefined;
               const revision = metadata.revision;
               if (typeof revision !== "string" || revision.length === 0) return undefined;

@@ -214,7 +214,7 @@ export interface NotesnookReadOnlyDatabase {
   readonly readNoteLockState?: (id: string) => Promise<"locked" | "unlocked">;
   /** Body-free classifier for one note's stored content representation. */
   readonly noteContentDiagnostic?: (id: string) => Promise<NotesnookReadOnlyContentDiagnostic>;
-  readonly readNoteContent?: (id: string) => Promise<NotesnookReadOnlyNoteContent>;
+  readonly readOperatorNoteContent?: (id: string) => Promise<NotesnookReadOnlyNoteContent>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }
@@ -429,14 +429,14 @@ export class NotesnookReadOnlyAdapter {
     throw readOnlyAdapterError("unsupported_content");
   }
 
-  async readNoteContent(id: string): Promise<NotesnookReadOnlyNoteContent> {
+  async readOperatorNoteContent(id: string): Promise<NotesnookReadOnlyNoteContent> {
     if (typeof id !== "string" || id.length === 0) {
       throw readOnlyAdapterError("Notesnook read-only adapter: note id must be a non-empty string");
     }
-    const reader = this.#database.readNoteContent;
+    const reader = this.#database.readOperatorNoteContent;
     if (typeof reader !== "function") throw readOnlyAdapterError("unsupported_content");
     try {
-      return coerceNoteContent(await this.#safeCall("readNoteContent", () => reader(id)));
+      return coerceNoteContent(await this.#safeCall("readOperatorNoteContent", () => reader(id)));
     } catch (error) {
       if (isNotesnookAdapterError(error) || isReadOnlyAdapterError(error)) throw error;
       throw readOnlyAdapterError("Notesnook read-only adapter: failed to read note content");

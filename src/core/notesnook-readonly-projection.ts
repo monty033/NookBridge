@@ -681,7 +681,7 @@ export function flattenLiveDatabaseToReadOnly(
       return classifyContentDiagnostic(content);
     },
 
-    readNoteContent: async (id: string) => {
+    readOperatorNoteContent: async (id: string) => {
       if (typeof id !== "string" || id.length === 0)
         throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
       if (contentFindByNoteIdFn === undefined) throw projectionError("unsupported_content");

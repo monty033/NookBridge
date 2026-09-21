@@ -57,7 +57,7 @@ describe("daemon operator discovery runtime", () => {
           title: "Body",
           revision: `rev_${"1".repeat(32)}`,
         }),
-        readNoteContent: async () => ({
+        readOperatorNoteContent: async () => ({
           type: "html",
           data: "<p>Hello <strong>world</strong></p>",
         }),
@@ -81,7 +81,7 @@ describe("daemon operator discovery runtime", () => {
           title: "Body",
           revision: `rev_${"1".repeat(32)}`,
         }),
-        readNoteContent: async () => ({ type: "html", data: "<p>Body</p>" }),
+        readOperatorNoteContent: async () => ({ type: "html", data: "<p>Body</p>" }),
       },
     } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
     const page = await runtime.browse({ limit: 1 }, PEER_A);
@@ -117,7 +117,7 @@ describe("daemon operator discovery runtime", () => {
           resolved.push(id);
           return { id, title: "Created", revision: `rev_${"2".repeat(32)}` };
         },
-        readNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
+        readOperatorNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
       },
       createNote: async () => ({ id: "raw-created-1", titleBytes: 5, contentBytes: 10 }),
     } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);

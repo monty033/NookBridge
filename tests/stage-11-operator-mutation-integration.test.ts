@@ -66,7 +66,7 @@ async function compose() {
     async noteMetadata() {
       return { id: NOTE_ID, title: "Integration note", revision: state.revision };
     },
-    async readNoteContent() {
+    async readOperatorNoteContent() {
       return { ...state.content };
     },
   } as unknown as ServiceRuntime["readOnly"];

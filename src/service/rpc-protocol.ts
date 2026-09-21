@@ -1806,12 +1806,12 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "create") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "id", "titleBytes", "contentBytes"],
+        ["kind", "id", "operationHandle", "titleBytes", "contentBytes"],
         "rpc protocol: create result has unexpected fields",
       );
       if (
-        resultKeys.length !== 4 ||
-        !keysAreExactly(resultKeys, ["kind", "id", "titleBytes", "contentBytes"])
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "id", "operationHandle", "titleBytes", "contentBytes"])
       ) {
         throw rpcProtocolError("rpc protocol: create result has unexpected fields");
       }
@@ -1829,11 +1829,19 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const resultPayload = objectCreate(null) as {
         kind: "create";
         id: string;
+        operationHandle: string;
         titleBytes: number;
         contentBytes: number;
       };
       resultPayload.kind = "create";
       resultPayload.id = noteId;
+      const operationHandle = resultRecord.operationHandle;
+      assertBoundedString(
+        operationHandle,
+        STAGE5_RPC_LIMITS.maxIdentifierBytes,
+        "create operation handle",
+      );
+      resultPayload.operationHandle = operationHandle;
       resultPayload.titleBytes = resultRecord.titleBytes;
       resultPayload.contentBytes = resultRecord.contentBytes;
       return serializeSuccessFrame(id, resultPayload, rawSum);

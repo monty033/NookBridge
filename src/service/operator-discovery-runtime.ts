@@ -114,7 +114,7 @@ export function createOperatorDiscoveryRuntime(
     view: async ({ id }, peer) => {
       const noteId = registry.resolve(id, peer);
       if (noteId === undefined) throw new OperatorWriteError("not_found");
-      const reader = service.readOnly.readNoteContent;
+      const reader = service.readOnly.readOperatorNoteContent;
       if (reader === undefined) throw new Error("content unavailable");
       const metadata = await service.readOnly.noteMetadata(noteId);
       if (metadata === undefined) throw new Error("note unavailable");
