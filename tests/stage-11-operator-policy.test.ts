@@ -75,8 +75,6 @@ describe("operator policy — closed method vocabulary", () => {
       "notes.create",
       "notes.operation-status",
       "notes.operation-list",
-      "notes.browse",
-      "notes.search-operator",
     ]);
   });
 

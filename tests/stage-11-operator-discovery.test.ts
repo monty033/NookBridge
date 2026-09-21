@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
-import { OPERATOR_METHODS } from "../src/service/operator-methods.js";
+import { OPERATOR_DISCOVERY_METHODS } from "../src/service/operator-methods.js";
 import { parseRpcFrame, serializeRpcResponse } from "../src/service/rpc-protocol.js";
 
 function frame(method: string, params: Record<string, unknown>): Uint8Array {
@@ -13,8 +13,8 @@ function frame(method: string, params: Record<string, unknown>): Uint8Array {
 
 describe("operator discovery RPC amendment", () => {
   it("admits browse and operator search only on the operator vocabulary", () => {
-    expect(OPERATOR_METHODS).toContain("notes.browse");
-    expect(OPERATOR_METHODS).toContain("notes.search-operator");
+    expect(OPERATOR_DISCOVERY_METHODS).toContain("notes.browse");
+    expect(OPERATOR_DISCOVERY_METHODS).toContain("notes.search-operator");
   });
 
   it("parses bounded discovery parameters", () => {

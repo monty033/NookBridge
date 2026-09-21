@@ -13,7 +13,7 @@ import {
   type RpcAnyResponseEnvelope,
   type RpcRequest,
 } from "./rpc-protocol.js";
-import { isOperatorMethod, type OperatorMethod } from "./operator-methods.js";
+import { isOperatorTransportMethod, type OperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import type { OperatorPolicyDecision } from "./operator-policy.js";
 
@@ -38,7 +38,7 @@ type PeerSocket = net.Socket & {
 
 export type OperatorSocketPeerResolver = (socket: net.Socket) => OperatorPeer | undefined;
 export type OperatorSocketAuthorization = (
-  method: OperatorMethod,
+  method: OperatorTransportMethod,
   peer: OperatorPeer,
   request?: RpcRequest,
 ) => OperatorPolicyDecision | Promise<OperatorPolicyDecision>;
@@ -165,7 +165,7 @@ async function dispatchFrame(
     socket.destroy();
     return;
   }
-  if (!isOperatorMethod(request.method)) {
+  if (!isOperatorTransportMethod(request.method)) {
     socket.destroy();
     return;
   }

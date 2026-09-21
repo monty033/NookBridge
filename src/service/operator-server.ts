@@ -35,7 +35,11 @@
 import { Buffer } from "node:buffer";
 import path from "node:path";
 
-import { isOperatorMethod, OPERATOR_METHODS, type OperatorMethod } from "./operator-methods.js";
+import {
+  isOperatorTransportMethod,
+  OPERATOR_METHODS,
+  type OperatorTransportMethod,
+} from "./operator-methods.js";
 import type { OperatorPolicyEvaluator } from "./operator-policy.js";
 
 const objectCreate = Object.create;
@@ -47,7 +51,7 @@ const objectFreeze = Object.freeze;
 
 const FRAME_PREFIX_BYTES = 4;
 const REJECTED_SENTINEL = "rejected" as const;
-export type OperatorMethodPeek = OperatorMethod | typeof REJECTED_SENTINEL;
+export type OperatorMethodPeek = OperatorTransportMethod | typeof REJECTED_SENTINEL;
 
 /**
  * Body-free peek of the operator method from a length-prefixed
@@ -88,7 +92,7 @@ function peekOperatorMethod(frame: Uint8Array): OperatorMethodPeek {
   const end = text.indexOf('"', valueStart);
   if (end < 0) return REJECTED_SENTINEL;
   const method = text.slice(valueStart, end);
-  if (!isOperatorMethod(method)) return REJECTED_SENTINEL;
+  if (!isOperatorTransportMethod(method)) return REJECTED_SENTINEL;
   return method;
 }
 
@@ -166,7 +170,7 @@ export function peerToAuthorizationContext(peer: OperatorPeer): {
  *     predicate and collapses throws to categorical denials.
  */
 export interface OperatorTransport {
-  readonly isMethodAllowed: (method: string) => method is OperatorMethod;
+  readonly isMethodAllowed: (method: string) => method is OperatorTransportMethod;
   readonly peekMethod: (frame: Uint8Array) => OperatorMethodPeek;
   readonly checkPeer: (peer: OperatorPeer) => OperatorPeerResult;
 }
@@ -185,7 +189,8 @@ export function buildOperatorTransport(options: BuildOperatorTransportOptions): 
   if (options === null || typeof options !== "object") {
     throw new Error("operator transport: invalid options");
   }
-  const isMethodAllowed = (method: string): method is OperatorMethod => isOperatorMethod(method);
+  const isMethodAllowed = (method: string): method is OperatorTransportMethod =>
+    isOperatorTransportMethod(method);
   const peekMethod = (frame: Uint8Array): OperatorMethodPeek => peekOperatorMethod(frame);
   const checkPeer = (peer: OperatorPeer): OperatorPeerResult => {
     if (peer === null || typeof peer !== "object") {
@@ -204,7 +209,7 @@ export function buildOperatorTransport(options: BuildOperatorTransportOptions): 
     }
   };
   const transport = objectCreate(null) as {
-    isMethodAllowed: (method: string) => method is OperatorMethod;
+    isMethodAllowed: (method: string) => method is OperatorTransportMethod;
     peekMethod: (frame: Uint8Array) => OperatorMethodPeek;
     checkPeer: (peer: OperatorPeer) => OperatorPeerResult;
   };
