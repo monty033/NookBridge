@@ -123,6 +123,27 @@ describe("notes create — D11 title rule", () => {
     expect(deriveCreateTitle("#nothashtag\n\nbody\n")).toBeUndefined();
   });
 
+  it("finds the heading in a CRLF document", () => {
+    // A document authored on Windows, or pasted from one, must not lose its
+    // title just because the line ending carries a carriage return.
+    expect(deriveCreateTitle("# Title\r\n\r\nbody\r\n")).toBe("Title");
+  });
+
+  it("finds the heading in a CR-only document", () => {
+    expect(deriveCreateTitle("# Title\r\rbody\r")).toBe("Title");
+  });
+
+  it("strips a trailing ATX closing sequence", () => {
+    expect(deriveCreateTitle("# Heading ###\n")).toBe("Heading");
+    expect(deriveCreateTitle("## Section ##\n")).toBeUndefined();
+  });
+
+  it("ignores a heading inside a fenced code block", () => {
+    expect(deriveCreateTitle("```\n# not a heading\n```\n")).toBeUndefined();
+    expect(deriveCreateTitle("~~~\n# not a heading\n~~~\n")).toBeUndefined();
+    expect(deriveCreateTitle("```\n# not a heading\n```\n\n# Real\n")).toBe("Real");
+  });
+
   it("returns undefined when there is no H1 at all", () => {
     expect(deriveCreateTitle("just prose\n\n- a list item\n")).toBeUndefined();
     expect(deriveCreateTitle("")).toBeUndefined();

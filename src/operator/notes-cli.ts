@@ -973,14 +973,29 @@ function parseCreate(rest: readonly string[]): ParseNotesCommandResult {
  * and a document with no usable H1 returns `undefined` so the caller fails
  * categorical with `invalid-input` rather than inventing a title from a
  * paragraph, a list item, or an H2.
+ *
+ * Three details keep the scan honest about what a heading is:
+ *  - Any Markdown line ending ends a line (`\r\n`, `\r`, `\n`), so a document
+ *    authored or pasted on Windows still yields its title instead of being
+ *    refused as heading-less.
+ *  - A trailing run of `#` is the ATX closing sequence, not part of the text.
+ *  - A fenced code block is not prose: an indented `#` line inside a fence is
+ *    code, so a fence suppresses heading recognition until it closes.
  */
 export function deriveCreateTitle(markdown: string): string | undefined {
   if (typeof markdown !== "string" || markdown.length === 0) return undefined;
-  for (const line of markdown.split("\n")) {
+  let insideFence = false;
+  for (const line of markdown.split(/\r\n|\r|\n/)) {
+    if (/^[ \t]*(?:```|~~~)/.test(line)) {
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) continue;
     const match = /^#[ \t]+(\S.*?)[ \t]*$/.exec(line);
     if (match === null) continue;
-    const title = match[1];
-    if (typeof title === "string" && title.length > 0) return title;
+    const text = match[1] ?? "";
+    const title = text.replace(/[ \t]+#+$/, "").trim();
+    if (title.length > 0) return title;
   }
   return undefined;
 }
