@@ -49,6 +49,62 @@ const allowPeer: OperatorSocketPeerResolver = () => ({
 });
 
 describe("daemon-owned operator socket", () => {
+  it("returns the categorical reason the policy denied with", async () => {
+    // Review finding 7: authorization had no request context and could only
+    // express `permission_denied`, so a locked target was indistinguishable
+    // from a permission problem.  The reason the policy returns is the code the
+    // operator receives.
+    const path = socketPath();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: () => ({ allowed: false, reason: "vault_locked" }),
+      handle: async (request) => ({
+        id: request.id,
+        ok: true,
+        result: { kind: "operation-list", handles: [] },
+      }),
+    });
+    try {
+      const response = await roundTrip(path, requestFrame("notes.operation-list"));
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code: "vault_locked", message: "Vault locked" },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("hands the parsed request to the authorization seam", async () => {
+    // The evaluator cannot judge a target it never sees: the request travels
+    // with the method so notebook and lock context can be resolved.
+    const path = socketPath();
+    const seen: Array<{ method: string; params: unknown }> = [];
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method, _peer, request) => {
+        seen.push({ method, params: request?.params });
+        return { allowed: true, method };
+      },
+      handle: async (request) => ({
+        id: request.id,
+        ok: true,
+        result: { kind: "operation-list", handles: [] },
+      }),
+    });
+    try {
+      await roundTrip(path, requestFrame("notes.operation-list"));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ method: "notes.operation-list" });
+    } finally {
+      await server.close();
+    }
+  });
+
   it("binds a separate restrictive socket and dispatches canonical methods", async () => {
     const path = socketPath();
     const server = await startOperatorSocketServer({

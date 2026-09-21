@@ -40,7 +40,8 @@ export type OperatorSocketPeerResolver = (socket: net.Socket) => OperatorPeer | 
 export type OperatorSocketAuthorization = (
   method: OperatorMethod,
   peer: OperatorPeer,
-) => OperatorPolicyDecision;
+  request?: RpcRequest,
+) => OperatorPolicyDecision | Promise<OperatorPolicyDecision>;
 export type OperatorSocketHandler = (
   request: RpcRequest,
   peer: OperatorPeer,
@@ -170,16 +171,19 @@ async function dispatchFrame(
   }
   let decision: OperatorPolicyDecision;
   try {
-    decision = authorize(request.method, peer);
+    decision = await authorize(request.method, peer, request);
   } catch {
     socket.destroy();
     return;
   }
   if (decision.allowed !== true) {
+    // The policy's categorical reason is the code the operator receives, so a
+    // lock refusal stays distinguishable from a permission problem.
+    const message = decision.reason === "vault_locked" ? "Vault locked" : "Permission denied";
     await writeResponse(socket, {
       id: request.id,
       ok: false,
-      error: { code: "permission_denied", message: "Permission denied" },
+      error: { code: decision.reason, message },
     });
     return;
   }

@@ -27,6 +27,31 @@ import {
   type OperatorPolicyProfile,
 } from "../src/service/operator-policy.js";
 
+describe("operator policy denial vocabulary", () => {
+  it("echoes the categorical lock reason the evaluator returns", () => {
+    // Finding 7: the seam could only ever say `permission_denied`, so a locked
+    // target was indistinguishable from a permission problem.  The evaluator's
+    // categorical reason now crosses the seam unchanged.
+    const policy = createOperatorPolicy(() => ({ allowed: false, reason: "vault_locked" }));
+    expect(authorizeOperatorMethod(policy, "notes.apply-edit")).toMatchObject({
+      allowed: false,
+      reason: "vault_locked",
+    });
+  });
+
+  it("collapses a reason outside the closed vocabulary", () => {
+    // Guard: an evaluator must not be able to forward arbitrary text as the
+    // operator-facing code.
+    const policy = createOperatorPolicy(
+      () => ({ allowed: false, reason: "teapot" }) as unknown as OperatorPolicyDecision,
+    );
+    expect(authorizeOperatorMethod(policy, "notes.apply-edit")).toMatchObject({
+      allowed: false,
+      reason: "permission_denied",
+    });
+  });
+});
+
 function makeContext(
   overrides: Partial<OperatorAuthorizationContext> = {},
 ): OperatorAuthorizationContext {

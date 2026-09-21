@@ -116,7 +116,7 @@ export interface OperatorAuthorizationContext {
 // Decision types.
 // ---------------------------------------------------------------------------
 
-export type OperatorPolicyDenialReason = "permission_denied";
+export type OperatorPolicyDenialReason = "permission_denied" | "vault_locked";
 
 /**
  * The categorical success decision the seam emits on admit.
@@ -282,11 +282,21 @@ export function authorizeOperatorMethod(
     if (notebookPath !== undefined) admit.notebookPath = notebookPath;
     return objectFreeze(admit) as OperatorPolicyAdmitDecision;
   }
-  return denyOperatorPolicyDecision();
+  // Only the closed denial vocabulary may cross the seam: an evaluator that
+  // returns an unrecognised reason gets the default rather than forwarding
+  // arbitrary text to the operator.
+  const rawReason = record.reason;
+  const reason: OperatorPolicyDenialReason =
+    rawReason === "vault_locked" || rawReason === "permission_denied"
+      ? rawReason
+      : "permission_denied";
+  return denyOperatorPolicyDecision(reason);
 }
 
-function denyOperatorPolicyDecision(): OperatorPolicyDenyDecision {
-  const deny: OperatorPolicyDenyDecision = { allowed: false, reason: "permission_denied" };
+function denyOperatorPolicyDecision(
+  reason: OperatorPolicyDenialReason = "permission_denied",
+): OperatorPolicyDenyDecision {
+  const deny: OperatorPolicyDenyDecision = { allowed: false, reason };
   return objectFreeze(deny) as OperatorPolicyDenyDecision;
 }
 
