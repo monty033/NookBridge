@@ -390,6 +390,35 @@ function parseTaskListLines(lines: readonly string[]): readonly TaskListItem[] {
   return rootChildren;
 }
 
+/**
+ * Render the inline mark set the gate accepts.
+ *
+ * The gate classifies `**bold**`, `*italic*` and `` `code` `` as supported
+ * constructs, so the renderer must emit the tags the projection maps back to
+ * those delimiters — `strong`, `em` and `code`, the canonical pair declared in
+ * `note-document-native.ts`.  Emitting the escaped delimiters instead would
+ * make the gate's promise a lie: the operator would see `created` while the
+ * note carried literal asterisks.
+ *
+ * Escaping runs first so the marks cannot smuggle markup.  Code spans are then
+ * isolated so an emphasis marker inside one stays literal, and bold is
+ * converted before italic so `**x**` cannot be read as an empty italic run.
+ * The patterns mirror the detection rules in {@link collectConstructs}, so a
+ * construct is accepted exactly when the renderer can express it.
+ */
+function renderInline(text: string): string {
+  return escapeHtml(text)
+    .split(/(`[^`\n]+`)/)
+    .map((part, index) =>
+      index % 2 === 1
+        ? `<code>${part.slice(1, -1)}</code>`
+        : part
+            .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+            .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>"),
+    )
+    .join("");
+}
+
 function renderTaskListItems(items: readonly TaskListItem[], listKind: NotesnookListKind): string {
   // The simple-checklist shape uses `<ul class="simple-checklist">` with
   // `simple-checklist--item` rows; the rich task-list shape uses
@@ -401,7 +430,7 @@ function renderTaskListItems(items: readonly TaskListItem[], listKind: Notesnook
   let out = "";
   for (const item of items) {
     const className = item.checked ? `checked ${itemClass}` : itemClass;
-    const text = escapeHtml(item.text);
+    const text = renderInline(item.text);
     out += `<li class="${className}"><p>${text}</p>`;
     if (item.children.length > 0) {
       // Nested children inherit the same listKind so every depth uses
@@ -439,7 +468,7 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const heading = /^(#{1,3}) +(.*)$/.exec(first);
   if (heading !== null && lines.length === 1) {
     const level = (heading[1] as string).length;
-    return `<h${level}>${escapeHtml(heading[2] as string)}</h${level}>`;
+    return `<h${level}>${renderInline(heading[2] as string)}</h${level}>`;
   }
 
   // A block is treated as a task-list only when EVERY non-empty line is a
@@ -456,12 +485,12 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const isList = lines.every((line) => /^[-*] +/.test(line));
   if (isList) {
     const items = lines
-      .map((line) => `<li>${escapeHtml(line.replace(/^[-*] +/, ""))}</li>`)
+      .map((line) => `<li>${renderInline(line.replace(/^[-*] +/, ""))}</li>`)
       .join("");
     return `<ul>${items}</ul>`;
   }
 
-  return `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`;
+  return `<p>${lines.map((line) => renderInline(line)).join("<br />")}</p>`;
 }
 
 function renderMarkdown(markdown: string, listKind: NotesnookListKind): string {

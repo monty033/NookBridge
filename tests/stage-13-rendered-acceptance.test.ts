@@ -9,14 +9,12 @@
  * the production deterministic Markdown codec behind the real write adapter —
  * and asserts the stored tree the pinned runtime renders from.
  *
+ * Inline `**bold**` / `*italic*` / `` `code` `` are asserted here in their
+ * rendered form, and one test carries them through the edit projection to
+ * prove a created note stays editable rather than degrading to opaque content.
+ *
  * What this fixture deliberately does NOT assert:
  *
- *   - inline `**bold**` / `*italic*` / `` `code` ``.  Those constructs pass the
- *     fidelity gate (they are members of `SUPPORTED_MARKDOWN_CONSTRUCTS`) but
- *     the renderer HTML-escapes them, so they are stored as literal characters.
- *     Asserting that would pin a defect; asserting the rendered form would fail.
- *     The gap is recorded in the plan and needs a decision (render or refuse)
- *     before it is covered here.
  *   - Markdown tables and fenced code blocks.  The codec refuses both
  *     categorically, so a table or callout reaches a note only as an opaque
  *     directive; this fixture asserts the refusal instead of a rendered table.
@@ -31,6 +29,14 @@ import {
 } from "../src/core/notesnook-write-adapter.js";
 import { isNotesnookWriteContractError } from "../src/core/notesnook-write-contract.js";
 import { createDeterministicMarkdownCodec } from "../src/core/notesnook-write-codec.js";
+import {
+  decodeNoteDocumentNative,
+  serializeNoteDocumentNative,
+} from "../src/core/note-document-native.js";
+import {
+  parseNoteDocumentMarkdown,
+  serializeNoteDocumentMarkdown,
+} from "../src/core/note-document-markdown.js";
 
 const NOTE_ID = "0123456789abcdef0123456789abcdef";
 
@@ -80,6 +86,8 @@ const ACCEPTANCE_DOCUMENT = [
   "",
   "Short intro paragraph & an ampersand.",
   "",
+  "Inline **bold**, *slanted* and `code()` marks.",
+  "",
   "- [ ] unpack the crates",
   "    - [ ] check the seals",
   "- [x] sign the manifest",
@@ -126,6 +134,42 @@ describe("T13 rendered acceptance — the tree a created note renders from", () 
     const { captured } = await createDocument();
     const data = captured[0]?.content.data ?? "";
     expect(data).toContain("<p>Short intro paragraph &amp; an ampersand.</p>");
+  });
+
+  it("renders the inline mark set as the tags the projection reads back", async () => {
+    const { captured } = await createDocument();
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain(
+      "<p>Inline <strong>bold</strong>, <em>slanted</em> and <code>code()</code> marks.</p>",
+    );
+    // The delimiters themselves must not survive as literal text.
+    expect(data).not.toContain("**bold**");
+    expect(data).not.toContain("*slanted*");
+  });
+
+  it("round-trips a created note's marks through the edit projection", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({
+      title: "Marks",
+      content: "Inline **bold**, *slanted* and `code()` marks.\n",
+    });
+    const stored = captured[0]?.content;
+    if (stored === undefined) throw new Error("the adapter captured no stored content");
+
+    // The operator editing the note must see the marks, not an opaque block.
+    const binding = { noteId: NOTE_ID, revision: "fixture-revision" };
+    const decoded = decodeNoteDocumentNative(stored, binding);
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    expect(markdown).toContain("**bold**");
+    expect(markdown).toContain("*slanted*");
+    expect(markdown).toContain("`code()`");
+
+    // A no-op edit restores the stored tree byte for byte, so undo stays exact.
+    const reparsed = parseNoteDocumentMarkdown(markdown, { preimage: decoded.document });
+    expect(serializeNoteDocumentNative(reparsed, { context: decoded.context, binding })).toEqual(
+      stored,
+    );
   });
 
   it("renders a plain unordered list without any checklist markup", async () => {
