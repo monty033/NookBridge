@@ -106,6 +106,24 @@ describe("T03 native HTML adapter", () => {
     expect(output.data).toContain('<ul class="simple-checklist">');
     expect(output.data).toContain("&lt;&amp;&gt;");
   });
+  it("mints stable opaque references so a preimage survives a later decode", () => {
+    // The operator preimage contract spans two independent decodes: one mints
+    // the markdown, a later one validates it. Opaque tokens used to be minted
+    // with randomness, so the second decode never agreed with the first and
+    // every note carrying an opaque block was permanently uneditable.
+    const html = wrap(
+      '<p>before</p><div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>',
+    );
+    const tokens = (doc: NoteDocumentV1) =>
+      doc.blocks.filter((b) => b.type === "opaque").map((b) => b.sentinel.token);
+    const first = decodeNoteDocumentNative(html, binding);
+    const second = decodeNoteDocumentNative(html, binding);
+    expect(tokens(first.document).length).toBeGreaterThan(0);
+    expect(tokens(second.document)).toEqual(tokens(first.document));
+    // Stable must not mean colliding: two identical subtrees need distinct refs.
+    expect(new Set(tokens(first.document)).size).toBe(tokens(first.document).length);
+  });
+
   it("preserves unknown safe attributes and opaque native references byte for byte during edits", () => {
     const opaque =
       '<p data-custom="kept">unknown <span title="label">shape</span></p><div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>';

@@ -4,7 +4,7 @@
  * T07 must supply the actual note/revision under its mutation lock.
  */
 import { Buffer } from "node:buffer";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { URL } from "node:url";
 import {
@@ -441,7 +441,17 @@ function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlo
       return decodeBlock(n, payloads);
     } catch (error) {
       if (!(error instanceof Preserve)) throw error;
-      const token = randomBytes(18).toString("hex");
+      // Deterministic, position-mixed token.  The operator preimage contract
+      // spans two independent decodes of the same stored content: one mints the
+      // markdown, a later one validates it.  A random token could never be
+      // re-derived by the second decode, so every note carrying an opaque block
+      // was permanently uneditable.  `payloads` is created per decode, so its
+      // size is this reference's traversal index — deterministic for identical
+      // input, and distinct for two identical subtrees in one document.
+      const token = createHash("sha256")
+        .update(`${payloads.size}\u0000${n.raw}`)
+        .digest("hex")
+        .slice(0, 36);
       payloads.set(token, n.raw);
       return {
         type: "opaque",

@@ -136,6 +136,25 @@ describe("daemon operator write runtime", () => {
     expect(JSON.stringify(records)).not.toContain("after");
   });
 
+  it("commits an edit to a note whose content carries an opaque block", async () => {
+    // Each load() re-decodes the stored envelope, so this is the shape the
+    // daemon actually runs: preimage and apply are separate decodes.
+    const f = await fixture({
+      native:
+        '<p>before</p><div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>',
+    });
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    expect(preimage.markdown).toContain("nookbridge opaque");
+    const result = await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    expect(result.kind).toBe("edit");
+    expect(f.state.writes).toBe(1);
+  });
+
   it("marks an uncertain write unresolved instead of claiming success", async () => {
     const f = await fixture();
     const failing: OperatorWriteSource = {
