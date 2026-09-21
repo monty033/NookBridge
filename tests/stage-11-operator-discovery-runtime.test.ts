@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createOperatorDiscoveryRuntime } from "../src/service/operator-discovery-runtime.js";
+import {
+  createOperatorDiscoveryRuntime,
+  createOperatorHandleRegistry,
+} from "../src/service/operator-discovery-runtime.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 
 const PEER_A: OperatorPeer = Object.freeze({
@@ -14,6 +17,15 @@ const PEER_B: OperatorPeer = Object.freeze({
 });
 
 describe("daemon operator discovery runtime", () => {
+  it("expires opaque handles after their configured TTL", () => {
+    let clock = 1000;
+    const registry = createOperatorHandleRegistry({ ttlMs: 100, now: () => clock });
+    const handle = registry.mint("raw-note", PEER_A);
+    expect(registry.resolve(handle, PEER_A)).toBe("raw-note");
+    clock += 100;
+    expect(registry.resolve(handle, PEER_A)).toBeUndefined();
+  });
+
   it("mints opaque handles and paginates source-side", async () => {
     const runtime = createOperatorDiscoveryRuntime({
       readOnly: {

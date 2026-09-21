@@ -39,6 +39,7 @@ import { isVaultLockedRefusal } from "../core/notesnook-readonly-projection.js";
 import type { RpcErrorCode } from "./rpc-protocol.js";
 import type { OperatorPeer } from "./operator-server.js";
 import type { OperationRecord, OperationState } from "./notes-undo-store.js";
+import type { NotesnookListKind } from "../core/notesnook-write-list-intent.js";
 
 /** Bounded native stored content envelope. */
 export interface OperatorStoredContent {
@@ -48,6 +49,13 @@ export interface OperatorStoredContent {
 
 /** The daemon-owned read/write seam this runtime depends on. */
 export interface OperatorWriteSource {
+  /** Bounded create seam; the result is local and returns the actual note id. */
+  readonly create?: (command: {
+    readonly title: string;
+    readonly content: string;
+    readonly notebookId?: string;
+    readonly listKind?: NotesnookListKind;
+  }) => Promise<Readonly<{ id: string; titleBytes: number; contentBytes: number }>>;
   /** Trusted read of the stored native content and its current revision. */
   readonly read: (
     noteId: string,
@@ -94,6 +102,8 @@ export interface OperatorWriteRuntimeOptions {
   readonly store: OperatorOperationStore;
   /** Daemon-side opaque handle resolution; raw note ids never cross the socket. */
   readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  /** Mint an opaque note handle for a newly-created note. */
+  readonly mintHandle?: (noteId: string, peer?: OperatorPeer) => string;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly audit?: (event: OperatorWriteAuditEvent) => void;
@@ -112,6 +122,14 @@ export interface OperatorEditApplied {
   readonly id: string;
   readonly appliedFields: ReadonlyArray<"content">;
   readonly revision: string;
+  readonly contentBytes: number;
+}
+
+export interface OperatorCreateApplied {
+  readonly kind: "create";
+  readonly id: string;
+  readonly operationHandle: string;
+  readonly titleBytes: number;
   readonly contentBytes: number;
 }
 
@@ -140,6 +158,15 @@ export interface OperatorOperationList {
 }
 
 export interface OperatorWriteRuntime {
+  readonly create?: (
+    params: Readonly<{
+      title: string;
+      content: string;
+      notebookId?: string;
+      listKind?: NotesnookListKind;
+    }>,
+    peer?: OperatorPeer,
+  ) => Promise<OperatorCreateApplied>;
   readonly editPreimage: (
     params: Readonly<{ id: string }>,
     peer?: OperatorPeer,
@@ -196,6 +223,8 @@ export function createOperatorWriteRuntime(
 ): OperatorWriteRuntime {
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+  const createSource = options.source.create;
+  const mintHandle = options.mintHandle;
 
   const audit = (event: OperatorWriteAuditEvent): void => {
     try {
@@ -256,6 +285,81 @@ export function createOperatorWriteRuntime(
     if (!Number.isSafeInteger(t) || t < 0) return fail("service_unavailable");
     return t;
   }
+
+  const create =
+    createSource === undefined || mintHandle === undefined
+      ? undefined
+      : async (
+          params: Readonly<{
+            title: string;
+            content: string;
+            notebookId?: string;
+            listKind?: NotesnookListKind;
+          }>,
+          peer?: OperatorPeer,
+        ): Promise<OperatorCreateApplied> => {
+          const owner = ownerKey(peer);
+          let record: OperationRecord;
+          try {
+            record = await options.store.insert({
+              kind: "create",
+              payload: JSON.stringify({
+                kind: "create",
+                owner,
+                notebookId: params.notebookId,
+                titleBytes: byteLength(params.title),
+                contentBytes: byteLength(params.content),
+              }),
+              ttlMs,
+            });
+            await options.store.transition(
+              record.handle,
+              "prepared",
+              "committing",
+              undefined,
+              owner,
+            );
+          } catch {
+            return fail("service_unavailable");
+          }
+          try {
+            const result = await createSource(params);
+            const noteHandle = mintHandle(result.id, peer);
+            await options.store.transition(
+              record.handle,
+              "committing",
+              "committed",
+              JSON.stringify({
+                kind: "create",
+                owner,
+                noteId: result.id,
+                titleBytes: result.titleBytes,
+                contentBytes: result.contentBytes,
+              }),
+              owner,
+            );
+            return {
+              kind: "create",
+              id: noteHandle,
+              operationHandle: record.handle,
+              titleBytes: result.titleBytes,
+              contentBytes: result.contentBytes,
+            };
+          } catch {
+            try {
+              await options.store.transition(
+                record.handle,
+                "committing",
+                "unresolved",
+                undefined,
+                owner,
+              );
+            } catch {
+              // Preserve the original categorical failure.
+            }
+            return fail("service_unavailable");
+          }
+        };
 
   const editPreimage = async (
     params: Readonly<{ id: string }>,
@@ -468,6 +572,7 @@ export function createOperatorWriteRuntime(
           postRevision: result.revision,
           createdAt,
         }),
+        ownerKey(peer),
       );
     } catch {
       return fail("service_unavailable");
@@ -645,6 +750,7 @@ export function createOperatorWriteRuntime(
   };
 
   return Object.freeze({
+    ...(create === undefined ? {} : { create }),
     editPreimage,
     applyEdit,
     applyUndo,

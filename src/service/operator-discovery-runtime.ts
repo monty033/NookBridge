@@ -13,6 +13,7 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MAX_CURSOR_COUNT = 512;
 const MAX_HANDLE_COUNT = 10_000;
+const DEFAULT_HANDLE_TTL_MS = 24 * 60 * 60 * 1000;
 
 type CursorState = Readonly<{ query?: string; offset: number }>;
 
@@ -38,10 +39,21 @@ export function operatorPeerKey(peer?: OperatorPeer): string {
 }
 
 /** Build a process-local, peer-scoped handle registry. */
-export function createOperatorHandleRegistry(): OperatorHandleRegistry {
-  const handles = new Map<string, Readonly<{ noteId: string; owner: string }>>();
+export function createOperatorHandleRegistry(
+  options?: Readonly<{ ttlMs?: number; now?: () => number }>,
+): OperatorHandleRegistry {
+  const ttlMs = options?.ttlMs ?? DEFAULT_HANDLE_TTL_MS;
+  const now = options?.now ?? Date.now;
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) throw new Error("invalid handle ttl");
+  const handles = new Map<string, Readonly<{ noteId: string; owner: string; expiresAt: number }>>();
+
+  const sweep = (): void => {
+    const current = now();
+    for (const [handle, entry] of handles) if (entry.expiresAt <= current) handles.delete(handle);
+  };
 
   const mint = (noteId: string, peer?: OperatorPeer): string => {
+    sweep();
     const owner = operatorPeerKey(peer);
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const handle = `h_${randomBytes(18).toString("base64url")}`;
@@ -50,7 +62,7 @@ export function createOperatorHandleRegistry(): OperatorHandleRegistry {
           const oldest = handles.keys().next().value;
           if (typeof oldest === "string") handles.delete(oldest);
         }
-        handles.set(handle, { noteId, owner });
+        handles.set(handle, { noteId, owner, expiresAt: now() + ttlMs });
         return handle;
       }
     }
@@ -60,6 +72,7 @@ export function createOperatorHandleRegistry(): OperatorHandleRegistry {
   return Object.freeze({
     mint,
     resolve: (handle: string, peer?: OperatorPeer): string | undefined => {
+      sweep();
       const entry = handles.get(handle);
       return entry?.owner === operatorPeerKey(peer) ? entry.noteId : undefined;
     },

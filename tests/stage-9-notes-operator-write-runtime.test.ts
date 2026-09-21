@@ -84,6 +84,49 @@ const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, u
   });
 
 describe("daemon operator write runtime", () => {
+  it("records a durable create operation before reporting success", async () => {
+    const f = await fixture();
+    const source = {
+      ...f.source,
+      create: async () => ({ id: NOTE_ID, titleBytes: 5, contentBytes: 7 }),
+    };
+    const rt = runtime(f, {
+      source,
+      mintHandle: () => HANDLE,
+    }) as typeof runtime extends (...args: never[]) => infer R
+      ? R & {
+          create: (params: { title: string; content: string }) => Promise<{
+            operationHandle: string;
+          }>;
+        }
+      : never;
+    const result = await rt.create({ title: "Title", content: "Content" });
+    expect(result.operationHandle).toMatch(/^op_/);
+    expect((await f.store.list())[0]?.state).toBe("committed");
+  });
+
+  it("leaves a create operation unresolved when the source outcome is uncertain", async () => {
+    const f = await fixture();
+    const source = {
+      ...f.source,
+      create: async () => {
+        throw new Error("uncertain");
+      },
+    };
+    const rt = runtime(f, {
+      source,
+      mintHandle: () => HANDLE,
+    }) as typeof runtime extends (...args: never[]) => infer R
+      ? R & {
+          create: (params: { title: string; content: string }) => Promise<unknown>;
+        }
+      : never;
+    await expect(rt.create({ title: "Title", content: "Content" })).rejects.toMatchObject({
+      code: "service_unavailable",
+    });
+    expect((await f.store.list())[0]?.state).toBe("unresolved");
+  });
+
   it("captures a trusted preimage without writing", async () => {
     const f = await fixture();
     const view = await runtime(f).editPreimage({ id: HANDLE });

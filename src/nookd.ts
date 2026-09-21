@@ -458,7 +458,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   // daemon (the MCP surface must keep working).
   let operatorStore: Awaited<ReturnType<typeof createNotesUndoStore>> | undefined;
   let operatorWrite: ReturnType<typeof createOperatorWriteRuntime> | undefined;
-  if (readOnly !== undefined && updateNote !== undefined) {
+  if (readOnly !== undefined && (updateNote !== undefined || createNote !== undefined)) {
     try {
       const databaseKey = keys.getDatabaseKey();
       if (typeof databaseKey === "string" && databaseKey.length > 0) {
@@ -469,7 +469,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
         operatorWrite = createOperatorWriteRuntime({
           store: operatorStore,
           resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
+          mintHandle: (noteId, peer) => operatorHandles.mint(noteId, peer),
           source: {
+            ...(createNote === undefined ? {} : { create: createNote }),
             read: async (noteId: string) => {
               const metadata = await readOnly.noteMetadata(noteId);
               const reader = readOnly.readNoteContent;
@@ -484,6 +486,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               readonly expectedRevision: string;
               readonly content: { readonly type: "tiptap" | "html"; readonly data: string };
             }) => {
+              if (updateNote === undefined) return { kind: "error" as const };
               try {
                 await updateNote({
                   id: command.noteId,
