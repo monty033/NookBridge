@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveOperatorRequestLockState } from "../src/service/operator-authorization-context.js";
+import {
+  resolveOperatorRequestLockState,
+  resolveOperatorRequestNotebookPolicy,
+  settingsOperationForMethod,
+} from "../src/service/operator-authorization-context.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
 
 const resolveHandle = (handle: string): string | undefined =>
@@ -101,5 +105,50 @@ describe("operator request lock context", () => {
     }
     expect(resolveOperationNoteId).not.toHaveBeenCalled();
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it("maps each operator method to the settings operation it performs", () => {
+    // The settings vocabulary is read/edit/create/delete; the operator surface
+    // has to say which one a method is, or the notebook policy cannot be asked.
+    expect(settingsOperationForMethod("notes.get-view")).toBe("read");
+    expect(settingsOperationForMethod("notes.edit-preimage")).toBe("read");
+    expect(settingsOperationForMethod("notes.browse")).toBe("read");
+    expect(settingsOperationForMethod("notes.search-operator")).toBe("read");
+    expect(settingsOperationForMethod("notes.operation-list")).toBe("read");
+    expect(settingsOperationForMethod("notes.operation-status")).toBe("read");
+    expect(settingsOperationForMethod("notes.apply-edit")).toBe("edit");
+    expect(settingsOperationForMethod("notes.apply-undo")).toBe("edit");
+    expect(settingsOperationForMethod("notes.create")).toBe("create");
+  });
+
+  it("exposes the notebook policy decision for the target", async () => {
+    // Review finding: the notebook half of the requirement was only scaffolded —
+    // the context had a field nothing populated.  It is now resolved from the
+    // settings evaluator that already backs the service policy.
+    const evaluate = vi.fn(() => false);
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        readNoteNotebookPath: async () => "Private/Secrets",
+        evaluateNotebookPolicy: evaluate,
+      }),
+    ).resolves.toEqual({ notebookPath: "Private/Secrets", allow: false });
+    expect(evaluate).toHaveBeenCalledWith("edit", "Private/Secrets");
+  });
+
+  it("reads no notebook policy when the daemon supplies no source", async () => {
+    // Guard: without a path reader and an evaluator there is nothing to decide,
+    // and the context must stay untouched rather than defaulting to allow.
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: undefined,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

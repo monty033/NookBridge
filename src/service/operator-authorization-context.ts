@@ -14,7 +14,8 @@
 
 import type { RpcRequest } from "./rpc-protocol.js";
 import type { OperatorMethod } from "./operator-methods.js";
-import type { OperatorNoteLockState } from "./operator-policy.js";
+import type { OperatorNoteLockState, OperatorNotebookPolicy } from "./operator-policy.js";
+import type { SettingsOperation } from "../settings/settings-types.js";
 
 /**
  * The operator methods that mutate a note.  Reads (`notes.get-view`,
@@ -98,4 +99,67 @@ export async function resolveOperatorRequestLockState(input: {
   if (noteId === undefined) return undefined;
   const state = await input.readNoteLockState(noteId);
   return { id: noteId, locked: state === "locked" };
+}
+
+/**
+ * The settings operation an operator method performs.
+ *
+ * `read` covers every method that does not change a note — including
+ * `edit-preimage`, which only reads the content an edit would replace.  The
+ * settings vocabulary is closed at read/edit/create/delete, and the operator
+ * surface has no delete verb.
+ */
+export function settingsOperationForMethod(method: OperatorMethod): SettingsOperation {
+  switch (method) {
+    case "notes.apply-edit":
+    case "notes.apply-undo":
+      return "edit";
+    case "notes.create":
+      return "create";
+    default:
+      return "read";
+  }
+}
+
+/**
+ * Resolve the notebook policy the evaluator should see for this request.
+ *
+ * The settings evaluator that already backs the service policy is the source of
+ * truth for per-notebook overrides, so the operator seam consults the same
+ * engine rather than inventing a second model.
+ *
+ * Returns `undefined` when there is no notebook context to decide — no target, no
+ * path for that target, or a daemon that supplied no source.  A missing context
+ * is not an allow decision: the evaluator only refuses on an explicit
+ * `allow: false`, and no policy source means the daemon is not enforcing
+ * notebook policy at this seam at all.
+ */
+export async function resolveOperatorRequestNotebookPolicy(input: {
+  readonly method: OperatorMethod;
+  readonly request: RpcRequest | undefined;
+  readonly resolveHandle: (handle: string) => string | undefined;
+  readonly resolveOperationNoteId?:
+    | ((operationHandle: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
+  readonly readNoteNotebookPath: ((noteId: string) => Promise<string | undefined>) | undefined;
+  readonly evaluateNotebookPolicy:
+    | ((operation: SettingsOperation, notebookPath: string) => boolean)
+    | undefined;
+}): Promise<OperatorNotebookPolicy | undefined> {
+  if (input.request === undefined) return undefined;
+  if (input.readNoteNotebookPath === undefined) return undefined;
+  if (input.evaluateNotebookPolicy === undefined) return undefined;
+  const noteId = await targetNoteId({
+    method: input.method,
+    request: input.request,
+    resolveHandle: input.resolveHandle,
+    resolveOperationNoteId: input.resolveOperationNoteId,
+  });
+  if (noteId === undefined) return undefined;
+  const notebookPath = await input.readNoteNotebookPath(noteId);
+  if (notebookPath === undefined) return undefined;
+  return {
+    notebookPath,
+    allow: input.evaluateNotebookPolicy(settingsOperationForMethod(input.method), notebookPath),
+  };
 }
