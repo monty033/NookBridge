@@ -530,13 +530,24 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
         return "nookctl notes: locked\n";
       case "missing":
         return "nookctl notes: missing\n";
+      case "empty":
+        return "nookctl notes: empty\n";
       case "error":
         return "nookctl notes: error\n";
+      default: {
+        // Exhaustiveness guard.  Every variant of NotesCategoricalResult must
+        // return above; a new variant without a formatter case must fail to
+        // compile rather than silently inherit the shared "error" return.
+        // That fall-through is exactly how an ordinary empty result set was
+        // reported to operators as a failure.
+        const unhandled: never = result;
+        void unhandled;
+        return "nookctl notes: error\n";
+      }
     }
   } catch {
     return "nookctl notes: error\n";
   }
-  return "nookctl notes: error\n";
 }
 
 // ---------------------------------------------------------------------------

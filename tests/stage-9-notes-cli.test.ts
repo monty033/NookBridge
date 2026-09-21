@@ -1220,6 +1220,14 @@ describe("formatNotesResult — closed output boundary", () => {
     expect(output).not.toContain("secret title");
   });
 
+  it("reports an empty result set as empty rather than as an error", () => {
+    // `empty` is a declared variant of NotesCategoricalResult and the page
+    // mapper emits it whenever the daemon returns no rows.  With no formatter
+    // case it fell through to the shared "error" return, so an ordinary
+    // no-match search was reported to the operator as a failure.
+    expect(formatNotesResult({ kind: "empty" })).toBe("nookctl notes: empty\n");
+  });
+
   it("collapses malformed runtime metadata to a fixed error", () => {
     const output = formatNotesResult({
       kind: "page",
