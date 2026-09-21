@@ -290,6 +290,14 @@ export class NotesnookReadOnlyAdapter {
     if (options.force !== undefined) {
       throw readOnlyAdapterError("Notesnook read-only adapter: sync force is out of scope");
     }
+    // The boundary is structurally exact, not merely permissive: an extra field
+    // would be forwarded nowhere and silently discarded, letting a caller
+    // believe it asked for something the adapter never honoured.
+    if (Object.keys(options ?? {}).some((key) => key !== "type")) {
+      throw readOnlyAdapterError(
+        'Notesnook read-only adapter: sync request must carry only "type"',
+      );
+    }
     if (this.#syncInFlight) {
       const existing = this.#syncInFlight;
       const result = await safeAwait(existing);

@@ -238,6 +238,21 @@ describe("NotesnookReadOnlyAdapter", () => {
     expect(database.syncCalls).toEqual([{ type: "fetch" }]);
   });
 
+  it("rejects a fetch request that carries any additional field", async () => {
+    // The read-only boundary is structurally exact: `{ type: "fetch" }` and
+    // nothing else.  Silently discarding an extra field would let a caller
+    // believe it asked for something the adapter never honoured.
+    const database = createFakeDatabase();
+    const adapter = createNotesnookReadOnlyAdapter({ source: database });
+
+    await expect(
+      adapter.sync({ type: "fetch", extra: "ignored" } as unknown as { type: "fetch" }),
+    ).rejects.toMatchObject({
+      message: 'Notesnook read-only adapter: sync request must carry only "type"',
+    });
+    expect(database.syncCalls).toEqual([]);
+  });
+
   it("coalesces concurrent sync calls to one upstream attempt", async () => {
     let release!: (value: boolean) => void;
     const database = createFakeDatabase();
