@@ -497,4 +497,20 @@ describe("T13 list semantics", () => {
     );
     expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(false);
   });
+
+  it("does not treat a class that merely contains the word as a checklist", () => {
+    // Guard: a substring test is too broad.  `not-checklist` and
+    // `checklist-decoration` are not checklist-kind tokens, so they must decode
+    // as ordinary lists rather than being preserved as if their states mattered.
+    for (const cls of ["not-checklist", "checklist-decoration", "checklistish"]) {
+      const decoded = decodeNoteDocumentNative(
+        wrap(`<ul class="${cls}"><li><p>x</p></li></ul>`),
+        binding,
+      );
+      expect(
+        decoded.document.blocks.every((b) => b.type === "opaque"),
+        `${cls} should decode as an ordinary list`,
+      ).toBe(false);
+    }
+  });
 });

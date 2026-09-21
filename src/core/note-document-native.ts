@@ -505,8 +505,11 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
     // read back as ordinary bullets.  Preserve rather than guess.  `start` and
     // `reversed` are likewise unrepresentable.  Any other class is decoration
     // and stays tolerated, so a decorated list still round-trips.
-    const cls = n.attrs.class;
-    if (cls !== undefined && cls.includes("checklist")) preserve();
+    // A checklist class must be an exact whitespace-separated token: a substring
+    // match would also preserve an ordinary list whose decorative class merely
+    // contains the word (`not-checklist`, `checklist-decoration`).
+    const classes = (n.attrs.class ?? "").split(/\s+/).filter(Boolean);
+    if (classes.includes("checklist") || classes.includes("simple-checklist")) preserve();
     // Presence is what matters, not the value: these are boolean or numeric
     // attributes with no canonical representation, and a valueless `reversed`
     // arrives as an empty string.

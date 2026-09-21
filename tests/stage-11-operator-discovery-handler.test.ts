@@ -39,13 +39,15 @@ describe("operator discovery handler", () => {
     });
   });
 
-  it("preserves a categorical refusal raised as a bare vocabulary message", async () => {
-    // The read projection refuses a locked record by throwing an error whose
-    // MESSAGE is the categorical name, carrying no `code` property.  Reading
-    // only `code` collapsed that refusal into `service_unavailable`, so a
-    // locked note was indistinguishable from a broken daemon: the operator saw
-    // a generic error for a note that was simply locked, and the locked-note
-    // acceptance proof could never return `vault_locked`.
+  it("collapses a bare vocabulary message on an untrusted error", async () => {
+    // Review finding: mapping any thrown object whose MESSAGE equals a
+    // vocabulary word let an unrelated upstream error be reported to the
+    // operator as a categorical refusal — a random failure carrying the text
+    // "not_found" or "permission_denied" became that category.  Only a
+    // class-identity-checked projection refusal may be read from its message, so
+    // a plain Error collapses instead.  The trusted path is exercised through
+    // the projection's own read surface, which is the only thing that can raise
+    // that error class.
     const handler = createOperatorDiscoveryHandler({
       browse: async () => ({ notes: [], next: null }),
       search: async () => ({ notes: [], next: null }),
@@ -60,7 +62,7 @@ describe("operator discovery handler", () => {
     expect(response).toMatchObject({
       id: "3",
       ok: false,
-      error: { code: "vault_locked", message: "Vault locked" },
+      error: { code: "service_unavailable" },
     });
   });
 

@@ -10,6 +10,7 @@ import type {
   RpcRequest,
 } from "./rpc-protocol.js";
 import { RPC_ERROR_MESSAGES } from "./rpc-protocol.js";
+import { isNotesnookReadOnlyProjectionError } from "../core/notesnook-readonly-projection.js";
 import type { NotesnookListKind } from "../core/notesnook-write-list-intent.js";
 import type { OperatorSocketHandler } from "./operator-socket-server.js";
 
@@ -151,16 +152,16 @@ function categoricalCode(error: unknown): RpcErrorCode {
     if (typeof code === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, code)) {
       return code as RpcErrorCode;
     }
-    // The read projection signals a categorical refusal by throwing an error
-    // whose MESSAGE is the vocabulary name (`vault_locked`) and which carries
-    // no `code` property.  Reading only `code` collapsed every such refusal
-    // into `service_unavailable`: a locked note was reported to the operator as
-    // a generic failure, and the locked-note acceptance proof could never
-    // return `vault_locked`.  Only an exact vocabulary match is accepted, so
-    // free text still collapses and no upstream detail crosses the boundary.
-    const message = (error as { readonly message?: unknown }).message;
-    if (typeof message === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, message)) {
-      return message as RpcErrorCode;
+    // A projection refusal carries the vocabulary name as its MESSAGE rather
+    // than as a `code` property.  Only a class-identity-checked projection error
+    // may be read that way: accepting any thrown object whose message happened
+    // to equal a vocabulary word let an unrelated upstream error be reported to
+    // the operator as `not_found` or `permission_denied`.
+    if (isNotesnookReadOnlyProjectionError(error)) {
+      const message = (error as { readonly message?: unknown }).message;
+      if (typeof message === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, message)) {
+        return message as RpcErrorCode;
+      }
     }
   }
   return "service_unavailable";
