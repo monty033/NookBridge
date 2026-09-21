@@ -100,11 +100,34 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       evaluateNotebookPolicy: deps.evaluateNotebookPolicy,
     });
     if (notebookPolicy !== undefined) context.notebookPolicy = notebookPolicy;
-    if (OPERATOR_MUTATING_METHODS.has(method) && notebookPolicy === undefined) {
-      return { allowed: false, reason: "permission_denied" };
+    if (OPERATOR_MUTATING_METHODS.has(method)) {
+      const targetKnown = await requestTargetKnown(deps, request, peer, method);
+      if (method === "notes.create" || targetKnown) {
+        if (notebookPolicy === undefined) return { allowed: false, reason: "permission_denied" };
+        if (method !== "notes.create" && deps.readNoteLockState === undefined) {
+          return { allowed: false, reason: "permission_denied" };
+        }
+      }
     }
     return authorizeOperatorMethod(createOperatorPolicy(evaluateOperatorRequest), method, context);
   };
+}
+
+async function requestTargetKnown(
+  deps: OperatorAuthorizerDependencies,
+  request: RpcRequest | undefined,
+  peer: OperatorPeer,
+  method: OperatorMethod,
+): Promise<boolean> {
+  if (request === undefined || request.params === null || typeof request.params !== "object") {
+    return false;
+  }
+  const params = request.params as Record<string, unknown>;
+  if (typeof params.id === "string") return deps.resolveHandle(params.id, peer) !== undefined;
+  if (method === "notes.apply-undo" && typeof params.operationHandle === "string") {
+    return (await deps.resolveOperationNoteId?.(params.operationHandle, peer)) !== undefined;
+  }
+  return false;
 }
 
 /**

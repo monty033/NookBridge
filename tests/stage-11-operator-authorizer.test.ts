@@ -16,7 +16,7 @@ const request = (method: string, params: Record<string, unknown> = {}) =>
 const deps = (overrides: Record<string, unknown> = {}) => ({
   resolveHandle: (handle: string) => (handle === "h_one" ? "note_one" : undefined),
   resolveOperationNoteId: undefined,
-  readNoteLockState: undefined,
+  readNoteLockState: async () => "unlocked" as const,
   readNoteNotebookPath: async () => "Public",
   evaluateNotebookPolicy: () => true,
   ...overrides,
