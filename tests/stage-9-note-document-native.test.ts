@@ -124,9 +124,15 @@ describe("T03 native HTML adapter", () => {
     expect(new Set(tokens(first.document)).size).toBe(tokens(first.document).length);
   });
 
-  it("preserves unknown safe attributes and opaque native references byte for byte during edits", () => {
+  it("preserves opaque native references byte for byte during edits", () => {
+    // The opaque carrier is a construct the decoder genuinely cannot express as
+    // canonical blocks (an attachment container).  A stray presentation
+    // attribute on a paragraph is no longer one of those: unread attribute
+    // names are ignored rather than preserved, because a real serializer
+    // decorates every element it stores and preserving on that basis made
+    // written notes unreadable and uneditable.
     const opaque =
-      '<p data-custom="kept">unknown <span title="label">shape</span></p><div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>';
+      '<div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>';
     const decoded = decodeNoteDocumentNative(wrap("<p>before</p>" + opaque), binding);
     expect(decoded.document.blocks.slice(1).every((b) => b.type === "opaque")).toBe(true);
     expect(JSON.stringify(decoded.document)).not.toContain("local-reference");
@@ -224,7 +230,9 @@ describe("T03 native HTML adapter", () => {
     ).toThrow();
   });
   it("keeps no-op native bytes despite object key ordering and binds contexts to note identity", () => {
-    const original = wrap("<p data-extra='keep'>opaque</p><p>plain</p>");
+    const original = wrap(
+      '<div data-type="attachment" data-id="keep"><img src="https://example.com/image" alt="image"></div><p>plain</p>',
+    );
     const decoded = decodeNoteDocumentNative(original, binding);
     const opaque = decoded.document.blocks[0]!;
     if (opaque.type !== "opaque") throw new Error("fixture");
@@ -367,10 +375,59 @@ describe("T13 document container tolerance", () => {
     expect(decoded.document.blocks[0]!.type).toBe("opaque");
   });
 
-  it("still preserves stray attributes inside content it cannot interpret", () => {
-    // Guard: the container fix must not relax block-level strictness.
-    const decoded = decodeNoteDocumentNative(wrap('<p data-custom="kept">x</p>'), binding);
-    expect(decoded.document.blocks.length).toBeGreaterThan(0);
+  it("ignores attribute names the decoder does not read for that tag", () => {
+    // A real serializer decorates every element it stores.  Preserving a block
+    // because it carried an attribute the decoder never reads made every note
+    // written through this path unreadable and uneditable.  An attribute the
+    // decoder does not consult cannot change what it decodes, so it is ignored.
+    const cases: Array<[string, string]> = [
+      ["paragraph", '<p data-id="abc" data-block-id="7">Body</p>'],
+      ["heading", '<h1 class="title">Heading</h1>'],
+      ["blockquote", '<blockquote data-id="q"><p>Quoted</p></blockquote>'],
+      ["bullet list", '<ul data-id="u"><li data-id="li"><p>Item</p></li></ul>'],
+    ];
+    for (const [name, html] of cases) {
+      const decoded = decodeNoteDocumentNative(wrap(html), binding);
+      expect(
+        decoded.document.blocks.some((b) => b.type === "opaque"),
+        `${name} should decode rather than be preserved`,
+      ).toBe(false);
+    }
+    const paragraphDecoded = decodeNoteDocumentNative(wrap('<p data-id="abc">Body</p>'), binding);
+    expect(paragraphDecoded.document.blocks[0]).toEqual({
+      type: "paragraph",
+      inlines: [{ text: "Body" }],
+    });
+  });
+
+  it("still enforces the attribute values it actually reads", () => {
+    // Guard: tolerance covers attribute NAMES the decoder does not read, not
+    // the values it interprets.  Two cases matter:
+    //   - `start` cannot be expressed in the canonical model, so a list that
+    //     carries it is preserved rather than silently renumbered;
+    //   - a checklist item whose class is not the expected item class is not
+    //     silently accepted as one.
+    const startList = decodeNoteDocumentNative(
+      wrap('<ol start="3"><li><p>Item</p></li></ol>'),
+      binding,
+    );
+    expect(startList.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+    const wrongItemClass = decodeNoteDocumentNative(
+      wrap('<ul class="checklist"><li class="nonsense"><p>Item</p></li></ul>'),
+      binding,
+    );
+    expect(wrongItemClass.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("still preserves content whose tag it cannot express", () => {
+    // Guard: tolerance is attribute-level only.  An unknown tag is still
+    // preserved opaquely, which is what keeps an attachment's payload intact.
+    const decoded = decodeNoteDocumentNative(
+      wrap(
+        '<div data-type="attachment" data-id="x"><img src="https://example.com/image" alt="image"></div>',
+      ),
+      binding,
+    );
     expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
   });
 });

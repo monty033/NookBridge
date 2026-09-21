@@ -279,12 +279,35 @@ class Preserve extends Error {}
 function preserve(): never {
   throw new Preserve();
 }
-function attrs(n: Element, allowed: Record<string, string | RegExp> = {}): void {
+/**
+ * Check the attributes this tag's decoding actually interprets.
+ *
+ * `meaningful` maps each attribute NAME the caller reads to the value it
+ * accepts.  A name the caller does not read cannot change what is decoded, so
+ * it is ignored rather than preserved: a real serializer decorates every
+ * element it stores, and preserving a block because of decoration the decoder
+ * never consults made every note written through this path unreadable and
+ * uneditable.  A *meaningful* name whose value does not match still preserves
+ * the element, and an unknown TAG is still preserved — tolerance is limited to
+ * attribute names, never to content the decoder cannot express.
+ */
+function attrs(n: Element, meaningful: Record<string, string | RegExp> = {}): void {
   for (const [key, value] of Object.entries(n.attrs)) {
-    const rule = allowed[key];
-    if (rule === undefined || (typeof rule === "string" ? rule !== value : !rule.test(value)))
-      preserve();
+    const rule = meaningful[key];
+    if (rule === undefined) continue;
+    if (typeof rule === "string" ? rule !== value : !rule.test(value)) preserve();
   }
+}
+/**
+ * Reject ANY attribute on an element whose canonical form carries none.
+ *
+ * Used for inline marks and table cells.  Block elements tolerate decoration
+ * (a real serializer decorates every element it stores), but the canonical
+ * inline model has no attributes at all, so dropping one there would be a
+ * silent downgrade rather than decoration.
+ */
+function attrsStrict(n: Element): void {
+  if (Object.keys(n.attrs).length > 0) preserve();
 }
 function elements(nodes: HtmlNode[]): Element[] {
   return nodes.flatMap((n) => {
@@ -344,7 +367,7 @@ function inline(nodes: HtmlNode[], marks: NoteInlineMark[] = []): NoteInline[] {
       if (!n.attrs.href) preserve();
       mark = { type: "link", href: url(n.attrs.href) };
     } else {
-      attrs(n);
+      attrsStrict(n);
       mark = markTags[n.tag] ?? preserve();
     }
     out.push(...inline(n.children, [...marks, mark]));
@@ -352,7 +375,7 @@ function inline(nodes: HtmlNode[], marks: NoteInlineMark[] = []): NoteInline[] {
   return canonicalRuns(out);
 }
 function textOnly(n: Element): string {
-  attrs(n);
+  attrsStrict(n);
   if (n.children.length === 1 && typeof n.children[0] === "object" && n.children[0].tag === "p")
     return textOnly(n.children[0]);
   if (n.children.some((c) => typeof c !== "string")) preserve();
@@ -472,7 +495,10 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
   if (n.tag === "ul" || n.tag === "ol") {
     const kind = listKind(n);
     if (kind) return { type: "task-list", kind, items: taskItems(n, kind) };
-    attrs(n);
+    // Decoration is tolerated here, but `start` cannot be expressed in the
+    // canonical model: any value of it forces opaque preservation rather than
+    // silently renumbering the list.
+    attrs(n, { start: /^$/ });
     const items = elements(n.children).map((li) => {
       if (li.tag !== "li") preserve();
       attrs(li);
