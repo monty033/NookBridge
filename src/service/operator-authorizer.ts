@@ -59,6 +59,9 @@ export interface OperatorAuthorizerDependencies {
   readonly readNoteLockState?: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
   /** Resolve a note id to its notebook path. */
   readonly readNoteNotebookPath?: ((noteId: string) => Promise<string | undefined>) | undefined;
+  readonly resolveNotebookPath?:
+    | ((notebookId: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
   /** The settings evaluator that decides per-notebook overrides. */
   readonly evaluateNotebookPolicy?:
     | ((operation: SettingsOperation, notebookPath: string) => boolean)
@@ -93,9 +96,13 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       resolveHandle: deps.resolveHandle,
       resolveOperationNoteId: deps.resolveOperationNoteId,
       readNoteNotebookPath: deps.readNoteNotebookPath,
+      resolveNotebookPath: deps.resolveNotebookPath,
       evaluateNotebookPolicy: deps.evaluateNotebookPolicy,
     });
     if (notebookPolicy !== undefined) context.notebookPolicy = notebookPolicy;
+    if (OPERATOR_MUTATING_METHODS.has(method) && notebookPolicy === undefined) {
+      return { allowed: false, reason: "permission_denied" };
+    }
     return authorizeOperatorMethod(createOperatorPolicy(evaluateOperatorRequest), method, context);
   };
 }

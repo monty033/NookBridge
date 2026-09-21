@@ -113,7 +113,7 @@ membership is what allows a peer to change a note, so it should be granted as a
 decision rather than inherited. Add the identity that runs your operator CLI:
 
 ```bash
-sudo usermod -aG nookbridge-operators "$OPERATOR_USER"
+sudo usermod -aG nookbridge-clients,nookbridge-operators "$OPERATOR_USER"
 ```
 
 A peer may be in both groups. `nookbridge-clients` alone is enough to read and

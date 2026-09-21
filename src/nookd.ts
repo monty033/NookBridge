@@ -547,6 +547,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               if (typeof notebookId !== "string" || notebookId.length === 0) return undefined;
               return resolveNotebookPath?.(notebookId);
             },
+            resolveNotebookPath,
             evaluateNotebookPolicy:
               settingsEvaluator === undefined
                 ? undefined

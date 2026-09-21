@@ -39,7 +39,7 @@ const OPERATION_HANDLE = /^op_[a-f0-9]{64}$/;
 /** The handle field a request carries, or `undefined`. */
 function requestStringField(
   request: RpcRequest,
-  field: "id" | "operationHandle",
+  field: "id" | "operationHandle" | "notebookId",
 ): string | undefined {
   const params = request.params;
   if (params === null || typeof params !== "object") return undefined;
@@ -160,13 +160,26 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteNotebookPath: ((noteId: string) => Promise<string | undefined>) | undefined;
+  readonly resolveNotebookPath?:
+    | ((notebookId: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
   readonly evaluateNotebookPolicy:
     | ((operation: SettingsOperation, notebookPath: string) => boolean)
     | undefined;
 }): Promise<OperatorNotebookPolicy | undefined> {
   if (input.request === undefined) return undefined;
-  if (input.readNoteNotebookPath === undefined) return undefined;
   if (input.evaluateNotebookPolicy === undefined) return undefined;
+  if (input.method === "notes.create") {
+    const notebookId = requestStringField(input.request, "notebookId");
+    if (notebookId === undefined || input.resolveNotebookPath === undefined) return undefined;
+    const notebookPath = await input.resolveNotebookPath(notebookId);
+    if (notebookPath === undefined) return undefined;
+    return {
+      notebookPath,
+      allow: input.evaluateNotebookPolicy("create", notebookPath),
+    };
+  }
+  if (input.readNoteNotebookPath === undefined) return undefined;
   const noteId = await targetNoteId({
     method: input.method,
     request: input.request,

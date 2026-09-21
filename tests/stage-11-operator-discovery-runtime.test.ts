@@ -75,7 +75,7 @@ describe("daemon operator discovery runtime", () => {
     const page = await runtime.browse({ limit: 1 }, PEER_A);
     const handle = page.notes[0]?.handle;
     if (handle === undefined) throw new Error("missing test handle");
-    await expect(runtime.view?.({ id: handle }, PEER_B)).rejects.toThrow("handle unavailable");
+    await expect(runtime.view?.({ id: handle }, PEER_B)).rejects.toThrow("not_found");
     await expect(runtime.view?.({ id: handle }, PEER_A)).resolves.toMatchObject({ id: handle });
   });
 

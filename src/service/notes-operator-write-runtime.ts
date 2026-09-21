@@ -324,6 +324,7 @@ export function createOperatorWriteRuntime(
     }
 
     const preimagePayload = JSON.stringify({
+      owner: ownerKey(peer),
       noteId,
       revision: trusted.revision,
       content: trusted.content,
@@ -341,7 +342,13 @@ export function createOperatorWriteRuntime(
     }
 
     try {
-      await options.store.transition(record.handle, "prepared", "committing");
+      await options.store.transition(
+        record.handle,
+        "prepared",
+        "committing",
+        undefined,
+        ownerKey(peer),
+      );
     } catch {
       return fail("service_unavailable");
     }
@@ -357,7 +364,13 @@ export function createOperatorWriteRuntime(
       // The write may or may not have landed: record the uncertainty and
       // never claim success.  The record is retained for reconciliation.
       try {
-        await options.store.transition(record.handle, "committing", "unresolved");
+        await options.store.transition(
+          record.handle,
+          "committing",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
       } catch {
         // best-effort: the prepared record still exists on disk
       }
@@ -368,7 +381,13 @@ export function createOperatorWriteRuntime(
     if (result.kind !== "updated") {
       if (result.kind === "conflict") {
         try {
-          await options.store.transition(record.handle, "committing", "aborted");
+          await options.store.transition(
+            record.handle,
+            "committing",
+            "aborted",
+            undefined,
+            ownerKey(peer),
+          );
         } catch {
           // best-effort
         }
@@ -377,7 +396,13 @@ export function createOperatorWriteRuntime(
       }
       if (result.kind === "locked") {
         try {
-          await options.store.transition(record.handle, "committing", "aborted");
+          await options.store.transition(
+            record.handle,
+            "committing",
+            "aborted",
+            undefined,
+            ownerKey(peer),
+          );
         } catch {
           // best-effort
         }
@@ -385,7 +410,13 @@ export function createOperatorWriteRuntime(
       }
       if (result.kind === "missing") {
         try {
-          await options.store.transition(record.handle, "committing", "aborted");
+          await options.store.transition(
+            record.handle,
+            "committing",
+            "aborted",
+            undefined,
+            ownerKey(peer),
+          );
         } catch {
           // best-effort
         }
@@ -394,7 +425,13 @@ export function createOperatorWriteRuntime(
       // A categorical transport/runtime error is NOT proof the write did
       // not land.  Retain the record as unresolved for reconciliation.
       try {
-        await options.store.transition(record.handle, "committing", "unresolved");
+        await options.store.transition(
+          record.handle,
+          "committing",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
       } catch {
         // best-effort
       }
@@ -404,7 +441,13 @@ export function createOperatorWriteRuntime(
 
     if (typeof result.revision !== "string" || !REVISION_TOKEN.test(result.revision)) {
       try {
-        await options.store.transition(record.handle, "committing", "unresolved");
+        await options.store.transition(
+          record.handle,
+          "committing",
+          "unresolved",
+          undefined,
+          ownerKey(peer),
+        );
       } catch {
         // best-effort
       }

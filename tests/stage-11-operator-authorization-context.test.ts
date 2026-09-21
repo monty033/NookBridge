@@ -138,6 +138,25 @@ describe("operator request lock context", () => {
     expect(evaluate).toHaveBeenCalledWith("edit", "Private/Secrets");
   });
 
+  it("resolves create policy from the request notebookId", async () => {
+    const evaluate = vi.fn(() => false);
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.create",
+        request: {
+          id: "r1",
+          method: "notes.create",
+          params: { notebookId: "nb_private", title: "T", content: "C" },
+        },
+        resolveHandle,
+        resolveNotebookPath: async (id) => (id === "nb_private" ? "Private/Secrets" : undefined),
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: evaluate,
+      }),
+    ).resolves.toEqual({ notebookPath: "Private/Secrets", allow: false });
+    expect(evaluate).toHaveBeenCalledWith("create", "Private/Secrets");
+  });
+
   it("reads no notebook policy when the daemon supplies no source", async () => {
     // Guard: without a path reader and an evaluator there is nothing to decide,
     // and the context must stay untouched rather than defaulting to allow.

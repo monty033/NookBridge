@@ -8,6 +8,7 @@ import type {
   OperatorDiscoveryRuntime,
 } from "./operator-discovery-handler.js";
 import type { OperatorPeer } from "./operator-server.js";
+import { OperatorWriteError } from "./notes-operator-write-runtime.js";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MAX_CURSOR_COUNT = 512;
@@ -98,7 +99,7 @@ export function createOperatorDiscoveryRuntime(
     },
     view: async ({ id }, peer) => {
       const noteId = registry.resolve(id, peer);
-      if (noteId === undefined) throw new Error("handle unavailable");
+      if (noteId === undefined) throw new OperatorWriteError("not_found");
       const reader = service.readOnly.readNoteContent;
       if (reader === undefined) throw new Error("content unavailable");
       const metadata = await service.readOnly.noteMetadata(noteId);

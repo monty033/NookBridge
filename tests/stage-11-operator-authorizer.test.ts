@@ -17,8 +17,8 @@ const deps = (overrides: Record<string, unknown> = {}) => ({
   resolveHandle: (handle: string) => (handle === "h_one" ? "note_one" : undefined),
   resolveOperationNoteId: undefined,
   readNoteLockState: undefined,
-  readNoteNotebookPath: undefined,
-  evaluateNotebookPolicy: undefined,
+  readNoteNotebookPath: async () => "Public",
+  evaluateNotebookPolicy: () => true,
   ...overrides,
 });
 
@@ -59,8 +59,20 @@ describe("operator authorizer", () => {
   it("admits a mutation for an operator peer", async () => {
     const authorize = createOperatorAuthorizer(deps());
     await expect(
-      authorize("notes.apply-edit", OPERATOR, request("notes.apply-edit")),
+      authorize("notes.apply-edit", OPERATOR, request("notes.apply-edit", { id: "h_one" })),
     ).resolves.toMatchObject({ allowed: true, method: "notes.apply-edit" });
+  });
+
+  it("fails closed for mutations when notebook policy evidence is unavailable", async () => {
+    const authorize = createOperatorAuthorizer(
+      deps({
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: undefined,
+      }),
+    );
+    await expect(
+      authorize("notes.apply-edit", OPERATOR, request("notes.apply-edit", { id: "h_one" })),
+    ).resolves.toMatchObject({ allowed: false, reason: "permission_denied" });
   });
 
   it("refuses a locked target categorically, before the mutation runs", async () => {
