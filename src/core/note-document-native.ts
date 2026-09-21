@@ -500,10 +500,17 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
   if (n.tag === "ul" || n.tag === "ol") {
     const kind = listKind(n);
     if (kind) return { type: "task-list", kind, items: taskItems(n, kind) };
-    // Decoration is tolerated here, but `start` cannot be expressed in the
-    // canonical model: any value of it forces opaque preservation rather than
-    // silently renumbering the list.
-    attrs(n, { start: /^$/ });
+    // A class naming a checklist kind but not exactly one cannot be represented
+    // faithfully: the recorded item states would be dropped and the list would
+    // read back as ordinary bullets.  Preserve rather than guess.  `start` and
+    // `reversed` are likewise unrepresentable.  Any other class is decoration
+    // and stays tolerated, so a decorated list still round-trips.
+    const cls = n.attrs.class;
+    if (cls !== undefined && cls.includes("checklist")) preserve();
+    // Presence is what matters, not the value: these are boolean or numeric
+    // attributes with no canonical representation, and a valueless `reversed`
+    // arrives as an empty string.
+    if (n.attrs.start !== undefined || n.attrs.reversed !== undefined) preserve();
     const items = elements(n.children).map((li) => {
       if (li.tag !== "li") preserve();
       attrs(li);

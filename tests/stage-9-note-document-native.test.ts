@@ -464,3 +464,37 @@ describe("T13 inline attribute strictness", () => {
     expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(false);
   });
 });
+
+describe("T13 list semantics", () => {
+  // A checklist whose class is not exactly one of the known kinds cannot be
+  // represented faithfully: the recorded item states would be silently dropped
+  // and the list would read back as ordinary bullets.  Preserve it instead.
+  it("preserves a list whose class names a checklist kind but is not exactly one", () => {
+    const decoded = decodeNoteDocumentNative(
+      wrap('<ul class="checklist extra"><li class="checklist--item"><p>x</p></li></ul>'),
+      binding,
+    );
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("preserves a list that carries reversed", () => {
+    // The valued form is the one the parser accepts.  A valueless `reversed`
+    // does not parse at all, which fails the whole document closed — safe, but
+    // a separate question from whether the attribute can be represented.
+    const decoded = decodeNoteDocumentNative(
+      wrap('<ol reversed="true"><li><p>x</p></li></ol>'),
+      binding,
+    );
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("still tolerates a decorative class that names no checklist kind", () => {
+    // Guard: block-level tolerance must survive, or a serializer that decorates
+    // its lists would make every written note unreadable again.
+    const decoded = decodeNoteDocumentNative(
+      wrap('<ul class="decorated"><li><p>x</p></li></ul>'),
+      binding,
+    );
+    expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(false);
+  });
+});
