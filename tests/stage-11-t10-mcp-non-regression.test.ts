@@ -17,7 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
-import { OPERATOR_METHODS } from "../src/service/operator-methods.js";
+import { OPERATOR_DISCOVERY_METHODS, OPERATOR_METHODS } from "../src/service/operator-methods.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import type { RpcMethod, RpcRequest } from "../src/service/rpc-protocol.js";
 
@@ -28,6 +28,7 @@ const PRE_EXISTING_MCP_METHOD = "notes.create";
 const OPERATOR_ONLY = OPERATOR_METHODS.filter(
   (method) => method !== PRE_EXISTING_MCP_METHOD,
 ) as ReadonlyArray<RpcMethod>;
+const DISCOVERY_OPERATOR_ONLY = OPERATOR_DISCOVERY_METHODS as ReadonlyArray<RpcMethod>;
 
 /**
  * The most permissive profile the daemon can run.  A custom policy is
@@ -80,6 +81,17 @@ describe("T10 — operator vocabulary is unreachable from the daemon surface", (
     // handles, revisions) alongside the error.
     expect((envelope as { result?: unknown }).result).toBeUndefined();
   });
+
+  it.each(DISCOVERY_OPERATOR_ONLY)(
+    "refuses discovery transport method %s through MCP",
+    async (method) => {
+      const envelope = await handleRpcRequest(request(method), runtime, permissivePolicy());
+      expect(envelope.ok).toBe(false);
+      if (envelope.ok) return;
+      expect(["invalid_request", "permission_denied"]).toContain(envelope.error.code);
+      expect((envelope as { result?: unknown }).result).toBeUndefined();
+    },
+  );
 
   it.each(OPERATOR_ONLY)("refuses %s under the default read-only policy too", async (method) => {
     const envelope = await handleRpcRequest(request(method), runtime);
