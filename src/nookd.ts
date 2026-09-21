@@ -65,6 +65,12 @@ import {
   deriveOperationStoreKey,
 } from "./service/notes-operation-store-fs.js";
 import { authorizeOperatorMethod, createOperatorPolicy } from "./service/operator-policy.js";
+import {
+  OPERATOR_MUTATING_METHODS,
+  resolveOperatorRequestLockState,
+} from "./service/operator-authorization-context.js";
+import type { OperatorNoteLockState } from "./service/operator-policy.js";
+import type { RpcRequest } from "./service/rpc-protocol.js";
 import { peerToAuthorizationContext, type OperatorPeer } from "./service/operator-server.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
@@ -518,21 +524,41 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       ? undefined
       : {
           socketPath: resolve(dirname(config.socketPath), "operator.sock"),
-          authorize: (method: OperatorMethod, peer: OperatorPeer) =>
-            authorizeOperatorMethod(
-              createOperatorPolicy((candidate, context) => {
-                const groups = context.operatorGroupMembership ?? [];
+          authorize: async (method: OperatorMethod, peer: OperatorPeer, request?: RpcRequest) => {
+            // Finding 7: resolve the lock context of the target before the
+            // synchronous seam runs, so a mutation of a locked note is refused
+            // categorically instead of reaching the write path.
+            const context = peerToAuthorizationContext(peer) as ReturnType<
+              typeof peerToAuthorizationContext
+            > & { noteLockState?: OperatorNoteLockState };
+            const lockState = await resolveOperatorRequestLockState({
+              method,
+              request,
+              resolveHandle: (handle) => operatorHandles.resolve(handle),
+              readNoteLockState: readOnly.readNoteLockState,
+            });
+            if (lockState !== undefined) context.noteLockState = lockState;
+            return authorizeOperatorMethod(
+              createOperatorPolicy((candidate, evaluatorContext) => {
+                const groups = evaluatorContext.operatorGroupMembership ?? [];
                 if (
                   !groups.includes("nookbridge-clients") &&
                   !groups.includes("nookbridge-operators")
                 ) {
                   return { allowed: false, reason: "permission_denied" };
                 }
+                if (
+                  evaluatorContext.noteLockState?.locked === true &&
+                  OPERATOR_MUTATING_METHODS.has(candidate)
+                ) {
+                  return { allowed: false, reason: "vault_locked" };
+                }
                 return { allowed: true, method: candidate };
               }),
               method,
-              peerToAuthorizationContext(peer),
-            ),
+              context,
+            );
+          },
           handle: createOperatorDiscoveryHandler({
             ...createOperatorDiscoveryRuntime(
               {
