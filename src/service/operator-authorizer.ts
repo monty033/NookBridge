@@ -37,10 +37,10 @@ import type { RpcRequest } from "./rpc-protocol.js";
 import type { SettingsOperation } from "../settings/settings-types.js";
 
 /** Groups admitted to the operator socket at all. */
-export const OPERATOR_ADMITTED_GROUPS: ReadonlyArray<string> = [
+export const OPERATOR_ADMITTED_GROUPS: ReadonlyArray<string> = Object.freeze([
   "nookbridge-clients",
   "nookbridge-operators",
-];
+]);
 
 /** The capability group required for any mutating operator method. */
 export const OPERATOR_MUTATION_GROUP = "nookbridge-operators";
@@ -100,7 +100,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       evaluateNotebookPolicy: deps.evaluateNotebookPolicy,
     });
     if (notebookPolicy !== undefined) context.notebookPolicy = notebookPolicy;
-    if (OPERATOR_MUTATING_METHODS.has(method)) {
+    if (OPERATOR_MUTATING_METHODS.includes(method)) {
       const targetKnown = await requestTargetKnown(deps, request, peer, method);
       if (method === "notes.create" || targetKnown) {
         if (notebookPolicy === undefined) {
@@ -145,7 +145,7 @@ function evaluateOperatorRequest(
   const isAdmitted = groups.some((group) => OPERATOR_ADMITTED_GROUPS.includes(group));
   if (!isAdmitted) return { allowed: false, reason: "permission_denied" };
 
-  const mutating = OPERATOR_MUTATING_METHODS.has(candidate);
+  const mutating = OPERATOR_MUTATING_METHODS.includes(candidate);
   if (mutating && !isOperator) return { allowed: false, reason: "permission_denied" };
 
   if (mutating && context.noteLockState?.locked === true) {

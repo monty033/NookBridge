@@ -27,7 +27,7 @@ import type { OperatorPeer } from "./operator-server.js";
  * `notes.create` is included: it writes a note, so it needs the operator
  * capability even though it has no existing target to be locked.
  */
-export const OPERATOR_MUTATING_METHODS: ReadonlySet<OperatorMethod> = new Set<OperatorMethod>([
+export const OPERATOR_MUTATING_METHODS: ReadonlyArray<OperatorMethod> = Object.freeze([
   "notes.apply-edit",
   "notes.apply-undo",
   "notes.create",
@@ -101,7 +101,7 @@ export async function resolveOperatorRequestLockState(input: {
   readonly readNoteLockState: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
 }): Promise<OperatorNoteLockState | undefined> {
   if (input.request === undefined) return undefined;
-  if (!OPERATOR_MUTATING_METHODS.has(input.method)) return undefined;
+  if (!OPERATOR_MUTATING_METHODS.includes(input.method)) return undefined;
   if (input.readNoteLockState === undefined) return undefined;
   const noteId = await targetNoteId({
     method: input.method,

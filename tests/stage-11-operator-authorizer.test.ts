@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOperatorAuthorizer } from "../src/service/operator-authorizer.js";
+import {
+  OPERATOR_ADMITTED_GROUPS,
+  createOperatorAuthorizer,
+} from "../src/service/operator-authorizer.js";
+import { OPERATOR_MUTATING_METHODS } from "../src/service/operator-authorization-context.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 
 const CLIENT: OperatorPeer = { uid: 1, gid: 2, groups: ["nookbridge-clients"] };
@@ -23,6 +27,13 @@ const deps = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("operator authorizer", () => {
+  it("keeps exported authorization vocabularies immutable at runtime", () => {
+    expect(() =>
+      (OPERATOR_ADMITTED_GROUPS as unknown as string[]).push("nookbridge-operators"),
+    ).toThrow();
+    expect(() => (OPERATOR_MUTATING_METHODS as unknown as string[]).splice(2, 1)).toThrow();
+  });
+
   it("denies a peer in neither admitted group", async () => {
     const authorize = createOperatorAuthorizer(deps());
     await expect(
