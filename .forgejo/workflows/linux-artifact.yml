@@ -180,9 +180,16 @@ jobs:
           test -f "$STATIC_GLIBC/lib/libc.a" \
             || { printf 'static glibc is missing libc.a: %s\n' "$STATIC_GLIBC" >&2; exit 1; }
           HELPER="${RUNNER_TEMP:-/tmp}/nookbridge-operator-peercred-helper"
-          cc -O2 -static -L"$STATIC_GLIBC/lib" -o "$HELPER" native/operator-peercred.c
+          cc -O2 -std=c11 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector \
+            -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-pie -no-pie \
+            -nostdlib -static -Wl,-e,_start -Wl,--build-id=none \
+            -L"$STATIC_GLIBC/lib" -o "$HELPER" native/operator-peercred.c
           if readelf -l "$HELPER" | grep -E 'INTERP' >/dev/null; then
             printf 'peer-credential helper is dynamically linked\n' >&2
+            exit 1
+          fi
+          if strings "$HELPER" | grep -E '/nix/store/[[:alnum:]]|(^|[[:space:]])/build/|/tmp/nookbridge/' >/dev/null; then
+            printf 'peer-credential helper contains a host path\n' >&2
             exit 1
           fi
           chmod 0755 "$HELPER"

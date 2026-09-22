@@ -1,3 +1,5 @@
+/* global process */
+
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -368,10 +370,71 @@ describe("Linux artifact manifest contract", () => {
     expect(workflow).not.toContain("-name 'glibc-*-static'");
     expect(workflow).toContain("static glibc output not found");
     expect(workflow).toContain('test -f "$STATIC_GLIBC/lib/libc.a"');
-    expect(workflow).toContain('cc -O2 -static -L"$STATIC_GLIBC/lib"');
+    expect(workflow).toContain("cc -O2 -std=c11 -Wall -Wextra -Werror -ffreestanding -fno-builtin");
+    expect(workflow).toContain("-nostdlib -static -Wl,-e,_start");
+    expect(workflow).toContain('-L"$STATIC_GLIBC/lib"');
     expect(workflow).toContain('readelf -l "$HELPER"');
     expect(workflow).toContain("grep -E 'INTERP'");
+    expect(workflow).toContain("peer-credential helper contains a host path");
+    expect(workflow).toContain('strings "$HELPER" | grep -E');
     expect(workflow).not.toContain('|| cc -O2 -o "$HELPER"');
+  });
+
+  it("keeps the static peer-credential helper free of Nix NSS path leakage", () => {
+    if (process.platform !== "linux") return;
+
+    const helperSource = readFileSync(
+      join(repositoryRoot, "native", "operator-peercred.c"),
+      "utf8",
+    );
+    const tempRoot = mkdtempSync(join(tmpdir(), "nookbridge-peercred-test-"));
+    fixtureRoots.push(tempRoot);
+    const helper = join(tempRoot, "operator-peercred-helper");
+    const staticGlibc = spawnSync(
+      "find",
+      ["/nix/store", "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-name", "*-glibc-*-static"],
+      { encoding: "utf8" },
+    )
+      .stdout.trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+    if (staticGlibc === undefined) return;
+    const compile = spawnSync(
+      "cc",
+      [
+        "-O2",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fno-stack-protector",
+        "-fno-asynchronous-unwind-tables",
+        "-fno-unwind-tables",
+        "-fno-pie",
+        "-no-pie",
+        "-nostdlib",
+        "-static",
+        "-Wl,-e,_start",
+        "-Wl,--build-id=none",
+        `-L${staticGlibc}/lib`,
+        "-o",
+        helper,
+        join(repositoryRoot, "native", "operator-peercred.c"),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(compile.status).toBe(0);
+    expect(helperSource).not.toContain("getgrgid_r");
+    expect(helperSource).toContain("/etc/group");
+
+    const strings = spawnSync("strings", [helper], { encoding: "utf8" });
+    expect(strings.status).toBe(0);
+    expect(strings.stdout).not.toMatch(/\/nix\/store\/[A-Za-z0-9]+/u);
   });
 
   /**
