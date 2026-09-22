@@ -30,6 +30,8 @@ For a compact view of what is implemented, validated, and supported, see
 - [Architecture](architecture.md)
 - [Background and intent](background.md)
 - [Project status](project-status.md)
+- [Versioning and releases](versioning-and-releases.md)
+- [Changelog](../CHANGELOG.md)
 - [Command and MCP usage](usage.md)
 - [MCP tool reference](reference/mcp-tools.md)
 - [Operator CLI reference](reference/cli.md)

@@ -27,6 +27,8 @@ for the exact boundary.
 - [Documentation home](docs/index.md) — choose an operator, user, or contributor path.
 - [Background and intent](docs/background.md) — why the bridge exists and its design principles.
 - [Project status](docs/project-status.md) — implemented, validated, and supported boundaries.
+- [Versioning and releases](docs/versioning-and-releases.md) — version policy and release checklist.
+- [Changelog](CHANGELOG.md) — user-visible release history.
 - [Getting started](docs/getting-started.md) — purpose, support status, and prerequisites.
 - [NixOS installation](docs/installation-nixos.md) — reference deployment boundary.
 - [Generic systemd installation](docs/installation-systemd.md) — non-NixOS Linux path.
