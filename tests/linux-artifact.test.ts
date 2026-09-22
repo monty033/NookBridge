@@ -382,16 +382,35 @@ describe("Linux artifact manifest contract", () => {
   it("publishes a tag push as a candidate and gates promotion behind a separate ref", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     const doc = parseYaml(raw) as {
-      on: { push: { tags: string[] } };
-      jobs: Record<string, { if?: string }>;
+      on: { push: { branches: string[]; tags: string[] } };
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          steps?: Array<{ if?: string; name?: string }>;
+        }
+      >;
     };
 
     const buildJob = doc.jobs["linux-artifact"];
     const promoteJob = doc.jobs["promote-release"];
+    const artifactStep = buildJob?.steps?.find(
+      (step) => step.name === "Build and verify x86_64 glibc artifact",
+    );
+    const assetsStep = buildJob?.steps?.find(
+      (step) => step.name === "Prepare GitHub release assets",
+    );
+    const publishStep = buildJob?.steps?.find((step) => step.name === "Publish GitHub release");
 
+    expect(doc.on.push.branches).toEqual(["main", "runner-test/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
     expect(buildJob?.if).toContain("!startsWith(github.ref, 'refs/tags/promote-v')");
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
+    expect(artifactStep?.if).toBe(
+      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
+    );
+    expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    expect(publishStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
 
     // The candidate is created off the general install path...
     expect(raw).toContain("prerelease: true");
@@ -401,5 +420,15 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back; a successful PATCH is not proof.
     expect(raw).toMatch(/test "\$promoted" = "false"/);
+  });
+
+  it("runs the real artifact build on main and runner-test refs without publishing", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(raw).toContain("refs/heads/runner-test/");
+    expect(raw).toContain("github.ref == 'refs/heads/main'");
+    expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
+    expect(raw).toContain("unexpected artifact-build ref");
+    expect(raw).toContain("if: startsWith(github.ref, 'refs/tags/v')");
   });
 });

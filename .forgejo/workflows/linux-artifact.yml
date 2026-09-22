@@ -2,7 +2,7 @@ name: Linux artifact
 
 on:
   push:
-    branches: [main]
+    branches: [main, "runner-test/**"]
     tags: ["v*", "promote-v*"]
   pull_request:
 
@@ -115,12 +115,21 @@ jobs:
         run: npm prune --omit=dev
 
       - name: Build and verify x86_64 glibc artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'
         run: |
           set -eu
-          VERSION="${RELEASE_VERSION#v}"
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              VERSION="${GITHUB_REF#refs/tags/v}"
+              ;;
+            refs/heads/main|refs/heads/runner-test/*)
+              VERSION="ci-${GITHUB_SHA:0:12}"
+              ;;
+            *)
+              printf 'unexpected artifact-build ref: %s\n' "$GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
           RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"

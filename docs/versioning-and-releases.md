@@ -55,17 +55,29 @@ The historical `v1.2.6` tag is outside this policy. If it is retired before
 
 ## Reliable release execution
 
-The release is deliberately split into three gates:
+The release is deliberately split into four gates:
 
 1. **Merge gate:** the release PR contains the synchronized version surfaces,
    changelog, installer pin, release fixtures, and workflow regression coverage.
-2. **Candidate gate:** pushing `v<VERSION>` runs the artifact build, verifies the
+2. **Runner preflight gate:** every push to canonical `main` runs the complete
+   Linux artifact build and verifier on the `nixos` Forgejo runner using an
+   ephemeral `ci-<commit>` artifact version. A `runner-test/<name>` branch runs
+   the same path before merge when a release-sensitive workflow change needs a
+   direct runner check. These runs never publish a release or alter `latest`.
+3. **Candidate gate:** pushing `v<VERSION>` runs the artifact build, verifies the
    manifest against the tag commit, publishes the exact five GitHub assets, and
    creates a prerelease candidate. The candidate must not move the `latest`
    installer path.
-3. **Promotion gate:** after clean-target acceptance, push `promote-v<VERSION>`.
+4. **Promotion gate:** after clean-target acceptance, push `promote-v<VERSION>`.
    The promotion job downloads the candidate artifact, re-verifies its checksum
    and source commit, then clears the prerelease flag and reads the release back.
+
+Do not create a release tag until the `main` preflight for the exact merge commit
+is terminal-success. The tag workflow repeats the artifact build as a final
+release-local gate, so a release cannot publish assets if the runner or artifact
+verification fails. The preflight and candidate jobs use the same static glibc
+discovery, helper compilation, packaging, and verifier commands; only the
+publishing steps are tag-only.
 
 The artifact workflow must fail loudly before compilation when a required runner
 input is missing. Static glibc discovery accounts for Nix store hash prefixes
