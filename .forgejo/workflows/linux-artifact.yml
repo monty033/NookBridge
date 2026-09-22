@@ -128,11 +128,22 @@ jobs:
           test -n "$LIBSTDCXX_BASELINE"
           # The operator socket spawns this helper to read SO_PEERCRED.  Static
           # linking keeps it off the artifact's glibc/libstdcxx baseline floor.
-          command -v cc >/dev/null 2>&1 \
-            || { printf 'missing runner command: %s\n' cc >&2; exit 1; }
+          for command_name in cc find readelf; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
+          done
+          # The runner must provide the static glibc output explicitly.  A
+          # dynamically linked fallback embeds /nix/store in the portable
+          # artifact and is rejected by the artifact verifier.
+          STATIC_GLIBC="$(find /nix/store -mindepth 1 -maxdepth 1 -type d -name 'glibc-*-static' -print | LC_ALL=C sort | tail -n 1)"
+          test -n "$STATIC_GLIBC"
+          test -f "$STATIC_GLIBC/lib/libc.a"
           HELPER="${RUNNER_TEMP:-/tmp}/nookbridge-operator-peercred-helper"
-          cc -O2 -static -o "$HELPER" native/operator-peercred.c \
-            || cc -O2 -o "$HELPER" native/operator-peercred.c
+          cc -O2 -static -L"$STATIC_GLIBC/lib" -o "$HELPER" native/operator-peercred.c
+          if readelf -l "$HELPER" | grep -E 'INTERP' >/dev/null; then
+            printf 'peer-credential helper is dynamically linked\n' >&2
+            exit 1
+          fi
           chmod 0755 "$HELPER"
           npm run artifact:linux -- \
             --source-dir "$PWD" \

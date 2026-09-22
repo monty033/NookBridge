@@ -360,6 +360,16 @@ describe("Linux artifact manifest contract", () => {
     expect(workflow).toContain("GITHUB_SHA");
   });
 
+  it("builds and asserts a portable static peer-credential helper", () => {
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(workflow).toContain('STATIC_GLIBC="$(find /nix/store');
+    expect(workflow).toContain('cc -O2 -static -L"$STATIC_GLIBC/lib"');
+    expect(workflow).toContain('readelf -l "$HELPER"');
+    expect(workflow).toContain("grep -E 'INTERP'");
+    expect(workflow).not.toContain('|| cc -O2 -o "$HELPER"');
+  });
+
   /**
    * T12 — candidate promotion.  A tag push must never land on the general
    * install path: the candidate is published as a prerelease and an explicit
