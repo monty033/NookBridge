@@ -288,7 +288,11 @@ export type NotesCategoricalResult =
    */
   | Readonly<{ kind: "created" }>
   /** Bounded list of pending undo operations, as opaque operation handles. */
-  | Readonly<{ kind: "operations"; handles: readonly string[] }>
+  | Readonly<{
+      kind: "operations";
+      handles: readonly string[];
+      unresolvedHandles: readonly string[];
+    }>
   | Readonly<{ kind: "undone" }>
   | Readonly<{ kind: "conflict" }>
   | Readonly<{ kind: "denied" }>

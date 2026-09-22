@@ -159,6 +159,7 @@ describe("operator-socket notes write runtime", () => {
     await expect(runtime.operations()).resolves.toEqual({
       kind: "operations",
       handles: [OPERATION],
+      unresolvedHandles: [],
     });
   });
 });

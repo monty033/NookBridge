@@ -557,18 +557,26 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
                 : (operation, notebookPath) =>
                     settingsEvaluator(operation, { notebookPath }).allowed,
           }),
-          handle: createOperatorDiscoveryHandler({
-            ...createOperatorDiscoveryRuntime(
-              {
-                readOnly,
-                ...(operatorWrite?.create === undefined || createNote === undefined
-                  ? {}
-                  : { createNote }),
-              } as ServiceRuntime,
+          handle: (() => {
+            const discoveryRuntime = createOperatorDiscoveryRuntime(
+              { readOnly } as ServiceRuntime,
               operatorHandles,
-            ),
-            ...(operatorWrite === undefined ? {} : operatorWrite),
-          }),
+            );
+            const { create: _untrackedCreate, ...discoveryMethods } = discoveryRuntime;
+            return createOperatorDiscoveryHandler({
+              ...discoveryMethods,
+              ...(operatorWrite?.create === undefined ? {} : { create: operatorWrite.create }),
+              ...(operatorWrite === undefined
+                ? {}
+                : {
+                    editPreimage: operatorWrite.editPreimage,
+                    applyEdit: operatorWrite.applyEdit,
+                    applyUndo: operatorWrite.applyUndo,
+                    operationStatus: operatorWrite.operationStatus,
+                    operationList: operatorWrite.operationList,
+                  }),
+            });
+          })(),
         };
 
   let serverShutdown: () => Promise<void>;

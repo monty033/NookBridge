@@ -278,7 +278,10 @@ export function createNotesCommandRuntimeFromOperatorSocket(
       const handles = listed.result.handles.filter(
         (handle) => typeof handle === "string" && isBoundedOpaqueValue(handle),
       );
-      return { kind: "operations", handles };
+      const unresolvedHandles = (listed.result.unresolvedHandles ?? []).filter(
+        (handle) => typeof handle === "string" && isBoundedOpaqueValue(handle),
+      );
+      return { kind: "operations", handles, unresolvedHandles };
     },
 
     /**
