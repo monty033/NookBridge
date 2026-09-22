@@ -125,6 +125,38 @@ describe("operator discovery handler", () => {
     });
   });
 
+  it("returns only the opaque operation handle for an uncertain write", async () => {
+    const operationHandle = `op_${"a".repeat(64)}`;
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      applyEdit: async () => {
+        throw new OperatorWriteError("service_unavailable", operationHandle);
+      },
+    });
+    const response = await handler(
+      {
+        id: "6",
+        method: "notes.apply-edit",
+        params: {
+          id: "h_one",
+          expectedRevision: `rev_${"b".repeat(32)}`,
+          markdown: "# x",
+        },
+      },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toEqual({
+      id: "6",
+      ok: false,
+      error: {
+        code: "service_unavailable",
+        message: "Service unavailable",
+        operationHandle,
+      },
+    });
+  });
+
   it("still collapses a failure whose message is not in the closed vocabulary", async () => {
     // Guard: only exact vocabulary members map.  Free text — including text
     // that merely mentions a category — must not become a category, and no

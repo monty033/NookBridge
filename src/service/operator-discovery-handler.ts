@@ -114,7 +114,11 @@ export function createOperatorDiscoveryHandler(
       }
       return failure(request.id, "invalid_request");
     } catch (error) {
-      return failure(request.id, categoricalCode(error));
+      return failure(
+        request.id,
+        categoricalCode(error),
+        error instanceof OperatorWriteError ? error.operationHandle : undefined,
+      );
     }
   };
 }
@@ -182,10 +186,14 @@ function categoricalCode(error: unknown): RpcErrorCode {
   return "service_unavailable";
 }
 
-function failure(id: string, code: RpcErrorCode): RpcAnyResponseEnvelope {
+function failure(id: string, code: RpcErrorCode, operationHandle?: string): RpcAnyResponseEnvelope {
   return {
     id,
     ok: false,
-    error: { code, message: RPC_ERROR_MESSAGES[code] },
+    error: {
+      code,
+      message: RPC_ERROR_MESSAGES[code],
+      ...(operationHandle === undefined ? {} : { operationHandle }),
+    },
   } as RpcAnyResponseEnvelope;
 }

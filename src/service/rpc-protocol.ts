@@ -710,6 +710,8 @@ export interface RpcAnySuccessEnvelope {
 export interface RpcErrorEnvelopePayload {
   readonly code: RpcErrorCode;
   readonly message: string;
+  /** Present only when a mutating operation outcome is uncertain. */
+  readonly operationHandle?: string;
 }
 
 /** The only error categories that may cross the RPC response boundary. */
@@ -2541,14 +2543,21 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   const errorRecord = error as Record<string, JsonValue>;
   const errorKeys = validateClosedObject(
     errorRecord,
-    ["code", "message"],
+    ["code", "message", "operationHandle"],
     "rpc protocol: response error has unexpected fields",
   );
-  if (errorKeys.length !== 2 || !keysAreExactly(errorKeys, ["code", "message"])) {
+  if (
+    (errorKeys.length !== 2 && errorKeys.length !== 3) ||
+    !keysAreExactly(
+      errorKeys,
+      errorKeys.length === 3 ? ["code", "message", "operationHandle"] : ["code", "message"],
+    )
+  ) {
     throw rpcProtocolError("rpc protocol: response error has unexpected fields");
   }
   const code = errorRecord.code;
   const message = errorRecord.message;
+  const operationHandle = errorRecord.operationHandle;
   if (typeof code !== "string" || typeof message !== "string") {
     throw rpcProtocolError("rpc protocol: response error fields must be strings");
   }
@@ -2563,14 +2572,22 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   // error envelope.
   preflightResponseStringField(code, rawSum);
   preflightResponseStringField(fixedMessage, rawSum);
+  if (operationHandle !== undefined) {
+    assertBoundedString(operationHandle, STAGE5_RPC_LIMITS.maxIdentifierBytes, "operation handle");
+  }
 
-  const errorPayload = objectCreate(null) as { code: string; message: string };
+  const errorPayload = objectCreate(null) as {
+    code: string;
+    message: string;
+    operationHandle?: string;
+  };
   errorPayload.code = code;
   errorPayload.message = fixedMessage;
+  if (operationHandle !== undefined) errorPayload.operationHandle = operationHandle;
   const errorEnvelope = objectCreate(null) as {
     id: string;
     ok: false;
-    error: { code: string; message: string };
+    error: { code: string; message: string; operationHandle?: string };
   };
   errorEnvelope.id = id;
   errorEnvelope.ok = false;

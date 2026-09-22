@@ -198,10 +198,12 @@ const REVISION_TOKEN = /^rev_[0-9a-f]{32}$/;
  */
 export class OperatorWriteError extends Error {
   public readonly code: RpcErrorCode;
+  public readonly operationHandle?: string;
 
-  constructor(code: RpcErrorCode) {
+  constructor(code: RpcErrorCode, operationHandle?: string) {
     super(code);
     this.code = code;
+    if (operationHandle !== undefined) this.operationHandle = operationHandle;
   }
 }
 
@@ -210,8 +212,8 @@ function ownerKey(peer?: OperatorPeer): string {
   return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
 }
 
-function fail(code: RpcErrorCode): never {
-  throw new OperatorWriteError(code);
+function fail(code: RpcErrorCode, operationHandle?: string): never {
+  throw new OperatorWriteError(code, operationHandle);
 }
 
 function byteLength(value: string): number {
@@ -357,7 +359,7 @@ export function createOperatorWriteRuntime(
             } catch {
               // Preserve the original categorical failure.
             }
-            return fail("service_unavailable");
+            return fail("service_unavailable", record.handle);
           }
         };
 
@@ -479,7 +481,7 @@ export function createOperatorWriteRuntime(
         // best-effort: the prepared record still exists on disk
       }
       audit("edit.unresolved");
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
 
     if (result.kind !== "updated") {
@@ -540,7 +542,7 @@ export function createOperatorWriteRuntime(
         // best-effort
       }
       audit("edit.unresolved");
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
 
     if (typeof result.revision !== "string" || !REVISION_TOKEN.test(result.revision)) {
@@ -556,7 +558,7 @@ export function createOperatorWriteRuntime(
         // best-effort
       }
       audit("edit.unresolved");
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
 
     try {
@@ -685,7 +687,7 @@ export function createOperatorWriteRuntime(
       } catch {
         // Preserve the original categorical failure.
       }
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
     if (result.kind === "conflict") {
       audit("undo.conflict");
@@ -705,7 +707,7 @@ export function createOperatorWriteRuntime(
       } catch {
         // Preserve the original categorical failure.
       }
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
     if (typeof result.revision !== "string" || !REVISION_TOKEN.test(result.revision)) {
       try {
@@ -719,7 +721,7 @@ export function createOperatorWriteRuntime(
       } catch {
         // Preserve the categorical failure.
       }
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
 
     try {
@@ -742,7 +744,7 @@ export function createOperatorWriteRuntime(
       } catch {
         // Preserve the categorical failure.
       }
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
     audit("undo.undone");
     return {
