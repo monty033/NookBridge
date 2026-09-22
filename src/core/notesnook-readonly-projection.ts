@@ -261,12 +261,69 @@ export function flattenLiveDatabaseToReadOnly(
   );
   const contentFindByNoteIdFn = readOptionalContentFindByNoteId(source);
   const relationsFromFn = readOptionalRelationsFrom(source);
+  const notebookHasNoteViaRelations = async (
+    notebookId: string,
+    noteId: string,
+  ): Promise<boolean> => {
+    const relationsArray = await callThrough(
+      relationsFromFn as (...args: unknown[]) => unknown,
+      [{ id: notebookId, type: "notebook" }, "note"],
+      "Notesnook read-only projection: relations.from rejected",
+    );
+    if (
+      relationsArray === undefined ||
+      relationsArray === null ||
+      typeof relationsArray !== "object"
+    ) {
+      throw projectionError(
+        "Notesnook read-only projection: relations.from returned an invalid RelationsArray",
+      );
+    }
+    let hasFn: unknown;
+    try {
+      hasFn = (relationsArray as { has?: unknown }).has;
+    } catch {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.has could not be read",
+      );
+    }
+    if (typeof hasFn !== "function") {
+      throw projectionError(
+        "Notesnook read-only projection: relations.from did not return a RelationsArray",
+      );
+    }
+    let raw: unknown;
+    try {
+      raw = Reflect.apply(hasFn, relationsArray, [noteId]);
+    } catch {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.has threw synchronously",
+      );
+    }
+    const resolved = await callThenable(
+      raw as PromiseLike<unknown>,
+      "relations.from(...).has",
+      (value) => value,
+    );
+    if (typeof resolved !== "boolean") {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.has did not return a boolean",
+      );
+    }
+    return resolved;
+  };
   const resolveNotebookIdForNote = async (noteId: string): Promise<string | undefined> => {
-    if (notebookNotesFn === undefined) return undefined;
+    if (notebookNotesFn === undefined && relationsFromFn === undefined) return undefined;
     const notebookIds = truncateIds(
       await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids"),
       MAX_LIST_NOTEBOOKS,
     );
+    if (relationsFromFn !== undefined) {
+      for (const notebookId of notebookIds) {
+        if (await notebookHasNoteViaRelations(notebookId, noteId)) return notebookId;
+      }
+    }
+    if (notebookNotesFn === undefined) return undefined;
     for (const notebookId of notebookIds) {
       const rawNoteIds = await callThrough(
         notebookNotesFn,
@@ -583,45 +640,7 @@ export function flattenLiveDatabaseToReadOnly(
                 "Notesnook read-only projection: note id must be a non-empty string",
               );
             }
-            const relationsArray = await callThrough(
-              relationsFromFn,
-              [{ id: notebookId, type: "notebook" }, "note"],
-              "Notesnook read-only projection: relations.from rejected",
-            );
-            if (
-              relationsArray === undefined ||
-              relationsArray === null ||
-              typeof relationsArray !== "object"
-            ) {
-              throw projectionError(
-                "Notesnook read-only projection: relations.from returned an invalid RelationsArray",
-              );
-            }
-            const hasFn = (relationsArray as { has?: unknown }).has;
-            if (typeof hasFn !== "function") {
-              throw projectionError(
-                "Notesnook read-only projection: relations.from did not return a RelationsArray",
-              );
-            }
-            let raw: unknown;
-            try {
-              raw = Reflect.apply(hasFn, relationsArray, [noteId]);
-            } catch {
-              throw projectionError(
-                "Notesnook read-only projection: relations RelationsArray.has threw synchronously",
-              );
-            }
-            const resolved = await callThenable(
-              raw as PromiseLike<unknown>,
-              "relations.from(...).has",
-              (value) => value,
-            );
-            if (typeof resolved !== "boolean") {
-              throw projectionError(
-                "Notesnook read-only projection: relations RelationsArray.has did not return a boolean",
-              );
-            }
-            return resolved;
+            return notebookHasNoteViaRelations(notebookId, noteId);
           },
         }),
 
@@ -980,7 +999,13 @@ async function readFilteredSelectorIds(selector: unknown, label: string): Promis
     throw projectionError(`Notesnook read-only projection: ${label} threw synchronously`);
   }
   if (raw === undefined || raw === null) return [];
-  if (typeof raw !== "object" || typeof (raw as { then?: unknown }).then !== "function") {
+  let isThenable = false;
+  try {
+    isThenable = typeof raw === "object" && typeof (raw as { then?: unknown }).then === "function";
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label} then getter threw`);
+  }
+  if (!isThenable) {
     throw projectionError(`Notesnook read-only projection: ${label} did not return a thenable`);
   }
   return callThenable(raw as PromiseLike<unknown>, label, (resolved) => {
@@ -1083,7 +1108,14 @@ async function callThrough<T>(
     throw projectionError(message);
   }
   if (result === undefined || result === null) return result as T;
-  if (typeof result === "object" && typeof (result as { then?: unknown }).then === "function") {
+  let isThenable = false;
+  try {
+    isThenable =
+      typeof result === "object" && typeof (result as { then?: unknown }).then === "function";
+  } catch {
+    throw projectionError(message);
+  }
+  if (isThenable) {
     try {
       return (await (result as PromiseLike<T>)) as T;
     } catch (error) {

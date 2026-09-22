@@ -26,8 +26,13 @@ import {
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
 import { isExactFetchRequest } from "../src/core/readonly-sync-shape.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { createOperatorAuthorizer } from "../src/service/operator-authorizer.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
-import { serializeRpcResponse, type RpcNotesGetRequest } from "../src/service/rpc-protocol.js";
+import {
+  serializeRpcResponse,
+  type RpcNotesGetRequest,
+  type RpcRequest,
+} from "../src/service/rpc-protocol.js";
 import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
@@ -502,6 +507,101 @@ describe("Stage 3 production projection and sync gate", () => {
       notebookId: "nb-1",
       revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
     });
+  });
+
+  it("derives notebook membership from relations when notebooks.notes is unavailable", async () => {
+    const database = createFakeLiveDatabase({ omitNotebookReference: true });
+    delete (database.notebooks as { notes?: unknown }).notes;
+    const source = flattenLiveDatabaseToReadOnly(database);
+
+    await expect(source.noteMetadata("note-1")).resolves.toMatchObject({
+      id: "note-1",
+      notebookId: "nb-1",
+    });
+  });
+
+  it("feeds relation-derived notebook membership into operator edit policy", async () => {
+    const database = createFakeLiveDatabase({ omitNotebookReference: true });
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+    const seenPolicies: string[] = [];
+    const request: RpcRequest = {
+      id: "edit",
+      method: "notes.apply-edit",
+      params: { id: "h_target", expectedRevision: "rev", markdown: "<p>changed</p>" },
+    };
+    const peer = { uid: 1, gid: 2, groups: ["nookbridge-operators"] };
+    const makeAuthorizer = (allow: boolean) =>
+      createOperatorAuthorizer({
+        resolveHandle: (handle) => (handle === "h_target" ? "note-1" : undefined),
+        readNoteLockState: async () => "unlocked",
+        readNoteNotebookPath: async (noteId) => {
+          const metadata = await readOnly.noteMetadata(noteId);
+          return metadata?.notebookId === "nb-1" ? "Work" : undefined;
+        },
+        evaluateNotebookPolicy: (operation, notebookPath) => {
+          seenPolicies.push(`${operation}:${notebookPath}`);
+          return allow;
+        },
+      });
+
+    await expect(makeAuthorizer(true)("notes.apply-edit", peer, request)).resolves.toEqual({
+      allowed: true,
+      method: "notes.apply-edit",
+    });
+    await expect(makeAuthorizer(false)("notes.apply-edit", peer, request)).resolves.toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(seenPolicies).toEqual(["edit:Work", "edit:Work"]);
+  });
+
+  it("prefers relation membership when notebooks.notes rejects", async () => {
+    const database = createFakeLiveDatabase({ omitNotebookReference: true });
+    (
+      database as unknown as {
+        notebooks: { notes: (id: string) => Promise<never> };
+      }
+    ).notebooks.notes = async () => {
+      throw new Error("notebooks.notes unavailable");
+    };
+    const source = flattenLiveDatabaseToReadOnly(database);
+
+    await expect(source.noteMetadata("note-1")).resolves.toMatchObject({
+      id: "note-1",
+      notebookId: "nb-1",
+    });
+  });
+
+  it("does not enumerate notebooks when both membership sources are unavailable", async () => {
+    const database = createFakeLiveDatabase({ omitNotebookReference: true });
+    delete (database.notebooks as { notes?: unknown }).notes;
+    delete (database as { relations?: unknown }).relations;
+    const notebooks = (database as unknown as { notebooks: { all: { ids: unknown } } }).notebooks;
+    (notebooks.all as { ids: () => Promise<never> }).ids = async () => {
+      throw new Error("notebooks enumeration unavailable");
+    };
+    const source = flattenLiveDatabaseToReadOnly(database);
+
+    await expect(source.noteMetadata("note-1")).resolves.toMatchObject({
+      id: "note-1",
+    });
+    await expect(source.noteMetadata("note-1")).resolves.not.toHaveProperty("notebookId");
+  });
+
+  it("normalizes notebook id resolution failures from throwing then getters", async () => {
+    const database = createFakeLiveDatabase({ omitNotebookReference: true });
+    const notebooks = (database as unknown as { notebooks: { all: { ids: unknown } } }).notebooks;
+    (notebooks.all as { ids: () => object }).ids = () =>
+      Object.defineProperty({}, "then", {
+        get: () => {
+          throw new Error("private notebook ids then getter failure");
+        },
+      });
+    const source = flattenLiveDatabaseToReadOnly(database);
+
+    const failure = await source.noteMetadata("note-1").catch((error: unknown) => error);
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(String(failure)).not.toContain("private notebook ids then getter failure");
   });
 
   it("classifies stored HTML versus literal Markdown without returning content", async () => {
@@ -1179,6 +1279,51 @@ describe("Stage 3 production projection and sync gate", () => {
     );
     expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
     expect(String(failure)).not.toContain(privateDetail);
+  });
+
+  it("normalizes relation membership failures from throwing has getters", async () => {
+    const database = createFakeLiveDatabase();
+    Object.defineProperty(
+      (database as unknown as { relations: { from: () => object } }).relations,
+      "from",
+      {
+        configurable: true,
+        value: () =>
+          Object.defineProperty({}, "has", {
+            get: () => {
+              throw new Error("private has getter failure");
+            },
+          }),
+      },
+    );
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+    const failure = await readOnly.hasNoteInNotebook!("nb-1", "note-1").catch(
+      (error: unknown) => error,
+    );
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(String(failure)).not.toContain("private has getter failure");
+  });
+
+  it("normalizes relation membership failures from throwing then getters", async () => {
+    const database = createFakeLiveDatabase();
+    (
+      database as unknown as {
+        relations: { from: (reference: unknown, type: string) => unknown };
+      }
+    ).relations.from = () =>
+      Object.defineProperty({}, "then", {
+        get: () => {
+          throw new Error("private then getter failure");
+        },
+      });
+    const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+    const failure = await readOnly.hasNoteInNotebook!("nb-1", "note-1").catch(
+      (error: unknown) => error,
+    );
+    expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+    expect(String(failure)).not.toContain("private then getter failure");
   });
 
   it("falls back to root-only summaries when notebooks.breadcrumbs is absent", async () => {
