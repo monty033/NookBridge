@@ -21,11 +21,11 @@ and branch builds do not receive it.
 ## Publishing a release
 
 1. Merge the source change into Forgejo `main`.
-2. Create and push a version tag in Forgejo, for example:
+2. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md), for example:
 
    ```bash
-   git tag -a v1.2.6 -m 'NookBridge v1.2.6' <canonical-merge-sha>
-   git push upstream v1.2.6
+   git tag -a v0.1.0 -m 'NookBridge v0.1.0' <canonical-merge-sha>
+   git push upstream v0.1.0
    ```
 
 3. Forgejo Actions runs `.forgejo/workflows/linux-artifact.yml`.
