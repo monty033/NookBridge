@@ -118,7 +118,10 @@ Until then, the `0.x` line is an honest signal that users should expect change.
 2. Update `CHANGELOG.md` with user-visible changes and limitations.
 3. Run checks, typecheck, lint, formatting, build, and artifact verification.
 4. Merge the release-ready change into Forgejo `main`.
-5. Create `v<VERSION>` on the canonical merge commit.
-6. Push the tag and allow Forgejo Actions to build and publish the candidate.
-7. Verify the artifact manifest, checksums, release assets, and installer URL.
-8. Promote or announce the release only after the release gates pass.
+5. Wait for the terminal-success `main` runner preflight for that exact merge
+   commit. If the release changes the workflow or runner contract, first run a
+   `runner-test/<name>` branch preflight before merging.
+6. Create `v<VERSION>` on the canonical merge commit.
+7. Push the tag and allow Forgejo Actions to build and publish the candidate.
+8. Verify the artifact manifest, checksums, release assets, and installer URL.
+9. Promote or announce the release only after the release gates pass.

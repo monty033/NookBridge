@@ -138,8 +138,13 @@ Configure the `RELEASE_PUBLISH_TOKEN` Forgejo repository secret as documented
 in [Forgejo-to-GitHub release publishing](forgejo-github-release-publishing.md),
 then:
 
-1. Merge the reviewed commit on `main` and tag it `v$VERSION`.
-2. Push the tag to Forgejo. The workflow builds the artifact in the pinned
+1. Merge the reviewed commit on `main`.
+2. Wait for the terminal-success runner preflight for that exact `main` commit.
+   The preflight runs the complete artifact build and verifier without
+   publishing a release. If the change is release-sensitive, run the same gate
+   first on a `runner-test/<name>` branch before merging.
+3. Create and push the tag `v$VERSION` to Forgejo. The workflow repeats the
+   artifact build in the pinned
    CI/container environment:
 
    ```bash
@@ -157,6 +162,6 @@ then:
      --min-libstdcxx GLIBCXX_3.4.29
    ```
 
-3. The workflow creates or updates the GitHub release and uploads the artifact,
+4. The workflow creates or updates the GitHub release and uploads the artifact,
    `SHA256SUMS`, `scripts/install-systemd.sh`, `scripts/verify-linux-artifact.sh`,
    and the version-pinned bootstrap as `install.sh`.
