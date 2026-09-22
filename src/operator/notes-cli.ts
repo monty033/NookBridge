@@ -542,7 +542,10 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
         if (
           !Array.isArray(result.handles) ||
           result.handles.length > 100 ||
-          !result.handles.every((handle) => isBoundedOpaqueValue(handle))
+          !result.handles.every((handle) => isBoundedOpaqueValue(handle)) ||
+          !Array.isArray(result.unresolvedHandles) ||
+          result.unresolvedHandles.length > 100 ||
+          !result.unresolvedHandles.every((handle) => isBoundedOpaqueValue(handle))
         ) {
           return "nookctl notes: error\n";
         }
@@ -550,6 +553,8 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
           "nookctl notes: operations",
           `count: ${result.handles.length}`,
           ...result.handles.map((handle) => `operation: ${handle}`),
+          `unresolved-count: ${result.unresolvedHandles.length}`,
+          ...result.unresolvedHandles.map((handle) => `unresolved-operation: ${handle}`),
           "",
         ].join("\n");
       }
