@@ -397,6 +397,9 @@ describe("Linux artifact manifest contract", () => {
     const artifactStep = buildJob?.steps?.find(
       (step) => step.name === "Build and verify x86_64 glibc artifact",
     );
+    const preflightStep = buildJob?.steps?.find(
+      (step) => step.name === "Require successful main runner preflight",
+    );
     const assetsStep = buildJob?.steps?.find(
       (step) => step.name === "Prepare GitHub release assets",
     );
@@ -406,6 +409,7 @@ describe("Linux artifact manifest contract", () => {
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
     expect(buildJob?.if).toContain("!startsWith(github.ref, 'refs/tags/promote-v')");
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
+    expect(preflightStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(artifactStep?.if).toBe(
       "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
     );
@@ -428,6 +432,9 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("refs/heads/runner-test/");
     expect(raw).toContain("github.ref == 'refs/heads/main'");
     expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
+    expect(raw).toContain("run.prettyref === 'main'");
+    expect(raw).toContain("run.commit_sha === process.env.GITHUB_SHA");
+    expect(raw).toContain("run.status === 'success'");
     expect(raw).toContain("unexpected artifact-build ref");
     expect(raw).toContain("if: startsWith(github.ref, 'refs/tags/v')");
   });

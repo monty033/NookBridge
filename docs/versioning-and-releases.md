@@ -73,11 +73,12 @@ The release is deliberately split into four gates:
    and source commit, then clears the prerelease flag and reads the release back.
 
 Do not create a release tag until the `main` preflight for the exact merge commit
-is terminal-success. The tag workflow repeats the artifact build as a final
-release-local gate, so a release cannot publish assets if the runner or artifact
-verification fails. The preflight and candidate jobs use the same static glibc
-discovery, helper compilation, packaging, and verifier commands; only the
-publishing steps are tag-only.
+is terminal-success. The tag workflow fails closed unless it can read that
+successful `main` run for the tagged commit from the Forgejo Actions API. It then
+repeats the artifact build as a final release-local gate, so a release cannot
+publish assets if the runner or artifact verification fails. The preflight and
+candidate jobs use the same static glibc discovery, helper compilation, packaging,
+and verifier commands; only the publishing steps are tag-only.
 
 The artifact workflow must fail loudly before compilation when a required runner
 input is missing. Static glibc discovery accounts for Nix store hash prefixes

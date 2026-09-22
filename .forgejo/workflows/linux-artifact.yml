@@ -114,6 +114,34 @@ jobs:
       - name: Prepare production dependencies
         run: npm prune --omit=dev
 
+      - name: Require successful main runner preflight
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          test -n "${GITHUB_TOKEN:-}"
+          runs_json="${RUNNER_TEMP:-/tmp}/nookbridge-runs.json"
+          curl -fsS \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/json' \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs?limit=100" \
+            -o "$runs_json"
+          GITHUB_SHA="$GITHUB_SHA" RUNS_JSON="$runs_json" node <<'NODE'
+          const fs = require('fs');
+          const runs = JSON.parse(fs.readFileSync(process.env.RUNS_JSON, 'utf8'));
+          const entries = Array.isArray(runs) ? runs : (runs.workflow_runs ?? runs.runs ?? []);
+          const preflight = entries.some((run) =>
+            run.workflow_id === 'linux-artifact.yml' &&
+            run.event === 'push' &&
+            run.prettyref === 'main' &&
+            run.commit_sha === process.env.GITHUB_SHA &&
+            run.status === 'success'
+          );
+          if (!preflight) {
+            console.error('successful main runner preflight missing for tagged commit');
+            process.exit(1);
+          }
+          NODE
+
       - name: Build and verify x86_64 glibc artifact
         if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'
         run: |
