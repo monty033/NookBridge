@@ -11,7 +11,7 @@ set -euo pipefail
 umask 077
 
 readonly INSTALLER_NAME='install-from-github.sh'
-readonly RELEASE_VERSION='0.1.1'
+readonly RELEASE_VERSION='0.1.2'
 readonly RELEASE_BASE_DEFAULT="https://github.com/monty033/NookBridge/releases/download/v${RELEASE_VERSION}"
 readonly ARTIFACT_BASENAME="nookbridge-v${RELEASE_VERSION}-linux-x64-gnu.tar.gz"
 readonly INSTALL_SYSTEMD_BASENAME='install-systemd.sh'

@@ -364,6 +364,10 @@ describe("Linux artifact manifest contract", () => {
     const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
 
     expect(workflow).toContain('STATIC_GLIBC="$(find /nix/store');
+    expect(workflow).toContain("-name '*-glibc-*-static'");
+    expect(workflow).not.toContain("-name 'glibc-*-static'");
+    expect(workflow).toContain("static glibc output not found");
+    expect(workflow).toContain('test -f "$STATIC_GLIBC/lib/libc.a"');
     expect(workflow).toContain('cc -O2 -static -L"$STATIC_GLIBC/lib"');
     expect(workflow).toContain('readelf -l "$HELPER"');
     expect(workflow).toContain("grep -E 'INTERP'");

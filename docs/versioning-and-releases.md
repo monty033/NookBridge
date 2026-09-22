@@ -53,6 +53,38 @@ The historical `v1.2.6` tag is outside this policy. If it is retired before
 `v0.1.0`, it must not be reused or repointed. The new release line starts at
 `v0.1.0` on the canonical merge commit selected for that release.
 
+## Reliable release execution
+
+The release is deliberately split into three gates:
+
+1. **Merge gate:** the release PR contains the synchronized version surfaces,
+   changelog, installer pin, release fixtures, and workflow regression coverage.
+2. **Candidate gate:** pushing `v<VERSION>` runs the artifact build, verifies the
+   manifest against the tag commit, publishes the exact five GitHub assets, and
+   creates a prerelease candidate. The candidate must not move the `latest`
+   installer path.
+3. **Promotion gate:** after clean-target acceptance, push `promote-v<VERSION>`.
+   The promotion job downloads the candidate artifact, re-verifies its checksum
+   and source commit, then clears the prerelease flag and reads the release back.
+
+The artifact workflow must fail loudly before compilation when a required runner
+input is missing. Static glibc discovery accounts for Nix store hash prefixes
+(`*-glibc-*-static`) and prints the discovered path or a diagnostic listing. The
+workflow test must assert this exact pattern; a green source suite is not enough
+if the runner cannot produce the artifact.
+
+A public tag is immutable. If a tag-triggered workflow fails, fix the workflow on
+`main` and increment the patch version. Do not move or reuse the failed tag, and
+do not manually declare the release complete while its asset set is incomplete.
+A release is published only when all of these agree:
+
+- the canonical tag target and merged `main` commit;
+- a terminal successful tag workflow;
+- the five expected assets: `install.sh`, `install-systemd.sh`,
+  `verify-linux-artifact.sh`, `SHA256SUMS`, and the versioned Linux artifact;
+- the artifact manifest source commit and checksum;
+- the mirrored GitHub release and public download URLs.
+
 ## When NookBridge reaches 1.0
 
 `1.0.0` should wait until these conditions are true:
