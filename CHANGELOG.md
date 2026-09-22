@@ -3,6 +3,20 @@
 All notable user-visible changes are recorded here. The project is pre-alpha;
 release entries describe the supported boundary at the time of the release.
 
+## [0.1.1] - 2026-09-22
+
+Patch release correcting the portable Linux artifact build and Forgejo runner
+integration.
+
+### Fixed
+
+- Added the static glibc toolchain required to build the operator
+  peer-credential helper on the NixOS Forgejo runner.
+- Removed the unsafe dynamically linked fallback that could embed `/nix/store`
+  paths in portable artifacts.
+- Added an ELF portability check rejecting helpers with a dynamic interpreter.
+- Preserved artifact provenance, checksum, and source-commit verification.
+
 ## [0.1.0] - 2026-09-22
 
 First intentional pre-1.0 release line. This release is usable for the
@@ -30,4 +44,5 @@ support boundary remain subject to change.
 - Sync and mutation support remain narrowly scoped; do not infer general account
   or cross-device support from the validated scenarios.
 
+[0.1.1]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.1
 [0.1.0]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.0
