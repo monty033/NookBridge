@@ -80,6 +80,11 @@ publish assets if the runner or artifact verification fails. The preflight and
 candidate jobs use the same static glibc discovery, helper compilation, packaging,
 and verifier commands; only the publishing steps are tag-only.
 
+The preflight lookup uses a separate read-only `RELEASE_PREFLIGHT_TOKEN`; the
+source-controlled install, rebuild, test, and packaging commands do not receive
+the repository `GITHUB_TOKEN`. The lookup paginates the Actions API instead of
+assuming the valid run is among the newest 100 records.
+
 The artifact workflow must fail loudly before compilation when a required runner
 input is missing. Static glibc discovery accounts for Nix store hash prefixes
 (`*-glibc-*-static`) and prints the discovered path or a diagnostic listing. The

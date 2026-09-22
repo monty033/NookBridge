@@ -14,6 +14,7 @@ jobs:
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
@@ -57,6 +58,8 @@ jobs:
           git checkout -q --detach FETCH_HEAD
 
       - name: Verify npm registry access
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           node --version
@@ -68,6 +71,8 @@ jobs:
             --fetch-retries=0
 
       - name: Install packages without lifecycle scripts
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           npm ci \
@@ -79,6 +84,8 @@ jobs:
             --timing
 
       - name: Rebuild native and lifecycle dependencies
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           npm rebuild \
@@ -91,6 +98,8 @@ jobs:
 
       - name: Report npm diagnostics
         if: always()
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           for log_path in /tmp/nookbridge-npm-cache/_logs/*; do
@@ -104,6 +113,8 @@ jobs:
           done
 
       - name: Build and test
+        env:
+          GITHUB_TOKEN: ""
         run: |
           npm run build
           npm test
@@ -112,38 +123,24 @@ jobs:
           npm run format:check
 
       - name: Prepare production dependencies
+        env:
+          GITHUB_TOKEN: ""
         run: npm prune --omit=dev
 
       - name: Require successful main runner preflight
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PREFLIGHT_READ_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
         run: |
           set -eu
-          test -n "${GITHUB_TOKEN:-}"
-          runs_json="${RUNNER_TEMP:-/tmp}/nookbridge-runs.json"
-          curl -fsS \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H 'Accept: application/json' \
-            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs?limit=100" \
-            -o "$runs_json"
-          GITHUB_SHA="$GITHUB_SHA" RUNS_JSON="$runs_json" node <<'NODE'
-          const fs = require('fs');
-          const runs = JSON.parse(fs.readFileSync(process.env.RUNS_JSON, 'utf8'));
-          const entries = Array.isArray(runs) ? runs : (runs.workflow_runs ?? runs.runs ?? []);
-          const preflight = entries.some((run) =>
-            run.workflow_id === 'linux-artifact.yml' &&
-            run.event === 'push' &&
-            run.prettyref === 'main' &&
-            run.commit_sha === process.env.GITHUB_SHA &&
-            run.status === 'success'
-          );
-          if (!preflight) {
-            console.error('successful main runner preflight missing for tagged commit');
-            process.exit(1);
-          }
-          NODE
+          test -n "${PREFLIGHT_READ_TOKEN:-}"
+          PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs" \
+            node scripts/check-forgejo-preflight.mjs
 
       - name: Build and verify x86_64 glibc artifact
         if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           case "$GITHUB_REF" in
@@ -208,6 +205,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           VERSION="${RELEASE_TAG#v}"
@@ -233,6 +231,7 @@ jobs:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "$RELEASE_PUBLISH_TOKEN"
@@ -343,6 +342,7 @@ jobs:
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           PROMOTE_REF: ${{ github.ref_name }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "$RELEASE_PUBLISH_TOKEN"

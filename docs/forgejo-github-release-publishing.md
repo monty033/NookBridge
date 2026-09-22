@@ -14,9 +14,18 @@ Store it in the Forgejo repository secret:
 RELEASE_PUBLISH_TOKEN
 ```
 
-Do not put the token in the repository, workflow YAML, a commit, or a chat
-message. The secret is used only by the tag-triggered release job; pull request
-and branch builds do not receive it.
+Create a separate read-only token that can list Actions runs for the canonical
+repository, with no write or release permissions. Store it as:
+
+```text
+RELEASE_PREFLIGHT_TOKEN
+```
+
+Do not put either token in the repository, workflow YAML, a commit, or a chat
+message. The publish token is used only by the tag-triggered publishing steps;
+the read-only preflight token is used only to verify the prior `main` run. Pull
+request and branch builds do not receive either secret, and source-controlled
+build/test steps explicitly receive an empty `GITHUB_TOKEN`.
 
 ## Publishing a release
 

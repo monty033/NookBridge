@@ -387,7 +387,7 @@ describe("Linux artifact manifest contract", () => {
         string,
         {
           if?: string;
-          steps?: Array<{ if?: string; name?: string }>;
+          steps?: Array<{ if?: string; name?: string; env?: Record<string, string> }>;
         }
       >;
     };
@@ -413,6 +413,7 @@ describe("Linux artifact manifest contract", () => {
     expect(artifactStep?.if).toBe(
       "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
     );
+    expect(artifactStep?.env?.GITHUB_TOKEN).toBe("");
     expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(publishStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
 
@@ -432,9 +433,12 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("refs/heads/runner-test/");
     expect(raw).toContain("github.ref == 'refs/heads/main'");
     expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
-    expect(raw).toContain("run.prettyref === 'main'");
-    expect(raw).toContain("run.commit_sha === process.env.GITHUB_SHA");
-    expect(raw).toContain("run.status === 'success'");
+    expect(raw).toContain("PREFLIGHT_READ_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}");
+    expect(raw).toContain(
+      'PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs"',
+    );
+    expect(raw).toContain("node scripts/check-forgejo-preflight.mjs");
+    expect(raw).toContain('GITHUB_TOKEN: ""');
     expect(raw).toContain("unexpected artifact-build ref");
     expect(raw).toContain("if: startsWith(github.ref, 'refs/tags/v')");
   });
