@@ -588,7 +588,7 @@ export function createOperatorWriteRuntime(
       } catch {
         // Preserve the categorical failure.
       }
-      return fail("service_unavailable");
+      return fail("service_unavailable", record.handle);
     }
     audit("edit.committed");
     return {

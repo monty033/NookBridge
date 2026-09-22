@@ -27,7 +27,7 @@ export type OperatorSocketErrorCode = RpcErrorCode;
 
 export type OperatorSocketResult =
   | Readonly<{ ok: true; result: RpcResult }>
-  | Readonly<{ ok: false; code: OperatorSocketErrorCode }>;
+  | Readonly<{ ok: false; code: OperatorSocketErrorCode; operationHandle?: string }>;
 
 export type OperatorSocketConnect = (path: string) => Promise<Socket>;
 
@@ -159,7 +159,14 @@ function decodeResponse(frame: Buffer, expectedId: string): OperatorSocketResult
     const error = record.error;
     if (error !== null && typeof error === "object" && !Array.isArray(error)) {
       const code = (error as { code?: unknown }).code;
-      if (typeof code === "string" && isRpcErrorCode(code)) return { ok: false, code };
+      const operationHandle = (error as { operationHandle?: unknown }).operationHandle;
+      if (typeof code === "string" && isRpcErrorCode(code)) {
+        return {
+          ok: false,
+          code,
+          ...(typeof operationHandle === "string" ? { operationHandle } : {}),
+        };
+      }
     }
     return { ok: false, code: "service_unavailable" };
   }
