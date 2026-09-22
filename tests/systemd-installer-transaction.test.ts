@@ -55,6 +55,10 @@ function createArtifact(): { artifact: string; checksum: string } {
   writeFileSync(join(source, "package.json"), '{"name":"fixture"}\n');
   writeFileSync(join(source, "package-lock.json"), '{"lockfileVersion":3}\n');
   writeFileSync(join(source, "LICENSE"), "fixture license\n");
+  // The portable artifact must ship the operator peer-credential helper.
+  const peercredHelper = join(root, "operator-peercred-helper");
+  writeFileSync(peercredHelper, "#!/bin/sh\nexit 0\n");
+  chmodSync(peercredHelper, 0o755);
   writeFileSync(
     runtime,
     '#!/bin/sh\ncase "$1" in --version) printf "%s\\n" v22.23.2 ;; -p) printf "%s\\n" 127 ;; esac\n',
@@ -71,6 +75,8 @@ function createArtifact(): { artifact: string; checksum: string } {
     source,
     "--node-runtime",
     runtime,
+    "--operator-peercred-helper",
+    peercredHelper,
     "--output-dir",
     output,
     "--version",
@@ -204,6 +210,39 @@ describe("generic systemd installer — health rollback and retention", () => {
     );
     expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-runtime-check")).isSymbolicLink()).toBe(
       true,
+    );
+  });
+
+  /**
+   * Regression: `systemctl enable --now` is a no-op for an already-running
+   * unit.  Using it on the upgrade path left the *previous* release's process
+   * serving while `current` and the ledger advanced to the new version, and
+   * the health gate then passed against that stale process.  An upgrade must
+   * restart the daemon, and it must do so before the health gate runs.
+   */
+  it("restarts the daemon on upgrade, before the health gate", () => {
+    const ctx = createInstallerFakeRoot();
+    fakeRoots.push(ctx);
+    const { artifact, checksum } = createArtifact();
+    mkdirSync(join(ctx.optDir, "releases", "0.9.0", "bin"), { recursive: true });
+    symlinkSync("releases/0.9.0", join(ctx.optDir, "current"));
+
+    const logPath = join(ctx.rootDir, "invocations.log");
+    const result = spawnSync(
+      "bash",
+      [installer, "upgrade", "--artifact", artifact, "--checksum-file", checksum],
+      {
+        cwd: repositoryRoot,
+        env: { ...ctx.env, NOOKBRIDGE_FAKE_LOG: logPath },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status).toBe(0);
+
+    const invocations = readFileSync(logPath, "utf8");
+    expect(invocations).toContain("systemctl restart nookd.service");
+    expect(invocations.indexOf("systemctl restart nookd.service")).toBeLessThan(
+      invocations.indexOf("nookbridge-health"),
     );
   });
 });

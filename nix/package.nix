@@ -2,6 +2,7 @@
 , buildNpmPackage
 , gnumake
 , makeWrapper
+, musl
 , nodejs_22
 , openssl
 , pkg-config
@@ -22,6 +23,8 @@ buildNpmPackage rec {
   npmRebuildFlags = [ "--ignore-scripts" ];
 
   preBuild = ''
+    ${musl}/bin/musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+      native/operator-peercred.c -o operator-peercred-helper
     substituteInPlace node_modules/better-sqlite3-multiple-ciphers/src/better_sqlite3.hpp \
       --replace-fail '#include <sqlite3.h>' '#include "../deps/sqlite3/sqlite3.h"'
     npm rebuild better-sqlite3-multiple-ciphers --build-from-source
@@ -54,6 +57,7 @@ buildNpmPackage rec {
     mkdir -p "$out/libexec/nookbridge"
     cp -r dist "$out/libexec/nookbridge/"
     cp -r node_modules "$out/libexec/nookbridge/"
+    install -Dm755 operator-peercred-helper "$out/libexec/nookbridge/operator-peercred-helper"
     install -Dm644 package.json "$out/libexec/nookbridge/package.json"
     install -Dm644 LICENSE "$out/share/licenses/nookbridge/LICENSE"
 

@@ -12,6 +12,7 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; under review as source PR #125. The dedicated lock proof and the read-only sync proof remain open — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
@@ -37,6 +38,51 @@ does not close the broader production-MVP release gate. The remaining
 production-shaped atomicity, recovery, privileged-scan, outsider-boundary,
 long-duration stress, and dependency/license sign-off work is tracked in the
 [implementation plan](implementation-plan-v1.5.md#1314-fresh-astra-re-baseline--current-production-mvp-blockers).
+
+## Operator notes surface — 2026-09-21
+
+The operator `notes` surface is implemented on the sole daemon and live-validated
+on the reference Debian host:
+
+- A note created through `nookctl notes create --approve-edit` reads back as real
+  markdown — heading, inline bold and code, and both checklist states render.
+  Before this work every content block came back opaque, so the write path could
+  create a note the read path could neither display nor edit.
+- A CRLF document creates, where it previously failed input validation.
+- A locked note returns a categorical `locked` refusal while an unlocked note
+  beside it still returns its projection.
+- Nothing is uploaded *by this surface*: the operator socket has no `sync` verb, and
+  every sync run during this work used the fetch-only read-only path.
+
+**What this does not prove.** An earlier statement here claimed operator-created
+notes are never uploaded. **That was wrong.** Operator creates are recorded with
+`pendingSync: true`, and the remote executor invokes upstream `{ type: "full" }`,
+which includes a send phase — so a later daemon-side full sync would drain that
+queue. The accurate position is "not automatically uploaded", not "may never be
+uploaded". This is tracked as an open defect, not a closed boundary.
+
+Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
+categorical `vault_locked` for a locked note and `permission_denied` for the
+unlocked control — proven live on 1.3.9 — but the daemon still records
+`peerCredentials: "unknown"` for the peer, and the proof's own path resolution
+collapses every failure other than `not_found` into the generic code. The
+read-only sync proof reports a pass against an empty store, because its state
+directory is derived from the working directory when the environment variable is
+unset.
+
+An independent read-only review of source PR #125 returned `REQUEST_CHANGES`
+twice. Round 1 raised seven findings; four are now fixed — list-class semantics
+(`f119808`), inline attribute strictness (`f31e017`), the sync request shape
+(`053c322`), and the lock category on the write paths (`52c0231`, with the
+remaining paths covered in `4da0fe9`). One deferral was upheld (unknown tags are
+separable from this PR). One was corrected as documentation rather than code
+(creates are not automatically uploaded). One was reclassified: authorization is
+not notebook- or lock-aware, which is a defect against the frozen T00
+requirement rather than a future improvement, and it blocks the merge. Round 2
+additionally found that `categoricalCode` trusted arbitrary error text
+(`03ebb32`) and that the operator vocabulary header contradicted its own
+constant; the shape check from round 1 was also found evadable and is now
+un-evadable (`2f9b66b`).
 
 ## Reading status claims safely
 

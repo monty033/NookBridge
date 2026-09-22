@@ -419,4 +419,71 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       ).toThrow();
     });
   });
+
+  describe("inline mark rendering (P1-7 follow-up)", () => {
+    const wrap = (inner: string) => `<div data-type="document">${inner}</div>`;
+
+    // The gate treats `**bold**`, `*italic*` and `` `code` `` as supported
+    // constructs, so the renderer has to emit the tags the projection maps
+    // back (see the canonical mark→tag pair in note-document-native.ts).
+    // Emitting the escaped delimiters instead would make the gate's promise
+    // a lie: the note would be created carrying literal asterisks.
+    it("renders bold as the tag the projection reads back", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a **bold** word");
+      expect(encoded.data).toBe(wrap("<p>a <strong>bold</strong> word</p>"));
+    });
+
+    it("renders italic as the tag the projection reads back", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a *slanted* word");
+      expect(encoded.data).toBe(wrap("<p>a <em>slanted</em> word</p>"));
+    });
+
+    it("renders code as the tag the projection reads back", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("call `now()` here");
+      expect(encoded.data).toBe(wrap("<p>call <code>now()</code> here</p>"));
+    });
+
+    it("leaves emphasis markers inside a code span literal", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("`a *b* c`");
+      expect(encoded.data).toBe(wrap("<p><code>a *b* c</code></p>"));
+    });
+
+    it("still escapes text that is not an inline mark", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a & b");
+      expect(encoded.data).toBe(wrap("<p>a &amp; b</p>"));
+    });
+
+    it("renders marks inside list items and checklist items", () => {
+      const list = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- **bold** item");
+      expect(list.data).toBe(wrap("<ul><li><strong>bold</strong> item</li></ul>"));
+
+      const checklist = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [x] **bold** done");
+      expect(checklist.data).toContain("<strong>bold</strong> done");
+    });
+
+    // An asterisk that opens or closes onto whitespace is not emphasis:
+    // `2 * 3 * 4` is arithmetic and `a ** b ** c` is prose.  Detection and
+    // rendering share one pattern so the gate cannot accept a mark the
+    // renderer would leave literal.
+    it("leaves space-flanked asterisks literal", () => {
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("2 * 3 * 4").data).toBe(
+        wrap("<p>2 * 3 * 4</p>"),
+      );
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a ** b ** c").data).toBe(
+        wrap("<p>a ** b ** c</p>"),
+      );
+      expect(detectMarkdownConstructs("2 * 3 * 4", MAX_BYTES)).not.toContain("inline-italic");
+      expect(detectMarkdownConstructs("a ** b ** c", MAX_BYTES)).not.toContain("inline-bold");
+      expect(detectMarkdownConstructs("*slanted*", MAX_BYTES)).toContain("inline-italic");
+    });
+
+    it("lets emphasis wrap a code span", () => {
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a *`code`* b").data).toBe(
+        wrap("<p>a <em><code>code</code></em> b</p>"),
+      );
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a **`code`** b").data).toBe(
+        wrap("<p>a <strong><code>code</code></strong> b</p>"),
+      );
+    });
+  });
 });

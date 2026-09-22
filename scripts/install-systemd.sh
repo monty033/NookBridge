@@ -8,6 +8,10 @@ readonly SERVICE_NAME='nookd.service'
 readonly SERVICE_USER='nookbridge'
 readonly SERVICE_GROUP='nookbridge-clients'
 readonly PRIVATE_GROUP='nookbridge'
+# The capability group for mutating operator methods.  Membership is what allows
+# apply-edit / apply-undo / create over the operator socket; the read-only client
+# group deliberately does not confer it.  Grant it deliberately.
+readonly OPERATOR_GROUP='nookbridge-operators'
 readonly SOCKET_PATH='/run/nookbridge/nookbridge.sock'
 
 OPT_DIR="${NOOKBRIDGE_OPT_DIR:-/opt/nookbridge}"
@@ -97,6 +101,10 @@ ensure_service_identity() {
   [ -n "${NOOKBRIDGE_FAKE_ROOT:-}" ] && return
   getent group "$PRIVATE_GROUP" >/dev/null 2>&1 || groupadd --system "$PRIVATE_GROUP"
   getent group "$SERVICE_GROUP" >/dev/null 2>&1 || groupadd --system "$SERVICE_GROUP"
+  # The operator capability group must exist even though nobody is added to it by
+  # default: the daemon's authorization model names it, so a stock install that
+  # omitted it would have a mutation gate no operator could satisfy.
+  getent group "$OPERATOR_GROUP" >/dev/null 2>&1 || groupadd --system "$OPERATOR_GROUP"
   if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --home-dir "$STATE_DIR" --no-create-home \
       --shell /usr/sbin/nologin --gid "$PRIVATE_GROUP" "$SERVICE_USER"
@@ -489,7 +497,13 @@ install_artifact() {
   install_wrappers
   systemctl daemon-reload >/dev/null 2>&1
   if [ -n "$transaction_previous_target" ]; then
-    systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
+    # An upgrade replaces the release behind `current`.  `enable --now` only
+    # *starts* an inactive unit, so against an already-running daemon it is a
+    # no-op: the previous release's process would keep serving while the ledger
+    # claims the new version, and the health gate would then pass against that
+    # stale process.  Restart explicitly, then gate.
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1
     run_health_gate
   else
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1

@@ -72,47 +72,15 @@ const OPAQUE_VALUE_MAX_LENGTH = 128;
  * than the bounded bodies it queries against.
  */
 export const MAX_NOTES_QUERY_BYTES = 4 * 1024 * 1024;
-/** Maximum edit envelope size, including a bounded JSON token field. */
-export const MAX_NOTES_EDIT_STDIN_BYTES = MAX_NOTES_QUERY_BYTES + 1024;
+/** Maximum Markdown body emitted by `notes get`. */
+export const MAX_NOTES_VIEW_MARKDOWN_BYTES = 256 * 1024;
 
-export type NotesEditStdin = Readonly<{ content: string; undoToken: string }>;
-
-export function parseNotesEditStdin(value: unknown): NotesEditStdin | undefined {
-  if (
-    typeof value !== "string" ||
-    new TextEncoder().encode(value).byteLength > MAX_NOTES_EDIT_STDIN_BYTES
-  ) {
-    return undefined;
-  }
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const record = parsed as Record<string, unknown>;
-    if (
-      Object.keys(record).length !== 2 ||
-      typeof record.content !== "string" ||
-      typeof record.undoToken !== "string"
-    ) {
-      return undefined;
-    }
-    if (new TextEncoder().encode(record.content).byteLength > MAX_NOTES_QUERY_BYTES)
-      return undefined;
-    if (!isBoundedOpaqueValue(record.undoToken)) return undefined;
-    return { content: record.content, undoToken: record.undoToken };
-  } catch {
-    return undefined;
-  }
-}
-
-export function parseNotesUndoStdin(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const token = value.endsWith("\r\n")
-    ? value.slice(0, -2)
-    : value.endsWith("\n")
-      ? value.slice(0, -1)
-      : value;
-  return isBoundedOpaqueValue(token) ? token : undefined;
-}
+// There is deliberately no edit-envelope or undo-token parser here.  The
+// frozen transport forbids a body or token crossing argv, env or stdin:
+// `notes edit` sources its body from the operator's editor against a
+// daemon-captured preimage, and `notes undo` selects a daemon-minted
+// opaque operation handle interactively.  A parser for either shape
+// would be an invitation to reintroduce the forbidden path.
 
 // ---------------------------------------------------------------------------
 // Forbidden carriers.
@@ -186,7 +154,10 @@ const FORBIDDEN_ENV_VARS: readonly string[] = [
 // Bounded opaque-value grammar.
 //
 // Opaque cursor and handle values follow `<prefix>_<token>`:
-//   - prefix: 3-4 lowercase ASCII letters, then a single underscore;
+//   - prefix: 1-4 lowercase ASCII letters, then a single underscore
+//     (matching the families the daemon actually mints: `h_` note
+//     handles, `op_` operation handles, `cur_` cursors, `not_`/`crs_`
+//     client handles);
 //   - token: 4..124 ASCII letters/digits/underscores/hyphens;
 //   - total length: 1..128 (enforced by `OPAQUE_VALUE_MAX_LENGTH`).
 //
@@ -195,9 +166,13 @@ const FORBIDDEN_ENV_VARS: readonly string[] = [
 // `deadbeefcafe`), raw revision tokens (`rev_...`), and any value
 // containing whitespace, control characters, or punctuation beyond
 // `_` and `-`.
+//
+// The prefix width must cover the daemon's own short families.  An
+// earlier revision required 3-4 letters, which silently rejected every
+// real `h_` note handle and `op_` operation handle the daemon minted.
 // ---------------------------------------------------------------------------
 
-const OPAQUE_VALUE_PATTERN = /^[a-z][a-z0-9]{2,3}_[A-Za-z0-9_-]{4,124}$/;
+const OPAQUE_VALUE_PATTERN = /^[a-z][a-z0-9]{0,3}_[A-Za-z0-9_-]{4,124}$/;
 
 /**
  * `true` iff the bounded opaque value uses a reserved upstream token
@@ -238,11 +213,26 @@ export type ParsedNotesCommand =
       handle: string;
     }>
   | Readonly<{
+      kind: "create";
+      subcommand: "create";
+      /**
+       * Optional bounded notebook selector.  The daemon owns the notebook
+       * hierarchy and resolves it; no title or body is ever accepted from
+       * argv, env or stdin.
+       */
+      notebookId?: string;
+    }>
+  | Readonly<{
       kind: "edit";
       subcommand: "edit";
       handle: string;
     }>
-  | Readonly<{ kind: "undo"; subcommand: "undo" }>;
+  | Readonly<{
+      kind: "undo";
+      subcommand: "undo";
+      /** `status`/`list` print pending operations; absent means interactive. */
+      selector?: "status" | "list";
+    }>;
 
 export type ParseNotesCommandResult =
   | Readonly<{ kind: "parsed"; command: ParsedNotesCommand }>
@@ -269,7 +259,9 @@ export type BoundedNoteMetadata = Readonly<{
 /** Bounded content returned by `notes get`. */
 export type BoundedNoteContent = Readonly<{
   /** Safe display label (never a path or raw id). */
-  readonly label: string;
+  readonly label?: string;
+  /** Bounded Markdown body for operator-only `notes get`. */
+  readonly markdown?: string;
   /** Bounded size in bytes; never reveals raw body bytes. */
   readonly bytes: number;
 }>;
@@ -284,6 +276,23 @@ export type NotesCategoricalResult =
   | Readonly<{ kind: "empty" }>
   | Readonly<{ kind: "note"; content: BoundedNoteContent }>
   | Readonly<{ kind: "updated" }>
+  /**
+   * The operator saved without changing anything.  Distinct from
+   * `updated` on purpose: no write was applied and no undo record was
+   * created, so reporting an update would be a small lie.
+   */
+  | Readonly<{ kind: "unchanged" }>
+  /**
+   * A note was created.  Categorical on purpose: the derived title and the
+   * daemon's note id stay behind the boundary.
+   */
+  | Readonly<{ kind: "created" }>
+  /** Bounded list of pending undo operations, as opaque operation handles. */
+  | Readonly<{
+      kind: "operations";
+      handles: readonly string[];
+      unresolvedHandles: readonly string[];
+    }>
   | Readonly<{ kind: "undone" }>
   | Readonly<{ kind: "conflict" }>
   | Readonly<{ kind: "denied" }>
@@ -326,12 +335,29 @@ export interface NotesCommandRuntime {
     readonly limit?: number;
   }) => Promise<NotesCategoricalResult>;
   readonly get: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
-  readonly edit: (command: {
-    readonly handle: string;
-    readonly content: string;
-    readonly undoToken: string;
-  }) => Promise<NotesCategoricalResult>;
-  readonly undo: (command: { readonly token: string }) => Promise<NotesCategoricalResult>;
+  /**
+   * Bounded edit.  The body does NOT cross this interface: the runtime
+   * captures the trusted preimage from the daemon, runs the operator's
+   * editor locally, and applies the result.  No body, title, id or
+   * token bytes are ever accepted from argv, env or stdin.
+   */
+  readonly edit: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
+  /**
+   * Bounded create.  The body does NOT cross this interface: the runtime
+   * runs the operator's editor over an empty document, derives the title
+   * from its first level-1 heading (D11), and creates the note with the
+   * heading retained in the body.  No body or title bytes are ever accepted
+   * from argv, env or stdin — only the optional notebook selector.
+   */
+  readonly create: (command: { readonly notebookId?: string }) => Promise<NotesCategoricalResult>;
+  /** Pending undo operations as opaque operation handles (no note reference). */
+  readonly operations: () => Promise<NotesCategoricalResult>;
+  /**
+   * Undo a prior edit by its daemon-minted opaque operation handle.
+   * The daemon resolves the note and the guarding revision from its own
+   * committed record, so no note id or revision crosses the boundary.
+   */
+  readonly undo: (command: { readonly operationHandle: string }) => Promise<NotesCategoricalResult>;
 }
 
 /**
@@ -381,10 +407,20 @@ export type RunNotesCommandOptions = Readonly<{
    * without the runtime ever being constructed.
    */
   readonly searchQuery?: unknown;
-  /** Bounded JSON edit envelope read from stdin. */
-  readonly editInput?: unknown;
-  /** Bounded opaque undo token read from stdin. */
-  readonly undoInput?: unknown;
+  /**
+   * Interactive selection seam for a bare `notes undo`.
+   *
+   * Selection is by daemon-minted opaque operation handle, never by a
+   * token: `tty` must be true only when BOTH stdin and stdout are
+   * interactive terminals, and `select` receives the bounded handle list
+   * and returns the chosen handle (or `undefined` on cancel).  With no
+   * usable seam the bare form fails categorical `invalid-input` rather
+   * than guessing which operation to reverse.
+   */
+  readonly interactive?: Readonly<{
+    readonly tty: boolean;
+    readonly select?: (handles: readonly string[]) => Promise<string | undefined>;
+  }>;
   /**
    * Constructed ONLY after the parser, the credential-carrier policy,
    * and the explicit approval gate have all passed.
@@ -409,27 +445,36 @@ export function formatNotesHelp(): string {
     "  nookctl notes help",
     "  nookctl notes browse [--cursor <opaque-cursor>] [--limit <1..100>]",
     "  nookctl notes search --stdin [--cursor <opaque-cursor>] [--limit <1..100>]",
-    "  nookctl notes get --handle <opaque-handle>",
-    `  nookctl notes edit --handle <opaque-handle> ${APPROVE_EDIT_FLAG} --stdin`,
-    `  nookctl notes undo ${APPROVE_EDIT_FLAG} --stdin`,
+    `  nookctl notes get --handle <opaque-handle>`,
+    `  nookctl notes create ${APPROVE_EDIT_FLAG} [--notebook-id <id>]`,
+    `  nookctl notes edit --handle <opaque-handle> ${APPROVE_EDIT_FLAG}`,
+    `  nookctl notes undo ${APPROVE_EDIT_FLAG} [--status|--list]`,
     "",
     "Options:",
     "  --cursor <opaque-cursor>   pagination cursor from a prior `notes` page",
     "  --limit  <1..100>          bounded page size",
     "  --handle <opaque-handle>   opaque note handle from `notes browse`/`search`",
-    `  ${APPROVE_EDIT_FLAG}        exact approval flag required for edit and undo`,
-    "  --stdin                    read bounded query / body / undo payload from stdin",
+    `  --notebook-id <id>         optional notebook for \`notes create\``,
+    `  ${APPROVE_EDIT_FLAG}        exact approval flag required for create, edit and undo`,
+    "  --stdin                    read the bounded search query from stdin",
+    "  --status | --list          print pending undo operations as opaque handles",
     "",
     "Subcommands:",
     "  help                       show this help (read-only, ungated)",
     "  browse                     paginate bounded note metadata (read-only)",
     "  search                     paginate search matches (read-only, stdin query)",
     "  get                        return a single bounded note view (read-only)",
-    "  edit                       bounded edit (approval-gated, stdin body)",
-    "  undo                       bounded inverse update (approval-gated, stdin payload)",
+    "  create                     new note in $EDITOR (approval-gated)",
+    "  edit                       bounded edit in $EDITOR (approval-gated)",
+    "  undo                       reverse a prior edit (approval-gated, by opaque handle)",
     "",
     "Notes:",
-    "  - queries, bodies, and undo payloads arrive only via bounded stdin",
+    "  - queries arrive only via bounded stdin",
+    "  - `notes create` takes its title from the first level-1 heading of the",
+    "    editor document and keeps that heading in the body; a document with",
+    "    no level-1 heading is refused as invalid-input rather than guessed",
+    "  - create and edit bodies are edited in $EDITOR; they never cross argv, env or stdin",
+    "  - undo selects a daemon-minted opaque handle; no token is accepted",
     "  - credentials, keys, paths, and revisions are not accepted through argv or env",
     "  - `notes delete` is intentionally absent",
     "",
@@ -468,12 +513,51 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
           "",
         ].join("\n");
       }
-      case "note":
-        return Number.isSafeInteger(result.content.bytes) && result.content.bytes >= 0
-          ? `nookctl notes: note\nbytes: ${result.content.bytes}\n`
-          : "nookctl notes: error\n";
+      case "note": {
+        if (!Number.isSafeInteger(result.content.bytes) || result.content.bytes < 0)
+          return "nookctl notes: error\n";
+        if (result.content.markdown !== undefined) {
+          if (
+            typeof result.content.markdown !== "string" ||
+            new TextEncoder().encode(result.content.markdown).byteLength >
+              MAX_NOTES_VIEW_MARKDOWN_BYTES ||
+            // eslint-disable-next-line no-control-regex -- rejecting C0 control characters is the intent here
+            /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(result.content.markdown) ||
+            result.content.bytes !== new TextEncoder().encode(result.content.markdown).byteLength
+          )
+            return "nookctl notes: error\n";
+          return result.content.markdown.endsWith("\n")
+            ? result.content.markdown
+            : `${result.content.markdown}\n`;
+        }
+        return `nookctl notes: note\nbytes: ${result.content.bytes}\n`;
+      }
       case "updated":
         return "nookctl notes: updated\n";
+      case "unchanged":
+        return "nookctl notes: unchanged\n";
+      case "created":
+        return "nookctl notes: created\n";
+      case "operations": {
+        if (
+          !Array.isArray(result.handles) ||
+          result.handles.length > 100 ||
+          !result.handles.every((handle) => isBoundedOpaqueValue(handle)) ||
+          !Array.isArray(result.unresolvedHandles) ||
+          result.unresolvedHandles.length > 100 ||
+          !result.unresolvedHandles.every((handle) => isBoundedOpaqueValue(handle))
+        ) {
+          return "nookctl notes: error\n";
+        }
+        return [
+          "nookctl notes: operations",
+          `count: ${result.handles.length}`,
+          ...result.handles.map((handle) => `operation: ${handle}`),
+          `unresolved-count: ${result.unresolvedHandles.length}`,
+          ...result.unresolvedHandles.map((handle) => `unresolved-operation: ${handle}`),
+          "",
+        ].join("\n");
+      }
       case "undone":
         return "nookctl notes: undone\n";
       case "conflict":
@@ -486,13 +570,24 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
         return "nookctl notes: locked\n";
       case "missing":
         return "nookctl notes: missing\n";
+      case "empty":
+        return "nookctl notes: empty\n";
       case "error":
         return "nookctl notes: error\n";
+      default: {
+        // Exhaustiveness guard.  Every variant of NotesCategoricalResult must
+        // return above; a new variant without a formatter case must fail to
+        // compile rather than silently inherit the shared "error" return.
+        // That fall-through is exactly how an ordinary empty result set was
+        // reported to operators as a failure.
+        const unhandled: never = result;
+        void unhandled;
+        return "nookctl notes: error\n";
+      }
     }
   } catch {
     return "nookctl notes: error\n";
   }
-  return "nookctl notes: error\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +684,8 @@ export function parseNotesCommand(
         return parseBrowseOrSearch("search", stringArgv.slice(1), { requireStdin: true });
       case "get":
         return parseGet(stringArgv.slice(1));
+      case "create":
+        return parseCreate(stringArgv.slice(1));
       case "edit":
         return parseEdit(stringArgv.slice(1));
       case "undo":
@@ -748,14 +845,18 @@ function parseGet(rest: readonly string[]): ParseNotesCommandResult {
 // edit.
 //
 // Exact shape:
-//   --handle <opaque-handle> --approve-edit --stdin
+//   --handle <opaque-handle> --approve-edit
 // in any flag order, with no extras, no duplicates, no =value form.
+//
+// There is deliberately NO content channel here.  The note body is
+// captured from the daemon and edited in the operator's own editor
+// (`$VISUAL` / `$EDITOR` / `vi`); no body, title, id, path or token
+// bytes may cross argv, env or stdin.
 // ---------------------------------------------------------------------------
 
 function parseEdit(rest: readonly string[]): ParseNotesCommandResult {
   let handle: string | undefined;
   let approveCount = 0;
-  let stdinCount = 0;
 
   for (let i = 0; i < rest.length; i += 1) {
     const token = rest[i];
@@ -777,9 +878,11 @@ function parseEdit(rest: readonly string[]): ParseNotesCommandResult {
       continue;
     }
     if (token === "--stdin") {
-      stdinCount += 1;
-      if (stdinCount > 1) return invalidParseInput();
-      continue;
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl notes edit: bodies are edited in $EDITOR, not supplied on stdin",
+      };
     }
     return invalidParseInput();
   }
@@ -789,13 +892,6 @@ function parseEdit(rest: readonly string[]): ParseNotesCommandResult {
       kind: "error",
       exitCode: 2,
       message: `nookctl notes edit: requires ${APPROVE_EDIT_FLAG}`,
-    };
-  }
-  if (stdinCount !== 1) {
-    return {
-      kind: "error",
-      exitCode: 2,
-      message: "nookctl notes edit: requires --stdin (bodies arrive only via bounded stdin)",
     };
   }
   if (handle === undefined) {
@@ -813,17 +909,22 @@ function parseEdit(rest: readonly string[]): ParseNotesCommandResult {
 }
 
 // ---------------------------------------------------------------------------
-// undo.
+// create.
 //
-// Exact shape:
-//   --approve-edit --stdin
-// in any flag order, with no extras, no duplicates, no =value form,
-// and no `--handle`.
+// Exact shapes:
+//   --approve-edit
+//   --approve-edit --notebook-id <id>
+//
+// in any flag order, with no extras and no duplicates.  There is NO body
+// channel and NO title channel: the document is composed in $EDITOR, the
+// title is derived from its first level-1 heading (D11), and the daemon
+// mints the note.  A `--stdin` attempt is refused with a message naming
+// the reason rather than silently ignoring the payload.
 // ---------------------------------------------------------------------------
 
-function parseUndo(rest: readonly string[]): ParseNotesCommandResult {
+function parseCreate(rest: readonly string[]): ParseNotesCommandResult {
   let approveCount = 0;
-  let stdinCount = 0;
+  let notebookId: string | undefined;
 
   for (let i = 0; i < rest.length; i += 1) {
     const token = rest[i];
@@ -834,10 +935,141 @@ function parseUndo(rest: readonly string[]): ParseNotesCommandResult {
       if (approveCount > 1) return invalidParseInput();
       continue;
     }
-    if (token === "--stdin") {
-      stdinCount += 1;
-      if (stdinCount > 1) return invalidParseInput();
+    if (token === "--notebook-id") {
+      if (notebookId !== undefined) return invalidParseInput();
+      const value = rest[i + 1];
+      if (typeof value !== "string") return invalidParseInput();
+      if (value.startsWith("--")) return invalidParseInput();
+      if (!isBoundedNotebookId(value)) return invalidParseInput();
+      notebookId = value;
+      i += 1;
       continue;
+    }
+    if (token === "--stdin") {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: "nookctl notes create: bodies are edited in $EDITOR, not supplied on stdin",
+      };
+    }
+    return invalidParseInput();
+  }
+
+  if (approveCount !== 1) {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: `nookctl notes create: requires ${APPROVE_EDIT_FLAG}`,
+    };
+  }
+
+  return {
+    kind: "parsed",
+    command:
+      notebookId === undefined
+        ? { kind: "create", subcommand: "create" }
+        : { kind: "create", subcommand: "create", notebookId },
+  };
+}
+
+/**
+ * D11 — the title of a created note is the text of the **first level-1
+ * heading**, and that heading stays in the body.
+ *
+ * The scan is deliberately literal: only an ATX `#` followed by whitespace
+ * starts a heading (CommonMark), so `#hashtag` is prose and `## Section` is
+ * not a title.  A heading with no text is skipped, later H1s are ignored,
+ * and a document with no usable H1 returns `undefined` so the caller fails
+ * categorical with `invalid-input` rather than inventing a title from a
+ * paragraph, a list item, or an H2.
+ *
+ * Three details keep the scan honest about what a heading is:
+ *  - Any Markdown line ending ends a line (`\r\n`, `\r`, `\n`), so a document
+ *    authored or pasted on Windows still yields its title instead of being
+ *    refused as heading-less.
+ *  - A trailing run of `#` is the ATX closing sequence, not part of the text;
+ *    a heading left with no text at all is skipped rather than titled `###`.
+ *  - A fenced code block is not prose: an indented `#` line inside a fence is
+ *    code, so a fence suppresses heading recognition until it closes.  A fence
+ *    marker is up to three spaces of indent and three or more backticks or
+ *    tildes (four spaces is an indented code block, not a fence), and it closes
+ *    only on a run of the same character at least as long as the opener.
+ */
+export function deriveCreateTitle(markdown: string): string | undefined {
+  if (typeof markdown !== "string" || markdown.length === 0) return undefined;
+  let fence: string | undefined;
+  for (const line of markdown.split(/\r\n|\r|\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker !== undefined) {
+      if (fence === undefined) {
+        fence = marker;
+      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (fence !== undefined) continue;
+    const match = /^#[ \t]+(\S.*?)[ \t]*$/.exec(line);
+    if (match === null) continue;
+    const text = match[1] ?? "";
+    const title = text
+      .replace(/[ \t]+#+$/, "")
+      .replace(/^#+$/, "")
+      .trim();
+    if (title.length > 0) return title;
+  }
+  return undefined;
+}
+
+/** Bounded opaque notebook selector: an id the daemon minted, never a path. */
+function isBoundedNotebookId(value: string): boolean {
+  if (value.length === 0 || value.length > OPAQUE_VALUE_MAX_LENGTH) return false;
+  return /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+// ---------------------------------------------------------------------------
+// undo.
+//
+// Exact shapes:
+//   --approve-edit --status
+//   --approve-edit --list
+//   --approve-edit              (interactive selection of a pending operation)
+//
+// in any flag order, with no extras, no duplicates, no =value form,
+// and no `--handle`.  There is no `--token` flag and no token env var:
+// the only bytes that cross argv/env here are the flag names and the
+// bare approval flag.  Selection is by daemon-minted opaque operation
+// handle, chosen from `--status`/`--list` output over an interactive
+// TTY; with no TTY the bare form fails categorical.
+// ---------------------------------------------------------------------------
+
+function parseUndo(rest: readonly string[]): ParseNotesCommandResult {
+  let approveCount = 0;
+  let selector: "status" | "list" | undefined;
+  let selectorCount = 0;
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (token === undefined) return invalidParseInput();
+
+    if (token === APPROVE_EDIT_FLAG) {
+      approveCount += 1;
+      if (approveCount > 1) return invalidParseInput();
+      continue;
+    }
+    if (token === "--status" || token === "--list") {
+      selectorCount += 1;
+      if (selectorCount > 1) return invalidParseInput();
+      selector = token === "--status" ? "status" : "list";
+      continue;
+    }
+    if (token === "--stdin" || token === "--token" || token.startsWith("--token=")) {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message:
+          "nookctl notes undo: select a pending operation by opaque handle; no token is accepted",
+      };
     }
     return invalidParseInput();
   }
@@ -849,15 +1081,14 @@ function parseUndo(rest: readonly string[]): ParseNotesCommandResult {
       message: `nookctl notes undo: requires ${APPROVE_EDIT_FLAG}`,
     };
   }
-  if (stdinCount !== 1) {
-    return {
-      kind: "error",
-      exitCode: 2,
-      message: "nookctl notes undo: requires --stdin (undo payload arrives only via bounded stdin)",
-    };
-  }
 
-  return { kind: "parsed", command: { kind: "undo", subcommand: "undo" } };
+  return {
+    kind: "parsed",
+    command:
+      selector === undefined
+        ? { kind: "undo", subcommand: "undo" }
+        : { kind: "undo", subcommand: "undo", selector },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -945,20 +1176,23 @@ export async function runNotesCommand(
     validatedQuery = queryVerdict.query;
   }
 
-  let validatedEdit: NotesEditStdin | undefined;
-  let validatedUndo: string | undefined;
-  if (command.kind === "edit") {
-    validatedEdit = parseNotesEditStdin(normalized.editInput);
-    if (validatedEdit === undefined) return { kind: "invalid-input" };
-  }
-  if (command.kind === "undo") {
-    validatedUndo = parseNotesUndoStdin(normalized.undoInput);
-    if (validatedUndo === undefined) return { kind: "invalid-input" };
+  // A bare `notes undo` needs an interactive selector.  Fail before
+  // constructing any runtime or touching the daemon when there is none,
+  // rather than reversing an operation the operator did not choose.
+  if (
+    command.kind === "undo" &&
+    command.selector === undefined &&
+    (normalized.interactive === undefined ||
+      normalized.interactive.tty !== true ||
+      typeof normalized.interactive.select !== "function")
+  ) {
+    return { kind: "invalid-input" };
   }
 
   // The runtime factory is constructed ONLY after parse + approval
   // gate have both passed.  Read-only commands (`browse`, `search`,
-  // `get`) are ungated but they still go through this single seam.
+  // `get`) and `undo --status`/`--list` are ungated but they still go
+  // through this single seam.
   let runtime: NotesCommandRuntime;
   try {
     runtime = await normalized.createRuntime();
@@ -988,13 +1222,19 @@ export async function runNotesCommand(
       case "get":
         return await runtime.get({ handle: command.handle });
       case "edit":
-        return await runtime.edit({
-          handle: command.handle,
-          content: (validatedEdit as NotesEditStdin).content,
-          undoToken: (validatedEdit as NotesEditStdin).undoToken,
-        });
+        // The body never crosses this boundary: the runtime captures the
+        // trusted preimage, runs the operator's editor, and applies the
+        // result.  Only the opaque handle is passed down.
+        return await runtime.edit({ handle: command.handle });
+      case "create":
+        // The body never crosses this boundary either: the runtime runs the
+        // operator's editor over an empty document, derives the title from
+        // the first level-1 heading (D11), and creates the note.
+        return await runtime.create(
+          command.notebookId === undefined ? {} : { notebookId: command.notebookId },
+        );
       case "undo":
-        return await runtime.undo({ token: validatedUndo as string });
+        return await runUndo(runtime, command, normalized.interactive);
     }
   } catch {
     // Any runtime throw collapses to the closed categorical `error`.
@@ -1005,6 +1245,50 @@ export async function runNotesCommand(
       message: "nookctl notes: runtime error",
     };
   }
+}
+
+/**
+ * `notes undo` — list pending operations, or select one interactively.
+ *
+ * The selector forms are read-only and ungated.  The bare form needs a
+ * usable TTY seam: without one the command fails categorical rather than
+ * reversing an operation the operator did not choose.  A returned handle
+ * is re-validated against the bounded list, so a hostile `select`
+ * implementation cannot smuggle a value the daemon never minted.
+ */
+async function runUndo(
+  runtime: NotesCommandRuntime,
+  command: Extract<ParsedNotesCommand, { kind: "undo" }>,
+  interactive: RunNotesCommandOptions["interactive"],
+): Promise<NotesCategoricalResult> {
+  if (command.selector !== undefined) return await runtime.operations();
+
+  if (
+    interactive === undefined ||
+    interactive.tty !== true ||
+    typeof interactive.select !== "function"
+  ) {
+    return { kind: "invalid-input" };
+  }
+
+  const listed = await runtime.operations();
+  if (listed.kind !== "operations") return listed;
+  if (listed.handles.length === 0) return listed;
+
+  let chosen: string | undefined;
+  try {
+    chosen = await interactive.select(listed.handles);
+  } catch {
+    chosen = undefined;
+  }
+  if (
+    typeof chosen !== "string" ||
+    !isBoundedOpaqueValue(chosen) ||
+    !listed.handles.includes(chosen)
+  ) {
+    return { kind: "invalid-input" };
+  }
+  return await runtime.undo({ operationHandle: chosen });
 }
 
 function normalizeRunOptions(options: RunNotesCommandOptions): RunNotesCommandOptions {

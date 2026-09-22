@@ -77,6 +77,8 @@
  * no `__context__`, no upstream message bytes are forwarded.
  */
 
+import { Buffer } from "node:buffer";
+
 import {
   createReadOnlyRevisionToken,
   isNotesnookReadOnlyAdapterError,
@@ -87,6 +89,7 @@ import {
   type NotesnookReadOnlyNoteMetadata,
 } from "./notesnook-readonly-adapter.js";
 import type { NotesnookLiveDatabase } from "./notesnook-core-adapter.js";
+import { isExactFetchRequest } from "./readonly-sync-shape.js";
 
 type ReadOnlyRevisionToken = NonNullable<NotesnookReadOnlyNoteMetadata["revision"]>;
 
@@ -325,6 +328,15 @@ export function flattenLiveDatabaseToReadOnly(
       }
       if (options?.force !== undefined) {
         throw projectionError("Notesnook read-only projection: sync force is out of scope");
+      }
+      if (!isExactFetchRequest(options)) {
+        // The same shape rule the read-only adapter enforces: only `type` may be
+        // present, as an own property of a plain object.  Silently dropping an
+        // extra field let a caller believe it asked for something this boundary
+        // never honoured.
+        throw projectionError(
+          'Notesnook read-only projection: sync request must carry only "type"',
+        );
       }
       const syncArgs: { type: NotesnookReadOnlyProjectionSyncType } = {
         type: syncType,
@@ -667,6 +679,26 @@ export function flattenLiveDatabaseToReadOnly(
         "Notesnook read-only projection: content.findByNoteId rejected",
       );
       return classifyContentDiagnostic(content);
+    },
+
+    readOperatorNoteContent: async (id: string) => {
+      if (typeof id !== "string" || id.length === 0)
+        throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
+      if (contentFindByNoteIdFn === undefined) throw projectionError("unsupported_content");
+      const value = await callThrough(
+        contentFindByNoteIdFn,
+        [id],
+        "Notesnook read-only projection: content.findByNoteId rejected",
+      );
+      if (value === undefined || value === null || typeof value !== "object")
+        throw projectionError("unsupported_content");
+      const record = value as Record<string, unknown>;
+      if (record.locked === true || isCipherRecord(record)) throw projectionError("vault_locked");
+      if ((record.type !== "html" && record.type !== "tiptap") || typeof record.data !== "string")
+        throw projectionError("unsupported_content");
+      if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > 256 * 1024)
+        throw projectionError("unsupported_content");
+      return Object.freeze({ type: record.type, data: record.data });
     },
 
     search: async (
@@ -1399,9 +1431,19 @@ function readOptionalNoteLockedMarker(value: unknown): boolean | undefined {
   }
 }
 
-function isVaultLockedRefusal(error: unknown): boolean {
+export function isVaultLockedRefusal(error: unknown): boolean {
   if (error === null || (typeof error !== "object" && typeof error !== "function")) {
     return false;
+  }
+  // This projection raises a locked note itself, so its own error must be
+  // recognised here too: the operator write paths read through this module, and
+  // collapsing its refusal into a generic failure hid a working lock.
+  if (isNotesnookReadOnlyProjectionError(error)) {
+    try {
+      return error.message === "vault_locked";
+    } catch {
+      return false;
+    }
   }
   if (isNotesnookReadOnlyAdapterError(error)) {
     try {

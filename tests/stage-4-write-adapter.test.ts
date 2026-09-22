@@ -1326,6 +1326,27 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(stored).toContain("rewritten body");
   });
 
+  it("writes exact stored native content without invoking the Markdown codec", async () => {
+    const { adapter, database, codec } = setupUpdatable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+    const native =
+      '<div data-type="document"><p>native body</p><!-- unsupported: customBlock --></div>';
+
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      patch: { storedContent: { type: "tiptap", data: native } },
+      expectedRevision,
+    });
+
+    expect(result.appliedFields).toEqual(["content"]);
+    // The Markdown codec must never run for a native-content write.
+    expect(codec.encodeCalls).toEqual([]);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    // The exact bytes are written, re-pinned to the note's existing slot type.
+    expect(database.calls.contentUpdate[0]?.partial.data).toBe(native);
+    expect(database.calls.contentUpdate[0]?.ids).toEqual([NOTE_ID]);
+  });
+
   it("advances the revision timestamp after a content-only update", async () => {
     const { adapter, database, note } = setupUpdatable();
     const previousDateEdited = note.dateEdited;

@@ -63,6 +63,7 @@ import {
   isNotesnookReadOnlyAdapterError,
   type NotesnookReadOnlyContentDiagnostic,
 } from "../core/notesnook-readonly-adapter.js";
+import { isNotesnookReadOnlyProjectionError } from "../core/notesnook-readonly-projection.js";
 import {
   isNotesnookWriteAdapterError,
   type AppendNoteResult,
@@ -838,7 +839,15 @@ function pathDiagnosticReport(
 }
 
 function isVaultLockedReadProofError(error: unknown): boolean {
-  return isNotesnookReadOnlyAdapterError(error) && error.message === "vault_locked";
+  // A locked record is refused on the READ path by the projection, which
+  // throws a PROJECTION-owned error with the message `vault_locked`.  Checking
+  // only the ADAPTER error class meant that refusal was never recognised as a
+  // lock: the proof reported `service_unavailable`, so a working lock was
+  // indistinguishable from a broken daemon and could not be demonstrated.
+  if (!isNotesnookReadOnlyAdapterError(error) && !isNotesnookReadOnlyProjectionError(error)) {
+    return false;
+  }
+  return error instanceof Error && error.message === "vault_locked";
 }
 
 function isVaultLockedWriteProofError(error: unknown): boolean {

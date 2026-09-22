@@ -261,14 +261,24 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     const source = readFileSync(installer, "utf8");
 
     expect(source).toContain('if [ -n "$transaction_previous_target" ]; then');
+    // Fresh install: enable only. Activation is the provisioning step's job.
     expect(source).toContain('systemctl enable "$SERVICE_NAME"');
-    expect(source).toContain('systemctl enable --now "$SERVICE_NAME"');
+    // Upgrade: activate the newly activated release. This must be a restart —
+    // `enable --now` is a no-op against an already-running unit, which would
+    // leave the previous release's process serving under the new ledger entry.
+    expect(source).toContain('systemctl restart "$SERVICE_NAME"');
   });
   it("does not mask daemon activation failures", () => {
     const source = readFileSync(installer, "utf8");
-    const activation = source.match(/systemctl enable --now[\s\S]{0,120}/)?.[0] ?? "";
+    // Target the *activation* site — the one that gates on the health check.
+    // The transaction-rollback and `rollback` paths legitimately swallow a
+    // restart failure, because rolling back must not itself abort.
+    const activation =
+      source.match(
+        /systemctl (?:restart|enable --now) "\$SERVICE_NAME" >\/dev\/null 2>&1\n\s*run_health_gate/,
+      )?.[0] ?? "";
 
-    expect(activation).toContain("systemctl enable --now");
+    expect(activation).toMatch(/systemctl (restart|enable --now) "\$SERVICE_NAME"/);
     expect(activation).not.toContain("|| true");
   });
 

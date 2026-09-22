@@ -2622,6 +2622,114 @@ is a fresh production-composition review of mutation atomicity and durable
 commit-vs-error semantics; do not reopen or repeat the completed
 update-compensation implementation.
 
+## 13.18 Operator `notes` feature parity — frozen T00 contract and T01–T14 task graph
+
+**Status date:** 2026-09-19 (America/New_York)
+**Source plan:** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (T00 frozen contract at the top of the file).
+**Mode:** documentation-only reconciliation; no source/test/deployment mutation in this section.
+**Supersedes for this scope:** §13.18 (v2 amendment) and §13.19 wording where they conflict with the T00 frozen contract. The v2 amendment file is no longer in force; see the v3 plan's T00.8 supersession markers.
+
+### Scope
+
+Add the operator `notes` CLI capability set (`browse`, `search`, `get` with body projection, `create`, `edit`, `undo`) and the shared structured-note document model, while preserving every existing §13.11, §13.13, §13.14, and §13.15 invariant:
+
+- one daemon / one database owner;
+- existing MCP schema set (9 tools, body-free) is **not** widened;
+- fetch-only sync boundary is preserved;
+- credential / key / body / title / ID / path / token bytes remain out of argv, env, logs, and chat.
+
+The T00 frozen contract at the top of the v3 plan is the **single executable specification**; this roadmap section exists to reference it and to record the task graph, gate language, and supersession markers as part of the project's documentation source-of-truth.
+
+### T00 frozen contract summary
+
+The frozen contract enumerates 14 decisions (D1–D14), a daemon-side operation state machine, a permissions / authorization boundary, and structured-note fidelity properties. Every dependent task T01–T14 must conform. The full text is in `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (sections T00.1–T00.8). The decisions resolve the Astra review blockers and supersede contradictory wording in §13.18/§13.19 of the v3 plan body.
+
+Highlights (full text wins on conflict):
+
+- **D1** one daemon / one database owner; second-runtime opener removed.
+- **D2** separate operator-only socket; MCP endpoint stays body-free; the **frozen operator RPC vocabulary** is exactly `notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`, `notes.create`, `notes.operation-status`, `notes.operation-list`; **no aliases** (no `notes.edit` / `notes.undo` / "snapshot RPCs"); operator methods route to a **distinct operator policy evaluator** (NOT `methodToSettingsOperation`) that enforces edit/create authorization, notebook policy, and lock state.
+- **D3** daemon-owned encrypted undo / operation store; CLI never holds the database key.
+- **D4** no predicted revisions; no blind retry of uncertain mutations.
+- **D5** native HTML first; JSON writer feature-flagged and **disabled** until pinned-runtime proof.
+- **D6** per-list intent (`simple-checklist` vs interactive `task-list`); legacy request-level `listKind` is the default.
+- **D7** opaque native payloads are daemon-side, **revision-bound** references surfaced in the editor as **stable opaque-reference sentinels** (one per preserved subtree); edits with changed / moved / deleted / duplicated / forged sentinels fail before mutation; untouched sentinels resolve only against the originating (note id, revision, subtree); movement / deletion rejected in the first release.
+- **D8** real bounded pagination + opaque daemon-minted handles.
+- **D9** explicit budgets for source / editor / native / frame / response / journal (record + byte).
+- **D10** editor argv parsed without shell evaluation; exclusive-creation scratch with `O_NOFOLLOW`; documented cleanup limits; SIGKILL / power loss documented, not patched.
+- **D11** create title is the first H1 of the editor document; that heading is retained in the body.
+- **D12** uncertain mutations leave the daemon in `unresolved`; CLI surfaces via `notes undo --status`; no automatic retry.
+- **D13** MCP schemas and fetch-only sync remain unchanged.
+- **D14** rendered clean-LXC acceptance (structural assertions, not string markers) is a release gate.
+- **T00.5 / T00.6** T05 is a **required** dependency of T11 and T12 (the second-DB opener must be removed before any deployment or release artifact ships). The T05 PR must include a green dedicated regression test that invokes `createProductionNotesRuntime` and proves no `createProductionLiveLoginRuntime` / `@notesnook/core` / encrypted-database opener is invoked. The T05 PR may not merge with the test skipped or marked `.skip`.
+- **T00.7 #1** the undo-token transport is **frozen**: interactive TTY selection of daemon-minted opaque handles via `notes undo --status` / `notes undo --list`. The CLI **never** accepts undo token, body, title, or id bytes on argv or env (no `--token`, no `NOOKCTL_NOTE_TOKEN`); the parser rejects those carriers.
+
+### T01–T14 task graph and dependencies
+
+The task graph is exactly the Astra-review subagent decomposition, canonicalized at T00.5 of the v3 plan. The dependency edges are:
+
+```
+T00 → T01 → T02 → T03
+T00 → T04 → T05
+T00 → T06
+T00 → T08
+T03 + T04 + T05 + T06 → T07
+T02 + T05 + T07 + T08 → T09
+T07 + T09 → T10
+T04 + T05 + T06 + T09 → T11
+T05 + T10 + T11 → T12 (candidate artifact)
+T12 candidate → T13 → T14 → release promotion
+```
+
+**T05 is a required dependency of both T11 and T12** (see T00.5 of the v3 plan): T05 removes `src/operator/notes-production-runtime.ts`'s second-DB opener, and T11 / T12 must not proceed without it. The T05 ticket includes a mandatory regression-test gate (see T00.6 of the v3 plan) that directly invokes `createProductionNotesRuntime` and proves `createProductionLiveLoginRuntime` / `@notesnook/core` / any encrypted-database opener is never called. No T11 or T12 ticket may be opened before that test is green.
+
+Lane assignment (frozen): document lane (T01–T03, then T04), transport lane (T04 → T05), storage lane (T06), editor lane (T08), mutation integration (T07, sequential), CLI integration (T09, sequential; owns shared CLI files), independent verification (T10), deployment (T11), release (T12), acceptance (T13), finalization (T14).
+
+### Frozen task gates
+
+The pass condition for each of T01–T14 is recorded at T00.6 of the v3 plan. Every gate requires failing behavioral tests before implementation, an exact-diff review, and no generated state or credentials in changes. Shared-file owners run sequentially.
+
+### Suppression of contradictions and historical scope
+
+The following earlier roadmap text and v2/v3 plan wording are **superseded** by the T00 frozen contract. They remain in the repository only as historical context; nothing in them is in force where it conflicts with T00:
+
+- §13.18 v2 amendment (`2026-09-18-notes-features-complete-v2.md`) — fully superseded.
+- §13.18 / §13.19 wording inside the v3 plan body — superseded per the markers at T00.8 of the v3 plan.
+- §13.11 (Stage 9 operator slice) — the bounded CLI filetree + notes browse/edit scope remains historical; the operator tree is now governed by T09.
+- §13.12 (Astra Stage 9.5 P1/P2 plan) — historical evidence; the P1/P2 items it named that survive into the notes-feature scope are tracked in T01–T14.
+
+### Relationship to existing closeouts
+
+The existing §13.13, §13.14, and §13.15 closeouts (locked-note proof, delete/reconciliation, update compensation) remain valid for the slices they describe. The notes-feature work in T00–T14 **must not regress** those slices. The T10 verification gate explicitly checks that the existing MCP schema catalogue (9 tools) and fetch-only sync boundary remain unchanged.
+
+### Next implementation ticket (after T00)
+
+The first dependent ticket is **T01** (native-preserving document model). T01 is documentation-and-test-first: failing-test cases for depth, item-count, byte limits, unknown-node preservation, malformed directive rejection, opaque-reference validation, hostile object shapes, mixed list kinds, block-capable list items, marks, attributes, tables, and callouts. Source implementation begins only after those tests fail.
+
+The nix-config pin change should target that repository's `flake.nix` and `flake.lock` after artifact / source acceptance. Its deployment-module path is not established by T00 and must be identified before any module edit is assigned.
+
+## 13.19 Structured note items and native Notesnook construction (amendment, governed by T00)
+
+**Status date:** 2026-09-19 (America/New_York)
+**Source plan:** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (the §13.19 amendment section, as governed by T00).
+**Mode:** documentation-only; no source/test/deployment mutation in this section.
+
+The §13.19 amendment extends the operator tree to add editor-based `create`, structured document handling for nested task lists (both checklist kinds), inline marks, fenced code, tables, and callouts, while preserving the closed tool list, the no-delete invariant, and the daemon-owned encryption boundary.
+
+### Subordinate decisions frozen by T00
+
+The amendment's intent is preserved; its specific contract decisions are governed by T00:
+
+- **Document model** — `NoteDocumentV1` AST carries per-list intent (T00 D6); legacy request-level `listKind` is the default. The AST is defined and gated by T01.
+- **Markdown editor representation** — `- [ ]` / `- [x]` with indentation maps to nested `task-list` nodes; `#`–`###` map to headings; tables and callouts use `:::nookbridge` directives (preserved in v3 §13.19 §3, subject to T02 round-trip). Opaque unsupported nodes use `:::nookbridge opaque <node-type>` directives, **but the directive body is an opaque reference, not parsed JSON** (T00 D7).
+- **Native serialization** — native HTML is the first supported writer (T00 D5); JSON writer is feature-flagged and disabled. Both checklist kinds are constructed natively with their structural HTML.
+- **Create and edit CLI UX** — both `notes create` and `notes edit` open the mode-0600 Markdown document through `$VISUAL`/`$EDITOR`/`vi`. Create title semantics follow T00 D11.
+- **Special-item rollout** — paragraphs, headings, inline marks, lists, nested task lists (both kinds), fenced code, tables and callouts ship in the first structured release; attachments, images, mentions, comments, and proprietary extension nodes round-trip as bounded opaque references (T00 D7).
+- **Tests** — required tests live with their respective T01–T03 / T07 / T09 / T13 tasks; nothing in this amendment widens the test surface beyond what those tasks already gate.
+
+### Supersession note
+
+The §13.19 amendment is governed by T00 and not by §13.18 of the v2 file. The shared document model, the editor interchange grammar, the native serializer, and the CLI UX are all tasks T01–T03 + T07 + T09. The amendment does not stand alone; the T00 frozen contract and the T01–T14 task graph are the source of truth.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.

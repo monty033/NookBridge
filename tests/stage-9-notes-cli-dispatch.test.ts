@@ -45,6 +45,8 @@
 
 import process from "node:process";
 import { Buffer } from "node:buffer";
+import { readFileSync } from "node:fs";
+import { fileURLToPath, URL } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -350,34 +352,20 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
     expect(out.stderr).not.toContain(handle);
   });
 
-  it("rejects missing edit stdin before constructing the runtime", async () => {
+  it("refuses `edit --stdin` rather than reading a body from stdin", async () => {
     const handle = "not_xyz98765";
-    const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
-    try {
-      const out = await driveCli([
-        "notes",
-        "edit",
-        "--handle",
-        handle,
-        "--approve-edit",
-        "--stdin",
-      ]);
-      expect(out.code).toBe(2);
-      expect(out.stdout).toBe("nookctl notes: invalid-input\n");
-      expect(out.stderr).toBe("");
-      expect(out.stdout + out.stderr).not.toContain(handle);
-    } finally {
-      if (originalIsTTY !== undefined) {
-        Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
-      } else {
-        delete (process.stdin as { isTTY?: unknown }).isTTY;
-      }
-    }
+    const out = await driveCli(["notes", "edit", "--handle", handle, "--approve-edit", "--stdin"]);
+    expect(out.code).toBe(2);
+    expect(out.stdout).toBe("");
+    expect(out.stderr).toContain("nookctl:");
+    // The refusal explains the editor rule and never echoes the handle.
+    expect(out.stderr).toContain("$EDITOR");
+    expect(out.stdout).not.toContain(handle);
+    expect(out.stderr).not.toContain(handle);
   });
 
-  it("rejects missing undo stdin before constructing the runtime", async () => {
-    const out = await driveCli(["notes", "undo", "--approve-edit", "--stdin"]);
+  it("refuses a bare `notes undo` with no TTY instead of guessing", async () => {
+    const out = await driveCli(["notes", "undo", "--approve-edit"]);
     expect(out.code).toBe(2);
     expect(out.stdout).toBe("nookctl notes: invalid-input\n");
     expect(out.stderr).toBe("");
@@ -666,6 +654,27 @@ describe("nookctl — existing commands remain unchanged", () => {
     const out = await driveCli(["notes"]);
     expect(out.code).toBe(0);
     expect(out.stderr).not.toContain("unknown subcommand");
+  });
+  /**
+   * Regression: `_internal` must be declared BEFORE the entry-point guard.
+   *
+   * The guard starts `run`, whose synchronous prefix reaches `createRuntime`,
+   * which reads `_internal`.  While the declaration sat after the guard,
+   * `_internal` was still in its temporal dead zone for that prefix, so every
+   * `nookctl notes ...` command that constructs a runtime died with
+   * "Cannot access '_internal' before initialization" whenever the CLI was the
+   * entry point.  No in-process test can reach that path, because importing
+   * this module evaluates the whole body before any test helper runs — which is
+   * exactly how the defect survived a green suite.
+   */
+  it("declares the in-process seam before the entry-point guard", () => {
+    const source = readFileSync(fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "utf8");
+    const declaration = source.indexOf("export const _internal");
+    const guard = source.indexOf("if (import.meta.url === `file://${process.argv[1]}`)");
+
+    expect(declaration).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(-1);
+    expect(declaration).toBeLessThan(guard);
   });
 });
 

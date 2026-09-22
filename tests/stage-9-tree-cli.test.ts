@@ -193,7 +193,10 @@ describe("tree runtime", () => {
       "denied",
     );
     const locked = fixture();
-    writeFileSync(join(locked, "nookbridge.lock"), "123");
+    // A lock file only counts while its holder is alive, so record a live
+    // process: this fixture means "another process is using this state dir",
+    // not "a crashed process left a file behind".
+    writeFileSync(join(locked, "nookbridge.lock"), `${process.pid}\n`);
     expect((await runtime.list({ stateDir: locked, limit: 1 })).kind).toBe("locked");
   });
 });

@@ -175,6 +175,35 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
 );
 
 /**
+ * The inline marks the codec can both detect and render.
+ *
+ * Detection and rendering share these sources so a construct is accepted
+ * exactly when the renderer can express it.  When the two drifted, the gate
+ * admitted marks that the renderer left as literal text, and the operator saw
+ * `created` over a note carrying asterisks.
+ *
+ * An asterisk that opens or closes onto whitespace is not emphasis, so
+ * `2 * 3 * 4` stays arithmetic and `a ** b ** c` stays prose.
+ */
+const BOLD_MARK_SOURCE = "\\*\\*([^\\s*](?:[^*\\n]*[^\\s*])?)\\*\\*";
+const ITALIC_MARK_SOURCE = "(^|[^*])\\*([^\\s*](?:[^*\\n]*[^\\s*])?)\\*(?!\\*)";
+const CODE_MARK_SOURCE = "`([^`\\n]+)`";
+const BOLD_MARK_DETECT = new RegExp(BOLD_MARK_SOURCE);
+const ITALIC_MARK_DETECT = new RegExp(ITALIC_MARK_SOURCE);
+const CODE_MARK_DETECT = new RegExp(CODE_MARK_SOURCE);
+const BOLD_MARK_RENDER = new RegExp(BOLD_MARK_SOURCE, "g");
+const ITALIC_MARK_RENDER = new RegExp(ITALIC_MARK_SOURCE, "g");
+const CODE_MARK_RENDER = new RegExp(CODE_MARK_SOURCE, "g");
+
+/**
+ * A placeholder for a lifted-out code span.  Escape has already run, so the
+ * text cannot contain markup; the private-use sentinel is not whitespace and
+ * not an asterisk, so emphasis may wrap a span without matching inside it.
+ */
+const CODE_SPAN_SENTINEL = "\uE000";
+const CODE_SPAN_RESTORE = new RegExp(`${CODE_SPAN_SENTINEL}(\\d+)${CODE_SPAN_SENTINEL}`, "g");
+
+/**
  * Human-readable names for the Markdown constructs the deterministic
  * codec refuses.  Exposed for the write adapter and operator-facing
  * documentation; tests assert membership.
@@ -216,9 +245,9 @@ export function detectMarkdownConstructs(
     if (/!\[\[[^\]\n]*\]\]/.test(line)) observed.add("attachment-reference");
     if (/```/.test(line)) observed.add("fenced-code-block");
     if (/\[[^\]\n]+\]\([^)\n]+\)/.test(line)) observed.add("link-or-image");
-    if (/\*\*[^*\n]+\*\*/.test(line)) observed.add("inline-bold");
-    if (/(^|[^*])\*[^*\n]+\*(?!\*)/.test(line)) observed.add("inline-italic");
-    if (/`[^`\n]+`/.test(line)) observed.add("inline-code");
+    if (BOLD_MARK_DETECT.test(line)) observed.add("inline-bold");
+    if (ITALIC_MARK_DETECT.test(line)) observed.add("inline-italic");
+    if (CODE_MARK_DETECT.test(line)) observed.add("inline-code");
     if (/<[a-zA-Z][^>\n]*>/.test(line)) observed.add("inline-html");
   }
   return Object.freeze(observed);
@@ -390,6 +419,34 @@ function parseTaskListLines(lines: readonly string[]): readonly TaskListItem[] {
   return rootChildren;
 }
 
+/**
+ * Render the inline mark set the gate accepts.
+ *
+ * The gate classifies `**bold**`, `*italic*` and `` `code` `` as supported
+ * constructs, so the renderer must emit the tags the projection maps back to
+ * those delimiters — `strong`, `em` and `code`, the canonical pair declared in
+ * `note-document-native.ts`.  Emitting the escaped delimiters instead would
+ * make the gate's promise a lie: the operator would see `created` while the
+ * note carried literal asterisks.  Both halves read the same patterns
+ * ({@link BOLD_MARK_SOURCE} and friends) so they cannot drift apart.
+ *
+ * Escaping runs first so the marks cannot smuggle markup.  Code spans are then
+ * lifted out into placeholders: an emphasis marker inside one stays literal,
+ * while emphasis may wrap a whole span (`a *`code`* b`).  Bold is converted
+ * before italic so `**x**` cannot be read as an empty italic run.
+ */
+function renderInline(text: string): string {
+  const codeSpans: string[] = [];
+  const masked = escapeHtml(text).replace(CODE_MARK_RENDER, (_match, inner: string) => {
+    codeSpans.push(`<code>${inner}</code>`);
+    return `${CODE_SPAN_SENTINEL}${codeSpans.length - 1}${CODE_SPAN_SENTINEL}`;
+  });
+  return masked
+    .replace(BOLD_MARK_RENDER, "<strong>$1</strong>")
+    .replace(ITALIC_MARK_RENDER, "$1<em>$2</em>")
+    .replace(CODE_SPAN_RESTORE, (_match, index: string) => codeSpans[Number(index)] ?? "");
+}
+
 function renderTaskListItems(items: readonly TaskListItem[], listKind: NotesnookListKind): string {
   // The simple-checklist shape uses `<ul class="simple-checklist">` with
   // `simple-checklist--item` rows; the rich task-list shape uses
@@ -401,7 +458,7 @@ function renderTaskListItems(items: readonly TaskListItem[], listKind: Notesnook
   let out = "";
   for (const item of items) {
     const className = item.checked ? `checked ${itemClass}` : itemClass;
-    const text = escapeHtml(item.text);
+    const text = renderInline(item.text);
     out += `<li class="${className}"><p>${text}</p>`;
     if (item.children.length > 0) {
       // Nested children inherit the same listKind so every depth uses
@@ -439,7 +496,7 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const heading = /^(#{1,3}) +(.*)$/.exec(first);
   if (heading !== null && lines.length === 1) {
     const level = (heading[1] as string).length;
-    return `<h${level}>${escapeHtml(heading[2] as string)}</h${level}>`;
+    return `<h${level}>${renderInline(heading[2] as string)}</h${level}>`;
   }
 
   // A block is treated as a task-list only when EVERY non-empty line is a
@@ -456,12 +513,12 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const isList = lines.every((line) => /^[-*] +/.test(line));
   if (isList) {
     const items = lines
-      .map((line) => `<li>${escapeHtml(line.replace(/^[-*] +/, ""))}</li>`)
+      .map((line) => `<li>${renderInline(line.replace(/^[-*] +/, ""))}</li>`)
       .join("");
     return `<ul>${items}</ul>`;
   }
 
-  return `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`;
+  return `<p>${lines.map((line) => renderInline(line)).join("<br />")}</p>`;
 }
 
 function renderMarkdown(markdown: string, listKind: NotesnookListKind): string {

@@ -15,3 +15,5 @@ result-*
 *.swp
 .idea/
 .vscode/
+# Agent working notes (untracked; never part of a release)
+.hermes/

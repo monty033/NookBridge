@@ -1,0 +1,181 @@
+import { describe, expect, it } from "vitest";
+import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
+import { OPERATOR_DISCOVERY_METHODS, OPERATOR_METHODS } from "../src/service/operator-methods.js";
+import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.js";
+
+describe("operator discovery handler", () => {
+  it("publishes the frozen seven-method vocabulary separately from discovery", () => {
+    expect(OPERATOR_METHODS).toHaveLength(7);
+    expect([...OPERATOR_METHODS]).toEqual([
+      "notes.get-view",
+      "notes.edit-preimage",
+      "notes.apply-edit",
+      "notes.apply-undo",
+      "notes.create",
+      "notes.operation-status",
+      "notes.operation-list",
+    ]);
+    expect([...OPERATOR_DISCOVERY_METHODS]).toEqual(["notes.browse", "notes.search-operator"]);
+  });
+
+  it("dispatches browse and returns only the bounded page projection", async () => {
+    const handler = createOperatorDiscoveryHandler({
+      browse: async (params) => ({
+        notes: [{ handle: "h_one", label: `page-${params.limit ?? 0}`, bytes: 6 }],
+        next: null,
+      }),
+      search: async () => ({ notes: [], next: null }),
+    });
+    const response = await handler(
+      { id: "1", method: "notes.browse", params: { limit: 10 } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "1",
+      ok: true,
+      result: { kind: "operator-page", notes: [{ handle: "h_one", label: "page-10", bytes: 6 }] },
+    });
+  });
+
+  it("normalizes runtime failures categorically", async () => {
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => {
+        throw new Error("raw note data must not escape");
+      },
+      search: async () => ({ notes: [], next: null }),
+    });
+    const response = await handler(
+      { id: "2", method: "notes.browse", params: {} },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toEqual({
+      id: "2",
+      ok: false,
+      error: { code: "service_unavailable", message: "Service unavailable" },
+    });
+  });
+
+  it("collapses a bare vocabulary message on an untrusted error", async () => {
+    // Review finding: mapping any thrown object whose MESSAGE equals a
+    // vocabulary word let an unrelated upstream error be reported to the
+    // operator as a categorical refusal — a random failure carrying the text
+    // "not_found" or "permission_denied" became that category.  Only a
+    // class-identity-checked projection refusal may be read from its message, so
+    // a plain Error collapses instead.  The trusted path is exercised through
+    // the projection's own read surface, which is the only thing that can raise
+    // that error class.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw new Error("vault_locked");
+      },
+    });
+    const response = await handler(
+      { id: "3", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "3",
+      ok: false,
+      error: { code: "service_unavailable" },
+    });
+  });
+
+  it("does not trust a code property on an error we did not raise", async () => {
+    // Review finding: the code path accepted ANY thrown object whose `code`
+    // matched the vocabulary, so an unrelated upstream error carrying
+    // `code: "vault_locked"` was still reported to the operator as a lock
+    // refusal.  Trust has to come from identity, not from a field.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw Object.assign(new Error("upstream"), { code: "vault_locked" });
+      },
+    });
+    const response = await handler(
+      { id: "4", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "4",
+      ok: false,
+      error: { code: "service_unavailable" },
+    });
+  });
+
+  it("still carries the code of a categorical write failure", async () => {
+    // Guard: the trusted producer keeps its category.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw new OperatorWriteError("vault_locked");
+      },
+    });
+    const response = await handler(
+      { id: "5", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "5",
+      ok: false,
+      error: { code: "vault_locked" },
+    });
+  });
+
+  it("returns only the opaque operation handle for an uncertain write", async () => {
+    const operationHandle = `op_${"a".repeat(64)}`;
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      applyEdit: async () => {
+        throw new OperatorWriteError("service_unavailable", operationHandle);
+      },
+    });
+    const response = await handler(
+      {
+        id: "6",
+        method: "notes.apply-edit",
+        params: {
+          id: "h_one",
+          expectedRevision: `rev_${"b".repeat(32)}`,
+          markdown: "# x",
+        },
+      },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toEqual({
+      id: "6",
+      ok: false,
+      error: {
+        code: "service_unavailable",
+        message: "Service unavailable",
+        operationHandle,
+      },
+    });
+  });
+
+  it("still collapses a failure whose message is not in the closed vocabulary", async () => {
+    // Guard: only exact vocabulary members map.  Free text — including text
+    // that merely mentions a category — must not become a category, and no
+    // upstream detail may cross the boundary.
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw new Error("upstream locked detail must stay internal");
+      },
+    });
+    const response = await handler(
+      { id: "4", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toEqual({
+      id: "4",
+      ok: false,
+      error: { code: "service_unavailable", message: "Service unavailable" },
+    });
+  });
+});

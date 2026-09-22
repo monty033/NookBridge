@@ -25,6 +25,7 @@ version=''
 source_epoch=''
 min_glibc=''
 min_libstdcxx=''
+operator_peercred_helper=''
 
 while (($# > 0)); do
   case "$1" in
@@ -78,8 +79,13 @@ while (($# > 0)); do
       min_libstdcxx=$2
       shift 2
       ;;
+    --operator-peercred-helper)
+      (($# >= 2)) || fail
+      operator_peercred_helper=$2
+      shift 2
+      ;;
     --help)
-      printf '%s\n' 'build-linux-artifact.sh --source-dir PATH --build-node PATH --runtime-tarball PATH --output-dir PATH --version VERSION --source-date-epoch EPOCH --min-glibc VERSION --min-libstdcxx SYMBOL'
+      printf '%s\n' 'build-linux-artifact.sh --source-dir PATH --build-node PATH --runtime-tarball PATH --output-dir PATH --version VERSION --source-date-epoch EPOCH --min-glibc VERSION --min-libstdcxx SYMBOL --operator-peercred-helper PATH'
       exit 0
       ;;
     *)
@@ -96,6 +102,7 @@ if [[ -z "$build_node" && -z "$runtime_tarball" && -n "$legacy_node_runtime" ]];
 fi
 [[ -n "$source_dir" && -n "$build_node" && -n "$output_dir" ]] || fail
 [[ -n "$version" && -n "$source_epoch" && -n "$min_glibc" && -n "$min_libstdcxx" ]] || fail
+[[ -n "$operator_peercred_helper" ]] || fail
 [[ -n "$runtime_tarball" || -n "$legacy_node_runtime" ]] || fail
 [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || fail
 [[ "$source_epoch" =~ ^[0-9]+$ ]] || fail
@@ -118,6 +125,13 @@ else
 fi
 node_runtime_real=$(readlink -f "$runtime_node" 2>/dev/null) || fail
 [[ -f "$node_runtime_real" && ! -L "$node_runtime_real" && -x "$node_runtime_real" ]] || fail
+
+# The operator socket resolves peer credentials by spawning a packaged native
+# helper at <app>/operator-peercred-helper (see defaultPeerCredentialHelperPath).
+# The Nix package builds this helper; the portable artifact must carry the same
+# binary or the operator CLI surface fails closed on portable installs while
+# working under Nix.  Refuse to emit an artifact without it.
+[[ -f "$operator_peercred_helper" && ! -L "$operator_peercred_helper" && -x "$operator_peercred_helper" ]] || fail
 
 for command_name in cp date find git gzip mktemp readlink sha256sum sort tar; do
   command -v "$command_name" >/dev/null 2>&1 || fail
@@ -178,6 +192,8 @@ cp -a "$source_dir/package.json" "$release_root/app/package.json"
 cp -a "$source_dir/LICENSE" "$release_root/licenses/LICENSE"
 cp "$node_runtime_real" "$release_root/runtime/bin/node"
 chmod 0555 "$release_root/runtime/bin/node"
+cp "$operator_peercred_helper" "$release_root/app/operator-peercred-helper"
+chmod 0755 "$release_root/app/operator-peercred-helper"
 
 make_wrapper() {
   local name=$1

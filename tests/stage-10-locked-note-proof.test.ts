@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatLockedNoteProof,
+  lockedNoteProofCodeForError,
   runLockedNoteProof,
   type LockedNoteProofRuntime,
 } from "../src/operator/locked-note-proof.js";
@@ -90,5 +91,23 @@ describe("locked-note proof", () => {
     expect(result.read).toBe("service_unavailable");
     expect(formatLockedNoteProof(result)).not.toContain("note-secret");
     expect(formatLockedNoteProof(result)).not.toContain("private body");
+  });
+});
+
+describe("locked-note proof error mapping", () => {
+  it("keeps a categorical refusal distinguishable from a service failure", () => {
+    // The socket facade used to collapse every code except `not_found` into
+    // `service_unavailable`.  That made a proven lock refusal unprovable: the
+    // acceptance criterion is a categorical `vault_locked`, and a facade that
+    // reports a generic failure for a working lock cannot demonstrate it.
+    expect(lockedNoteProofCodeForError("vault_locked")).toBe("vault_locked");
+    expect(lockedNoteProofCodeForError("not_found")).toBe("not_found");
+    expect(lockedNoteProofCodeForError("permission_denied")).toBe("permission_denied");
+  });
+
+  it("still reports an unknown or transport-level code as unavailable", () => {
+    expect(lockedNoteProofCodeForError("service_unavailable")).toBe("service_unavailable");
+    expect(lockedNoteProofCodeForError("sync_failed")).toBe("service_unavailable");
+    expect(lockedNoteProofCodeForError("invalid_request")).toBe("service_unavailable");
   });
 });

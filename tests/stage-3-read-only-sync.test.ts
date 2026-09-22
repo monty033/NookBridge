@@ -24,6 +24,7 @@ import {
   runSyncCommand,
 } from "../src/core/notesnook-sync-admin.js";
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
+import { isExactFetchRequest } from "../src/core/readonly-sync-shape.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { serializeRpcResponse, type RpcNotesGetRequest } from "../src/service/rpc-protocol.js";
@@ -112,6 +113,7 @@ describe("NotesnookReadOnlyAdapter", () => {
       "listNotes",
       "noteMetadata",
       "readNoteBody",
+      "readOperatorNoteContent",
       "search",
     ]);
     expect((adapter as unknown as { database?: unknown }).database).toBeUndefined();
@@ -195,6 +197,23 @@ describe("NotesnookReadOnlyAdapter", () => {
     });
   });
 
+  it("reads bounded native content and rejects ciphertext", async () => {
+    const source = Object.assign(createFakeDatabase(), {
+      readOperatorNoteContent: async (id: string) =>
+        id === "note-1"
+          ? { type: "html", data: "<p>Hello</p>" }
+          : { locked: true, cipher: "secret", iv: "iv", salt: "salt" },
+    });
+    const adapter = createNotesnookReadOnlyAdapter({ source });
+    await expect(adapter.readOperatorNoteContent("note-1")).resolves.toEqual({
+      type: "html",
+      data: "<p>Hello</p>",
+    });
+    await expect(adapter.readOperatorNoteContent("locked-note")).rejects.toMatchObject({
+      message: "Notesnook read-only adapter: note content is invalid",
+    });
+  });
+
   it("allows fetch-only sync and rejects full, send, force, and invalid inputs", async () => {
     const database = createFakeDatabase();
     const adapter = createNotesnookReadOnlyAdapter({ source: database });
@@ -218,6 +237,72 @@ describe("NotesnookReadOnlyAdapter", () => {
       message: "Notesnook read-only adapter: search query must be a non-empty string",
     });
     expect(database.syncCalls).toEqual([{ type: "fetch" }]);
+  });
+
+  it("rejects a fetch request that carries any additional field", async () => {
+    // The read-only boundary is structurally exact: `{ type: "fetch" }` and
+    // nothing else.  Silently discarding an extra field would let a caller
+    // believe it asked for something the adapter never honoured.
+    const database = createFakeDatabase();
+    const adapter = createNotesnookReadOnlyAdapter({ source: database });
+
+    await expect(
+      adapter.sync({ type: "fetch", extra: "ignored" } as unknown as { type: "fetch" }),
+    ).rejects.toMatchObject({
+      message: 'Notesnook read-only adapter: sync request must carry only "type"',
+    });
+    expect(database.syncCalls).toEqual([]);
+  });
+
+  it("rejects extra fields that are not plain own enumerable properties", async () => {
+    // Guard: an own-keys check alone is evadable.  A symbol key, a
+    // non-enumerable property, or a property inherited from a prototype all
+    // carry a request field the naive check never sees.
+    const database = createFakeDatabase();
+    const adapter = createNotesnookReadOnlyAdapter({ source: database });
+    const rejection = {
+      message: 'Notesnook read-only adapter: sync request must carry only "type"',
+    };
+
+    const withSymbol = { type: "fetch" as const, [Symbol("extra")]: 1 };
+    await expect(adapter.sync(withSymbol)).rejects.toMatchObject(rejection);
+
+    const withHidden = { type: "fetch" as const };
+    Object.defineProperty(withHidden, "extra", { value: 1, enumerable: false });
+    await expect(adapter.sync(withHidden)).rejects.toMatchObject(rejection);
+
+    const withPrototype = Object.create({ type: "fetch", extra: 1 }) as {
+      type: "fetch";
+    };
+    await expect(adapter.sync(withPrototype)).rejects.toMatchObject(rejection);
+
+    expect(database.syncCalls).toEqual([]);
+  });
+
+  describe("shared sync shape rule", () => {
+    // The adapter and the projection both expose the read-only sync boundary, so
+    // they share one implementation.  The projection cannot be unit-tested in
+    // isolation without a live-database fixture, so the rule itself is pinned
+    // here and both call sites use it.
+    it('accepts exactly { type: "fetch" } and rejects every other shape', () => {
+      expect(isExactFetchRequest({ type: "fetch" })).toBe(true);
+
+      expect(isExactFetchRequest({ type: "fetch", extra: 1 })).toBe(false);
+      expect(isExactFetchRequest({ type: "fetch", force: true })).toBe(false);
+      expect(isExactFetchRequest({ type: "full" })).toBe(false);
+      expect(isExactFetchRequest({})).toBe(false);
+      expect(isExactFetchRequest(null)).toBe(false);
+      expect(isExactFetchRequest("fetch")).toBe(false);
+
+      const withSymbol = { type: "fetch", [Symbol("extra")]: 1 };
+      expect(isExactFetchRequest(withSymbol)).toBe(false);
+
+      const withHidden = { type: "fetch" };
+      Object.defineProperty(withHidden, "extra", { value: 1, enumerable: false });
+      expect(isExactFetchRequest(withHidden)).toBe(false);
+
+      expect(isExactFetchRequest(Object.create({ type: "fetch" }))).toBe(false);
+    });
   });
 
   it("coalesces concurrent sync calls to one upstream attempt", async () => {
@@ -1013,6 +1098,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "noteContentDiagnostic",
       "noteMetadata",
       "readNoteLockState",
+      "readOperatorNoteContent",
       "search",
       "sync",
     ]);

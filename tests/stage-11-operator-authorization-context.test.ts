@@ -1,0 +1,173 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  resolveOperatorRequestLockState,
+  resolveOperatorRequestNotebookPolicy,
+  settingsOperationForMethod,
+} from "../src/service/operator-authorization-context.js";
+import type { RpcRequest } from "../src/service/rpc-protocol.js";
+
+const resolveHandle = (handle: string): string | undefined =>
+  handle === "h_one" ? "note_one" : undefined;
+
+const mutating = (params: Record<string, unknown>): RpcRequest =>
+  ({ id: "r1", method: "notes.apply-edit", params }) as unknown as RpcRequest;
+
+const readOnly = (params: Record<string, unknown>): RpcRequest =>
+  ({ id: "r1", method: "notes.get-view", params }) as unknown as RpcRequest;
+
+describe("operator request lock context", () => {
+  it("reads the lock state of the note a mutating request names", async () => {
+    // Finding 7: the evaluator must be able to see the lock state of the target
+    // it is authorizing, which means resolving it before the sync seam runs.
+    const read = vi.fn(async () => "locked" as const);
+    await expect(
+      resolveOperatorRequestLockState({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        readNoteLockState: read,
+      }),
+    ).resolves.toEqual({ id: "note_one", locked: true });
+    expect(read).toHaveBeenCalledWith("note_one");
+  });
+
+  it("reads no lock state when there is no target to resolve", async () => {
+    // Guard: a read-only method, a forged handle, a request without a handle,
+    // and a missing request must all leave the context untouched rather than
+    // consulting the database on an untrusted id.
+    const read = vi.fn(async () => "locked" as const);
+    const cases: Array<{ method: "notes.apply-edit" | "notes.get-view"; request?: RpcRequest }> = [
+      { method: "notes.get-view", request: readOnly({ id: "h_one" }) },
+      { method: "notes.apply-edit", request: mutating({ id: "h_forged" }) },
+      { method: "notes.apply-edit", request: mutating({}) },
+      { method: "notes.apply-edit" },
+    ];
+    for (const testCase of cases) {
+      await expect(
+        resolveOperatorRequestLockState({
+          method: testCase.method,
+          request: testCase.request,
+          resolveHandle,
+          readNoteLockState: read,
+        }),
+      ).resolves.toBeUndefined();
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("reads no lock state when the daemon exposes no lock reader", async () => {
+    await expect(
+      resolveOperatorRequestLockState({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        resolveOperationNoteId: undefined,
+        readNoteLockState: undefined,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("resolves the lock state of a bare apply-undo through its operation handle", async () => {
+    // Review finding: a bare apply-undo carries only an opaque operation handle,
+    // so the authorization seam saw no target and skipped the lock check.  The
+    // runtime refused the mutation anyway, but the seam is meant to be the first
+    // line, so it must resolve the note from the operation record too.
+    const read = vi.fn(async () => "locked" as const);
+    const operationHandle = `op_${"a".repeat(64)}`;
+    await expect(
+      resolveOperatorRequestLockState({
+        method: "notes.apply-undo",
+        request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+        resolveHandle,
+        resolveOperationNoteId: (handle) =>
+          handle === operationHandle ? "note_from_op" : undefined,
+        readNoteLockState: read,
+      }),
+    ).resolves.toEqual({ id: "note_from_op", locked: true });
+    expect(read).toHaveBeenCalledWith("note_from_op");
+  });
+
+  it("ignores a malformed or unresolvable operation handle", async () => {
+    // Guard: a handle that is not the published shape, or that resolves to
+    // nothing, must not cause a database read on an untrusted value.
+    const read = vi.fn(async () => "locked" as const);
+    const resolveOperationNoteId = vi.fn(() => undefined);
+    for (const operationHandle of ["op_nothex", "h_one", ""]) {
+      await expect(
+        resolveOperatorRequestLockState({
+          method: "notes.apply-undo",
+          request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+          resolveHandle,
+          resolveOperationNoteId,
+          readNoteLockState: read,
+        }),
+      ).resolves.toBeUndefined();
+    }
+    expect(resolveOperationNoteId).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("maps each operator method to the settings operation it performs", () => {
+    // The settings vocabulary is read/edit/create/delete; the operator surface
+    // has to say which one a method is, or the notebook policy cannot be asked.
+    expect(settingsOperationForMethod("notes.get-view")).toBe("read");
+    expect(settingsOperationForMethod("notes.edit-preimage")).toBe("read");
+    expect(settingsOperationForMethod("notes.browse")).toBe("read");
+    expect(settingsOperationForMethod("notes.search-operator")).toBe("read");
+    expect(settingsOperationForMethod("notes.operation-list")).toBe("read");
+    expect(settingsOperationForMethod("notes.operation-status")).toBe("read");
+    expect(settingsOperationForMethod("notes.apply-edit")).toBe("edit");
+    expect(settingsOperationForMethod("notes.apply-undo")).toBe("edit");
+    expect(settingsOperationForMethod("notes.create")).toBe("create");
+  });
+
+  it("exposes the notebook policy decision for the target", async () => {
+    // Review finding: the notebook half of the requirement was only scaffolded —
+    // the context had a field nothing populated.  It is now resolved from the
+    // settings evaluator that already backs the service policy.
+    const evaluate = vi.fn(() => false);
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        readNoteNotebookPath: async () => "Private/Secrets",
+        evaluateNotebookPolicy: evaluate,
+      }),
+    ).resolves.toEqual({ notebookPath: "Private/Secrets", allow: false });
+    expect(evaluate).toHaveBeenCalledWith("edit", "Private/Secrets");
+  });
+
+  it("resolves create policy from the request notebookId", async () => {
+    const evaluate = vi.fn(() => false);
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.create",
+        request: {
+          id: "r1",
+          method: "notes.create",
+          params: { notebookId: "nb_private", title: "T", content: "C" },
+        },
+        resolveHandle,
+        resolveNotebookPath: async (id) => (id === "nb_private" ? "Private/Secrets" : undefined),
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: evaluate,
+      }),
+    ).resolves.toEqual({ notebookPath: "Private/Secrets", allow: false });
+    expect(evaluate).toHaveBeenCalledWith("create", "Private/Secrets");
+  });
+
+  it("reads no notebook policy when the daemon supplies no source", async () => {
+    // Guard: without a path reader and an evaluator there is nothing to decide,
+    // and the context must stay untouched rather than defaulting to allow.
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.apply-edit",
+        request: mutating({ id: "h_one" }),
+        resolveHandle,
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: undefined,
+      }),
+    ).resolves.toBeUndefined();
+  });
+});

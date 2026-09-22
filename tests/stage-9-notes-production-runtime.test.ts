@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { URL } from "node:url";
 
 import {
   createNotesCommandRuntimeFromReadOnly,
   createNotesOpaqueHandleCodec,
   createNotesReadSource,
+  createProductionNotesRuntime,
 } from "../src/operator/notes-production-runtime.js";
 import type { NotesCategoricalResult } from "../src/operator/notes-cli.js";
 
@@ -74,6 +77,22 @@ describe("Stage 9 production read-only notes composition", () => {
     expect(JSON.stringify(note)).not.toContain("note-1");
   });
 
+  it("constructs production runtime without a second database opener", async () => {
+    const runtimeSource = readFileSync(
+      new URL("../src/operator/notes-production-runtime.ts", import.meta.url),
+      "utf8",
+    );
+    expect(runtimeSource).not.toContain("createProductionLiveLoginRuntime");
+    expect(runtimeSource).not.toContain("@notesnook/core");
+    expect(runtimeSource).not.toContain("createProductionOperatorKeyStore");
+    const production = await createProductionNotesRuntime({ environment: {} });
+    await expect(production.runtime.browse({ limit: 1 })).resolves.toMatchObject({
+      kind: "error",
+      exitCode: 3,
+    });
+    await production.cleanup();
+  });
+
   it("returns categorical unavailable results for mutation methods", async () => {
     const runtime = createNotesCommandRuntimeFromReadOnly(
       createNotesReadSource({
@@ -84,14 +103,17 @@ describe("Stage 9 production read-only notes composition", () => {
       createNotesOpaqueHandleCodec("stable local database key"),
     );
 
-    await expect(
-      runtime.edit({ handle: "not_handle", content: "body", undoToken: "unt_token" }),
-    ).resolves.toEqual({
+    await expect(runtime.edit({ handle: "not_handle" })).resolves.toEqual({
       kind: "error",
       exitCode: 3,
       message: "nookctl notes: runtime unavailable",
     });
-    await expect(runtime.undo({ token: "unt_token" })).resolves.toEqual({
+    await expect(runtime.undo({ operationHandle: `op_${"a".repeat(64)}` })).resolves.toEqual({
+      kind: "error",
+      exitCode: 3,
+      message: "nookctl notes: runtime unavailable",
+    });
+    await expect(runtime.operations()).resolves.toEqual({
       kind: "error",
       exitCode: 3,
       message: "nookctl notes: runtime unavailable",

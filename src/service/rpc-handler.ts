@@ -338,6 +338,35 @@ export async function handleRpcRequest<T extends RpcRequest>(
         )) as unknown as RpcHandlerResponse<T>;
       }
 
+      // T04 — the MCP endpoint rejects every canonical operator
+      // method categorically.  Operator methods are routed to the
+      // separate operator listener (and operator policy evaluator)
+      // — they must never reach the MCP handler.
+      //
+      // In practice this block is UNREACHABLE for operator methods:
+      // `validateRequestStructurally` above admits only the eleven
+      // daemon methods, so an operator method is already refused with
+      // `invalid_request` before it gets here.  That is the stronger
+      // outcome — an operator method is indistinguishable from any
+      // other unknown method, so probing cannot reveal that an
+      // operator endpoint exists on this host.  The check is kept as
+      // defence in depth in case the structural allowlist is ever
+      // widened; `tests/stage-11-t10-mcp-non-regression.test.ts`
+      // derives its cases from OPERATOR_METHODS so a widening cannot
+      // silently open this boundary.
+      if (
+        structural.request.method === "notes.get-view" ||
+        structural.request.method === "notes.edit-preimage" ||
+        structural.request.method === "notes.apply-edit" ||
+        structural.request.method === "notes.apply-undo" ||
+        structural.request.method === "notes.operation-status" ||
+        structural.request.method === "notes.operation-list" ||
+        structural.request.method === "notes.browse" ||
+        structural.request.method === "notes.search-operator"
+      ) {
+        return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+      }
+
       const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
       if (!resolved.ok)
         return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
@@ -786,6 +815,20 @@ async function runAuthorizedRpcMethod(
       return runPathDiagnostic(request, runtime, id);
     case "notes.sync":
       return runNotesSync(request, runtime, id);
+    // T04 — the MCP endpoint does not reach this branch for operator
+    // methods: the structural allowlist refuses them with
+    // `invalid_request` first, and the check above refuses them again
+    // if that allowlist is ever widened.  Kept as the final
+    // defence-in-depth refusal.
+    case "notes.get-view":
+    case "notes.edit-preimage":
+    case "notes.apply-edit":
+    case "notes.apply-undo":
+    case "notes.operation-status":
+    case "notes.operation-list":
+    case "notes.browse":
+    case "notes.search-operator":
+      return buildErrorEnvelope(id, "permission_denied");
   }
 }
 

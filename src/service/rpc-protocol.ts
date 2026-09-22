@@ -240,6 +240,74 @@ export type RpcNotesDeleteParams = RpcNotesPathParams | RpcNotesExplicitPathPara
 export type RpcNotesLockedNoteProofParams = RpcNotesPathParams | RpcNotesExplicitPathParams;
 export type RpcNotesPathDiagnosticParams = RpcNotesPathParams | RpcNotesExplicitPathParams;
 
+// ---------------------------------------------------------------------------
+// T04 — canonical operator RPC vocabulary.
+//
+// The frozen T00 operator vocabulary (notes.get-view, notes.edit-preimage,
+// notes.apply-edit, notes.apply-undo, notes.create, notes.operation-status,
+// notes.operation-list) is admitted on the wire but routed to a SEPARATE
+// operator listener.  The MCP endpoint continues to reject every operator
+// method categorically (no body, no edit, no undo) at the policy layer.
+//
+// The request / response shapes below are the CLOSED wire surfaces the
+// operator listener forwards to the policy seam.  No body bytes are
+// projected into the MCP endpoint; the MCP listener is unchanged and
+// keeps its body-free contract for the four read methods.
+// ---------------------------------------------------------------------------
+
+/** Bounded opaque handle for the operator vocabulary (note id). */
+export interface RpcOperatorNoteParams {
+  readonly id: string;
+}
+
+/** Bounded opaque handle for `notes.operation-status`. */
+export interface RpcOperatorOperationStatusParams {
+  readonly operationHandle: string;
+}
+
+/** Bounded apply-edit params; canonical closed shape. */
+export interface RpcOperatorApplyEditParams {
+  readonly id: string;
+  readonly expectedRevision: string;
+  readonly markdown: string;
+}
+
+/**
+ * Bounded apply-undo params; closed shape, two admitted forms.
+ *
+ * `id` and `expectedRevision` are optional because the operator form carries
+ * only the daemon-minted `operationHandle`: the daemon resolves the note and
+ * the guarding revision from its own committed operation record, so neither
+ * crosses the socket.  A caller that already holds both may still send them.
+ */
+export interface RpcOperatorApplyUndoParams {
+  readonly id?: string;
+  readonly operationHandle: string;
+  readonly expectedRevision?: string;
+}
+
+export interface RpcOperatorPageParams {
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+export interface RpcOperatorSearchParams extends RpcOperatorPageParams {
+  readonly query: string;
+}
+
+/** Bounded operator discovery note projection. */
+export interface RpcOperatorDiscoveryNote {
+  readonly handle: string;
+  readonly label: string;
+  readonly bytes: number;
+}
+
+export interface RpcOperatorDiscoveryPageResult {
+  readonly kind: "operator-page";
+  readonly notes: ReadonlyArray<RpcOperatorDiscoveryNote>;
+  readonly next: string | null;
+}
+
 /** The closed set of allowed RPC methods. */
 export type RpcMethod =
   | "notes.search"
@@ -252,7 +320,19 @@ export type RpcMethod =
   | "notes.delete"
   | "notes.locked_note_proof"
   | "notes.path_diagnostic"
-  | "notes.sync";
+  | "notes.sync"
+  // T04 — canonical operator RPC vocabulary.  Operator methods live in
+  // the SAME `RpcMethod` union (the parser is the wire contract); the
+  // MCP endpoint rejects them categorically, and the operator listener
+  // is the only surface that admits them.
+  | "notes.get-view"
+  | "notes.edit-preimage"
+  | "notes.apply-edit"
+  | "notes.apply-undo"
+  | "notes.operation-status"
+  | "notes.operation-list"
+  | "notes.browse"
+  | "notes.search-operator";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -320,6 +400,48 @@ export interface RpcNotesSyncRequest {
   readonly params: RpcNotesSyncParams;
 }
 
+// T04 — operator request shapes.
+export interface RpcNotesGetViewRequest {
+  readonly id: string;
+  readonly method: "notes.get-view";
+  readonly params: RpcOperatorNoteParams;
+}
+export interface RpcNotesEditPreimageRequest {
+  readonly id: string;
+  readonly method: "notes.edit-preimage";
+  readonly params: RpcOperatorNoteParams;
+}
+export interface RpcNotesApplyEditRequest {
+  readonly id: string;
+  readonly method: "notes.apply-edit";
+  readonly params: RpcOperatorApplyEditParams;
+}
+export interface RpcNotesApplyUndoRequest {
+  readonly id: string;
+  readonly method: "notes.apply-undo";
+  readonly params: RpcOperatorApplyUndoParams;
+}
+export interface RpcNotesOperationStatusRequest {
+  readonly id: string;
+  readonly method: "notes.operation-status";
+  readonly params: RpcOperatorOperationStatusParams;
+}
+export interface RpcNotesOperationListRequest {
+  readonly id: string;
+  readonly method: "notes.operation-list";
+  readonly params: Record<string, never>;
+}
+export interface RpcNotesBrowseRequest {
+  readonly id: string;
+  readonly method: "notes.browse";
+  readonly params: RpcOperatorPageParams;
+}
+export interface RpcNotesSearchOperatorRequest {
+  readonly id: string;
+  readonly method: "notes.search-operator";
+  readonly params: RpcOperatorSearchParams;
+}
+
 export type RpcRequest =
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
@@ -331,7 +453,16 @@ export type RpcRequest =
   | RpcNotesDeleteRequest
   | RpcNotesLockedNoteProofRequest
   | RpcNotesPathDiagnosticRequest
-  | RpcNotesSyncRequest;
+  | RpcNotesSyncRequest
+  // T04 — canonical operator RPC vocabulary.
+  | RpcNotesGetViewRequest
+  | RpcNotesEditPreimageRequest
+  | RpcNotesApplyEditRequest
+  | RpcNotesApplyUndoRequest
+  | RpcNotesOperationStatusRequest
+  | RpcNotesOperationListRequest
+  | RpcNotesBrowseRequest
+  | RpcNotesSearchOperatorRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -394,6 +525,7 @@ export interface RpcGetNoteResult {
 export interface RpcCreatedNoteResult {
   readonly kind: "create";
   readonly id: string;
+  readonly operationHandle?: string;
   readonly titleBytes: number;
   readonly contentBytes: number;
 }
@@ -476,6 +608,73 @@ export interface RpcSyncResult {
   readonly attempts: number;
 }
 
+// T04 — canonical operator RPC result shapes.  These are the closed
+// envelopes the operator listener serialises; their bodies are
+// bounded by the published wire limits (D9) and never include
+// credentials, keys, raw stored content beyond the editor Markdown
+// projection, or operator argv/env tokens.  The integration with
+// the operator listener is the T05 handoff; the type definitions
+// land here so the operator policy seam can be wired without
+// widening `RpcResult`.
+export interface RpcNotesGetViewResult {
+  readonly kind: "view";
+  readonly id: string;
+  readonly revision: string;
+  /** Bounded Markdown projection for the operator editor/view path. */
+  readonly markdown: string;
+  readonly contentBytes: number;
+}
+
+export interface RpcNotesEditPreimageResult {
+  readonly kind: "preimage";
+  readonly id: string;
+  readonly revision: string;
+  /** Trusted pre-edit Markdown projection captured before the editor opens. */
+  readonly markdown: string;
+  readonly contentBytes: number;
+}
+
+export interface RpcNotesApplyEditResult {
+  readonly kind: "edit";
+  readonly id: string;
+  readonly appliedFields: ReadonlyArray<"content">;
+  readonly revision: string;
+  readonly contentBytes: number;
+}
+
+export interface RpcNotesApplyUndoResult {
+  readonly kind: "undo";
+  /**
+   * Note handle, echoed only when the caller addressed one.  A bare
+   * `notes undo` addresses the operation alone and the daemon must not
+   * answer with the raw note id (D8), so this is omitted then.
+   */
+  readonly id?: string;
+  readonly appliedFields: ReadonlyArray<"content">;
+  readonly revision: string;
+  readonly contentBytes: number;
+}
+
+export type RpcOperatorOperationState =
+  | "prepared"
+  | "committing"
+  | "committed"
+  | "undone"
+  | "unresolved"
+  | "aborted";
+
+export interface RpcNotesOperationStatusResult {
+  readonly kind: "operation-status";
+  readonly operationHandle: string;
+  readonly state: RpcOperatorOperationState;
+}
+
+export interface RpcNotesOperationListResult {
+  readonly kind: "operation-list";
+  readonly handles: ReadonlyArray<string>;
+  readonly unresolvedHandles?: ReadonlyArray<string>;
+}
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
@@ -487,7 +686,15 @@ export type RpcResult =
   | RpcDeleteNoteResult
   | RpcLockedNoteProofResult
   | RpcNotesPathDiagnosticResult
-  | RpcSyncResult;
+  | RpcSyncResult
+  // T04 — canonical operator RPC result shapes.
+  | RpcNotesGetViewResult
+  | RpcNotesEditPreimageResult
+  | RpcNotesApplyEditResult
+  | RpcNotesApplyUndoResult
+  | RpcNotesOperationStatusResult
+  | RpcNotesOperationListResult
+  | RpcOperatorDiscoveryPageResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -504,6 +711,8 @@ export interface RpcAnySuccessEnvelope {
 export interface RpcErrorEnvelopePayload {
   readonly code: RpcErrorCode;
   readonly message: string;
+  /** Present only when a mutating operation outcome is uncertain. */
+  readonly operationHandle?: string;
 }
 
 /** The only error categories that may cross the RPC response boundary. */
@@ -527,7 +736,17 @@ rpcErrorMessages.conflict = "Conflict";
 rpcErrorMessages.sync_failed = "Sync failed";
 rpcErrorMessages.vault_locked = "Vault locked";
 rpcErrorMessages.not_found = "Not found";
-const RPC_ERROR_MESSAGES: Readonly<Record<RpcErrorCode, string>> = objectFreeze(rpcErrorMessages);
+/**
+ * The single source of truth for the categorical error vocabulary.
+ *
+ * `serializeRpcResponse` rejects any envelope whose `message` is not
+ * exactly the fixed string for its `code`, so every producer (including
+ * the operator handler) MUST derive its error message from this table
+ * rather than inventing one.  Exporting it keeps that rule mechanical
+ * instead of duplicated.
+ */
+export const RPC_ERROR_MESSAGES: Readonly<Record<RpcErrorCode, string>> =
+  objectFreeze(rpcErrorMessages);
 
 export interface RpcErrorEnvelope {
   readonly id: string;
@@ -812,7 +1031,21 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.delete" &&
     method !== "notes.locked_note_proof" &&
     method !== "notes.path_diagnostic" &&
-    method !== "notes.sync"
+    method !== "notes.sync" &&
+    // T04 — canonical operator RPC vocabulary.  The parser admits the
+    // method literal so the operator listener (which owns the
+    // body-aware handler chain) can route it to the operator policy
+    // seam.  Aliases (notes.edit / notes.undo /
+    // notes.predict-next-revision / any "snapshot RPC") are NOT
+    // accepted here.
+    method !== "notes.get-view" &&
+    method !== "notes.edit-preimage" &&
+    method !== "notes.apply-edit" &&
+    method !== "notes.apply-undo" &&
+    method !== "notes.operation-status" &&
+    method !== "notes.operation-list" &&
+    method !== "notes.browse" &&
+    method !== "notes.search-operator"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -1188,6 +1421,167 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       if (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookPath"]))
         paramsObj.notebookPath = notebookPath;
     }
+  } else if (method === "notes.browse" || method === "notes.search-operator") {
+    const allowedShapes =
+      method === "notes.browse"
+        ? [[], ["cursor"], ["limit"], ["cursor", "limit"]]
+        : [["query"], ["query", "cursor"], ["query", "limit"], ["query", "cursor", "limit"]];
+    if (!allowedShapes.some((shape) => keysAreExactly(paramKeys, shape)))
+      throw rpcProtocolError("rpc protocol: operator discovery params are invalid");
+    if (method === "notes.search-operator") {
+      const query = paramsRecord.query;
+      if (
+        typeof query !== "string" ||
+        query.length === 0 ||
+        hasControlCharacter(query) ||
+        utf8ByteLength(query, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes
+      )
+        throw rpcProtocolError("rpc protocol: operator search query is invalid");
+    }
+    const cursor = paramsRecord.cursor;
+    if (cursor !== undefined && !isWellFormedCursorToken(cursor))
+      throw rpcProtocolError("rpc protocol: operator cursor is invalid");
+    const limit = paramsRecord.limit;
+    if (
+      limit !== undefined &&
+      (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100)
+    )
+      throw rpcProtocolError("rpc protocol: operator limit is invalid");
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    if (method === "notes.search-operator") paramsObj.query = paramsRecord.query;
+    if (cursor !== undefined) paramsObj.cursor = cursor;
+    if (limit !== undefined) paramsObj.limit = limit;
+  } else if (method === "notes.get-view" || method === "notes.edit-preimage") {
+    // T04 — closed `notes.get-view` / `notes.edit-preimage` params:
+    // exactly one field, `id` (an opaque operator handle, bounded by
+    // the published identifier cap).  Anything else is rejected.
+    if (paramKeys.length !== 1 || paramKeys[0] !== "id") {
+      throw rpcProtocolError(
+        "rpc protocol: operator note params must contain exactly one field: id",
+      );
+    }
+    const noteId = paramsRecord.id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    ) {
+      throw rpcProtocolError("rpc protocol: operator note id is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+  } else if (method === "notes.apply-edit") {
+    // T04 — closed `notes.apply-edit` params: exactly
+    // { id, expectedRevision, markdown } (canonical vocabulary).
+    // The `markdown` field is bounded by the editor markdown budget
+    // (D9 — 4 MiB upper; the wire cap below is the closed form).
+    if (!keysAreExactly(paramKeys, ["id", "expectedRevision", "markdown"])) {
+      throw rpcProtocolError("rpc protocol: apply-edit params have unexpected fields");
+    }
+    const noteId = paramsRecord.id;
+    const expectedRevision = paramsRecord.expectedRevision;
+    const markdown = paramsRecord.markdown;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId) ||
+      typeof expectedRevision !== "string" ||
+      expectedRevision.length === 0 ||
+      !isWellFormedRevisionToken(expectedRevision) ||
+      typeof markdown !== "string"
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-edit params are invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+    paramsObj.expectedRevision = expectedRevision;
+    paramsObj.markdown = markdown;
+  } else if (method === "notes.apply-undo") {
+    // T04 — closed `notes.apply-undo` params.  Two shapes are admitted:
+    //
+    //   { operationHandle }
+    //   { id, operationHandle, expectedRevision }
+    //
+    // The handle-only form is the operator contract: the daemon resolves the
+    // note id and the guarding revision from its own committed record, so
+    // neither crosses the socket.  The explicit form stays for callers that
+    // already hold the note handle and the revision.  Requiring the three-field
+    // form refused the CLI's `notes undo` before the request ever reached the
+    // runtime, and the protocol error closed the connection with no envelope.
+    const handleOnlyShape = keysAreExactly(paramKeys, ["operationHandle"]);
+    const explicitShape = keysAreExactly(paramKeys, ["id", "operationHandle", "expectedRevision"]);
+    if (!handleOnlyShape && !explicitShape) {
+      throw rpcProtocolError("rpc protocol: apply-undo params have unexpected fields");
+    }
+    const noteId = paramsRecord.id;
+    const operationHandle = paramsRecord.operationHandle;
+    const expectedRevision = paramsRecord.expectedRevision;
+    if (
+      typeof operationHandle !== "string" ||
+      operationHandle.length === 0 ||
+      operationHandle.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(operationHandle, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(operationHandle)
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-undo operationHandle is invalid");
+    }
+    if (
+      noteId !== undefined &&
+      (typeof noteId !== "string" ||
+        noteId.length === 0 ||
+        noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(noteId))
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-undo id is invalid");
+    }
+    if (
+      expectedRevision !== undefined &&
+      (typeof expectedRevision !== "string" ||
+        expectedRevision.length === 0 ||
+        !isWellFormedRevisionToken(expectedRevision))
+    ) {
+      throw rpcProtocolError("rpc protocol: apply-undo expectedRevision is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.operationHandle = operationHandle;
+    if (noteId !== undefined) paramsObj.id = noteId;
+    if (expectedRevision !== undefined) paramsObj.expectedRevision = expectedRevision;
+  } else if (method === "notes.operation-status") {
+    // T04 — closed `notes.operation-status` params: exactly one field,
+    // `operationHandle` (daemon-minted opaque handle).
+    if (paramKeys.length !== 1 || paramKeys[0] !== "operationHandle") {
+      throw rpcProtocolError(
+        "rpc protocol: operation-status params must contain exactly one field: operationHandle",
+      );
+    }
+    const operationHandle = paramsRecord.operationHandle;
+    if (
+      typeof operationHandle !== "string" ||
+      operationHandle.length === 0 ||
+      operationHandle.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      utf8ByteLength(operationHandle, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(operationHandle)
+    ) {
+      throw rpcProtocolError("rpc protocol: operation-status operationHandle is invalid");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.operationHandle = operationHandle;
+  } else if (method === "notes.operation-list") {
+    // T04 — closed `notes.operation-list` params: parameterless.
+    if (paramKeys.length !== 0) {
+      throw rpcProtocolError("rpc protocol: operation-list params must be empty");
+    }
+    paramsObj = objectCreate(null) as Record<string, unknown>;
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");
@@ -1415,12 +1809,17 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "create") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "id", "titleBytes", "contentBytes"],
+        ["kind", "id", "operationHandle", "titleBytes", "contentBytes"],
         "rpc protocol: create result has unexpected fields",
       );
       if (
-        resultKeys.length !== 4 ||
-        !keysAreExactly(resultKeys, ["kind", "id", "titleBytes", "contentBytes"])
+        (resultKeys.length !== 4 && resultKeys.length !== 5) ||
+        !keysAreExactly(
+          resultKeys,
+          resultKeys.length === 5
+            ? ["kind", "id", "operationHandle", "titleBytes", "contentBytes"]
+            : ["kind", "id", "titleBytes", "contentBytes"],
+        )
       ) {
         throw rpcProtocolError("rpc protocol: create result has unexpected fields");
       }
@@ -1438,11 +1837,21 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const resultPayload = objectCreate(null) as {
         kind: "create";
         id: string;
+        operationHandle?: string;
         titleBytes: number;
         contentBytes: number;
       };
       resultPayload.kind = "create";
       resultPayload.id = noteId;
+      const operationHandle = resultRecord.operationHandle;
+      if (operationHandle !== undefined) {
+        assertBoundedString(
+          operationHandle,
+          STAGE5_RPC_LIMITS.maxIdentifierBytes,
+          "create operation handle",
+        );
+        resultPayload.operationHandle = operationHandle;
+      }
       resultPayload.titleBytes = resultRecord.titleBytes;
       resultPayload.contentBytes = resultRecord.contentBytes;
       return serializeSuccessFrame(id, resultPayload, rawSum);
@@ -1783,6 +2192,373 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       resultPayload.attempts = resultRecord.attempts;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
+
+    // T04 — canonical operator RPC result shapes.  Each operator
+    // listener result is validated against its closed own-key set;
+    // unknown fields, missing fields, and oversize fields are
+    // rejected categorically with a categorical RpcProtocolError
+    // (the raw envelope is never echoed into the error).
+
+    if (kind === "operator-page") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "notes", "next"],
+        "rpc protocol: operator page result has unexpected fields",
+      );
+      if (resultKeys.length !== 3 || !keysAreExactly(resultKeys, ["kind", "notes", "next"]))
+        throw rpcProtocolError("rpc protocol: operator page result has unexpected fields");
+      const notes = resultRecord.notes;
+      const next = resultRecord.next;
+      if (
+        !arrayIsArray(notes) ||
+        notes.length > 100 ||
+        (next !== null && (typeof next !== "string" || !isWellFormedCursorToken(next)))
+      )
+        throw rpcProtocolError("rpc protocol: operator page result is invalid");
+      const cleanNotes: Array<{ handle: string; label: string; bytes: number }> = [];
+      for (const note of notes) {
+        if (note === null || typeof note !== "object" || arrayIsArray(note))
+          throw rpcProtocolError("rpc protocol: operator page note is invalid");
+        const noteRecord = note as Record<string, JsonValue>;
+        const noteKeys = validateClosedObject(
+          noteRecord,
+          ["handle", "label", "bytes"],
+          "rpc protocol: operator page note has unexpected fields",
+        );
+        if (noteKeys.length !== 3 || !keysAreExactly(noteKeys, ["handle", "label", "bytes"]))
+          throw rpcProtocolError("rpc protocol: operator page note has unexpected fields");
+        const handle = noteRecord.handle;
+        const label = noteRecord.label;
+        const bytes = noteRecord.bytes;
+        if (typeof handle !== "string" || typeof label !== "string" || typeof bytes !== "number")
+          throw rpcProtocolError("rpc protocol: operator page note is invalid");
+        assertBoundedString(handle, STAGE5_RPC_LIMITS.maxIdentifierBytes, "operator handle");
+        assertBoundedString(label, STAGE5_RPC_LIMITS.maxTitleBytes, "operator label");
+        if (!isNonNegativeFiniteNumber(bytes) || bytes !== Buffer.byteLength(label, "utf8"))
+          throw rpcProtocolError("rpc protocol: operator page note bytes are invalid");
+        preflightResponseStringField(handle, rawSum);
+        preflightResponseStringField(label, rawSum);
+        cleanNotes.push({ handle, label, bytes });
+      }
+      if (next !== null) preflightResponseStringField(next, rawSum);
+      const resultPayload = objectCreate(null) as {
+        kind: "operator-page";
+        notes: Array<{ handle: string; label: string; bytes: number }>;
+        next: string | null;
+      };
+      resultPayload.kind = "operator-page";
+      resultPayload.notes = cleanNotes;
+      resultPayload.next = next;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "view") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "revision", "markdown", "contentBytes"],
+        "rpc protocol: view result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "id", "revision", "markdown", "contentBytes"])
+      ) {
+        throw rpcProtocolError("rpc protocol: view result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      const revision = resultRecord.revision;
+      const markdown = resultRecord.markdown;
+      const contentBytes = resultRecord.contentBytes;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "view id");
+      assertBoundedString(revision, 64, "view revision");
+      assertBoundedMarkdown(markdown, STAGE5_RPC_LIMITS.maxResponseBytes, "view markdown");
+      preflightResponseStringField(noteId, rawSum);
+      preflightResponseStringField(revision, rawSum);
+      preflightResponseStringField(markdown, rawSum);
+      if (
+        !isNonNegativeFiniteNumber(contentBytes) ||
+        contentBytes !== Buffer.byteLength(markdown, "utf8")
+      ) {
+        throw rpcProtocolError("rpc protocol: view result contentBytes is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "view";
+        id: string;
+        revision: string;
+        markdown: string;
+        contentBytes: number;
+      };
+      resultPayload.kind = "view";
+      resultPayload.id = noteId;
+      resultPayload.revision = revision;
+      resultPayload.markdown = markdown;
+      resultPayload.contentBytes = contentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "preimage") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "revision", "markdown", "contentBytes"],
+        "rpc protocol: preimage result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "id", "revision", "markdown", "contentBytes"])
+      ) {
+        throw rpcProtocolError("rpc protocol: preimage result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      const revision = resultRecord.revision;
+      const markdown = resultRecord.markdown;
+      const contentBytes = resultRecord.contentBytes;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "preimage id");
+      assertBoundedString(revision, 64, "preimage revision");
+      assertBoundedMarkdown(markdown, STAGE5_RPC_LIMITS.maxResponseBytes, "preimage markdown");
+      preflightResponseStringField(noteId, rawSum);
+      preflightResponseStringField(revision, rawSum);
+      preflightResponseStringField(markdown, rawSum);
+      if (
+        !isNonNegativeFiniteNumber(contentBytes) ||
+        contentBytes !== Buffer.byteLength(markdown, "utf8")
+      ) {
+        throw rpcProtocolError("rpc protocol: preimage result contentBytes is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "preimage";
+        id: string;
+        revision: string;
+        markdown: string;
+        contentBytes: number;
+      };
+      resultPayload.kind = "preimage";
+      resultPayload.id = noteId;
+      resultPayload.revision = revision;
+      resultPayload.markdown = markdown;
+      resultPayload.contentBytes = contentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "edit") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "appliedFields", "revision", "contentBytes"],
+        "rpc protocol: edit result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "id", "appliedFields", "revision", "contentBytes"])
+      ) {
+        throw rpcProtocolError("rpc protocol: edit result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      const appliedFields = resultRecord.appliedFields;
+      const revision = resultRecord.revision;
+      const contentBytes = resultRecord.contentBytes;
+      assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "edit id");
+      assertBoundedString(revision, 64, "edit revision");
+      preflightResponseStringField(noteId, rawSum);
+      preflightResponseStringField(revision, rawSum);
+      if (
+        !arrayIsArray(appliedFields) ||
+        appliedFields.length !== 1 ||
+        appliedFields[0] !== "content"
+      ) {
+        throw rpcProtocolError("rpc protocol: edit result appliedFields is invalid");
+      }
+      if (!isNonNegativeFiniteNumber(contentBytes)) {
+        throw rpcProtocolError("rpc protocol: edit result contentBytes is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "edit";
+        id: string;
+        appliedFields: ReadonlyArray<"content">;
+        revision: string;
+        contentBytes: number;
+      };
+      resultPayload.kind = "edit";
+      resultPayload.id = noteId;
+      resultPayload.appliedFields = ["content"];
+      resultPayload.revision = revision;
+      resultPayload.contentBytes = contentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "undo") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "id", "appliedFields", "revision", "contentBytes"],
+        "rpc protocol: undo result has unexpected fields",
+      );
+      // `id` is optional; either four or five keys are accepted.  A bare
+      // `notes undo` addresses the operation alone, and the daemon must not
+      // answer with the raw note id (D8), so the field is omitted.  Requiring
+      // it failed the response *after* the undo had already committed, so the
+      // operator saw an error over a note that had in fact been changed.
+      if (
+        !(
+          (resultKeys.length === 4 &&
+            keysAreExactly(resultKeys, ["kind", "appliedFields", "revision", "contentBytes"])) ||
+          (resultKeys.length === 5 &&
+            keysAreExactly(resultKeys, ["kind", "id", "appliedFields", "revision", "contentBytes"]))
+        )
+      ) {
+        throw rpcProtocolError("rpc protocol: undo result has unexpected fields");
+      }
+      const noteId = resultRecord.id;
+      const appliedFields = resultRecord.appliedFields;
+      const revision = resultRecord.revision;
+      const contentBytes = resultRecord.contentBytes;
+      if (noteId !== undefined) {
+        assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "undo id");
+      }
+      assertBoundedString(revision, 64, "undo revision");
+      if (noteId !== undefined) preflightResponseStringField(noteId, rawSum);
+      preflightResponseStringField(revision, rawSum);
+      if (
+        !arrayIsArray(appliedFields) ||
+        appliedFields.length !== 1 ||
+        appliedFields[0] !== "content"
+      ) {
+        throw rpcProtocolError("rpc protocol: undo result appliedFields is invalid");
+      }
+      if (!isNonNegativeFiniteNumber(contentBytes)) {
+        throw rpcProtocolError("rpc protocol: undo result contentBytes is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "undo";
+        id?: string;
+        appliedFields: ReadonlyArray<"content">;
+        revision: string;
+        contentBytes: number;
+      };
+      resultPayload.kind = "undo";
+      if (noteId !== undefined) resultPayload.id = noteId;
+      resultPayload.appliedFields = ["content"];
+      resultPayload.revision = revision;
+      resultPayload.contentBytes = contentBytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "operation-status") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "operationHandle", "state"],
+        "rpc protocol: operation-status result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 3 ||
+        !keysAreExactly(resultKeys, ["kind", "operationHandle", "state"])
+      ) {
+        throw rpcProtocolError("rpc protocol: operation-status result has unexpected fields");
+      }
+      const operationHandle = resultRecord.operationHandle;
+      const state = resultRecord.state;
+      assertBoundedString(
+        operationHandle,
+        STAGE5_RPC_LIMITS.maxIdentifierBytes,
+        "operation-status operationHandle",
+      );
+      preflightResponseStringField(operationHandle, rawSum);
+      const allowedStates = [
+        "prepared",
+        "committing",
+        "committed",
+        "undone",
+        "unresolved",
+        "aborted",
+      ] as const;
+      if (
+        typeof state !== "string" ||
+        !allowedStates.includes(state as (typeof allowedStates)[number])
+      ) {
+        throw rpcProtocolError("rpc protocol: operation-status result state is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "operation-status";
+        operationHandle: string;
+        state: (typeof allowedStates)[number];
+      };
+      resultPayload.kind = "operation-status";
+      resultPayload.operationHandle = operationHandle;
+      resultPayload.state = state as (typeof allowedStates)[number];
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "operation-list") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "handles", "unresolvedHandles"],
+        "rpc protocol: operation-list result has unexpected fields",
+      );
+      if (
+        (resultKeys.length !== 2 && resultKeys.length !== 3) ||
+        !keysAreExactly(
+          resultKeys,
+          resultKeys.length === 3 ? ["kind", "handles", "unresolvedHandles"] : ["kind", "handles"],
+        )
+      ) {
+        throw rpcProtocolError("rpc protocol: operation-list result has unexpected fields");
+      }
+      const handles = resultRecord.handles;
+      if (!arrayIsArray(handles) || handles.length > STAGE5_RPC_LIMITS.maxSearchHits) {
+        throw rpcProtocolError("rpc protocol: operation-list result handles is invalid");
+      }
+      const cleanHandles: string[] = [];
+      for (let index = 0; index < handles.length; index += 1) {
+        const descriptor = objectGetOwnPropertyDescriptor(handles, String(index));
+        if (descriptor === undefined || !("value" in descriptor)) {
+          throw rpcProtocolError("rpc protocol: operation-list handle must be a value");
+        }
+        const handleValue = descriptor.value;
+        if (
+          typeof handleValue !== "string" ||
+          handleValue.length === 0 ||
+          handleValue.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+          hasControlCharacter(handleValue)
+        ) {
+          throw rpcProtocolError("rpc protocol: operation-list handle is invalid");
+        }
+        cleanHandles.push(handleValue);
+      }
+      objectSetPrototypeOf(cleanHandles, null);
+      objectFreeze(cleanHandles);
+      const unresolvedHandles = resultRecord.unresolvedHandles ?? [];
+      if (
+        !arrayIsArray(unresolvedHandles) ||
+        unresolvedHandles.length > STAGE5_RPC_LIMITS.maxSearchHits
+      ) {
+        throw rpcProtocolError("rpc protocol: operation-list unresolved handles is invalid");
+      }
+      const cleanUnresolvedHandles: string[] = [];
+      for (let index = 0; index < unresolvedHandles.length; index += 1) {
+        const descriptor = objectGetOwnPropertyDescriptor(unresolvedHandles, String(index));
+        if (descriptor === undefined || !("value" in descriptor)) {
+          throw rpcProtocolError("rpc protocol: operation-list unresolved handle must be a value");
+        }
+        const handleValue = descriptor.value;
+        if (
+          typeof handleValue !== "string" ||
+          handleValue.length === 0 ||
+          handleValue.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+          hasControlCharacter(handleValue)
+        ) {
+          throw rpcProtocolError("rpc protocol: operation-list unresolved handle is invalid");
+        }
+        cleanUnresolvedHandles.push(handleValue);
+      }
+      objectSetPrototypeOf(cleanUnresolvedHandles, null);
+      objectFreeze(cleanUnresolvedHandles);
+      const resultPayload = objectCreate(null) as {
+        kind: "operation-list";
+        handles: ReadonlyArray<string>;
+        unresolvedHandles: ReadonlyArray<string>;
+      };
+      resultPayload.kind = "operation-list";
+      resultPayload.handles = cleanHandles;
+      resultPayload.unresolvedHandles = cleanUnresolvedHandles;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
     throw rpcProtocolError("rpc protocol: result kind is not allowed");
   }
 
@@ -1797,14 +2573,21 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   const errorRecord = error as Record<string, JsonValue>;
   const errorKeys = validateClosedObject(
     errorRecord,
-    ["code", "message"],
+    ["code", "message", "operationHandle"],
     "rpc protocol: response error has unexpected fields",
   );
-  if (errorKeys.length !== 2 || !keysAreExactly(errorKeys, ["code", "message"])) {
+  if (
+    (errorKeys.length !== 2 && errorKeys.length !== 3) ||
+    !keysAreExactly(
+      errorKeys,
+      errorKeys.length === 3 ? ["code", "message", "operationHandle"] : ["code", "message"],
+    )
+  ) {
     throw rpcProtocolError("rpc protocol: response error has unexpected fields");
   }
   const code = errorRecord.code;
   const message = errorRecord.message;
+  const operationHandle = errorRecord.operationHandle;
   if (typeof code !== "string" || typeof message !== "string") {
     throw rpcProtocolError("rpc protocol: response error fields must be strings");
   }
@@ -1819,14 +2602,22 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   // error envelope.
   preflightResponseStringField(code, rawSum);
   preflightResponseStringField(fixedMessage, rawSum);
+  if (operationHandle !== undefined) {
+    assertBoundedString(operationHandle, STAGE5_RPC_LIMITS.maxIdentifierBytes, "operation handle");
+  }
 
-  const errorPayload = objectCreate(null) as { code: string; message: string };
+  const errorPayload = objectCreate(null) as {
+    code: string;
+    message: string;
+    operationHandle?: string;
+  };
   errorPayload.code = code;
   errorPayload.message = fixedMessage;
+  if (operationHandle !== undefined) errorPayload.operationHandle = operationHandle;
   const errorEnvelope = objectCreate(null) as {
     id: string;
     ok: false;
-    error: { code: string; message: string };
+    error: { code: string; message: string; operationHandle?: string };
   };
   errorEnvelope.id = id;
   errorEnvelope.ok = false;
@@ -1900,6 +2691,19 @@ function assertBoundedString(
       : "bytes";
   if (value.length > maxBytes || utf8ByteLength(value, maxBytes) > maxBytes) {
     throw rpcProtocolError(`rpc protocol: ${label} exceeds maximum ${boundLabel}`);
+  }
+}
+
+function assertBoundedMarkdown(
+  value: JsonValue | undefined,
+  maxBytes: number,
+  label: string,
+): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || hasDisallowedControlCharacter(value)) {
+    throw rpcProtocolError(`rpc protocol: ${label} is invalid`);
+  }
+  if (value.length > maxBytes || utf8ByteLength(value, maxBytes) > maxBytes) {
+    throw rpcProtocolError(`rpc protocol: ${label} exceeds maximum bytes`);
   }
 }
 
@@ -2402,7 +3206,15 @@ function isFourHexDigits(value: string): boolean {
   return true;
 }
 
-function isRpcErrorCode(value: string): value is RpcErrorCode {
+/**
+ * `true` iff `value` is one of the fixed categorical error codes.
+ *
+ * Exported so operator-side clients classify a daemon error envelope
+ * against the SAME closed vocabulary the daemon serializes with. A
+ * hardcoded client-side subset silently reclassifies any category it
+ * forgot — a losing revision check would surface as "unavailable".
+ */
+export function isRpcErrorCode(value: string): value is RpcErrorCode {
   return reflectApply(objectHasOwnProperty, RPC_ERROR_MESSAGES, [value]);
 }
 
@@ -2449,11 +3261,21 @@ function hasDisallowedControlCharacter(value: string): boolean {
  * through typed access, never through a method call that could
  * trigger a `Symbol.match` trap.
  */
+function isWellFormedCursorToken(value: unknown): boolean {
+  if (typeof value !== "string" || value.length < 6 || value.length > 128) return false;
+  if (value.slice(0, 4) !== "cur_") return false;
+  for (let index = 4; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const digit = code >= 0x30 && code <= 0x39;
+    const lower = code >= 0x61 && code <= 0x7a;
+    const upper = code >= 0x41 && code <= 0x5a;
+    if (!digit && !lower && !upper && code !== 0x5f && code !== 0x2d) return false;
+  }
+  return true;
+}
+
 function isWellFormedRevisionToken(value: unknown): boolean {
   if (typeof value !== "string") return false;
-  // Cheap O(1) prefix check, then walk the suffix byte-by-byte so a
-  // hostile Proxy / throwing getter on a single character cannot
-  // smuggle data past the boundary.
   if (value.length !== 36) return false;
   if (
     reflectApply(stringCharCodeAt, value, [0]) !== 0x72 ||

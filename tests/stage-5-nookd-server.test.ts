@@ -354,6 +354,69 @@ describe("nookd Unix socket server", () => {
       createServerSpy.mockRestore();
     }
   });
+
+  /**
+   * Regression: `validateOptions` builds its normalized result as a
+   * hand-written whitelist. When `operator` was omitted from that list the
+   * daemon started with no operator endpoint at all - no socket, no error -
+   * leaving the whole operator notes CLI surface unreachable in production.
+   * Nothing caught it because the operator socket was only ever exercised by
+   * calling `startOperatorSocketServer` directly, bypassing `validateOptions`.
+   */
+  it("starts the configured operator endpoint alongside the service socket", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-server-operator-"));
+    tempDirectories.push(directory);
+    const socketPath = path.join(directory, "nookbridge.sock");
+    const operatorSocketPath = path.join(directory, "operator.sock");
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: vi.fn(async () => []),
+      cleanup: vi.fn(async () => undefined),
+    });
+
+    const handle = await startNookdServer({
+      socketPath,
+      runtime,
+      installSignalHandlers: false,
+      operator: {
+        socketPath: operatorSocketPath,
+        socketPathRoot: os.tmpdir(),
+        resolvePeer: () => ({
+          uid: process.getuid?.() ?? 0,
+          gid: process.getgid?.() ?? 0,
+          groups: ["nookbridge-clients"],
+        }),
+        authorize: (method) => ({ allowed: true, method }),
+        handle: async (request) => ({
+          id: request.id,
+          ok: true,
+          result: { kind: "operation-list", handles: [] },
+        }),
+      },
+    });
+    handles.push(handle);
+
+    const details = await stat(operatorSocketPath);
+    expect(details.isSocket()).toBe(true);
+    expect(handle.operatorSocketPath).toBe(operatorSocketPath);
+  });
+
+  it("rejects a malformed operator option rather than ignoring it", async () => {
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: vi.fn(async () => []),
+      cleanup: vi.fn(async () => undefined),
+    });
+
+    await expect(
+      startNookdServer({
+        socketPath: "/tmp/nookbridge-operator-validation.sock",
+        runtime,
+        installSignalHandlers: false,
+        operator: "not-an-object" as unknown as NonNullable<
+          Parameters<typeof startNookdServer>[0]["operator"]
+        >,
+      }),
+    ).rejects.toThrow("operator");
+  });
 });
 
 describe("nookd entry point", () => {

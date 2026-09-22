@@ -29,3 +29,6 @@ result-*
 
 # Test scratch directories
 /tmp-tests/
+
+# Agent working notes (untracked planning scratch)
+.hermes/

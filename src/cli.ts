@@ -66,7 +66,6 @@ import {
   formatNotesResult,
   parseNotesCommand,
   runNotesCommand,
-  MAX_NOTES_EDIT_STDIN_BYTES,
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
 } from "./operator/notes-cli.js";
@@ -75,6 +74,7 @@ import {
   formatLockedNoteProof,
   runLockedNoteProof,
 } from "./operator/locked-note-proof.js";
+import { createNotesUndoSelection } from "./operator/notes-undo-prompt.js";
 import {
   createProductionPathDiagnosticRuntime,
   formatPathDiagnostic,
@@ -440,16 +440,24 @@ async function runNotes(args: Args): Promise<number> {
 
   const searchQuery =
     parsed.command.kind === "search" ? readBoundedNotesStdin(MAX_NOTES_QUERY_BYTES) : undefined;
-  const editInput =
-    parsed.command.kind === "edit" ? readBoundedNotesStdin(MAX_NOTES_EDIT_STDIN_BYTES) : undefined;
-  const undoInput = parsed.command.kind === "undo" ? readBoundedNotesStdin(256) : undefined;
+  // `edit` and `undo` deliberately read NOTHING from stdin: the edit body
+  // is produced by the operator's editor against a daemon-captured
+  // preimage, and an undo is selected by daemon-minted opaque handle.  A
+  // stdin read here would both block the command and reintroduce the
+  // forbidden body/token transport.
   let cleanup: (() => void | Promise<void>) | undefined;
   const result = await runNotesCommand({
     argv,
     env: environment,
     ...(searchQuery === undefined ? {} : { searchQuery }),
-    ...(editInput === undefined ? {} : { editInput }),
-    ...(undoInput === undefined ? {} : { undoInput }),
+    // A bare `notes undo` selects a daemon-minted operation handle over
+    // an interactive terminal.  When either stream is not a TTY the seam
+    // reports `{ tty: false }` and the command fails categorical rather
+    // than reversing an operation nobody chose.
+    interactive: createNotesUndoSelection({
+      input: process.stdin,
+      output: process.stdout,
+    }),
     createRuntime: async () => {
       const injected = _internal.notesRuntimeFactory;
       if (injected !== undefined) return injected();
@@ -947,7 +955,7 @@ function printHelp(): void {
       "  nookctl sync <status|read-only|help>",
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
-      "  nookctl notes <help|browse|search|get|edit|undo>",
+      "  nookctl notes <help|browse|search|get|create|edit|undo>",
       "  nookctl settings <show|validate|edit|reset|help>",
       "  nookctl tree <help|list>",
       "",
@@ -967,15 +975,15 @@ function printHelp(): void {
   );
 }
 
-// CLI entry-point.
-if (import.meta.url === `file://${process.argv[1]}`) {
-  run(process.argv).then((code) => {
-    process.exit(code);
-  });
-}
-
 // Convenience re-export for tests that exercise the CLI in-process
 // without spawning a child process.
+//
+// Declared BEFORE the entry-point guard, deliberately.  The guard starts
+// `run`, whose synchronous prefix reaches `createRuntime`, which reads
+// `_internal`.  Declaring this after the guard left `_internal` in its
+// temporal dead zone for that prefix, so every `nookctl notes ...` command
+// that constructs a runtime died with a ReferenceError the moment the CLI
+// was the entry point (the only path tests never exercised).
 export const _internal: {
   readonly dirname: typeof dirname;
   readonly join: typeof join;
@@ -986,4 +994,11 @@ export const _internal: {
   }>;
   treeRuntimeFactory?: (stateDir: string) => TreeCommandRuntime | Promise<TreeCommandRuntime>;
 } = { dirname, join };
+
+// CLI entry-point.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  run(process.argv).then((code) => {
+    process.exit(code);
+  });
+}
 export { formatAuthHelp, parseAuthCommand };
