@@ -103,22 +103,22 @@ function makeFakeArtifact(root: string): {
 } {
   const artifactDir = join(root, "artifact");
   mkdirSyncSafe(artifactDir);
-  const artifact = join(root, "nookbridge-v0.1.1-linux-x64-gnu.tar.gz");
+  const artifact = join(root, "nookbridge-v0.1.2-linux-x64-gnu.tar.gz");
   // Minimal valid artifact structure (must contain a top-level release.json
   // that install-systemd.sh can extract for archive_top_level/artifact_version,
   // plus a scripts/install-systemd.sh so the bootstrap can invoke it after
   // extraction).
   execFileSync("mkdir", [
     "-p",
-    join(artifactDir, "nookbridge-v0.1.1", "bin"),
-    join(artifactDir, "nookbridge-v0.1.1", "scripts"),
+    join(artifactDir, "nookbridge-v0.1.2", "bin"),
+    join(artifactDir, "nookbridge-v0.1.2", "scripts"),
   ]);
   writeFileSync(
-    join(artifactDir, "nookbridge-v0.1.1", "release.json"),
-    `${JSON.stringify({ version: "0.1.1", target: "linux-x64-gnu" }, null, 2)}\n`,
+    join(artifactDir, "nookbridge-v0.1.2", "release.json"),
+    `${JSON.stringify({ version: "0.1.2", target: "linux-x64-gnu" }, null, 2)}\n`,
   );
   writeFileSync(
-    join(artifactDir, "nookbridge-v0.1.1", "SHA256SUMS"),
+    join(artifactDir, "nookbridge-v0.1.2", "SHA256SUMS"),
     "deadbeef payload inventory\n",
   );
   // The bundled nookctl records its argv + the NOOKBRIDGE_SETTINGS_PATH
@@ -133,7 +133,7 @@ function makeFakeArtifact(root: string): {
   ].join("\n");
   for (const name of ["nookctl", "nookbridge-provision", "nookbridge-sync", "nookbridge-health"]) {
     writeFileSync(
-      join(artifactDir, "nookbridge-v0.1.1", "bin", name),
+      join(artifactDir, "nookbridge-v0.1.2", "bin", name),
       name === "nookctl" ? fakeNookctlBody : "#!/bin/sh\nexit 0\n",
       { mode: 0o755 },
     );
@@ -148,15 +148,15 @@ function makeFakeArtifact(root: string): {
     "",
   ].join("\n");
   writeFileSync(
-    join(artifactDir, "nookbridge-v0.1.1", "scripts", "install-systemd.sh"),
+    join(artifactDir, "nookbridge-v0.1.2", "scripts", "install-systemd.sh"),
     fakeInstallerScript,
     { mode: 0o755 },
   );
-  execFileSync("tar", ["-czf", artifact, "-C", artifactDir, "nookbridge-v0.1.1"]);
+  execFileSync("tar", ["-czf", artifact, "-C", artifactDir, "nookbridge-v0.1.2"]);
   const checksumFile = join(root, "SHA256SUMS");
   // The bootstrap must compute the artifact sha256 itself, then write the
   // outer SHA256SUMS file in the installer's expected format.
-  writeFileSync(checksumFile, `${sha256(artifact)}  nookbridge-v0.1.1-linux-x64-gnu.tar.gz\n`);
+  writeFileSync(checksumFile, `${sha256(artifact)}  nookbridge-v0.1.2-linux-x64-gnu.tar.gz\n`);
   return { artifact, checksumFile };
 }
 
@@ -235,7 +235,7 @@ function buildFakeInstallerEnv(): {
   writeFileSync(
     checksumFile,
     [
-      `${sha256(artifact)}  nookbridge-v0.1.1-linux-x64-gnu.tar.gz`,
+      `${sha256(artifact)}  nookbridge-v0.1.2-linux-x64-gnu.tar.gz`,
       `${sha256(fakeInstaller)}  install-systemd.sh`,
       `${sha256(fakeVerifier)}  verify-linux-artifact.sh`,
       "",
@@ -301,7 +301,7 @@ describe("GitHub one-command installer bootstrap", () => {
     // The bootstrap re-hands the artifact path; we only check that it
     // points at the artifact filename (the bootstrap may copy it to a
     // private staging directory before invoking install-systemd.sh).
-    expect(log).toMatch(/--artifact \/[^ ]*nookbridge-v0\.1\.1-linux-x64-gnu\.tar\.gz/);
+    expect(log).toMatch(/--artifact \/[^ ]*nookbridge-v0\.1\.2-linux-x64-gnu\.tar\.gz/);
     expect(log).toMatch(/--checksum-file \/[^ ]*SHA256SUMS/);
   });
 

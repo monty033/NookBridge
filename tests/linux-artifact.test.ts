@@ -364,6 +364,10 @@ describe("Linux artifact manifest contract", () => {
     const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
 
     expect(workflow).toContain('STATIC_GLIBC="$(find /nix/store');
+    expect(workflow).toContain("-name '*-glibc-*-static'");
+    expect(workflow).not.toContain("-name 'glibc-*-static'");
+    expect(workflow).toContain("static glibc output not found");
+    expect(workflow).toContain('test -f "$STATIC_GLIBC/lib/libc.a"');
     expect(workflow).toContain('cc -O2 -static -L"$STATIC_GLIBC/lib"');
     expect(workflow).toContain('readelf -l "$HELPER"');
     expect(workflow).toContain("grep -E 'INTERP'");
@@ -378,24 +382,67 @@ describe("Linux artifact manifest contract", () => {
   it("publishes a tag push as a candidate and gates promotion behind a separate ref", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     const doc = parseYaml(raw) as {
-      on: { push: { tags: string[] } };
-      jobs: Record<string, { if?: string }>;
+      on: { push: { branches: string[]; tags: string[] } };
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          steps?: Array<{ if?: string; name?: string; env?: Record<string, string> }>;
+        }
+      >;
     };
 
     const buildJob = doc.jobs["linux-artifact"];
     const promoteJob = doc.jobs["promote-release"];
+    const artifactStep = buildJob?.steps?.find(
+      (step) => step.name === "Build and verify x86_64 glibc artifact",
+    );
+    const preflightStep = buildJob?.steps?.find(
+      (step) => step.name === "Require successful main runner preflight",
+    );
+    const assetsStep = buildJob?.steps?.find(
+      (step) => step.name === "Prepare GitHub release assets",
+    );
+    const publishStep = buildJob?.steps?.find((step) => step.name === "Publish GitHub release");
 
+    expect(doc.on.push.branches).toEqual(["main", "runner-test/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
     expect(buildJob?.if).toContain("!startsWith(github.ref, 'refs/tags/promote-v')");
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
+    expect(preflightStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    expect(artifactStep?.if).toBe(
+      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
+    );
+    expect(artifactStep?.env?.GITHUB_TOKEN).toBe("");
+    expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    expect(publishStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
 
     // The candidate is created off the general install path...
     expect(raw).toContain("prerelease: true");
+    expect(raw).toContain("release.prerelease !== true");
+    expect(raw).toContain("release.target_commitish");
+    expect(raw).toContain("existing GitHub release is not the matching prerelease candidate");
     // ...and promotion is the only thing that clears the flag.
     expect(raw).toContain('{"prerelease":false}');
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back; a successful PATCH is not proof.
     expect(raw).toMatch(/test "\$promoted" = "false"/);
+  });
+
+  it("runs the real artifact build on main and runner-test refs without publishing", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(raw).toContain("refs/heads/runner-test/");
+    expect(raw).toContain("github.ref == 'refs/heads/main'");
+    expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
+    expect(raw).toContain("PREFLIGHT_READ_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}");
+    expect(raw).toContain(
+      'PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs"',
+    );
+    expect(raw).toContain("node scripts/check-forgejo-preflight.mjs");
+    expect(raw).toContain('GITHUB_TOKEN: ""');
+    expect(raw).toContain("unexpected artifact-build ref");
+    expect(raw).toContain("if: startsWith(github.ref, 'refs/tags/v')");
   });
 });

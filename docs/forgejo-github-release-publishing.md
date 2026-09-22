@@ -14,22 +14,35 @@ Store it in the Forgejo repository secret:
 RELEASE_PUBLISH_TOKEN
 ```
 
-Do not put the token in the repository, workflow YAML, a commit, or a chat
-message. The secret is used only by the tag-triggered release job; pull request
-and branch builds do not receive it.
+Create a separate read-only token that can list Actions runs for the canonical
+repository, with no write or release permissions. Store it as:
+
+```text
+RELEASE_PREFLIGHT_TOKEN
+```
+
+Do not put either token in the repository, workflow YAML, a commit, or a chat
+message. The publish token is used only by the tag-triggered publishing steps;
+the read-only preflight token is used only to verify the prior `main` run. Pull
+request and branch builds do not receive either secret, and source-controlled
+build/test steps explicitly receive an empty `GITHUB_TOKEN`.
 
 ## Publishing a release
 
 1. Merge the source change into Forgejo `main`.
-2. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md), for example:
+2. Wait for the `main` runner-preflight workflow for that exact merge commit to
+   finish successfully. Do not tag while it is queued or failed. For a
+   release-sensitive workflow change before merge, use a `runner-test/<name>`
+   branch first and require the same artifact-build and verifier pass.
+3. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md), for example:
 
    ```bash
    git tag -a v0.1.0 -m 'NookBridge v0.1.0' <canonical-merge-sha>
    git push upstream v0.1.0
    ```
 
-3. Forgejo Actions runs `.forgejo/workflows/linux-artifact.yml`.
-4. The workflow runs the full build/test gate, builds and verifies the Linux
+4. Forgejo Actions runs `.forgejo/workflows/linux-artifact.yml`.
+5. The workflow runs the full build/test gate, builds and verifies the Linux
    artifact, creates the matching GitHub release, and uploads:
 
    - `install.sh`

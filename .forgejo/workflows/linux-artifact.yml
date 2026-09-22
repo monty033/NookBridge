@@ -2,7 +2,7 @@ name: Linux artifact
 
 on:
   push:
-    branches: [main]
+    branches: [main, "runner-test/**"]
     tags: ["v*", "promote-v*"]
   pull_request:
 
@@ -14,6 +14,7 @@ jobs:
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
@@ -57,6 +58,8 @@ jobs:
           git checkout -q --detach FETCH_HEAD
 
       - name: Verify npm registry access
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           node --version
@@ -68,6 +71,8 @@ jobs:
             --fetch-retries=0
 
       - name: Install packages without lifecycle scripts
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           npm ci \
@@ -79,6 +84,8 @@ jobs:
             --timing
 
       - name: Rebuild native and lifecycle dependencies
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           npm rebuild \
@@ -91,6 +98,8 @@ jobs:
 
       - name: Report npm diagnostics
         if: always()
+        env:
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           for log_path in /tmp/nookbridge-npm-cache/_logs/*; do
@@ -104,6 +113,8 @@ jobs:
           done
 
       - name: Build and test
+        env:
+          GITHUB_TOKEN: ""
         run: |
           npm run build
           npm test
@@ -112,15 +123,38 @@ jobs:
           npm run format:check
 
       - name: Prepare production dependencies
+        env:
+          GITHUB_TOKEN: ""
         run: npm prune --omit=dev
 
-      - name: Build and verify x86_64 glibc artifact
+      - name: Require successful main runner preflight
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          PREFLIGHT_READ_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
         run: |
           set -eu
-          VERSION="${RELEASE_VERSION#v}"
+          test -n "${PREFLIGHT_READ_TOKEN:-}"
+          PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs" \
+            node scripts/check-forgejo-preflight.mjs
+
+      - name: Build and verify x86_64 glibc artifact
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              VERSION="${GITHUB_REF#refs/tags/v}"
+              ;;
+            refs/heads/main|refs/heads/runner-test/*)
+              VERSION="ci-${GITHUB_SHA:0:12}"
+              ;;
+            *)
+              printf 'unexpected artifact-build ref: %s\n' "$GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
           RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
@@ -134,10 +168,17 @@ jobs:
           done
           # The runner must provide the static glibc output explicitly.  A
           # dynamically linked fallback embeds /nix/store in the portable
-          # artifact and is rejected by the artifact verifier.
-          STATIC_GLIBC="$(find /nix/store -mindepth 1 -maxdepth 1 -type d -name 'glibc-*-static' -print | LC_ALL=C sort | tail -n 1)"
-          test -n "$STATIC_GLIBC"
-          test -f "$STATIC_GLIBC/lib/libc.a"
+          # artifact and is rejected by the artifact verifier.  Nix store
+          # basenames include the store hash before the package name.
+          STATIC_GLIBC="$(find /nix/store -mindepth 1 -maxdepth 1 -type d -name '*-glibc-*-static' -print | LC_ALL=C sort | tail -n 1)"
+          if [ -z "$STATIC_GLIBC" ]; then
+            printf 'static glibc output not found in /nix/store\n' >&2
+            find /nix/store -mindepth 1 -maxdepth 1 -type d -name '*glibc*static*' -print | LC_ALL=C sort >&2 || true
+            exit 1
+          fi
+          printf 'using static glibc: %s\n' "$STATIC_GLIBC"
+          test -f "$STATIC_GLIBC/lib/libc.a" \
+            || { printf 'static glibc is missing libc.a: %s\n' "$STATIC_GLIBC" >&2; exit 1; }
           HELPER="${RUNNER_TEMP:-/tmp}/nookbridge-operator-peercred-helper"
           cc -O2 -static -L"$STATIC_GLIBC/lib" -o "$HELPER" native/operator-peercred.c
           if readelf -l "$HELPER" | grep -E 'INTERP' >/dev/null; then
@@ -164,6 +205,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           VERSION="${RELEASE_TAG#v}"
@@ -189,6 +231,7 @@ jobs:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "$RELEASE_PUBLISH_TOKEN"
@@ -201,7 +244,21 @@ jobs:
             -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$RELEASE_TAG")"
           case "$http_status" in
-            200) ;;
+            200)
+              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
+          const fs = require('fs');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
+          const expectedTag = process.env.RELEASE_TAG;
+          const expectedSha = process.env.RELEASE_SHA.toLowerCase();
+          if (
+            release.tag_name !== expectedTag ||
+            release.prerelease !== true ||
+            String(release.target_commitish || '').toLowerCase() !== expectedSha
+          ) {
+            throw new Error('existing GitHub release is not the matching prerelease candidate');
+          }
+          NODE
+              ;;
             404)
               RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
           const fs = require('fs');
@@ -299,6 +356,7 @@ jobs:
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           PROMOTE_REF: ${{ github.ref_name }}
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "$RELEASE_PUBLISH_TOKEN"

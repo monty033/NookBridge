@@ -3,6 +3,17 @@
 All notable user-visible changes are recorded here. The project is pre-alpha;
 release entries describe the supported boundary at the time of the release.
 
+## [0.1.2] - 2026-09-22
+
+Patch release hardening static glibc discovery in the release workflow.
+
+### Fixed
+
+- Match the hash-prefixed Nix store basename used by `glibc.static`.
+- Emit actionable diagnostics when static glibc or `libc.a` is unavailable.
+- Add regression coverage so the release workflow cannot silently revert to the
+  non-matching store glob.
+
 ## [0.1.1] - 2026-09-22
 
 Patch release correcting the portable Linux artifact build and Forgejo runner
@@ -44,5 +55,6 @@ support boundary remain subject to change.
 - Sync and mutation support remain narrowly scoped; do not infer general account
   or cross-device support from the validated scenarios.
 
+[0.1.2]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.2
 [0.1.1]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.1
 [0.1.0]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.0
