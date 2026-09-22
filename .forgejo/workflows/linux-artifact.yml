@@ -244,7 +244,21 @@ jobs:
             -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$RELEASE_TAG")"
           case "$http_status" in
-            200) ;;
+            200)
+              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
+          const fs = require('fs');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
+          const expectedTag = process.env.RELEASE_TAG;
+          const expectedSha = process.env.RELEASE_SHA.toLowerCase();
+          if (
+            release.tag_name !== expectedTag ||
+            release.prerelease !== true ||
+            String(release.target_commitish || '').toLowerCase() !== expectedSha
+          ) {
+            throw new Error('existing GitHub release is not the matching prerelease candidate');
+          }
+          NODE
+              ;;
             404)
               RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
           const fs = require('fs');

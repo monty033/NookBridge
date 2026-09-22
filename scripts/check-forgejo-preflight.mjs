@@ -1,6 +1,6 @@
 /* global fetch, URL */
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const WORKFLOW_ID = "linux-artifact.yml";
 
 function runEntries(payload) {

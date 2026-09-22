@@ -43,7 +43,7 @@ async function runChecker(pages: Record<string, unknown>, requests: string[]) {
 describe("Forgejo main runner preflight gate", () => {
   it("paginates and accepts only the exact successful main workflow run", async () => {
     const requests: string[] = [];
-    const stalePage = Array.from({ length: 100 }, (_, index) => ({
+    const stalePage = Array.from({ length: 50 }, (_, index) => ({
       workflow_id: "linux-artifact.yml",
       event: "push",
       prettyref: `runner-test/${index}`,
@@ -99,11 +99,11 @@ describe("Forgejo main runner preflight gate", () => {
         {
           "1": [
             {
-              workflow_id: "other.yml",
-              event: "pull_request",
+              workflow_id: "linux-artifact.yml",
+              event: "push",
               prettyref: "main",
-              commit_sha: "e".repeat(40),
-              status: "success",
+              commit_sha: commitSha,
+              status: "failure",
             },
           ],
         },

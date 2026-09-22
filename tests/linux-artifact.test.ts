@@ -419,6 +419,9 @@ describe("Linux artifact manifest contract", () => {
 
     // The candidate is created off the general install path...
     expect(raw).toContain("prerelease: true");
+    expect(raw).toContain("release.prerelease !== true");
+    expect(raw).toContain("release.target_commitish");
+    expect(raw).toContain("existing GitHub release is not the matching prerelease candidate");
     // ...and promotion is the only thing that clears the flag.
     expect(raw).toContain('{"prerelease":false}');
     // Promotion re-verifies provenance against the release's own target commit.
