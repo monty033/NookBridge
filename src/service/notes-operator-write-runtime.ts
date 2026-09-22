@@ -155,6 +155,7 @@ export interface OperatorOperationStatus {
 export interface OperatorOperationList {
   readonly kind: "operation-list";
   readonly handles: ReadonlyArray<string>;
+  readonly unresolvedHandles: ReadonlyArray<string>;
 }
 
 export interface OperatorWriteRuntime {
@@ -796,16 +797,23 @@ export function createOperatorWriteRuntime(
       return fail("service_unavailable");
     }
     const owned = records.filter((record) => {
-      if (record.kind !== "edit" || record.state !== "committed") return false;
+      if (record.state !== "committed" && record.state !== "unresolved") return false;
       try {
         return (JSON.parse(record.payload) as { owner?: unknown }).owner === ownerKey(peer);
       } catch {
         return false;
       }
     });
+    const handles = owned
+      .filter((record) => record.kind === "edit" && record.state === "committed")
+      .map((record) => record.handle);
+    const unresolvedHandles = owned
+      .filter((record) => record.state === "unresolved")
+      .map((record) => record.handle);
     return {
       kind: "operation-list",
-      handles: owned.map((record) => record.handle),
+      handles,
+      unresolvedHandles,
     };
   };
 

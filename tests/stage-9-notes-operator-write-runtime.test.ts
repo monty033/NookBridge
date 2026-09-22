@@ -416,6 +416,10 @@ describe("daemon operator write runtime", () => {
       state: "committed",
     });
     const list = await rt.operationList();
-    expect(list).toEqual({ kind: "operation-list", handles: [record!.handle] });
+    expect(list).toEqual({
+      kind: "operation-list",
+      handles: [record!.handle],
+      unresolvedHandles: [],
+    });
   });
 });

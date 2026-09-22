@@ -525,6 +525,7 @@ export interface RpcGetNoteResult {
 export interface RpcCreatedNoteResult {
   readonly kind: "create";
   readonly id: string;
+  readonly operationHandle?: string;
   readonly titleBytes: number;
   readonly contentBytes: number;
 }
@@ -672,6 +673,7 @@ export interface RpcNotesOperationStatusResult {
 export interface RpcNotesOperationListResult {
   readonly kind: "operation-list";
   readonly handles: ReadonlyArray<string>;
+  readonly unresolvedHandles?: ReadonlyArray<string>;
 }
 
 export type RpcResult =
@@ -2498,10 +2500,16 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "operation-list") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "handles"],
+        ["kind", "handles", "unresolvedHandles"],
         "rpc protocol: operation-list result has unexpected fields",
       );
-      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "handles"])) {
+      if (
+        (resultKeys.length !== 2 && resultKeys.length !== 3) ||
+        !keysAreExactly(
+          resultKeys,
+          resultKeys.length === 3 ? ["kind", "handles", "unresolvedHandles"] : ["kind", "handles"],
+        )
+      ) {
         throw rpcProtocolError("rpc protocol: operation-list result has unexpected fields");
       }
       const handles = resultRecord.handles;
@@ -2527,12 +2535,40 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       }
       objectSetPrototypeOf(cleanHandles, null);
       objectFreeze(cleanHandles);
+      const unresolvedHandles = resultRecord.unresolvedHandles ?? [];
+      if (
+        !arrayIsArray(unresolvedHandles) ||
+        unresolvedHandles.length > STAGE5_RPC_LIMITS.maxSearchHits
+      ) {
+        throw rpcProtocolError("rpc protocol: operation-list unresolved handles is invalid");
+      }
+      const cleanUnresolvedHandles: string[] = [];
+      for (let index = 0; index < unresolvedHandles.length; index += 1) {
+        const descriptor = objectGetOwnPropertyDescriptor(unresolvedHandles, String(index));
+        if (descriptor === undefined || !("value" in descriptor)) {
+          throw rpcProtocolError("rpc protocol: operation-list unresolved handle must be a value");
+        }
+        const handleValue = descriptor.value;
+        if (
+          typeof handleValue !== "string" ||
+          handleValue.length === 0 ||
+          handleValue.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+          hasControlCharacter(handleValue)
+        ) {
+          throw rpcProtocolError("rpc protocol: operation-list unresolved handle is invalid");
+        }
+        cleanUnresolvedHandles.push(handleValue);
+      }
+      objectSetPrototypeOf(cleanUnresolvedHandles, null);
+      objectFreeze(cleanUnresolvedHandles);
       const resultPayload = objectCreate(null) as {
         kind: "operation-list";
         handles: ReadonlyArray<string>;
+        unresolvedHandles: ReadonlyArray<string>;
       };
       resultPayload.kind = "operation-list";
       resultPayload.handles = cleanHandles;
+      resultPayload.unresolvedHandles = cleanUnresolvedHandles;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
