@@ -667,7 +667,6 @@ export interface RpcNotesOperationStatusResult {
   readonly kind: "operation-status";
   readonly operationHandle: string;
   readonly state: RpcOperatorOperationState;
-  readonly id?: string;
 }
 
 export interface RpcNotesOperationListResult {
@@ -2443,17 +2442,12 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "operation-status") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "operationHandle", "state", "id"],
+        ["kind", "operationHandle", "state"],
         "rpc protocol: operation-status result has unexpected fields",
       );
-      // `id` is optional; either three or four keys are accepted.
-      const requiredKeys: ReadonlyArray<string> = ["kind", "operationHandle", "state"];
       if (
-        !(
-          (resultKeys.length === 3 && keysAreExactly(resultKeys, requiredKeys)) ||
-          (resultKeys.length === 4 &&
-            keysAreExactly(resultKeys, ["kind", "operationHandle", "state", "id"]))
-        )
+        resultKeys.length !== 3 ||
+        !keysAreExactly(resultKeys, ["kind", "operationHandle", "state"])
       ) {
         throw rpcProtocolError("rpc protocol: operation-status result has unexpected fields");
       }
@@ -2483,17 +2477,10 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         kind: "operation-status";
         operationHandle: string;
         state: (typeof allowedStates)[number];
-        id?: string;
       };
       resultPayload.kind = "operation-status";
       resultPayload.operationHandle = operationHandle;
       resultPayload.state = state as (typeof allowedStates)[number];
-      if (resultKeys.length === 4) {
-        const idValue = resultRecord.id;
-        assertBoundedString(idValue, STAGE5_RPC_LIMITS.maxIdentifierBytes, "operation-status id");
-        preflightResponseStringField(idValue, rawSum);
-        resultPayload.id = idValue;
-      }
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 

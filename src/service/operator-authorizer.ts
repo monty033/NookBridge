@@ -104,14 +104,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       const targetKnown = await requestTargetKnown(deps, request, peer, method);
       if (method === "notes.create" || targetKnown) {
         if (notebookPolicy === undefined) {
-          const params = request?.params;
-          const notebookId =
-            params !== null && typeof params === "object"
-              ? (params as Record<string, unknown>).notebookId
-              : undefined;
-          if (method !== "notes.create" || notebookId !== undefined) {
-            return { allowed: false, reason: "permission_denied" };
-          }
+          return { allowed: false, reason: "permission_denied" };
         }
         if (method !== "notes.create" && deps.readNoteLockState === undefined) {
           return { allowed: false, reason: "permission_denied" };

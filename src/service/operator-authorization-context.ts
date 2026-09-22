@@ -171,7 +171,13 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
   if (input.evaluateNotebookPolicy === undefined) return undefined;
   if (input.method === "notes.create") {
     const notebookId = requestStringField(input.request, "notebookId");
-    if (notebookId === undefined || input.resolveNotebookPath === undefined) return undefined;
+    if (notebookId === undefined) {
+      return {
+        notebookPath: "",
+        allow: input.evaluateNotebookPolicy("create", ""),
+      };
+    }
+    if (input.resolveNotebookPath === undefined) return undefined;
     const notebookPath = await input.resolveNotebookPath(notebookId);
     if (notebookPath === undefined) return undefined;
     return {
