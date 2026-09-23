@@ -111,6 +111,53 @@ function runVerifier(artifact: string, checksumFile: string, extraArgs: readonly
   );
 }
 
+function runReleaseDescriptionBuilder(
+  tag: string,
+  changelog: string,
+): {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly payload?: { body?: string; name?: string; target_commitish?: string };
+} {
+  const root = mkdtempSync(join(tmpdir(), "nookbridge-release-description-test-"));
+  fixtureRoots.push(root);
+  const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+  const marker =
+    '          RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" PAYLOAD="$PAYLOAD" node <<\'NODE\'\n';
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error("release payload builder was not found in the workflow");
+  const bodyStart = start + marker.length;
+  const end = workflow.indexOf("\n          NODE\n", bodyStart);
+  if (end < 0) throw new Error("release payload builder terminator was not found");
+  const script = workflow
+    .slice(bodyStart, end)
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
+  const scriptPath = join(root, "build-release-payload.cjs");
+  const payloadPath = join(root, "payload.json");
+  writeFileSync(scriptPath, script);
+  writeFileSync(join(root, "CHANGELOG.md"), changelog);
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      RELEASE_TAG: tag,
+      RELEASE_SHA: "a".repeat(40),
+      PAYLOAD: payloadPath,
+    },
+  });
+  let payload: { body?: string; name?: string; target_commitish?: string } | undefined;
+  if (result.status === 0) {
+    payload = JSON.parse(readFileSync(payloadPath, "utf8")) as typeof payload;
+  }
+  return payload
+    ? { status: result.status, stdout: result.stdout, stderr: result.stderr, payload }
+    : { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
 describe("Linux artifact manifest contract", () => {
   it("selects only numeric GLIBCXX ABI symbols in the release workflow", () => {
     const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
@@ -118,6 +165,144 @@ describe("Linux artifact manifest contract", () => {
     expect(workflow).toContain("grep -E '^GLIBCXX_[0-9]+(\\.[0-9]+){1,2}$'");
     expect(workflow).not.toContain("grep '^GLIBCXX_' | sort -V");
     expect(workflow).toContain('test -n "$LIBSTDCXX_BASELINE"');
+  });
+
+  it("publishes useful release context from the exact versioned summary", () => {
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+
+    expect(workflow).toContain(
+      "const changelog = fs.readFileSync('CHANGELOG.md', 'utf8').split('\\n');",
+    );
+    expect(workflow).toContain("const releaseHeading = /^## \\[([^\\]]+)\\](?:\\s+-.*)?$/;");
+    expect(workflow).toContain("const summarySections = section.flatMap((line, index) =>");
+    expect(workflow).toContain("line === '### Summary' ? [index] : []");
+    expect(workflow).not.toContain("startsWith(heading)");
+    expect(workflow).not.toContain("v0.1.2");
+    expect(workflow).toContain("fresh Debian Linux container");
+    expect(workflow).toContain(
+      "installation, service startup, and verifying that the application renders correctly",
+    );
+    expect(workflow).not.toContain("awaiting clean-LXC rendered acceptance");
+    expect(workflow).not.toContain("Candidate release. Verified by the Linux artifact job");
+
+    const collision = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      [
+        "## [1.2.30] - 2026-01-30",
+        "",
+        "### Summary",
+        "",
+        "- wrong release summary",
+        "",
+        "## [1.2.3] - 2026-01-03",
+        "",
+        "### Summary",
+        "",
+        "- correct release summary",
+        "",
+        "### Fixed",
+        "",
+        "- internal detail stays in the source changelog",
+        "",
+      ].join("\n"),
+    );
+    expect(collision.status).toBe(0);
+    expect(collision.payload?.name).toBe("v1.2.3");
+    expect(collision.payload?.body).toContain("- correct release summary");
+    expect(collision.payload?.body).not.toContain("- wrong release summary");
+    expect(collision.payload?.body).not.toContain(
+      "- internal detail stays in the source changelog",
+    );
+    expect(collision.payload?.body).toContain("fresh Debian Linux container");
+
+    const actual = runReleaseDescriptionBuilder(
+      "v0.1.2",
+      readFileSync(join(repositoryRoot, "CHANGELOG.md"), "utf8"),
+    );
+    expect(actual.status).toBe(0);
+    expect(actual.payload?.body).toContain("Added guarded release commands");
+    expect(actual.payload?.body).not.toContain("nodejs.org");
+    expect(actual.payload?.body).not.toContain("GITHUB_PATH");
+    expect(actual.payload?.body).not.toContain("/nix/store");
+    expect(actual.payload?.body).not.toContain("Forgejo/NixOS");
+    expect(actual.payload?.body).not.toContain("offline-pinned");
+    expect(actual.payload?.body).not.toContain("SSH account");
+    expect(actual.payload?.body).not.toContain("### Added");
+
+    const duplicateVersion = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      [
+        "## [1.2.3] - 2026-01-03",
+        "",
+        "### Summary",
+        "",
+        "- first summary",
+        "",
+        "## [1.2.3] - 2026-01-04",
+        "",
+        "### Summary",
+        "",
+        "- duplicate summary",
+        "",
+      ].join("\n"),
+    );
+    expect(duplicateVersion.status).not.toBe(0);
+    expect(duplicateVersion.stderr).toContain("exactly one release section");
+
+    const missingVersion = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      "## [1.2.30] - 2026-01-30\n\n### Summary\n\n- wrong version\n",
+    );
+    expect(missingVersion.status).not.toBe(0);
+    expect(missingVersion.stderr).toContain("exactly one release section");
+
+    const missingSummary = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      "## [1.2.3] - 2026-01-03\n\n### Fixed\n\n- no summary\n",
+    );
+    expect(missingSummary.status).not.toBe(0);
+    expect(missingSummary.stderr).toContain("exactly one Summary");
+
+    const falseSummary = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      [
+        "## [1.2.3] - 2026-01-03",
+        "",
+        "- See ### Summary for details",
+        "",
+        "### Summary (internal)",
+        "",
+        "- not the public summary",
+        "",
+      ].join("\n"),
+    );
+    expect(falseSummary.status).not.toBe(0);
+    expect(falseSummary.stderr).toContain("exactly one Summary");
+
+    const duplicateSummary = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      [
+        "## [1.2.3] - 2026-01-03",
+        "",
+        "### Summary",
+        "",
+        "- first summary",
+        "",
+        "### Summary",
+        "",
+        "- duplicate summary",
+        "",
+      ].join("\n"),
+    );
+    expect(duplicateSummary.status).not.toBe(0);
+    expect(duplicateSummary.stderr).toContain("exactly one Summary");
+
+    const emptySummary = runReleaseDescriptionBuilder(
+      "v1.2.3",
+      "## [1.2.3] - 2026-01-03\n\n### Summary\n\n### Fixed\n\n- no summary\n",
+    );
+    expect(emptySummary.status).not.toBe(0);
+    expect(emptySummary.stderr).toContain("release summary for 1.2.3 is empty");
   });
 
   it("defines the strict x86_64 glibc release metadata shape", () => {

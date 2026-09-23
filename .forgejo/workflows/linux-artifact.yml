@@ -377,16 +377,78 @@ jobs:
           esac
 
           # The release is written from this payload whether it is being created or
-          # recreated, so the two paths cannot drift.
+          # recreated, so the two paths cannot drift. Release notes come from the
+          # curated version section in CHANGELOG.md rather than from an internal
+          # workflow-status placeholder.
           RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" PAYLOAD="$PAYLOAD" node <<'NODE'
           const fs = require('fs');
           const tag = process.env.RELEASE_TAG;
           const sha = process.env.RELEASE_SHA;
+          const version = tag.replace(/^v/, '');
+          const changelog = fs.readFileSync('CHANGELOG.md', 'utf8').split('\n');
+          const releaseHeading = /^## \[([^\]]+)\](?:\s+-.*)?$/;
+          const matchingSections = changelog.flatMap((line, index) =>
+            releaseHeading.exec(line)?.[1] === version ? [index] : [],
+          );
+          if (matchingSections.length !== 1) {
+            throw new Error(
+              `CHANGELOG.md must have exactly one release section for ${version}`,
+            );
+          }
+          const start = matchingSections[0];
+          const end = changelog.findIndex(
+            (line, index) => index > start && line.startsWith('## '),
+          );
+          const section = changelog.slice(start + 1, end < 0 ? changelog.length : end);
+          const summarySections = section.flatMap((line, index) =>
+            line === '### Summary' ? [index] : [],
+          );
+          if (summarySections.length !== 1) {
+            throw new Error(
+              `CHANGELOG.md release section for ${version} must have exactly one Summary`,
+            );
+          }
+          const summaryStart = summarySections[0];
+          const summaryEnd = section.findIndex(
+            (line, index) => index > summaryStart && line.startsWith('### '),
+          );
+          const summary = section
+            .slice(summaryStart + 1, summaryEnd < 0 ? section.length : summaryEnd)
+            .join('\n')
+            .trim();
+          if (!summary) {
+            throw new Error(`CHANGELOG.md release summary for ${version} is empty`);
+          }
+          const body = [
+            `# NookBridge ${tag}`,
+            '',
+            `NookBridge ${tag} is a release focused on safer, more reproducible releases and portable Linux artifacts.`,
+            '',
+            '## Highlights',
+            '',
+            summary,
+            '',
+            '## Candidate validation',
+            '',
+            'This release is initially published as a candidate. Before it becomes the default installation, the release artifacts will be installed in a fresh Debian Linux container and checked end to end, including installation, service startup, and verifying that the application renders correctly.',
+            '',
+            '## Installation',
+            '',
+            'Once promoted, install with:',
+            '',
+            '```sh',
+            'curl -q -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash',
+            '```',
+            '',
+            `Full technical changelog: https://github.com/monty033/NookBridge/blob/${sha}/CHANGELOG.md`,
+            '',
+            `Source commit: \`${sha}\``,
+          ].join('\n');
           fs.writeFileSync(process.env.PAYLOAD, JSON.stringify({
             tag_name: tag,
             target_commitish: sha,
             name: tag,
-            body: `NookBridge ${tag}\n\nCandidate release. Verified by the Linux artifact job and awaiting clean-LXC rendered acceptance before promotion.\n\nInstall once promoted:\n\n    curl -q -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
+            body,
             draft: false,
             // Candidate gate: a tag push must never publish to the general
             // install path. Promotion to a normal release is a separate,
