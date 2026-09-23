@@ -463,6 +463,17 @@ describe("Linux artifact manifest contract", () => {
       )!;
       expect(runtimeStep.run ?? "").not.toMatch(/for command_name in [^\n]*\bnode\b/);
       expect(runtimeStep.run ?? "").toContain("command -v node");
+      // The archive is verified against a digest that is a constant of this workflow, so
+      // the check needs no network at all; a warm cache must not reach nodejs.org, or a
+      // runner without a route to it cannot prepare a runtime it already holds.
+      expect(runtimeStep.env?.NODE_ARCHIVE_SHA256).toMatch(/^[0-9a-f]{64}$/);
+      expect(runtimeStep.run ?? "").not.toContain("SHASUMS256.txt");
+      expect(runtimeStep.run ?? "").toContain('if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]');
+      // ...and it says what to do when it must fetch and cannot.
+      expect(runtimeStep.run ?? "").toContain("pre-seed");
+      // The verified runtime reaches later steps only through GITHUB_PATH; a runner that
+      // does not provide it must fail here rather than build with an unverified Node.
+      expect(runtimeStep.run ?? "").toContain('test -n "${GITHUB_PATH:-}"');
       expect(runtimeStep.run ?? "").toContain('test "$(node --version)" = "v${NODE_VERSION}"');
 
       // Forgejo exports its automatic token as FORGEJO_TOKEN and GITHUB_TOKEN, either of

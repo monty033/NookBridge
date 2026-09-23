@@ -35,6 +35,12 @@ jobs:
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
+          # The digest of node-v22.23.2-linux-x64.tar.gz, checked against both the
+          # published SHASUMS256.txt and a download of the archive itself. It is a
+          # constant of this workflow rather than something the network reports at run
+          # time, so the check needs no network and a substituted archive cannot be
+          # blessed by a substituted checksum file.
+          NODE_ARCHIVE_SHA256: b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -45,18 +51,28 @@ jobs:
           node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
           archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
           archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
-          sums_path="${RUNNER_TEMP:-/tmp}/SHASUMS256.txt"
-          # The archive is verified on every run, not only when it is downloaded. A
-          # persistent runner, or a preceding job that can write to the temporary
-          # directory, could otherwise substitute the runtime that gets packaged.
-          curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
-          expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
-          test -n "$expected_sha256"
-          cached_sha256="$(sha256sum "$archive_path" 2>/dev/null | awk '{ print $1 }')"
-          if [ ! -f "$archive_path" ] || [ "$cached_sha256" != "$expected_sha256" ]; then
+          # The archive is verified on every run against the pinned digest above, not
+          # only when it is downloaded: a persistent runner, or a preceding job that can
+          # write to the temporary directory, could otherwise substitute the runtime
+          # that gets packaged. The check itself needs no network, so a runner with a
+          # warm cache prepares its runtime without reaching nodejs.org at all — the
+          # download happens only when the cache is missing or does not match the pin.
+          cached_sha256=""
+          if [ -f "$archive_path" ]; then
+            cached_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+          fi
+          if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]; then
+            printf 'fetching the pinned Node archive (cache miss or digest mismatch)\n' >&2
             rm -f "$archive_path"
-            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
-            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
+            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path" \
+              || {
+                printf 'could not fetch %s\n' "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" >&2
+                printf 'if this runner has no route to nodejs.org, pre-seed %s with that archive and digest %s\n' \
+                  "$archive_path" "$NODE_ARCHIVE_SHA256" >&2
+                exit 1
+              }
+            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$NODE_ARCHIVE_SHA256" \
+              || { printf 'the Node archive does not match the pinned digest\n' >&2; exit 1; }
           fi
           # The extraction is rebuilt from the verified archive on every run. A
           # cached runtime is not trusted just because it reports the pinned
@@ -66,7 +82,11 @@ jobs:
           mkdir -p "$node_root"
           tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           # Later steps must use the verified runtime rather than whatever the runner
-          # provides, so the pinned directory goes on PATH for every following step.
+          # provides, so the pinned directory goes on PATH for every following step. If
+          # the runner offers no way to do that, this fails rather than letting the later
+          # steps build with an unverified Node.
+          test -n "${GITHUB_PATH:-}" \
+            || { printf 'this runner provides no GITHUB_PATH, so the verified runtime cannot be put on PATH for later steps\n' >&2; exit 1; }
           echo "$node_root/bin" >> "$GITHUB_PATH"
           export PATH="$node_root/bin:$PATH"
           test "$(command -v node)" = "$node_root/bin/node"
@@ -682,6 +702,12 @@ jobs:
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
+          # The digest of node-v22.23.2-linux-x64.tar.gz, checked against both the
+          # published SHASUMS256.txt and a download of the archive itself. It is a
+          # constant of this workflow rather than something the network reports at run
+          # time, so the check needs no network and a substituted archive cannot be
+          # blessed by a substituted checksum file.
+          NODE_ARCHIVE_SHA256: b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -692,18 +718,28 @@ jobs:
           node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
           archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
           archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
-          sums_path="${RUNNER_TEMP:-/tmp}/SHASUMS256.txt"
-          # The archive is verified on every run, not only when it is downloaded. A
-          # persistent runner, or a preceding job that can write to the temporary
-          # directory, could otherwise substitute the runtime that gets packaged.
-          curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
-          expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
-          test -n "$expected_sha256"
-          cached_sha256="$(sha256sum "$archive_path" 2>/dev/null | awk '{ print $1 }')"
-          if [ ! -f "$archive_path" ] || [ "$cached_sha256" != "$expected_sha256" ]; then
+          # The archive is verified on every run against the pinned digest above, not
+          # only when it is downloaded: a persistent runner, or a preceding job that can
+          # write to the temporary directory, could otherwise substitute the runtime
+          # that gets packaged. The check itself needs no network, so a runner with a
+          # warm cache prepares its runtime without reaching nodejs.org at all — the
+          # download happens only when the cache is missing or does not match the pin.
+          cached_sha256=""
+          if [ -f "$archive_path" ]; then
+            cached_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+          fi
+          if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]; then
+            printf 'fetching the pinned Node archive (cache miss or digest mismatch)\n' >&2
             rm -f "$archive_path"
-            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
-            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
+            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path" \
+              || {
+                printf 'could not fetch %s\n' "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" >&2
+                printf 'if this runner has no route to nodejs.org, pre-seed %s with that archive and digest %s\n' \
+                  "$archive_path" "$NODE_ARCHIVE_SHA256" >&2
+                exit 1
+              }
+            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$NODE_ARCHIVE_SHA256" \
+              || { printf 'the Node archive does not match the pinned digest\n' >&2; exit 1; }
           fi
           # The extraction is rebuilt from the verified archive on every run. A
           # cached runtime is not trusted just because it reports the pinned
@@ -713,7 +749,11 @@ jobs:
           mkdir -p "$node_root"
           tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           # Later steps must use the verified runtime rather than whatever the runner
-          # provides, so the pinned directory goes on PATH for every following step.
+          # provides, so the pinned directory goes on PATH for every following step. If
+          # the runner offers no way to do that, this fails rather than letting the later
+          # steps build with an unverified Node.
+          test -n "${GITHUB_PATH:-}" \
+            || { printf 'this runner provides no GITHUB_PATH, so the verified runtime cannot be put on PATH for later steps\n' >&2; exit 1; }
           echo "$node_root/bin" >> "$GITHUB_PATH"
           export PATH="$node_root/bin:$PATH"
           test "$(command -v node)" = "$node_root/bin/node"
