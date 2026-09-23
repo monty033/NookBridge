@@ -10,14 +10,35 @@ jobs:
   linux-artifact:
     if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/promote-v')
     runs-on: nixos
+    env:
+      # Forgejo exports its automatic token under both names, so a step that clears only
+      # GITHUB_TOKEN still hands repository write access to whatever it runs.
+      FORGEJO_TOKEN: ""
+      GITHUB_TOKEN: ""
     steps:
+      - name: Refuse an injected workflow token
+        # Forgejo exports its automatic token as both FORGEJO_TOKEN and GITHUB_TOKEN with
+        # repository write access, and the runner applies environment variables to each
+        # step. The job clears both; this step is what proves the clearing held, so that
+        # a runner which re-injects them fails the job instead of running repository
+        # code that can read a write token.
+        env:
+          FORGEJO_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          for refused_name in FORGEJO_TOKEN GITHUB_TOKEN; do
+            refused_value="$(printenv "$refused_name" 2>/dev/null || true)"
+            test -z "$refused_value" \
+              || { printf 'the runner injected %s; refusing to run repository code with it\n' "$refused_name" >&2; exit 1; }
+          done
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
           GITHUB_TOKEN: ""
         run: |
           set -eu
-          for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
+          for command_name in curl git g++ make sha256sum gzip tar awk; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -283,7 +304,6 @@ jobs:
           ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
           RELEASE_JSON="$PWD/.release-state.json"
           PAYLOAD="$PWD/.release-payload.json"
-          DECISION="$PWD/.release-existing-id"
           context="$PWD/.release-upload.tsv"
 
           http_status="$(curl -q -sS -o "$RELEASE_JSON" -w '%{http_code}' \
@@ -295,7 +315,7 @@ jobs:
               # same commit, still a prerelease, not a draft, and already carrying the
               # complete asset set. Anything else is an inconsistent release, so this
               # run stops instead of mutating it.
-              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" ARTIFACT="$ARTIFACT" DECISION="$DECISION" node <<'NODE'
+              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" ARTIFACT="$ARTIFACT" node <<'NODE'
           const fs = require('fs');
           const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
           const expectedTag = process.env.RELEASE_TAG;
@@ -318,8 +338,8 @@ jobs:
           // through its uploads leaves a release holding some of the assets, and a
           // tag is immutable, so refusing to touch it would make that failure
           // unrecoverable. Recreating from this run's own build is idempotent: the
-          // re-verification step asserts the exact asset set afterwards.
-          fs.writeFileSync(process.env.DECISION, String(release.id));
+          // write step re-reads this release from the API by tag, so nothing here
+          // has to be handed on.
           NODE
               printf 'action\trecreate\n' > "$context"
               ;;
@@ -362,7 +382,6 @@ jobs:
             printf 'release_dir\t%s\n' "$RELEASE_DIR"
             printf 'artifact\t%s\n' "$ARTIFACT"
             printf 'payload\t%s\n' "$PAYLOAD"
-            printf 'decision\t%s\n' "$DECISION"
           } >> "$context"
 
       - name: Publish release assets
@@ -405,7 +424,8 @@ jobs:
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
           for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
-            HTTP_PROXY HTTPS_PROXY ALL_PROXY; do
+            HTTP_PROXY HTTPS_PROXY ALL_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+          do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \
               || { printf 'refusing an inherited %s in the token-bearing step\n' "$refused_variable" >&2; exit 1; }
@@ -427,6 +447,27 @@ jobs:
               ;;
           esac
 
+          # Reads one top-level field from a release payload with the already-validated
+          # awk. An interpreter resolved from PATH is not used here: the runtime
+          # directory goes on PATH for the whole job, so an earlier step that ran
+          # released code could have replaced the binary. The payload's top-level fields
+          # precede any nested object that repeats a name, so the first match is the one
+          # wanted.
+          release_field() {
+            "$awk_path" -v wanted="$1" '
+              {
+                pattern = "\"" wanted "\"[[:space:]]*:[[:space:]]*"
+                if (match($0, pattern)) {
+                  rest = substr($0, RSTART + RLENGTH)
+                  if (match(rest, /^[^,}]*/)) {
+                    value = substr(rest, RSTART, RLENGTH)
+                    gsub(/[[:space:]]/, "", value)
+                    gsub(/^"|"$/, "", value)
+                    print value
+                  }
+                }
+              }' "$2" | head -1
+          }
           context="$PWD/.release-upload.tsv"
           field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
           api_base="$(field api_base)"
@@ -435,7 +476,6 @@ jobs:
           artifact="$(field artifact)"
           payload="$(field payload)"
           action="$(field action)"
-          decision="$(field decision)"
           test "$api_base" = "https://api.github.com"
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
           case "$action" in create | recreate) ;; *) printf 'unusable upload decision\n' >&2; exit 1 ;; esac
@@ -452,8 +492,30 @@ jobs:
           if [ "$action" = recreate ]; then
             # An earlier run left a partial candidate. Deleting it first is what makes
             # a retry possible at all, since a tag cannot be moved to a new version.
-            existing_id="$(cat "$decision" 2>/dev/null || true)"
+            #
+            # The identity is read from the API by this step rather than taken from the
+            # file an earlier step wrote: that step runs source-controlled code, and a
+            # process it left behind could replace the file with a different release id
+            # to be deleted by the step that holds the token.
+            existing_json="$PWD/.release-existing.json"
+            existing_status="$("$curl_path" -q -sS -o "$existing_json" -w '%{http_code}' \
+              --config "$curl_config" -H 'Accept: application/vnd.github+json' \
+              "$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag")"
+            test "$existing_status" = 200 \
+              || { printf 'the release to recreate could not be read (HTTP %s)\n' "$existing_status" >&2; exit 1; }
+            existing_id="$(release_field id "$existing_json")"
+            existing_tag="$(release_field tag_name "$existing_json")"
+            existing_prerelease="$(release_field prerelease "$existing_json")"
+            existing_draft="$(release_field draft "$existing_json")"
             case "$existing_id" in '' | *[!0-9]*) printf 'unusable existing release id\n' >&2; exit 1 ;; esac
+            test "$existing_tag" = "$rel_tag" \
+              || { printf 'the release to recreate is not the one this tag names\n' >&2; exit 1; }
+            # The same shape the preparation step accepted, so a retry recreates exactly
+            # the candidate the publishing path creates rather than any other release.
+            test "$existing_prerelease" = "true" \
+              || { printf 'the release to recreate is not a candidate\n' >&2; exit 1; }
+            test "$existing_draft" = "false" \
+              || { printf 'the release to recreate is a draft\n' >&2; exit 1; }
             "$curl_path" -q -fsS -X DELETE --config "$curl_config" \
               "$api_base/repos/monty033/NookBridge/releases/$existing_id" > /dev/null
           fi
@@ -547,14 +609,35 @@ jobs:
     # candidate that does not match the commit it claims.
     if: startsWith(github.ref, 'refs/tags/promote-v')
     runs-on: nixos
+    env:
+      # Forgejo exports its automatic token under both names, so a step that clears only
+      # GITHUB_TOKEN still hands repository write access to whatever it runs.
+      FORGEJO_TOKEN: ""
+      GITHUB_TOKEN: ""
     steps:
+      - name: Refuse an injected workflow token
+        # Forgejo exports its automatic token as both FORGEJO_TOKEN and GITHUB_TOKEN with
+        # repository write access, and the runner applies environment variables to each
+        # step. The job clears both; this step is what proves the clearing held, so that
+        # a runner which re-injects them fails the job instead of running repository
+        # code that can read a write token.
+        env:
+          FORGEJO_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          for refused_name in FORGEJO_TOKEN GITHUB_TOKEN; do
+            refused_value="$(printenv "$refused_name" 2>/dev/null || true)"
+            test -z "$refused_value" \
+              || { printf 'the runner injected %s; refusing to run repository code with it\n' "$refused_name" >&2; exit 1; }
+          done
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
           NODE_VERSION: 22.23.2
           GITHUB_TOKEN: ""
         run: |
           set -eu
-          for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
+          for command_name in curl git g++ make sha256sum gzip tar awk; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -794,7 +877,8 @@ jobs:
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
           for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
-            HTTP_PROXY HTTPS_PROXY ALL_PROXY; do
+            HTTP_PROXY HTTPS_PROXY ALL_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+          do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \
               || { printf 'refusing an inherited %s in the token-bearing step\n' "$refused_variable" >&2; exit 1; }
@@ -815,18 +899,59 @@ jobs:
               exit 1
               ;;
           esac
+          # Reads one top-level field from a release payload with the already-validated
+          # awk. An interpreter resolved from PATH is not used here: the runtime
+          # directory goes on PATH for the whole job, so an earlier step that ran
+          # released code could have replaced the binary. The payload's top-level fields
+          # precede any nested object that repeats a name, so the first match is the one
+          # wanted.
+          release_field() {
+            "$awk_path" -v wanted="$1" '
+              {
+                pattern = "\"" wanted "\"[[:space:]]*:[[:space:]]*"
+                if (match($0, pattern)) {
+                  rest = substr($0, RSTART + RLENGTH)
+                  if (match(rest, /^[^,}]*/)) {
+                    value = substr(rest, RSTART, RLENGTH)
+                    gsub(/[[:space:]]/, "", value)
+                    gsub(/^"|"$/, "", value)
+                    print value
+                  }
+                }
+              }' "$2" | head -1
+          }
           context="$PWD/.promote-work/context.tsv"
           field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
 
           api_base="$(field api_base)"
-          release_id="$(field release_id)"
           rel_tag="$(field rel_tag)"
 
           # The values are validated rather than trusted: a wrong one would send an
           # authenticated request somewhere unintended.
           test "$api_base" = "https://api.github.com"
-          case "$release_id" in '' | *[!0-9]*) printf 'unusable release id\n' >&2; exit 1 ;; esac
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
+
+          # The release to flip is read here, by this step, from its tag: taking the id
+          # from a file written by an earlier step lets a process that step left behind
+          # redirect the authenticated write onto another release. This read needs no
+          # credential and happens before the token file exists.
+          promote_json="$PWD/.promote-work/promote-existing.json"
+          promote_status="$("$curl_path" -q -sS -o "$promote_json" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            "$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag")"
+          test "$promote_status" = 200 \
+            || { printf 'the candidate release could not be read (HTTP %s)\n' "$promote_status" >&2; exit 1; }
+          release_id="$(release_field id "$promote_json")"
+          release_tag="$(release_field tag_name "$promote_json")"
+          release_prerelease="$(release_field prerelease "$promote_json")"
+          release_draft="$(release_field draft "$promote_json")"
+          case "$release_id" in '' | *[!0-9]*) printf 'unusable release id\n' >&2; exit 1 ;; esac
+          test "$release_tag" = "$rel_tag" \
+            || { printf 'the release to promote is not the one this tag names\n' >&2; exit 1; }
+          test "$release_prerelease" = "true" \
+            || { printf 'the release to promote is not a candidate\n' >&2; exit 1; }
+          test "$release_draft" = "false" \
+            || { printf 'the release to promote is a draft\n' >&2; exit 1; }
 
           # The bearer token is passed through a curl -q configuration file rather than
           # an argument, because a command line is readable by any process on the

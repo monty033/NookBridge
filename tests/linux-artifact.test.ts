@@ -442,6 +442,101 @@ describe("Linux artifact manifest contract", () => {
    * install path: the candidate is published as a prerelease and an explicit
    * promotion step re-verifies provenance before clearing that flag.
    */
+  it("installs its pinned runtime before requiring it, in a job that holds no token", () => {
+    const workflow = parseYaml(readFileSync(linuxArtifactWorkflow, "utf8")) as {
+      jobs: Record<
+        string,
+        {
+          env?: Record<string, string>;
+          steps: { name: string; env?: Record<string, string>; run?: string }[];
+        }
+      >;
+    };
+
+    // The step that selects the pinned runtime also installs it, so `node` cannot be a
+    // precondition of that step: on a runner without a host Node the job would exit
+    // before it could install the runtime it is about to use.
+    for (const jobName of ["linux-artifact", "promote-release"]) {
+      const job = workflow.jobs[jobName]!;
+      const runtimeStep = job.steps.find(
+        (step) => step.name === "Verify pinned Node runtime and prepare portable runtime",
+      )!;
+      expect(runtimeStep.run ?? "").not.toMatch(/for command_name in [^\n]*\bnode\b/);
+      expect(runtimeStep.run ?? "").toContain("command -v node");
+      expect(runtimeStep.run ?? "").toContain('test "$(node --version)" = "v${NODE_VERSION}"');
+
+      // Forgejo exports its automatic token as FORGEJO_TOKEN and GITHUB_TOKEN, either of
+      // which can write to the repository, so a job that clears one name and not the
+      // other still hands repository write access to the tagged code it runs.
+      expect(job.env?.FORGEJO_TOKEN).toBe("");
+      expect(job.env?.GITHUB_TOKEN).toBe("");
+      const guard = job.steps[0]!;
+      expect(guard.name).toBe("Refuse an injected workflow token");
+      expect(guard.run ?? "").toContain("for refused_name in FORGEJO_TOKEN GITHUB_TOKEN; do");
+      expect(guard.run ?? "").toContain("refusing to run repository code with it");
+    }
+  });
+
+  it("reads a release identity from a real payload with the workflow's own awk helper", () => {
+    // The token-bearing steps decide what to delete or flip from this helper, and it has
+    // never run: an awk that silently returns nothing would make those steps fail closed
+    // but would also make every release fail. It is extracted from the workflow so the
+    // test exercises the shipped text rather than a copy of it.
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+    const helper = /^ {10}# Reads one top-level field[\s\S]*?^ {10}\}\n/m.exec(workflow);
+    expect(helper).not.toBeNull();
+
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-release-field-"));
+    fixtureRoots.push(root);
+    const payload = join(root, "payload.json");
+    writeFileSync(
+      payload,
+      JSON.stringify(
+        {
+          url: "https://api.github.com/repos/monty033/NookBridge/releases/12345",
+          id: 12345,
+          tag_name: "v0.1.2",
+          target_commitish: "aa2a9934e90df50d6daf201b3de45a96f0288e10",
+          draft: true,
+          prerelease: false,
+          author: { login: "monty", id: 999 },
+          // A nested object repeating a name must not win over the top-level field.
+          assets: [{ id: 777, name: "install.sh", draft: false, prerelease: false }],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const script = join(root, "field.sh");
+    writeFileSync(
+      script,
+      [
+        "set -eu",
+        'awk_path="$(command -v awk)"',
+        "export awk_path",
+        helper?.[0] ?? "",
+        'printf "id=%s\\n" "$(release_field id "$1")"',
+        'printf "tag=%s\\n" "$(release_field tag_name "$1")"',
+        'printf "draft=%s\\n" "$(release_field draft "$1")"',
+        'printf "prerelease=%s\\n" "$(release_field prerelease "$1")"',
+        'printf "absent=%s\\n" "$(release_field nope "$1")"',
+        'printf "archived=%s\\n" "$(release_field archived "$1")"',
+      ].join("\n"),
+    );
+
+    const result = spawnSync("bash", [script, payload], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split("\n")).toStrictEqual([
+      "id=12345",
+      "tag=v0.1.2",
+      "draft=true",
+      "prerelease=false",
+      "absent=",
+      "archived=",
+    ]);
+  });
+
   it("publishes a tag push as a candidate and gates promotion behind a separate ref", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     const doc = parseYaml(raw) as {
@@ -536,7 +631,13 @@ describe("Linux artifact manifest contract", () => {
     // an interrupted upload would otherwise be unrecoverable.
     expect(raw).toContain("action\\trecreate");
     expect(raw).toContain("-X DELETE");
-    expect(raw).toContain('existing_id="$(cat "$decision"');
+    expect(raw).toContain('"$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag"');
+    // The retry path must accept the shape the publishing path creates — draft:false,
+    // prerelease:true — or every retry of a partial upload would abort.
+    expect(raw).toContain("draft: false");
+    expect(raw).toContain('test "$existing_draft" = "false"');
+    expect(raw).toContain('test "$existing_prerelease" = "true"');
+    expect(raw).not.toContain('existing_id="$(cat "$decision"');
     expect(raw).toContain("prerelease: true");
     expect(raw).toContain("release.prerelease !== true");
     expect(raw).toContain("release.target_commitish");
@@ -679,6 +780,13 @@ describe("Linux artifact manifest contract", () => {
       // The write step reads its inputs from a line-oriented file rather than from
       // shell it would source; the promotion and publishing paths name it differently.
       expect(run).toContain(".tsv");
+      // The release it acts on is read from the API by tag inside the step, because a
+      // file written by an earlier step can be replaced by a process that step left
+      // behind and this step is the one holding the token.
+      expect(run).toContain("/releases/tags/$rel_tag");
+      expect(run).not.toContain("field release_id");
+      // Forgejo exports its automatic token under both names.
+      expect(run).toContain("FORGEJO_TOKEN GITHUB_TOKEN");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);
       expect(run).not.toContain("node -e");

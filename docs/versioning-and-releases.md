@@ -225,15 +225,30 @@ untrusted:
   tag-triggered workflow re-checks the version surfaces
   (installer pin, `package.json`, `package-lock.json`) before it publishes, because
   a tag pushed by hand does not pass through the operator command.
-- No secret is reachable by code from the ref being released. The preflight gate
-  holds no token at all (the runs API is readable anonymously on a public
-  repository), and in the promotion job the publishing token exists only in a step
-  that runs the runner's own `curl` by absolute path over a line-oriented data file:
-  it executes no script from the released revision, sources no cross-step shell, and
-  does not resolve tools from `PATH`. The candidate verification and the post-flip
-  re-verification run the released revision's own verifier, so they hold no secret.
-  Bearer tokens are passed to `curl` through a mode-600 configuration file rather
-  than an argument, because a command line is readable by any process on the runner.
+- No secret is reachable by accident from code in the ref being released. The
+  preflight gate holds no token at all (the runs API is readable anonymously on a
+  public repository); every job clears Forgejo's automatic token under both of the
+  names it is exported as — `FORGEJO_TOKEN` and `GITHUB_TOKEN`, which carries
+  repository write access — and refuses to run if the runner re-injects either; and
+  the publishing token exists only in a step that runs the runner's own `curl`,
+  resolved from an explicit `PATH` and validated against a list of trusted prefixes,
+  over a line-oriented data file. That step executes no script from the released
+  revision and sources no cross-step shell. The candidate verification and the
+  post-flip re-verification run the released revision's own verifier, so they hold no
+  secret. Bearer tokens are passed to `curl` through a mode-600 configuration file
+  rather than an argument, because a command line is readable by any process on the
+  runner, and every `curl` call runs with `-q` so that no default configuration file
+  is read either.
+- What the split does not buy. The runner is a host runner, so code from the released
+  revision runs as the same user on the same machine as the steps that hold the
+  token. A process left behind by an earlier step can read the token step's
+  environment or wait beside its request; nothing in this workflow prevents that.
+  What the split does prevent is the ordinary accident: a step that sources stray
+  shell, a dependency's install script that dumps its environment, a helper that
+  prints its arguments. For the same reason the token steps re-read every identity
+  they act on — the release is looked up by tag inside the step that deletes or flips
+  it — rather than trusting a file written by an earlier step, which such a process
+  could have replaced.
   The step's startup environment is neutralised as well: a non-interactive shell
   sources `BASH_ENV` before its first line runs, so a tagged step could otherwise
   write that variable to `GITHUB_ENV` and have the token-bearing shell execute a

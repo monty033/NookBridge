@@ -81,13 +81,20 @@ Patch release hardening static glibc discovery in the release workflow.
   so a tag pushed by hand cannot publish a mismatched artifact.
 - Hold no secret in any step that executes code from the released revision: the
   preflight gate no longer carries a read token at all (the runs API is readable
-  anonymously, and a refused read is an error rather than an empty result), the
-  promotion job is split so the candidate verification and the post-flip
-  re-verification run with no publishing token, and the step that does hold the token
-  runs the runner's own `curl` by absolute path over a line-oriented data file
-  without sourcing cross-step shell or resolving tools from `PATH`. Bearer tokens
-  reach `curl` through a mode-600 configuration file rather than a command-line
-  argument.
+  anonymously, and a refused read is an error rather than an empty result), every job
+  clears Forgejo's automatic token under both of the names it is exported as
+  (`FORGEJO_TOKEN` and `GITHUB_TOKEN`, either of which carries repository write
+  access) and fails the job if the runner re-injects one, and the promotion job is
+  split so the candidate verification and the post-flip re-verification run with no
+  publishing token while the step that does hold it runs the runner's own `curl` — as
+  resolved from an explicit `PATH` and validated against trusted prefixes — over a
+  line-oriented data file, without sourcing cross-step shell. Bearer tokens reach
+  `curl` through a mode-600 configuration file and every call runs with `-q`, so
+  neither a command line nor a default configuration file carries it. The token steps
+  read the release they act on from the API by tag instead of trusting a file written
+  by an earlier step. A host runner gives the released revision and the token step the
+  same user, so this limits accidental exposure, not a process that stays behind
+  deliberately.
 - Sanitise every message the command prints: remote-derived URLs are redacted and
   terminal control characters are stripped, so a rewrite target carrying credentials
   or an operator's rejected argument cannot leak or inject output.
@@ -102,8 +109,10 @@ Patch release hardening static glibc discovery in the release workflow.
   re-read in three separate steps: only the middle one holds the token, it resolves
   its tools from an explicit PATH whose directories cover a conventional Linux runner
   and a NixOS one rather than hardcoding a path, and it refuses a `curl` or `awk`
-  resolved from outside those prefixes. A workflow test asserts that the token steps
-  carry that PATH and name no repository script.
+  resolved from outside those prefixes. A workflow test asserts that both
+  token-bearing steps — the one that publishes and the one that promotes — carry that
+  PATH, name no repository script, and look up the release they act on by tag rather
+  than reading its id from an earlier step's file.
 - Check every shell variable a workflow step references against what that step
   defines, receives through `env`, or is given by the runner. A step runs in a fresh
   shell, so a variable renamed in one place and read in another is an unbound-variable
