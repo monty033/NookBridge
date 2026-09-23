@@ -806,10 +806,43 @@ describe("Linux artifact manifest contract", () => {
     const publishedVerifyStep = buildJob?.steps?.find(
       (step) => step.name === "Re-verify the published release",
     );
+    const promotionCheckoutStep = promoteJob?.steps?.find(
+      (step) => step.name === "Checkout promotion tooling",
+    );
+    const promotionVerifyStep = promoteJob?.steps?.find(
+      (step) => step.name === "Verify the candidate artifact",
+    );
 
     expect(doc.on.push.branches).toEqual(["main", "runner-test/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
+    expect(raw).toContain("workflow_dispatch:");
+    expect(raw).toContain("release_tag:");
+    expect(promotionCheckoutStep?.env?.PROMOTION_TAG).toContain("inputs.release_tag");
+    expect(promotionCheckoutStep?.run).toContain('checkout_ref="refs/tags/$PROMOTION_TAG"');
+    expect(promotionVerifyStep?.env?.PROMOTE_REF).toContain("workflow_dispatch");
+    const promotionInputGuard =
+      /case "\$PROMOTION_TAG" in[\s\S]*?esac[\s\S]*?case "\$PROMOTION_TAG" in[\s\S]*?esac/.exec(
+        promotionCheckoutStep?.run ?? "",
+      )?.[0];
+    expect(promotionInputGuard).toBeDefined();
+    for (const candidate of ["v1.2.3", "v1.2.3-rc.1"]) {
+      const result = spawnSync(
+        "bash",
+        ["-c", `set -eu\nPROMOTION_TAG="$1"\n${promotionInputGuard ?? ""}`, "guard", candidate],
+        { encoding: "utf8" },
+      );
+      expect(result.status, candidate).toBe(0);
+    }
+    for (const candidate of ["v1.2.3;rm", "refs/heads/main", "x1.2.3"]) {
+      const result = spawnSync(
+        "bash",
+        ["-c", `set -eu\nPROMOTION_TAG="$1"\n${promotionInputGuard ?? ""}`, "guard", candidate],
+        { encoding: "utf8" },
+      );
+      expect(result.status, candidate).not.toBe(0);
+    }
     expect(buildJob?.if).toContain("!startsWith(github.ref, 'refs/tags/promote-v')");
+    expect(promoteJob?.if).toContain("workflow_dispatch");
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
     expect(preflightStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(artifactStep?.if).toBe(
@@ -849,7 +882,11 @@ describe("Linux artifact manifest contract", () => {
         jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
       }
     ).jobs["promote-release"]?.steps?.find((step) => step.name === "Checkout promotion tooling");
-    expect(promoteTooling?.run).toContain("for command_name in git curl cmp");
+    expect(promoteTooling?.run).toContain(
+      "for command_name in git curl cmp getconf strings grep sort tail cut tr;",
+    );
+    expect(raw).toContain("printf '%s' \"$RELEASE_PUBLISH_TOKEN\"");
+    expect(raw).not.toContain("Authorization: Bearer ***");
 
     for (const [jobName, stepName] of draftDecidingSteps) {
       const step = (
@@ -894,6 +931,12 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("existing GitHub release is not the matching prerelease candidate");
     // ...and promotion is the only thing that clears the flag.
     expect(raw).toContain('{"prerelease":false}');
+    // A failed authenticated write must expose its HTTP status and bounded response
+    // body; otherwise a rerun can fail closed without revealing whether the token,
+    // endpoint, or release state was rejected.
+    expect(raw).toContain("patch-response.json");
+    expect(raw).toContain("GitHub promotion failed (HTTP %s)");
+    expect(raw).toContain("tr '\\n' ' '");
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back in a step that holds no secret; a successful
