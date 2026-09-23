@@ -518,6 +518,13 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("scripts/install-from-github.sh");
     // The asset set is checked again after the flip, not only before it.
     expect(raw).toContain("missing GitHub release asset after promotion");
+    // The triggering ref must itself name the canonical commit, and the version
+    // must be well formed before it is interpolated into API paths.
+    expect(raw).toContain("promote_ref_commit=\"$(git rev-parse --verify 'HEAD^{commit}')\"");
+    expect(raw).toContain('test "$promote_ref_commit" = "$canonical_tag_commit"');
+    expect(raw).toContain("malformed promotion version");
+    // The promoted release must still be the verified one after the flip.
+    expect(raw).toContain('test "$target_after" = "$canonical_tag_commit"');
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {

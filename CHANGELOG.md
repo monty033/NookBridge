@@ -41,6 +41,19 @@ Patch release hardening static glibc discovery in the release workflow.
   canonical release tag's commit, to run its verification tooling from that
   tagged revision, to compare the published installers byte-for-byte with the
   tagged sources, and to re-check the asset set after the flip.
+- Refuse a remote whose fetch or push destination is changed by a Git URL
+  rewrite rule (`insteadOf`/`pushInsteadOf`), and refuse a `.git` path segment
+  or an SSH principal other than the hosting account.
+- Never send a read token while test mode is on, so a fixture run that inherits
+  credentials cannot disclose them to an overridden endpoint.
+- Redact query strings and fragments, not only userinfo, and strip control
+  characters from commit subjects and other repository-derived text.
+- Require a reported candidate to still be a prerelease pointing at the commit
+  that was built, and treat an exhausted run-page budget as a failed lookup
+  rather than as a missing run.
+- Require the promotion ref to name the canonical tag's commit, validate the
+  promotion ref's version syntax before it reaches an API path, and re-check the
+  release's target commit after the flag flip.
 
 ## [0.1.1] - 2026-09-22
 

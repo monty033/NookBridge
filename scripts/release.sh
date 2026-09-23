@@ -62,7 +62,7 @@ readonly MIRROR_REPOSITORY="monty033/NookBridge"
 readonly RELEASE_BRANCH="main"
 readonly WORKFLOW_ID="linux-artifact.yml"
 readonly RUN_EVENT="push"
-readonly API_TOKEN="${NOOKBRIDGE_API_TOKEN:-}"
+readonly CANONICAL_PRINCIPAL="git"
 readonly WATCH_INTERVAL="${NOOKBRIDGE_WATCH_INTERVAL:-10}"
 readonly WATCH_TIMEOUT="${NOOKBRIDGE_WATCH_TIMEOUT:-1800}"
 
@@ -70,6 +70,18 @@ test_mode=false
 if [ -n "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" ] && [ "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" != "0" ]; then
   test_mode=true
 fi
+
+# Test mode relaxes the remote identity check. It must not also become a way to
+# send real credentials to an endpoint chosen by the environment, so no token is
+# used at all while it is on.
+usable_token() { # $1 = candidate token
+  if [ "$test_mode" = true ]; then
+    return 0
+  fi
+  printf '%s' "$1"
+}
+
+api_token=$(usable_token "${NOOKBRIDGE_API_TOKEN:-}")
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 work_dir=$(mktemp -d)
@@ -152,10 +164,18 @@ json_field() { # dotted path, JSON on stdin
 ##########
 
 # Anything derived from a remote URL or from git's own diagnostics can carry
-# credentials or control characters. Strip the userinfo component and collapse
-# control characters before it reaches a log.
+# credentials, local paths, or control characters. Drop the userinfo component,
+# the query string, and the fragment, then collapse control characters before
+# anything reaches a log.
 redact() {
-  printf '%s' "$1" | sed -e 's#\(://\)[^/@[:space:]]*@#\1#' -e 's#[[:cntrl:]]# #g'
+  printf '%s' "$1" \
+    | sed -e 's#\(://\)[^/@[:space:]]*@#\1#' -e 's#[?#][^[:space:]]*##g' -e 's#[[:cntrl:]]# #g'
+}
+
+# Terminal controls can also arrive through repository content (a commit
+# subject), which is not a URL and must not be passed through the URL rules.
+strip_controls() {
+  printf '%s' "$1" | tr -d '[:cntrl:]'
 }
 
 # Git diagnostics are untrusted: keep one redacted line and drop the rest.
@@ -172,40 +192,74 @@ git_error_text() { # $1 = file holding captured stderr
 # Trust boundaries
 ##########
 
+# Normalize a repository path the way a hosting service spells it: one optional
+# trailing slash, one optional `.git` suffix. A path segment that is exactly
+# `.git` is a different endpoint, not the same repository spelled differently, so
+# it is rejected rather than normalized away.
+normalize_repo_path() { # $1 = path; prints the normalized path, fails when malformed
+  local path=$1
+  case "$path" in
+    */.git|.git) return 1 ;;
+  esac
+  case "$path" in
+    */) path=${path%/} ;;
+  esac
+  case "$path" in
+    *.git) path=${path%.git} ;;
+  esac
+  case "$path" in
+    */) path=${path%/} ;;
+  esac
+  printf '%s' "$path"
+}
+
 # Accept a remote URL only when it names the canonical host and repository with
-# no explicit port. A suffix match on the repository path alone would accept an
-# attacker-controlled host that mirrors the path, and an explicit port selects a
-# different service than the one the API identity is derived from.
+# no explicit port and no unexpected SSH principal. A suffix match on the
+# repository path alone would accept an attacker-controlled host that mirrors the
+# path, an explicit port selects a different service than the one the API
+# identity is derived from, and a principal other than the hosting account may
+# select a different destination on the same host.
 canonical_url_ok() {
-  local url=$1 rest authority host path
+  local url=$1 rest host path normalized user=''
   case "$url" in
     https://*) rest=${url#https://} ;;
-    ssh://*) rest=${url#ssh://} ;;
+    ssh://*)
+      rest=${url#ssh://}
+      # An ssh URL may name a principal. A principal other than the hosting
+      # account can select a different destination on the same host.
+      case "$rest" in
+        *@*)
+          user=${rest%%@*}
+          [ "$user" = "$CANONICAL_PRINCIPAL" ] || return 1
+          rest=${rest#*@}
+          ;;
+      esac
+      ;;
     *@*:*)
+      # scp-style destination: the principal is mandatory here, so it must be
+      # the hosting account.
+      user=${url%%@*}
       rest=${url#*@}
+      [ "$user" = "$CANONICAL_PRINCIPAL" ] || return 1
       host=${rest%%:*}
       path=${rest#*:}
       [ "$host" = "$CANONICAL_HOST" ] || return 1
-      path=${path%.git}
-      [ "$path" = "$CANONICAL_PATH" ] || return 1
+      normalized=$(normalize_repo_path "$path") || return 1
+      [ "$normalized" = "$CANONICAL_PATH" ] || return 1
       return 0
       ;;
     *) return 1 ;;
   esac
   rest=${rest#*@}
-  authority=${rest%%/*}
+  host=${rest%%/*}
   path=${rest#*/}
-  host=${authority%%:*}
   # A port in the authority means a service other than the canonical one.
-  if [ "$authority" != "$host" ]; then
-    return 1
-  fi
-  path=${path%.git}
-  case "$path" in
-    */) path=${path%/} ;;
+  case "$host" in
+    "$CANONICAL_HOST") ;;
+    *) return 1 ;;
   esac
-  [ "$host" = "$CANONICAL_HOST" ] || return 1
-  [ "$path" = "$CANONICAL_PATH" ] || return 1
+  normalized=$(normalize_repo_path "$path") || return 1
+  [ "$normalized" = "$CANONICAL_PATH" ] || return 1
   return 0
 }
 
@@ -289,12 +343,33 @@ resolve_canonical_remote() {
 
 # Validate the fetch URL and every configured push URL of the chosen remote, and
 # keep them by value so that nothing later re-reads mutable configuration.
+#
+# Comparing the configured value with the URL git reports is what detects an
+# `insteadOf`/`pushInsteadOf` rule: git expands a rewrite when it reports a URL
+# and expands it again when the URL is used, so a chained rule would otherwise
+# turn a validated destination into a different one at fetch or push time.
 resolve_remote_urls() { # $1 = remote name
-  local name=$1 url
+  local name=$1 url raw_url raw_push expanded_push
   canonical_fetch_url=$(git remote get-url "$name" 2>/dev/null || true)
   [ -n "$canonical_fetch_url" ] || fail "remote $name has no fetch URL"
   remote_url_ok "$canonical_fetch_url" \
     || fail "remote $name does not fetch from $CANONICAL_HOST/$CANONICAL_PATH: $(redact "$canonical_fetch_url")"
+  # `git config --get-all` exits non-zero for an absent key, and under
+  # `set -o pipefail` that would end the command silently rather than fail a
+  # guard, so both reads tolerate a missing key.
+  raw_url=$(git config --get-all "remote.$name.url" 2>/dev/null | head -n 1 || true)
+  [ -n "$raw_url" ] || fail "remote $name has no configured fetch URL"
+  [ "$raw_url" = "$canonical_fetch_url" ] \
+    || fail "a Git URL rewrite rule changes the destination of remote $name; refusing to fetch or push to a URL that differs from its configured value"
+  raw_push=$(git config --get-all "remote.$name.pushurl" 2>/dev/null | head -n 1 || true)
+  expanded_push=$(git remote get-url --push "$name" 2>/dev/null || true)
+  if [ -n "$raw_push" ]; then
+    [ "$raw_push" = "$expanded_push" ] \
+      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
+  else
+    [ "$expanded_push" = "$raw_url" ] \
+      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
+  fi
   canonical_push_urls=''
   while IFS= read -r url; do
     [ -n "$url" ] || continue
@@ -344,7 +419,7 @@ query_run() { # $1 = ref, $2 = commit, $3 = optional status filter
   EXPECT_REF="$1" \
   EXPECT_COMMIT="$2" \
   EXPECT_STATUS="${3:-}" \
-  RUNS_TOKEN="$API_TOKEN" \
+  RUNS_TOKEN="$api_token" \
     node "$script_dir/release-api.mjs" find-run
 }
 
@@ -359,7 +434,7 @@ github_release_state() { # $1 = tag
   GITHUB_API_BASE="$mirror_api_base" \
   GITHUB_REPOSITORY="$mirror_repository" \
   RELEASE_TAG="$1" \
-  GITHUB_READ_TOKEN="${NOOKBRIDGE_GITHUB_READ_TOKEN:-}" \
+  GITHUB_READ_TOKEN="$(usable_token "${NOOKBRIDGE_GITHUB_READ_TOKEN:-}")" \
     node "$script_dir/release-api.mjs" release-state
 }
 
@@ -606,12 +681,22 @@ watch_release_run() { # $1 = ref, $2 = commit, $3 = description
 # that cannot be verified exits non-zero, so automation cannot read an unverified
 # release as success.
 report_candidate() { # $1 = version
-  local tag="v$1" state missing
+  local tag="v$1" state missing target
   if ! state=$(github_release_state "$tag"); then
     fail "the release run succeeded but the mirror release state could not be read; verify $tag before announcing it"
   fi
   if [ "$(field_of "$state" exists)" != true ]; then
     fail "the release run succeeded but the mirror has no release for $tag yet; verify it before announcing it"
+  fi
+  # The release must still be the candidate this run produced: a published
+  # release, or one pointing at another commit, is not evidence that this
+  # release succeeded.
+  if [ "$(field_of "$state" prerelease)" != true ]; then
+    fail "the mirror release for $tag is not a prerelease candidate; verify it before announcing it"
+  fi
+  target=$(field_of "$state" target_commitish)
+  if [ "$target" != "$release_commit" ]; then
+    fail "the mirror release for $tag targets ${target:-no commit} but this run built $release_commit; verify it before announcing it"
   fi
   missing=$(missing_assets "$state" "$1")
   if [ -n "$missing" ]; then
@@ -639,7 +724,7 @@ command_status() {
   note "version=$version"
   note "canonical_remote=$canonical_remote"
   note "canonical_commit=$release_commit"
-  note "canonical_subject=$(git show -s --format=%s "$release_commit")"
+  note "canonical_subject=$(strip_controls "$(git show -s --format=%s "$release_commit")")"
 
   problems=$(version_sync_problems "$release_commit" "$version")
   if [ -z "$problems" ]; then
@@ -715,7 +800,7 @@ command_tag() {
   require_main_preflight "$release_commit"
 
   note "About to release NookBridge $tag"
-  note "  commit: $(git show -s --format='%H %s' "$release_commit")"
+  note "  commit: $(strip_controls "$(git show -s --format='%H %s' "$release_commit")")"
   note "  remote: $canonical_remote"
   confirm "Create and push $tag?"
 

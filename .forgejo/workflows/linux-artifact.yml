@@ -374,6 +374,28 @@ jobs:
           ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
           RELEASE_JSON=/tmp/nookbridge-promote.json
 
+          # The trigger is only a prefix match, so `promote-v` and `promote-vx/y`
+          # both reach this job. The version must be well formed before it is
+          # interpolated into API and download paths.
+          case "$REL_TAG" in
+            v[0-9A-Za-z]*) ;;
+            *)
+              printf 'malformed promotion ref: %s\n' "$PROMOTE_REF" >&2
+              exit 1
+              ;;
+          esac
+          case "$VERSION" in
+            ''|*[!0-9A-Za-z._+-]*)
+              printf 'malformed promotion version: %s\n' "$VERSION" >&2
+              exit 1
+              ;;
+          esac
+          test "${#VERSION}" -le 64
+
+          # The commit this ref points at, captured before the canonical tag is
+          # fetched and checked out below.
+          promote_ref_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+
           curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
           release_id="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')); if (!value.id) process.exit(2); process.stdout.write(String(value.id));")"
@@ -390,6 +412,11 @@ jobs:
           git fetch --no-tags --depth=1 origin "refs/tags/$REL_TAG"
           canonical_tag_commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
           test "$canonical_tag_commit" = "$target_commit"
+
+          # The ref that triggered this job must itself name that commit, so a
+          # hand-pushed promote-* ref at another revision cannot trigger a
+          # promotion of a release it was never built for.
+          test "$promote_ref_commit" = "$canonical_tag_commit"
 
           # Run the verification tooling from the tagged revision rather than
           # from the ref that triggered this job.
@@ -451,8 +478,12 @@ jobs:
           promoted="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
           test "$promoted" = "false"
 
-          # Re-check the asset set after the flip. An asset removed between the
-          # gate and the PATCH must fail the run rather than pass unnoticed.
+          # Re-check the release after the flip. Assets can be replaced and the
+          # target commit changed between the checks above and the PATCH, so the
+          # promoted release must still be the one that was verified — the API
+          # offers no transaction that would make this unnecessary.
+          target_after="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).target_commitish));")"
+          test "$target_after" = "$canonical_tag_commit"
           node -e "
             const fs = require('fs');
             const release = JSON.parse(fs.readFileSync('$RELEASE_JSON'));

@@ -116,6 +116,7 @@ type StubOptions = {
   readonly release?: Record<string, unknown> | null;
   readonly releaseStatus?: number;
   readonly releaseRedirect?: string;
+  readonly fullPages?: boolean;
 };
 
 async function startStub(options: StubOptions) {
@@ -133,7 +134,8 @@ async function startStub(options: StubOptions) {
         return;
       }
       const page = Number(url.searchParams.get("page") ?? "1");
-      const runs = page === 1 ? (options.runsFor?.(runRequests) ?? []) : [];
+      const runs =
+        options.fullPages === true || page === 1 ? (options.runsFor?.(runRequests) ?? []) : [];
       response.end(JSON.stringify({ workflow_runs: runs }));
       return;
     }
@@ -675,6 +677,14 @@ describe("release operator command", () => {
       "https://git.montycasa.net/openclaw/NookBridge.git",
       "https://user:pw@attacker.invalid/patrick/NookBridge.git",
       "https://git.elsewhere.invalid:443/patrick/NookBridge.git",
+      // A `.git` path segment is a different endpoint, not the same repository.
+      "https://git.montycasa.net/patrick/NookBridge/.git",
+      "https://git.montycasa.net/patrick/NookBridge.git/.git",
+      // A principal other than the hosting account may select another
+      // destination on the same host.
+      "ssh://root@git.montycasa.net/patrick/NookBridge.git",
+      "ssh://someone:else@git.montycasa.net/patrick/NookBridge.git",
+      "root@git.montycasa.net:patrick/NookBridge.git",
       "/tmp/canonical.git",
       "attacker.example:patrick/NookBridge.git",
     ];
@@ -904,4 +914,108 @@ describe("release operator command", () => {
     expect(lines).toContain("status=running");
     expect(lines).not.toContain("status=success");
   });
+
+  it("refuses a remote whose destination is rewritten by a Git URL rule", async () => {
+    const fixture = createFixture();
+    const attacker = createAttackerRepository(fixture);
+    // The configured value is the canonical path, but git expands the rewrite
+    // whenever the URL is reported, so the reported URL differs from the one the
+    // configuration actually holds.
+    git(["config", `url.${attacker}.insteadOf`, fixture.canonical], fixture.work);
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("rewrite rule");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+    expect(tagPresent(attacker, tag)).toBe(false);
+  });
+
+  it("does not print a credential carried in a remote URL query string", async () => {
+    const fixture = createFixture();
+    git(
+      [
+        "remote",
+        "set-url",
+        "upstream",
+        "https://attacker.invalid/patrick/NookBridge.git?token=sup3rsecret",
+      ],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not fetch from");
+    expect(result.stderr).not.toContain("sup3rsecret");
+    expect(result.stdout).not.toContain("sup3rsecret");
+  });
+
+  it("never sends a token while test mode is on", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: candidateRelease(fixture.commit),
+    });
+
+    const result = await runRelease(["status"], fixture, stub.base, {
+      NOOKBRIDGE_API_TOKEN: "leak-me-please",
+      NOOKBRIDGE_GITHUB_READ_TOKEN: "leak-me-too",
+    });
+
+    expect(result.code).toBe(0);
+    expect(stub.requests.length).toBeGreaterThan(0);
+    expect(stub.requests.join(",")).not.toContain("leak-me");
+    expect(stub.requests.every((entry) => entry.endsWith("|anonymous"))).toBe(true);
+  });
+
+  it("refuses to report a mirror release that is no longer a candidate", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit), tagRun(fixture.commit, "success")],
+      // Every asset name is present, but the release has already been published.
+      release: candidateRelease(fixture.commit, false),
+    });
+
+    const result = await runRelease(["tag", "--yes"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("not a prerelease candidate");
+    expect(result.stdout).not.toContain("has all five assets");
+  });
+
+  it("refuses to report a mirror release that targets another commit", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit), tagRun(fixture.commit, "success")],
+      release: candidateRelease("d".repeat(40)),
+    });
+
+    const result = await runRelease(["tag", "--yes"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("targets");
+    expect(result.stdout).not.toContain("has all five assets");
+  });
+
+  it("reports page exhaustion as a failed lookup, not as an absent run", async () => {
+    const fixture = createFixture();
+    // Every page is full and matches nothing, so the paging budget is exhausted.
+    const page = Array.from({ length: 50 }, () => ({
+      workflow_id: "linux-artifact.yml",
+      event: "push",
+      prettyref: "runner-test/other",
+      commit_sha: "c".repeat(40),
+      status: "success",
+    }));
+    const stub = await startStub({ runsFor: () => page, fullPages: true });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("cannot read Forgejo run state");
+    expect(stub.requests.length).toBeGreaterThanOrEqual(1000);
+  }, 60000);
 });

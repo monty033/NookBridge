@@ -128,10 +128,11 @@ is bypassed by hand.
   is still a prerelease candidate at that commit with the complete five-asset
   set, the release's `target_commitish` equals the canonical tag commit, and no
   promotion tag exists. It then pushes `promote-v<VERSION>` and waits for the
-  promotion run. The promotion job itself matches the promotion ref against the
-  canonical tag's commit, runs its verification tooling from that tagged
-  revision, compares the published installers byte-for-byte with the tagged
-  sources, and re-checks the complete asset set before and after it clears the
+  promotion run. The promotion job itself validates the promotion ref's version
+  syntax, matches the promotion ref against the canonical tag's commit, runs its
+  verification tooling from that tagged revision, compares the published
+  installers byte-for-byte with the tagged sources, and re-checks the complete
+  asset set and the release's target commit before and after it clears the
   prerelease flag.
 
 Both mutating commands confirm before pushing; `--yes` skips the prompt and
@@ -164,6 +165,15 @@ untrusted:
   fields, so a forged newline in a run URL or an asset name cannot satisfy a
   status or asset check, and error output is redacted so no credential or raw
   remote diagnostic reaches a log.
+- A remote whose fetch or push destination is changed by a Git URL rewrite rule
+  (`insteadOf`/`pushInsteadOf`) is refused rather than used: git expands a
+  rewrite when it reports a URL and again when the URL is used, so the configured
+  value and the reported value must agree. A `.git` path segment, an explicit
+  port, or an SSH principal other than the hosting account is likewise not the
+  canonical repository.
+- No read token is ever sent while test mode is on, and a reported candidate must
+  still be a prerelease pointing at the commit that was built. An exhausted
+  run-page budget is a failed lookup, not a missing run.
 
 The preflight gate is always `main`; there is no branch selection to configure,
 because the tag-triggered workflow accepts only a `main` preflight.

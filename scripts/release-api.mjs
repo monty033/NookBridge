@@ -92,7 +92,10 @@ export async function findRun({ runsUrl, expected, token, fetchImpl = fetch }) {
     if (match) return match;
     if (entries.length < PAGE_SIZE) return undefined;
   }
-  return undefined;
+  // Exhausting the page budget is a failed lookup, not evidence that no run
+  // matches: reporting it as absence is how a blocked release is mistaken for a
+  // missing preflight.
+  throw new Error(`Forgejo runs API paging limit of ${MAX_PAGES} pages was reached`);
 }
 
 /**
