@@ -215,6 +215,23 @@ untrusted:
   become query values. The tag-triggered workflow re-checks the version surfaces
   (installer pin, `package.json`, `package-lock.json`) before it publishes, because
   a tag pushed by hand does not pass through the operator command.
+- No secret is reachable by code from the ref being released. The preflight gate
+  holds no token at all (the runs API is readable anonymously on a public
+  repository), and in the promotion job the publishing token exists only in a step
+  that runs `curl` and workflow-embedded Node: the candidate verification and the
+  post-flip re-verification run the released revision's own verifier, so they hold
+  no secret. Bearer tokens are passed to `curl` through a mode-600 configuration
+  file rather than an argument, because a command line is readable by any process on
+  the runner. The residual is the workflow file itself, which is repository content:
+  the authority that can push a release tag is the authority that can change these
+  steps, so tag-push permission must be restricted to release principals.
+- The pinned Node runtime is verified on every run, not only when it is first
+  downloaded, and its directory is placed on `PATH` for every following step, so a
+  persistent runner or a preceding job cannot substitute the runtime that gets
+  packaged.
+- The version policy lives in one script, `scripts/check-release-version.sh`, used by
+  the operator command's tests and by both workflow paths, because a tag pushed by
+  hand reaches the workflow without passing through the command.
 - Canonical API endpoints are derived from the canonical identity with the
   repository path appended exactly once: the API base is an API root, and each
   caller appends `/repos/<owner>/<name>/...`.

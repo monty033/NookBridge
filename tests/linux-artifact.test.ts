@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -535,14 +535,45 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("unexpected GitHub release asset");
     // Asset names become query-string values and are encoded, not interpolated.
     expect(raw).toContain("encoded_name=");
-    // The promotion version must be SemVer, not merely filename-safe.
-    expect(raw).toContain("*[!0-9A-Za-z.-]*|*+*|*.|*-|.*)");
+    // The promotion version must satisfy the release policy, checked by the same
+    // script the operator command's rules are tested against rather than by a
+    // second inline copy that can drift.
+    expect(raw).toContain('bash scripts/check-release-version.sh "$VERSION"');
+    expect(raw).not.toContain("*[!0-9A-Za-z.-]*|*+*|*.|*-|.*)");
     // A hand-pushed tag must not publish an artifact whose manifest disagrees with
     // the release version.
     expect(raw).toContain('test "$package_version" = "$VERSION"');
     expect(raw).toContain('test "$lock_version" = "$VERSION"');
-    // A numeric prerelease identifier may not carry a leading zero.
-    expect(raw).toContain("IFS=.");
+    // A numeric prerelease identifier may not carry a leading zero. The rule lives
+    // in the shared validator now, and the agreement test pins both callers to it.
+    expect(
+      readFileSync(resolve(process.cwd(), "scripts", "check-release-version.sh"), "utf8"),
+    ).toContain("IFS=.");
+    // No script from the released revision runs in a step that holds the publishing
+    // token: the write is its own step and uses curl plus embedded Node only.
+    const promoteSteps = (
+      parseYaml(raw) as {
+        jobs: Record<
+          string,
+          { steps: { name: string; env?: Record<string, string>; run?: string }[] }
+        >;
+      }
+    ).jobs["promote-release"]!.steps as {
+      name: string;
+      env?: Record<string, string>;
+      run?: string;
+    }[];
+    const tokenSteps = promoteSteps.filter((step) => step.env?.RELEASE_PUBLISH_TOKEN !== undefined);
+    expect(tokenSteps.map((step) => step.name)).toStrictEqual(["Promote candidate release"]);
+    for (const step of tokenSteps) {
+      expect(step.run ?? "").not.toContain("scripts/");
+    }
+    // The public mirror is readable anonymously, so the verification steps hold no
+    // secret at all.
+    for (const name of ["Verify the candidate artifact", "Re-verify the promoted release"]) {
+      const step = promoteSteps.find((candidate) => candidate.name === name);
+      expect(step?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
+    }
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
@@ -551,7 +582,9 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("refs/heads/runner-test/");
     expect(raw).toContain("github.ref == 'refs/heads/main'");
     expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
-    expect(raw).toContain("PREFLIGHT_READ_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}");
+    // The preflight gate holds no token: the runs API is readable anonymously, and a
+    // secret must not be reachable by the tagged revision's own script.
+    expect(raw).not.toContain("RELEASE_PREFLIGHT_TOKEN");
     expect(raw).toContain(
       'PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs"',
     );
@@ -559,5 +592,20 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('GITHUB_TOKEN: ""');
     expect(raw).toContain("unexpected artifact-build ref");
     expect(raw).toContain("if: startsWith(github.ref, 'refs/tags/v')");
+    // The provenance check is bound to the build step that produces the artifact,
+    // not merely present somewhere in the file.
+    const buildStep = (
+      parseYaml(raw) as {
+        jobs: Record<string, { steps: { name: string; run?: string }[] }>;
+      }
+    ).jobs["linux-artifact"]!.steps.find(
+      (step) => step.name === "Build and verify x86_64 glibc artifact",
+    );
+    expect(buildStep?.run).toContain('--expect-git-commit "$GITHUB_SHA"');
+    // The pinned runtime is verified on every run and put on PATH, so later steps
+    // package the runtime that was verified.
+    expect(raw).toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
+    expect(raw).toContain('test "$(command -v node)" = "$node_root/bin/node"');
+    expect(raw).toContain("cached_sha256");
   });
 });

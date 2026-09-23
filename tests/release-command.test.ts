@@ -747,6 +747,8 @@ describe("release operator command", () => {
       // destination on the same host.
       "ssh://root@git.montycasa.net/patrick/NookBridge.git",
       "ssh://someone:else@git.montycasa.net/patrick/NookBridge.git",
+      // Without a principal, ssh selects the local user.
+      "ssh://git.montycasa.net/patrick/NookBridge.git",
       "root@git.montycasa.net:patrick/NookBridge.git",
       "/tmp/canonical.git",
       "attacker.example:patrick/NookBridge.git",
@@ -1262,6 +1264,42 @@ describe("release operator command", () => {
     expect(tagPresent(fixture.canonical, tag)).toBe(false);
   });
 
+  it("refuses overlapping rewrite rules where any applicable rule leaves the repository", async () => {
+    const fixture = createFixture();
+    const attacker = createAttackerRepository(fixture);
+    const canonicalUrl = "https://git.montycasa.net/patrick/NookBridge.git";
+    git(["remote", "set-url", "upstream", canonicalUrl], fixture.work);
+    git(["remote", "set-url", "--push", "upstream", canonicalUrl], fixture.work);
+    // A short rule that is harmless, and a longer rule that matches the same URL.
+    // Git does not guarantee that the first configured rule wins, so the command
+    // must not accept a URL just because one of the applicable rules is safe.
+    git(
+      ["config", `url.${fixture.canonical}.pushInsteadOf`, "https://git.montycasa.net/"],
+      fixture.work,
+    );
+    git(
+      [
+        "config",
+        "url.https://attacker.invalid/.pushInsteadOf",
+        "https://git.montycasa.net/patrick/",
+      ],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      withoutFixtures(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("rewrite rule");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+    expect(tagPresent(attacker, tag)).toBe(false);
+  });
+
   it("queries the tag ref at the canonical API path", async () => {
     const stub = await startStub({ runsFor: () => [] });
 
@@ -1364,5 +1402,51 @@ describe("release operator command", () => {
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("unexpected");
     expect(tagPresent(fixture.canonical, promoteTag)).toBe(false);
+  });
+
+  it("agrees with the workflow's version validator on the release policy", () => {
+    const table: [string, boolean][] = [
+      ["0.1.2", true],
+      ["1.0.0", true],
+      ["0.2.0-rc.1", true],
+      ["1.0.0-0", true],
+      ["1.0.0-alpha-2", true],
+      ["1.0.0-alpha.2", true],
+      ["foo", false],
+      ["1.2", false],
+      ["01.2.3", false],
+      ["1.02.3", false],
+      ["1.2.03", false],
+      ["1.2.3-", false],
+      ["1.2.3+build", false],
+      ["1.2.3.4", false],
+      ["1.2.3-01", false],
+      ["1.2.3-rc.01", false],
+      ["1.2.3-rc..1", false],
+      ["1.2.3-rc.", false],
+      ["1.2.3-.rc", false],
+      [`0.1.2-${"a".repeat(58)}`, true],
+      [`0.1.2-${"a".repeat(59)}`, false],
+    ];
+
+    for (const [value, expected] of table) {
+      // The operator command and the workflow must apply the same policy: a tag
+      // pushed by hand reaches the workflow without passing through the command, and
+      // two implementations of one rule drift.
+      const operator = guardAccepts("valid_version", [value])[0];
+      const workflow = spawnSync(
+        "bash",
+        [resolve(process.cwd(), "scripts", "check-release-version.sh"), value],
+        {
+          encoding: "utf8",
+        },
+      );
+
+      expect({ value, operator, workflow: workflow.status }).toStrictEqual({
+        value,
+        operator: expected,
+        workflow: expected ? 0 : 1,
+      });
+    }
   });
 });

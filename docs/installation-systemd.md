@@ -206,7 +206,21 @@ npm run artifact:linux -- \
     --version 1.2.3 \
     --source-date-epoch "$SOURCE_DATE_EPOCH" \
     --min-glibc 2.36 \
-    --min-libstdcxx GLIBCXX_3.4.29
+    --min-libstdcxx GLIBCXX_3.4.29 \
+    --operator-peercred-helper /tmp/nookbridge-operator-peercred-helper
+```
+
+`--operator-peercred-helper` is required: the artifact packages the helper binary
+at `app/operator-peercred-helper`. Build it the way the release workflow does, so
+the packaged binary is the freestanding static one the artifact expects:
+
+```bash
+STATIC_GLIBC="$(nix build --no-link --print-out-paths 'nixpkgs#glibc.static')"
+cc -O2 -std=c11 -Wall -Wextra -Werror -ffreestanding -fno-builtin \
+  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables \
+  -fno-pie -no-pie -nostdlib -static -Wl,-e,_start -Wl,--build-id=none \
+  -L"$STATIC_GLIBC/lib" -o /tmp/nookbridge-operator-peercred-helper \
+  native/operator-peercred.c
 ```
 
 The builder invokes the verifier before reporting success. Release signing,

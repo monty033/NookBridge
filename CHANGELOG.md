@@ -69,6 +69,17 @@ Patch release hardening static glibc discovery in the release workflow.
   version longer than the 64 characters the artifact builder accepts, and verify the
   `package.json` and `package-lock.json` version surfaces in the publishing workflow
   so a tag pushed by hand cannot publish a mismatched artifact.
+- Hold no secret in any step that executes code from the released revision: the
+  preflight gate no longer carries a read token at all (the runs API is readable
+  anonymously), the promotion job is split so the candidate verification and the
+  post-flip re-verification run with no publishing token, and bearer tokens reach
+  `curl` through a mode-600 configuration file rather than a command-line argument.
+- Verify the pinned Node runtime on every run, not only on first download, and put
+  its directory on `PATH` for every following step so the packaged runtime is the
+  verified one.
+- Apply the version policy from one shared script so the workflow and the operator
+  command cannot drift, and validate a rewrite rule by the URL it produces rather
+  than by its replacement base.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.
