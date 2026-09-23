@@ -103,6 +103,37 @@ A release is published only when all of these agree:
 - the artifact manifest source commit and checksum;
 - the mirrored GitHub release and public download URLs.
 
+## Operator command
+
+`scripts/release.sh` (wrapped by `just release`, `just release-promote`, and
+`just release-status`) is the normal way to execute the candidate and promotion
+gates. It is a convenience layer: the workflow keeps enforcing every gate, so a
+release is no less strict when the command is used, and no more correct when it
+is bypassed by hand.
+
+- `release.sh status` is read-only. It prints the version from the canonical
+  commit, whether the version surfaces agree, whether the `main` preflight for
+  that commit succeeded, whether the version and promotion tags already exist,
+  and the current mirror release state.
+- `release.sh tag` reads the version from the canonical commit, refuses to run
+  unless the version surfaces agree, no `v<VERSION>` or `promote-v<VERSION>`
+  exists locally or on the canonical remote, and the exact commit has a
+  terminal-successful `main` preflight. It then creates the annotated
+  `NookBridge v<VERSION>` tag, pushes it, waits for the run, and reports the
+  candidate assets. The tag targets the fetched canonical commit, so local
+  working-tree state cannot change what is released.
+- `release.sh promote` refuses to run unless the tag exists, the mirror release
+  is still a prerelease candidate at that commit with the complete five-asset
+  set, and no promotion tag exists. It then pushes `promote-v<VERSION>` and
+  waits for the promotion run.
+
+Both mutating commands confirm before pushing; `--yes` skips the prompt and
+`--no-watch` skips waiting for the run. A failed tag push deletes the local tag
+that was just created, so a failed release does not leave a half-created tag
+behind. The command reads public release state anonymously; it never needs a
+token unless the Forgejo API requires one, in which case
+`NOOKBRIDGE_API_TOKEN` is read from the environment rather than the command line.
+
 ## When NookBridge reaches 1.0
 
 `1.0.0` should wait until these conditions are true:
@@ -127,7 +158,11 @@ Until then, the `0.x` line is an honest signal that users should expect change.
 5. Wait for the terminal-success `main` runner preflight for that exact merge
    commit. If the release changes the workflow or runner contract, first run a
    `runner-test/<name>` branch preflight before merging.
-6. Create `v<VERSION>` on the canonical merge commit.
-7. Push the tag and allow Forgejo Actions to build and publish the candidate.
+6. Confirm the release state: `just release-status`.
+7. Create and push the tag with `just release`. It re-checks the version
+   surfaces, the existing tags, and the successful `main` preflight before it
+   pushes, then reports the candidate and the assets.
 8. Verify the artifact manifest, checksums, release assets, and installer URL.
-9. Promote or announce the release only after the release gates pass.
+9. Accept the candidate on a clean host, then promote it with
+   `just release-promote`. Promotion is the only step that moves the general
+   install path.

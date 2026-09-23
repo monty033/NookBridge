@@ -34,7 +34,15 @@ build/test steps explicitly receive an empty `GITHUB_TOKEN`.
    finish successfully. Do not tag while it is queued or failed. For a
    release-sensitive workflow change before merge, use a `runner-test/<name>`
    branch first and require the same artifact-build and verifier pass.
-3. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md), for example:
+3. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md). Use the release command, which re-checks the
+   version surfaces, the existing tags, and this preflight before it pushes:
+
+   ```bash
+   just release-status   # read-only: confirm the release is ready
+   just release          # tag, push, wait for the candidate run
+   ```
+
+   The equivalent manual steps are:
 
    ```bash
    git tag -a v0.1.0 -m 'NookBridge v0.1.0' <canonical-merge-sha>

@@ -7,12 +7,20 @@ release entries describe the supported boundary at the time of the release.
 
 Patch release hardening static glibc discovery in the release workflow.
 
+### Added
+
+- `scripts/release.sh` (`just release`, `just release-promote`,
+  `just release-status`) executes the candidate and promotion gates with the
+  version, tag, preflight, and asset guards stated in the release policy.
+
 ### Fixed
 
 - Match the hash-prefixed Nix store basename used by `glibc.static`.
 - Emit actionable diagnostics when static glibc or `libc.a` is unavailable.
 - Add regression coverage so the release workflow cannot silently revert to the
   non-matching store glob.
+- Build the operator peer-credential helper freestanding so portable artifacts
+  cannot embed host `/nix/store` paths.
 
 ## [0.1.1] - 2026-09-22
 

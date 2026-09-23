@@ -38,6 +38,9 @@
     "test:watch": "vitest",
     "artifact:linux": "bash scripts/build-linux-artifact.sh",
     "artifact:verify": "bash scripts/verify-linux-artifact.sh",
+    "release:status": "bash scripts/release.sh status",
+    "release:tag": "bash scripts/release.sh tag",
+    "release:promote": "bash scripts/release.sh promote",
     "nookd": "node dist/nookd.js"
   },
   "dependencies": {

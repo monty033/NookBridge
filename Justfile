@@ -44,6 +44,20 @@ format:
 cli-help:
     {{nix}} node dist/cli.js help
 
+# Read-only release state: version, canonical commit, preflight, tags, mirror.
+release-status:
+    {{nix}} npm run release:status
+
+# Tag and push the canonical version, then wait for the release workflow.
+# Extra arguments are passed through, for example: just release --no-watch
+release *ARGS:
+    {{nix}} npm run release:tag -- {{ARGS}}
+
+# Promote an accepted candidate release onto the public install path.
+# Extra arguments are passed through, for example: just release-promote 0.1.2
+release-promote *ARGS:
+    {{nix}} npm run release:promote -- {{ARGS}}
+
 # Interactive live login. Credentials and MFA stay in the TTY.
 # Use a fresh disposable state directory for proof work.
 live-login:

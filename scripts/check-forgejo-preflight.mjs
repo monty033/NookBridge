@@ -1,26 +1,21 @@
-/* global fetch, URL */
+/* global fetch */
 
-const PAGE_SIZE = 50;
+import { findRun } from "./release-api.mjs";
+
 const WORKFLOW_ID = "linux-artifact.yml";
 
-function runEntries(payload) {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.workflow_runs)) return payload.workflow_runs;
-  if (Array.isArray(payload?.runs)) return payload.runs;
-  return [];
-}
-
-export function isSuccessfulMainPreflight(runs, commitSha) {
-  return runs.some(
-    (run) =>
-      run?.workflow_id === WORKFLOW_ID &&
-      run?.event === "push" &&
-      run?.prettyref === "main" &&
-      run?.commit_sha === commitSha &&
-      run?.status === "success",
-  );
-}
-
+/**
+ * The release gate: a tagged commit may only publish if that same commit
+ * already completed a successful `main` push run of the artifact workflow.
+ *
+ * Matching is exact — workflow, event, ref, and commit — because the tag push
+ * shares its commit with the `main` preflight, so a looser match would accept
+ * the wrong run as evidence. Pagination and the matching rule live in
+ * `release-api.mjs` so the operator command and this CI gate cannot drift apart.
+ *
+ * A missing token is a configuration failure, not a reason to skip the check:
+ * the gate fails closed rather than publishing without preflight evidence.
+ */
 export async function requireSuccessfulMainPreflight({
   runsUrl,
   commitSha,
@@ -31,25 +26,21 @@ export async function requireSuccessfulMainPreflight({
     throw new Error("Forgejo preflight gate is missing required configuration");
   }
 
-  for (let page = 1; page <= 1000; page += 1) {
-    const url = new URL(runsUrl);
-    url.searchParams.set("limit", String(PAGE_SIZE));
-    url.searchParams.set("page", String(page));
-    const response = await fetchImpl(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    if (!response.ok) {
-      throw new Error(`Forgejo preflight API returned HTTP ${response.status}`);
-    }
-    const entries = runEntries(await response.json());
-    if (isSuccessfulMainPreflight(entries, commitSha)) return;
-    if (entries.length < PAGE_SIZE) break;
+  const match = await findRun({
+    runsUrl,
+    expected: {
+      workflowId: WORKFLOW_ID,
+      event: "push",
+      ref: "main",
+      commitSha,
+      status: "success",
+    },
+    token,
+    fetchImpl,
+  });
+  if (match === undefined) {
+    throw new Error("successful main runner preflight missing for tagged commit");
   }
-
-  throw new Error("successful main runner preflight missing for tagged commit");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
