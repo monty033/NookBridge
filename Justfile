@@ -2,6 +2,10 @@
 # All Node commands run inside the pinned offline Nix development shell.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+# Recipe arguments must reach the shell as positional parameters, never
+# interpolated into the command text: `{{ARGS}}` would let shell metacharacters
+# in an argument run before the release command can validate them.
+set positional-arguments
 
 nix := "nix develop --offline --command"
 live-state := "var/state/stage-3-live-crypto-poc"
@@ -43,6 +47,20 @@ format:
 # Show the administrative CLI help without opening live state.
 cli-help:
     {{nix}} node dist/cli.js help
+
+# Read-only release state: version, canonical commit, preflight, tags, mirror.
+release-status:
+    {{nix}} npm run release:status
+
+# Tag and push the canonical version, then wait for the release workflow.
+# Extra arguments are passed through, for example: just release --no-watch
+release *ARGS:
+    {{nix}} npm run release:tag -- "$@"
+
+# Promote an accepted candidate release onto the public install path.
+# Extra arguments are passed through, for example: just release-promote 0.1.2
+release-promote *ARGS:
+    {{nix}} npm run release:promote -- "$@"
 
 # Interactive live login. Credentials and MFA stay in the TTY.
 # Use a fresh disposable state directory for proof work.

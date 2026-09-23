@@ -14,18 +14,24 @@ Store it in the Forgejo repository secret:
 RELEASE_PUBLISH_TOKEN
 ```
 
-Create a separate read-only token that can list Actions runs for the canonical
-repository, with no write or release permissions. Store it as:
+The preflight lookup needs no secret. The Actions API of a public repository is
+readable anonymously, and the workflow deliberately sets no token for that step, so
+no credential is reachable by code from the tag being released. A read that is
+refused is an error rather than an empty result, so the gate still fails closed.
 
-```text
-RELEASE_PREFLIGHT_TOKEN
-```
+This means the workflow requires an anonymously readable Actions API on the canonical
+host. If that API is private, a tag-triggered release cannot perform its preflight and
+will fail with a message saying so. The checker accepts `PREFLIGHT_READ_TOKEN` from the
+environment for that case, and the operator command reads it, so the supported answer
+is to run the preflight locally before pushing the tag rather than to hand a read
+token to a step that executes code from the tag being released.
 
-Do not put either token in the repository, workflow YAML, a commit, or a chat
-message. The publish token is used only by the tag-triggered publishing steps;
-the read-only preflight token is used only to verify the prior `main` run. Pull
-request and branch builds do not receive either secret, and source-controlled
-build/test steps explicitly receive an empty `GITHUB_TOKEN`.
+Do not put a token in the repository, workflow YAML, a commit, or a chat message.
+The publish token is used only by the tag-triggered publishing step, which runs the
+runner's own tools over a data file and executes no script from the released
+revision. Pull request and branch builds do not receive the secret, and the
+source-controlled build, test, and verification steps explicitly receive an empty
+`GITHUB_TOKEN`.
 
 ## Publishing a release
 
@@ -34,7 +40,15 @@ build/test steps explicitly receive an empty `GITHUB_TOKEN`.
    finish successfully. Do not tag while it is queued or failed. For a
    release-sensitive workflow change before merge, use a `runner-test/<name>`
    branch first and require the same artifact-build and verifier pass.
-3. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md), for example:
+3. Create and push the version tag selected by the [versioning and releases policy](versioning-and-releases.md). Use the release command, which re-checks the
+   version surfaces, the existing tags, and this preflight before it pushes:
+
+   ```bash
+   just release-status   # read-only: confirm the release is ready
+   just release          # tag, push, wait for the candidate run
+   ```
+
+   The equivalent manual steps are:
 
    ```bash
    git tag -a v0.1.0 -m 'NookBridge v0.1.0' <canonical-merge-sha>
@@ -51,8 +65,12 @@ build/test steps explicitly receive an empty `GITHUB_TOKEN`.
    - `SHA256SUMS`
    - `nookbridge-v<VERSION>-linux-x64-gnu.tar.gz`
 
-The workflow is idempotent for a tag: an existing GitHub release is reused and
-same-named assets are replaced before the final asset-set check.
+The workflow is recoverable for a tag. A run that fails partway through its uploads
+leaves a partial candidate, and the tag cannot be moved to another version, so a
+re-run deletes that candidate and recreates it from its own build before uploading:
+retrying is the documented recovery. An existing release is only touched when it is
+the matching candidate for this tag — same commit, still a prerelease, not a draft —
+and the run ends by reading the release back and asserting its exact asset set.
 
 ## Why the workflow is needed
 
