@@ -18,6 +18,26 @@
 export const PAGE_SIZE = 50;
 const MAX_PAGES = 1000;
 
+const CONTROL_LIMIT = 32;
+const DELETE_CHARACTER = 127;
+
+/**
+ * Remote strings are untrusted, and the command-line form emits them as
+ * `key=value` lines that a shell caller parses. A newline inside a value would
+ * forge additional fields — a fabricated `status=success`, or an asset name
+ * that satisfies the release asset check — so control characters are collapsed
+ * before anything is printed.
+ */
+export function sanitize(value, limit = 512) {
+  let result = "";
+  for (const character of String(value)) {
+    if (result.length >= limit) break;
+    const code = character.codePointAt(0) ?? 0;
+    result += code < CONTROL_LIMIT || code === DELETE_CHARACTER ? " " : character;
+  }
+  return result;
+}
+
 export function runEntries(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.workflow_runs)) return payload.workflow_runs;
@@ -60,7 +80,12 @@ export async function findRun({ runsUrl, expected, token, fetchImpl = fetch }) {
     const url = new URL(runsUrl);
     url.searchParams.set("limit", String(PAGE_SIZE));
     url.searchParams.set("page", String(page));
-    const response = await fetchImpl(url, { headers: requestHeaders(token) });
+    // Redirects are refused: a redirecting endpoint could hand back a result
+    // for an identity this query never asked about.
+    const response = await fetchImpl(url, {
+      headers: requestHeaders(token),
+      redirect: "manual",
+    });
     if (!response.ok) throw new Error(`Forgejo runs API returned HTTP ${response.status}`);
     const entries = runEntries(await response.json());
     const match = entries.find((run) => matchesRun(run, expected));
@@ -82,6 +107,7 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetchImpl(`${apiBase}/repos/${repository}/releases/tags/${tag}`, {
     headers,
+    redirect: "manual",
   });
   if (response.status === 404)
     return { exists: false, prerelease: false, targetCommitish: "", assets: [] };
@@ -93,9 +119,9 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
     // The promotion workflow re-verifies the artifact against this commit, so
     // the caller must compare it with the canonical tag commit before pushing a
     // promotion ref that would otherwise be rejected after the fact.
-    targetCommitish: String(release?.target_commitish ?? ""),
+    targetCommitish: sanitize(release?.target_commitish ?? "", 256),
     assets: Array.isArray(release?.assets)
-      ? release.assets.map((asset) => String(asset?.name ?? "")).filter(Boolean)
+      ? release.assets.map((asset) => sanitize(asset?.name ?? "", 256)).filter(Boolean)
       : [],
   };
 }
@@ -118,7 +144,7 @@ function printRun(run) {
   ];
   for (const [key, value] of fields) {
     if (value === undefined || value === null) continue;
-    process.stdout.write(`${key}=${String(value)}\n`);
+    process.stdout.write(`${key}=${sanitize(value)}\n`);
   }
 }
 

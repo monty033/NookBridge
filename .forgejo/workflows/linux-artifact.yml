@@ -383,6 +383,18 @@ jobs:
           # Only a candidate may be promoted, and only once.
           test "$prerelease" = "true"
 
+          # The promotion ref must point at the commit the canonical release tag
+          # names. Without this, a hand-pushed promote-* ref at another commit
+          # could clear the prerelease flag while this job verifies a revision
+          # the candidate was never built from.
+          git fetch --no-tags --depth=1 origin "refs/tags/$REL_TAG"
+          canonical_tag_commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          test "$canonical_tag_commit" = "$target_commit"
+
+          # Run the verification tooling from the tagged revision rather than
+          # from the ref that triggered this job.
+          git checkout -q --detach "$canonical_tag_commit"
+
           # Asset gate: promotion must require the complete published asset set,
           # not just the two files this job happens to download. An installer
           # asset that disappeared after the candidate run must fail the
@@ -406,6 +418,21 @@ jobs:
               -o "$work_dir/$asset_name"
           done
 
+          # Installer integrity: the published installers must be the reviewed
+          # scripts from the tagged revision. The checksum file deliberately
+          # covers only the artifact and the two auxiliary scripts, so install.sh
+          # is compared byte-for-byte against its source here instead.
+          for installer in install.sh install-systemd.sh verify-linux-artifact.sh; do
+            case "$installer" in
+              install.sh) installer_source='scripts/install-from-github.sh' ;;
+              *) installer_source="scripts/$installer" ;;
+            esac
+            curl -fsSL \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
+              -o "$work_dir/$installer"
+            cmp -s "$work_dir/$installer" "$installer_source"
+          done
+
           # Provenance gate: the artifact must record the release's own target
           # commit before it is allowed onto the general install path.
           bash scripts/verify-linux-artifact.sh \
@@ -423,4 +450,19 @@ jobs:
             "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
           promoted="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
           test "$promoted" = "false"
+
+          # Re-check the asset set after the flip. An asset removed between the
+          # gate and the PATCH must fail the run rather than pass unnoticed.
+          node -e "
+            const fs = require('fs');
+            const release = JSON.parse(fs.readFileSync('$RELEASE_JSON'));
+            const names = new Set((release.assets || []).map((asset) => String(asset.name)));
+            const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[1]];
+            const missing = required.filter((name) => !names.has(name));
+            if (missing.length > 0) {
+              console.error('missing GitHub release asset after promotion: ' + missing.join(', '));
+              process.exit(2);
+            }
+          " "$ARTIFACT"
+
           printf 'release promoted: %s\n' "$REL_TAG"

@@ -22,11 +22,25 @@ Patch release hardening static glibc discovery in the release workflow.
 - Build the operator peer-credential helper freestanding so portable artifacts
   cannot embed host `/nix/store` paths.
 - Authenticate the release command's canonical remote by host and repository
-  path for both its fetch and push URLs, derive the Forgejo and GitHub endpoints
-  from that identity, refuse a remote tag lookup error as an error rather than
-  as an absent tag, and report a push whose outcome is unknown as uncertain.
+  path, with no explicit port, for its fetch URL and for every configured push
+  URL, and push to the validated URLs rather than to a remote name so a
+  configuration change after validation cannot redirect a release.
+- Derive the Forgejo and GitHub endpoints from that remote identity, refuse API
+  responses served through a redirect, and refuse fixture overrides unless test
+  mode is set and the remote is a filesystem path.
+- Refuse a remote tag lookup error as an error rather than as an absent tag, and
+  report a push whose outcome is unknown as uncertain instead of as
+  "nothing was published".
+- Exit non-zero when the release run succeeds but the candidate release cannot
+  be verified, instead of reporting an unverified release as success.
+- Escape remote-derived values before printing them as `key=value` fields, so a
+  forged newline in a run URL or an asset name cannot satisfy a status or asset
+  check, and redact credentials and raw remote diagnostics from error output.
 - Require the promotion workflow to verify the complete published asset set
-  before it clears the prerelease flag.
+  before it clears the prerelease flag, to match the promotion ref against the
+  canonical release tag's commit, to run its verification tooling from that
+  tagged revision, to compare the published installers byte-for-byte with the
+  tagged sources, and to re-check the asset set after the flip.
 
 ## [0.1.1] - 2026-09-22
 

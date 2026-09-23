@@ -12,17 +12,25 @@
 # candidate release is still a prerelease with the complete asset set.
 #
 # Trust model. Every input that decides whether a guard passes is treated as an
-# untrusted input:
+# untrusted input, and every destination is resolved once and then used by value:
 #
-#   * the canonical remote is authenticated by host AND repository path for both
-#     its fetch URL and its push URL, so a lookalike host or a divergent pushurl
-#     cannot redirect the tag;
+#   * the canonical remote is authenticated by host AND repository path, with no
+#     explicit port, for its fetch URL and for every configured push URL, so a
+#     lookalike host, a second push destination, or a divergent pushurl cannot
+#     receive the tag;
+#   * the validated URLs are used for the fetch, the tag lookup, and the push
+#     itself, so rewriting the remote configuration after validation cannot
+#     redirect an already-approved release;
 #   * the Forgejo and GitHub endpoints are derived from that identity instead of
-#     being accepted from the environment;
+#     being accepted from the environment, and API responses are read with
+#     redirects refused;
 #   * a remote lookup that cannot be performed is an error, never evidence that
 #     the tag is absent;
 #   * a push whose outcome cannot be determined is reported as uncertain rather
-#     than as "nothing was published".
+#     than as "nothing was published";
+#   * the release run succeeding is not treated as the candidate existing, and
+#     nothing printed in an error path carries credentials or raw remote
+#     diagnostics.
 #
 # Every guard fails closed before anything is pushed. A push that provably did
 # not reach the remote deletes the local tag it created, because a public tag is
@@ -30,9 +38,9 @@
 # permanently rather than fail safely.
 #
 # Test mode. The fixture overrides below are refused unless
-# NOOKBRIDGE_RELEASE_TEST_MODE is set, and even then they may only relax the
-# canonical identity check for a local filesystem remote. They must never be set
-# for a real release:
+# NOOKBRIDGE_RELEASE_TEST_MODE is set, and are then usable only against a local
+# filesystem remote. They can never point this command at a network
+# destination, and they must never be set for a real release:
 #
 #   NOOKBRIDGE_RELEASE_TEST_MODE   enable the fixture overrides (tests only)
 #   NOOKBRIDGE_CANONICAL_REMOTE    remote name to tag and push
@@ -57,7 +65,6 @@ readonly RUN_EVENT="push"
 readonly API_TOKEN="${NOOKBRIDGE_API_TOKEN:-}"
 readonly WATCH_INTERVAL="${NOOKBRIDGE_WATCH_INTERVAL:-10}"
 readonly WATCH_TIMEOUT="${NOOKBRIDGE_WATCH_TIMEOUT:-1800}"
-readonly PENDING_STATUSES="running waiting blocked queued"
 
 test_mode=false
 if [ -n "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" ] && [ "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" != "0" ]; then
@@ -69,7 +76,8 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
 canonical_remote=''
-canonical_url=''
+canonical_fetch_url=''
+canonical_push_urls=''
 repo_root=''
 runs_url=''
 mirror_api_base=''
@@ -79,7 +87,6 @@ version=''
 requested_version=''
 run_output=''
 run_code=0
-tag_output=''
 assume_yes=false
 watch=true
 
@@ -141,38 +148,58 @@ json_field() { # dotted path, JSON on stdin
 }
 
 ##########
+# Output hygiene
+##########
+
+# Anything derived from a remote URL or from git's own diagnostics can carry
+# credentials or control characters. Strip the userinfo component and collapse
+# control characters before it reaches a log.
+redact() {
+  printf '%s' "$1" | sed -e 's#\(://\)[^/@[:space:]]*@#\1#' -e 's#[[:cntrl:]]# #g'
+}
+
+# Git diagnostics are untrusted: keep one redacted line and drop the rest.
+git_error_text() { # $1 = file holding captured stderr
+  local line=''
+  if [ -f "$1" ]; then
+    line=$(head -n 1 "$1" 2>/dev/null || true)
+  fi
+  [ -n "$line" ] || line='no diagnostic was produced'
+  redact "$line"
+}
+
+##########
 # Trust boundaries
 ##########
 
-# Accept a remote URL only when it names the canonical host and repository. A
-# suffix match on the repository path alone would accept an attacker-controlled
-# host that mirrors the path, so both components are checked.
+# Accept a remote URL only when it names the canonical host and repository with
+# no explicit port. A suffix match on the repository path alone would accept an
+# attacker-controlled host that mirrors the path, and an explicit port selects a
+# different service than the one the API identity is derived from.
 canonical_url_ok() {
-  local url=$1 host='' path='' rest
+  local url=$1 rest authority host path
   case "$url" in
-    https://*)
-      rest=${url#https://}
-      rest=${rest#*@}
-      host=${rest%%/*}
-      host=${host%%:*}
-      path=${rest#*/}
-      ;;
-    ssh://*)
-      rest=${url#ssh://}
-      rest=${rest#*@}
-      host=${rest%%/*}
-      host=${host%%:*}
-      path=${rest#*/}
-      ;;
+    https://*) rest=${url#https://} ;;
+    ssh://*) rest=${url#ssh://} ;;
     *@*:*)
       rest=${url#*@}
       host=${rest%%:*}
       path=${rest#*:}
+      [ "$host" = "$CANONICAL_HOST" ] || return 1
+      path=${path%.git}
+      [ "$path" = "$CANONICAL_PATH" ] || return 1
+      return 0
       ;;
-    *)
-      return 1
-      ;;
+    *) return 1 ;;
   esac
+  rest=${rest#*@}
+  authority=${rest%%/*}
+  path=${rest#*/}
+  host=${authority%%:*}
+  # A port in the authority means a service other than the canonical one.
+  if [ "$authority" != "$host" ]; then
+    return 1
+  fi
   path=${path%.git}
   case "$path" in
     */) path=${path%/} ;;
@@ -182,23 +209,36 @@ canonical_url_ok() {
   return 0
 }
 
-# A filesystem path is never a canonical release target; only the test fixtures
-# may use one, and only while test mode is on.
+# A filesystem path is never a canonical release target. A scp-style URL such as
+# `host:path` carries a colon before any slash, so it is a network destination
+# and not a path, whether or not it names a user.
 local_path_url() {
-  case "$1" in
-    *://*|*@*:*) return 1 ;;
-    *) return 0 ;;
+  local value=$1 head
+  case "$value" in
+    *://*) return 1 ;;
   esac
-}
-
-remote_url_ok() {
-  if canonical_url_ok "$1"; then
-    return 0
-  fi
-  if [ "$test_mode" = true ] && local_path_url "$1"; then
+  head=${value%%/*}
+  case "$head" in
+    *:*) return 1 ;;
+  esac
+  case "$value" in
+    /*|./*|../*) return 0 ;;
+  esac
+  # A bare `~` cannot be written as a case pattern: bash tilde-expands patterns,
+  # so `~/*` would silently become the literal home directory.
+  if [ "$head" = '~' ]; then
     return 0
   fi
   return 1
+}
+
+remote_url_ok() {
+  if [ "$test_mode" = true ]; then
+    # Test mode relaxes identity only for a local filesystem remote.
+    local_path_url "$1"
+    return $?
+  fi
+  canonical_url_ok "$1"
 }
 
 require_trusted_configuration() {
@@ -219,34 +259,52 @@ require_trusted_configuration() {
 # Repository and endpoint resolution
 ##########
 
+# Sets canonical_remote, canonical_fetch_url, and canonical_push_urls. Called
+# directly rather than in a command substitution, because a guard that fails
+# inside a subshell could not stop the caller.
 resolve_canonical_remote() {
-  local name fetch_url push_url
+  local name='' candidate fetch_url push_url
   if [ -n "${NOOKBRIDGE_CANONICAL_REMOTE:-}" ]; then
     name=$NOOKBRIDGE_CANONICAL_REMOTE
     git remote get-url "$name" >/dev/null 2>&1 \
       || fail "the configured canonical remote does not exist: $name"
-    fetch_url=$(git remote get-url "$name")
-    push_url=$(git remote get-url --push "$name" 2>/dev/null || true)
-    [ -n "$push_url" ] || push_url=$fetch_url
-    remote_url_ok "$fetch_url" \
-      || fail "remote $name does not fetch from $CANONICAL_HOST/$CANONICAL_PATH: $fetch_url"
-    remote_url_ok "$push_url" \
-      || fail "remote $name does not push to $CANONICAL_HOST/$CANONICAL_PATH: $push_url"
-    printf '%s' "$name"
-    return 0
+  else
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      fetch_url=$(git remote get-url "$candidate" 2>/dev/null || true)
+      [ -n "$fetch_url" ] || continue
+      push_url=$(git remote get-url --push "$candidate" 2>/dev/null || true)
+      [ -n "$push_url" ] || push_url=$fetch_url
+      if remote_url_ok "$fetch_url" && remote_url_ok "$push_url"; then
+        name=$candidate
+        break
+      fi
+    done < <(git remote)
+    [ -n "$name" ] \
+      || fail "no remote fetches from and pushes to $CANONICAL_HOST/$CANONICAL_PATH; add one, or set NOOKBRIDGE_RELEASE_TEST_MODE with NOOKBRIDGE_CANONICAL_REMOTE for fixture work"
   fi
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    fetch_url=$(git remote get-url "$name" 2>/dev/null || true)
-    push_url=$(git remote get-url --push "$name" 2>/dev/null || true)
-    [ -n "$fetch_url" ] || continue
-    [ -n "$push_url" ] || push_url=$fetch_url
-    if remote_url_ok "$fetch_url" && remote_url_ok "$push_url"; then
-      printf '%s' "$name"
-      return 0
-    fi
-  done < <(git remote)
-  fail "no remote fetches from and pushes to $CANONICAL_HOST/$CANONICAL_PATH; add one, or set NOOKBRIDGE_RELEASE_TEST_MODE with NOOKBRIDGE_CANONICAL_REMOTE for fixture work"
+  canonical_remote=$name
+  resolve_remote_urls "$name"
+}
+
+# Validate the fetch URL and every configured push URL of the chosen remote, and
+# keep them by value so that nothing later re-reads mutable configuration.
+resolve_remote_urls() { # $1 = remote name
+  local name=$1 url
+  canonical_fetch_url=$(git remote get-url "$name" 2>/dev/null || true)
+  [ -n "$canonical_fetch_url" ] || fail "remote $name has no fetch URL"
+  remote_url_ok "$canonical_fetch_url" \
+    || fail "remote $name does not fetch from $CANONICAL_HOST/$CANONICAL_PATH: $(redact "$canonical_fetch_url")"
+  canonical_push_urls=''
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    remote_url_ok "$url" \
+      || fail "remote $name does not push to $CANONICAL_HOST/$CANONICAL_PATH: $(redact "$url")"
+    canonical_push_urls="${canonical_push_urls}${url}"$'\n'
+  done < <(git config --get-all "remote.$name.pushurl" 2>/dev/null || true)
+  if [ -z "$canonical_push_urls" ]; then
+    canonical_push_urls="${canonical_fetch_url}"$'\n'
+  fi
 }
 
 forgejo_runs_url() {
@@ -308,13 +366,14 @@ github_release_state() { # $1 = tag
 # Print "absent" or "present <sha>" for a canonical tag. A lookup that cannot be
 # performed is an error: reporting it as absence is how a fail-closed guard
 # quietly becomes fail-open.
-tag_state_of() { # $1 = tag; sets tag_output; returns 1 when the lookup failed
-  tag_output=$(git ls-remote --tags "$canonical_remote" "refs/tags/$1" 2>"$work_dir/tag-lookup-error.txt") \
+tag_state_of() { # $1 = tag
+  local output
+  output=$(git ls-remote --tags "$canonical_fetch_url" "refs/tags/$1" 2>"$work_dir/tag-lookup-error.txt") \
     || return 1
-  if [ -z "$tag_output" ]; then
+  if [ -z "$output" ]; then
     printf 'absent'
   else
-    printf 'present %s' "${tag_output%%$'\t'*}"
+    printf 'present %s' "$(printf '%s' "${output%%$'\t'*}" | tr -d '[:cntrl:]')"
   fi
 }
 
@@ -325,18 +384,18 @@ local_tag_exists() {
 canonical_tag_commit() { # commit a canonical tag points at; empty when absent
   local state commit
   if ! state=$(tag_state_of "$1"); then
-    fail "cannot check tag $1 on $canonical_remote: $(cat "$work_dir/tag-lookup-error.txt")"
+    fail "cannot check tag $1 on $canonical_remote: $(git_error_text "$work_dir/tag-lookup-error.txt")"
   fi
   case "$state" in
     absent) return 0 ;;
     present\ *) commit=${state#present } ;;
-    *) fail "unexpected tag state for $1: $state" ;;
+    *) fail "unexpected tag state for $1" ;;
   esac
   # ls-remote reports the tag object for an annotated tag, so fetch the ref and
   # peel it locally. The explicit refspec stores it in FETCH_HEAD without
   # creating a local tag.
-  git fetch --quiet --no-tags "$canonical_remote" "refs/tags/$1" \
-    || fail "cannot fetch tag $1 from $canonical_remote"
+  git fetch --quiet --no-tags "$canonical_fetch_url" "refs/tags/$1" 2>"$work_dir/fetch-tag-error.txt" \
+    || fail "cannot fetch tag $1 from $canonical_remote: $(git_error_text "$work_dir/fetch-tag-error.txt")"
   if ! commit=$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}'); then
     fail "cannot resolve tag $1 to a commit"
   fi
@@ -384,13 +443,15 @@ resolve_release_target() {
     fail "run release commands from inside a clone of the repository"
   fi
   cd "$repo_root"
-  canonical_remote=$(resolve_canonical_remote)
-  canonical_url=$(git remote get-url "$canonical_remote")
+  if [ "$test_mode" = true ]; then
+    note "test_mode=true (fixture overrides are active and only a local remote is accepted; never use this for a real release)"
+  fi
+  resolve_canonical_remote
   runs_url=$(forgejo_runs_url)
   mirror_api_base=$(resolve_mirror_api_base)
   mirror_repository=$(resolve_mirror_repository)
-  git fetch --quiet --no-tags "$canonical_remote" "$RELEASE_BRANCH" \
-    || fail "cannot fetch $RELEASE_BRANCH from $canonical_remote"
+  git fetch --quiet --no-tags "$canonical_fetch_url" "$RELEASE_BRANCH" 2>"$work_dir/fetch-error.txt" \
+    || fail "cannot fetch $RELEASE_BRANCH from $canonical_remote: $(git_error_text "$work_dir/fetch-error.txt")"
   if ! release_commit=$(git rev-parse --verify --quiet FETCH_HEAD); then
     fail "cannot resolve $RELEASE_BRANCH on $canonical_remote"
   fi
@@ -434,7 +495,7 @@ require_tag_absent() { # $1 = tag
     fail "a local tag $1 already exists; a released version is never re-pointed"
   fi
   if ! state=$(tag_state_of "$1"); then
-    fail "cannot check tag $1 on $canonical_remote: $(cat "$work_dir/tag-lookup-error.txt")"
+    fail "cannot check tag $1 on $canonical_remote: $(git_error_text "$work_dir/tag-lookup-error.txt")"
   fi
   case "$state" in
     absent) return 0 ;;
@@ -450,7 +511,7 @@ require_main_preflight() { # $1 = commit; the gate is always the release branch
       fail "no successful $RELEASE_BRANCH runner preflight for $1; wait for it before tagging"
       ;;
     *)
-      fail "cannot read Forgejo run state: $(cat "$work_dir/run-error.txt")"
+      fail "cannot read Forgejo run state: $(git_error_text "$work_dir/run-error.txt")"
       ;;
   esac
 }
@@ -473,12 +534,20 @@ confirm() {
 # Publication
 ##########
 
-# A push that reports failure may still have updated the remote. Report what is
-# true instead of asserting that nothing happened.
+# A push that reports failure may still have updated the remote, so report what
+# is true instead of asserting that nothing happened. The push destinations were
+# captured by value during validation, so rewriting the remote configuration
+# after validation cannot redirect the tag.
 publish_tag() { # $1 = tag, $2 = commit, $3 = message
-  local tag=$1 commit=$2 message=$3 state
+  local tag=$1 commit=$2 message=$3 state url failed=false
   git tag -a "$tag" "$commit" -m "$message" || fail "cannot create tag $tag"
-  if git push "$canonical_remote" "refs/tags/$tag"; then
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    if ! git push --quiet "$url" "refs/tags/$tag" 2>"$work_dir/push-error.txt"; then
+      failed=true
+    fi
+  done <<< "$canonical_push_urls"
+  if [ "$failed" = false ]; then
     note "Pushed $tag."
     return 0
   fi
@@ -505,23 +574,25 @@ watch_release_run() { # $1 = ref, $2 = commit, $3 = description
         status=$(field_of "$run_output" status)
         url=$(field_of "$run_output" url)
         if [ "$announced" = false ] && [ -n "$url" ]; then
-          note "Run: $url"
+          note "Run: $(redact "$url")"
           announced=true
         fi
-        case " $PENDING_STATUSES " in
-          *" $status "*) ;;
-          *)
+        case "$status" in
+          success|failure|cancelled|error|skipped)
             note "Result: $status"
             if [ "$status" = success ]; then
               return 0
             fi
             return 1
             ;;
+          '')
+            fail "the run state could not be read; do not treat the release as complete"
+            ;;
         esac
         ;;
       2) ;;
       *)
-        fail "cannot read Forgejo run state: $(cat "$work_dir/run-error.txt")"
+        fail "cannot read Forgejo run state: $(git_error_text "$work_dir/run-error.txt")"
         ;;
     esac
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -531,22 +602,22 @@ watch_release_run() { # $1 = ref, $2 = commit, $3 = description
   done
 }
 
+# The workflow succeeding is not the same as the candidate existing. A candidate
+# that cannot be verified exits non-zero, so automation cannot read an unverified
+# release as success.
 report_candidate() { # $1 = version
   local tag="v$1" state missing
-  state=$(github_release_state "$tag") || state=''
-  if [ -z "$state" ]; then
-    note "Could not read the mirror release state for $tag."
-    return 0
+  if ! state=$(github_release_state "$tag"); then
+    fail "the release run succeeded but the mirror release state could not be read; verify $tag before announcing it"
   fi
   if [ "$(field_of "$state" exists)" != true ]; then
-    note "The mirror has no release for $tag yet."
-    return 0
+    fail "the release run succeeded but the mirror has no release for $tag yet; verify it before announcing it"
   fi
   missing=$(missing_assets "$state" "$1")
   if [ -n "$missing" ]; then
     note "Release $tag is missing assets:"
     printf '%s\n' "$missing"
-    return 0
+    fail "the candidate release for $tag is incomplete"
   fi
   note "Candidate $tag has all five assets:"
   note "  https://github.com/$mirror_repository/releases/tag/$tag"
@@ -559,13 +630,11 @@ report_candidate() { # $1 = version
 ##########
 
 command_status() {
-  local problems state preflight="missing" release_tag_state promote_tag_state
+  local problems state preflight='missing' release_tag_state promote_tag_state
+  local mirror_state='unknown'
   resolve_release_target
   version=${requested_version:-$(canonical_version)}
   valid_version "$version" || fail "invalid version: $version"
-  if [ "$test_mode" = true ]; then
-    note "test_mode=true (canonical identity checks are relaxed; never for a real release)"
-  fi
 
   note "version=$version"
   note "canonical_remote=$canonical_remote"
@@ -584,9 +653,9 @@ command_status() {
   fi
 
   release_tag_state=$(tag_state_of "v$version") \
-    || fail "cannot check tag v$version on $canonical_remote: $(cat "$work_dir/tag-lookup-error.txt")"
+    || fail "cannot check tag v$version on $canonical_remote: $(git_error_text "$work_dir/tag-lookup-error.txt")"
   promote_tag_state=$(tag_state_of "promote-v$version") \
-    || fail "cannot check tag promote-v$version on $canonical_remote: $(cat "$work_dir/tag-lookup-error.txt")"
+    || fail "cannot check tag promote-v$version on $canonical_remote: $(git_error_text "$work_dir/tag-lookup-error.txt")"
   case "$release_tag_state" in
     absent) note "tag_v$version=absent" ;;
     *) note "tag_v$version=present" ;;
@@ -600,7 +669,7 @@ command_status() {
   if [ $run_code -eq 0 ]; then
     preflight=$(field_of "$run_output" status)
     note "main_preflight=$preflight"
-    note "main_preflight_url=$(field_of "$run_output" url)"
+    note "main_preflight_url=$(redact "$(field_of "$run_output" url)")"
   elif [ $run_code -eq 2 ]; then
     note "main_preflight=missing"
   else
@@ -608,19 +677,25 @@ command_status() {
     note "main_preflight=unknown"
   fi
 
-  state=$(github_release_state "v$version") || state=''
-  if [ -z "$state" ]; then
-    note "mirror_release=unreachable"
-  elif [ "$(field_of "$state" exists)" != true ]; then
-    note "mirror_release=absent"
-  elif [ "$(field_of "$state" prerelease)" = true ]; then
-    note "mirror_release=candidate-prerelease"
-    note "mirror_assets=$(printf '%s\n' "$state" | grep -c '^asset=' || true)"
+  if state=$(github_release_state "v$version"); then
+    if [ "$(field_of "$state" exists)" != true ]; then
+      mirror_state=absent
+    elif [ "$(field_of "$state" prerelease)" = true ]; then
+      mirror_state=candidate-prerelease
+    else
+      mirror_state=published
+    fi
+    note "mirror_release=$mirror_state"
+    if [ "$mirror_state" = candidate-prerelease ]; then
+      note "mirror_assets=$(printf '%s\n' "$state" | grep -c '^asset=' || true)"
+    fi
   else
-    note "mirror_release=published"
+    mirror_state=unreachable
+    note "mirror_release=unreachable"
   fi
 
-  if [ -z "$problems" ] && [ "$preflight" = success ] && [ "$release_tag_state" = absent ]; then
+  if [ -z "$problems" ] && [ "$preflight" = success ] && [ "$release_tag_state" = absent ] \
+    && [ "$mirror_state" != unreachable ]; then
     note "release_ready=true"
   else
     note "release_ready=false"
@@ -668,8 +743,9 @@ command_promote() {
   fi
   [ -n "$tag_commit" ] || fail "canonical tag $tag does not exist; there is nothing to promote"
 
-  state=$(github_release_state "$tag") || state=''
-  [ -n "$state" ] || fail "cannot read the mirror release state for $tag"
+  if ! state=$(github_release_state "$tag"); then
+    fail "cannot read the mirror release state for $tag"
+  fi
   [ "$(field_of "$state" exists)" = true ] || fail "the mirror has no release for $tag"
   [ "$(field_of "$state" prerelease)" = true ] \
     || fail "$tag is not a prerelease candidate; it may already be promoted"

@@ -504,6 +504,20 @@ describe("Linux artifact manifest contract", () => {
     }
     // The versioned artifact name is supplied by the job, not hard-coded.
     expect(raw).toContain("process.argv[1]");
+    // The promotion ref must name the commit the canonical release tag points
+    // at, so a hand-pushed promote-* ref cannot clear the flag for another
+    // revision...
+    expect(raw).toContain("git rev-parse --verify 'FETCH_HEAD^{commit}'");
+    expect(raw).toContain('test "$canonical_tag_commit" = "$target_commit"');
+    // ...and the verification tooling is taken from that tagged revision rather
+    // than from the ref that triggered the job.
+    expect(raw).toContain('git checkout -q --detach "$canonical_tag_commit"');
+    // The published installers must match the tagged sources byte-for-byte,
+    // because the checksum file does not cover install.sh.
+    expect(raw).toContain('cmp -s "$work_dir/$installer" "$installer_source"');
+    expect(raw).toContain("scripts/install-from-github.sh");
+    // The asset set is checked again after the flip, not only before it.
+    expect(raw).toContain("missing GitHub release asset after promotion");
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
