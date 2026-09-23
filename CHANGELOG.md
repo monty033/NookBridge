@@ -117,7 +117,13 @@ Patch release hardening static glibc discovery in the release workflow.
   `promote-v<version>` is not ready to release, even though nothing is published yet.
 - Configure the preflight lookup with no secret. Only the publish token is needed;
   the preflight reads the public Actions API anonymously and fails closed on a
-  refused read.
+  refused read, naming the requirement when a host refuses an anonymous read instead
+  of reporting a missing preflight.
+- Neutralise the inherited environment of the token-bearing steps beyond `BASH_ENV`:
+  `curl` reads a default configuration file even when given `--config`, and the
+  loader honours `LD_PRELOAD`, so `CURL_HOME`, `LD_PRELOAD`, and the proxy variables
+  are cleared and re-asserted, and every `curl` invocation in the workflow runs with
+  `-q`.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

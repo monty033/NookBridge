@@ -63,7 +63,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       token: process.env.PREFLIGHT_READ_TOKEN,
     });
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "Forgejo preflight gate failed");
+    const message = error instanceof Error ? error.message : "Forgejo preflight gate failed";
+    console.error(message);
+    // A refused read on a self-hosted host is a configuration answer, not a transient
+    // one: the publishing workflow deliberately holds no read token, so it can only
+    // check a runs API that is readable anonymously.
+    if (/HTTP (401|403)\b/.test(message)) {
+      console.error(
+        "the canonical Actions API refused an anonymous read; the release workflow holds no read token, so that API must be publicly readable, or the preflight must be checked with PREFLIGHT_READ_TOKEN before the tag is pushed",
+      );
+    }
     process.exitCode = 1;
   }
 }

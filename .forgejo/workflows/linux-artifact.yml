@@ -28,13 +28,13 @@ jobs:
           # The archive is verified on every run, not only when it is downloaded. A
           # persistent runner, or a preceding job that can write to the temporary
           # directory, could otherwise substitute the runtime that gets packaged.
-          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
+          curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
           expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
           test -n "$expected_sha256"
           cached_sha256="$(sha256sum "$archive_path" 2>/dev/null | awk '{ print $1 }')"
           if [ ! -f "$archive_path" ] || [ "$cached_sha256" != "$expected_sha256" ]; then
             rm -f "$archive_path"
-            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
+            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
             test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
           fi
           # The extraction is rebuilt from the verified archive on every run. A
@@ -286,7 +286,7 @@ jobs:
           DECISION="$PWD/.release-existing-id"
           context="$PWD/.release-upload.tsv"
 
-          http_status="$(curl -sS -o "$RELEASE_JSON" -w '%{http_code}' \
+          http_status="$(curl -q -sS -o "$RELEASE_JSON" -w '%{http_code}' \
             -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$RELEASE_TAG")"
           case "$http_status" in
@@ -342,7 +342,7 @@ jobs:
             tag_name: tag,
             target_commitish: sha,
             name: tag,
-            body: `NookBridge ${tag}\n\nCandidate release. Verified by the Linux artifact job and awaiting clean-LXC rendered acceptance before promotion.\n\nInstall once promoted:\n\n    curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
+            body: `NookBridge ${tag}\n\nCandidate release. Verified by the Linux artifact job and awaiting clean-LXC rendered acceptance before promotion.\n\nInstall once promoted:\n\n    curl -q -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
             draft: false,
             // Candidate gate: a tag push must never publish to the general
             // install path. Promotion to a normal release is a separate,
@@ -385,14 +385,31 @@ jobs:
           # fails this step instead of running it with an attacker's startup file.
           BASH_ENV: ""
           ENV: ""
+          # curl -q reads a default configuration file ($HOME/.curlrc or $CURL_HOME) even
+          # when --config is given, and the loader honours LD_PRELOAD: a tagged step
+          # could plant either through $GITHUB_ENV and route the request, or read the
+          # token, without touching this step's text. They are cleared here and the
+          # body re-asserts them.
+          CURL_HOME: ""
+          LD_PRELOAD: ""
+          http_proxy: ""
+          https_proxy: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
           GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "${RELEASE_PUBLISH_TOKEN:-}"
-          test -z "${BASH_ENV:-}" \
-            || { printf 'refusing a BASH_ENV in the token-bearing step\n' >&2; exit 1; }
-          test -z "${ENV:-}" \
-            || { printf 'refusing an ENV in the token-bearing step\n' >&2; exit 1; }
+          # The runner injects what a previous step wrote to $GITHUB_ENV, so each
+          # variable this step relies on being empty is re-checked here: a runner that
+          # applies an injected value fails the step instead of running with it.
+          for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
+            HTTP_PROXY HTTPS_PROXY ALL_PROXY; do
+            refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
+            test -z "$refused_value" \
+              || { printf 'refusing an inherited %s in the token-bearing step\n' "$refused_variable" >&2; exit 1; }
+          done
           curl_path="$(command -v curl)"
           case "$curl_path" in
             /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
@@ -424,7 +441,7 @@ jobs:
           case "$action" in create | recreate) ;; *) printf 'unusable upload decision\n' >&2; exit 1 ;; esac
           case "$release_dir" in "$PWD"/*) ;; *) printf 'unusable release directory\n' >&2; exit 1 ;; esac
 
-          # The bearer token is passed through a curl configuration file rather than
+          # The bearer token is passed through a curl -q configuration file rather than
           # an argument, because a command line is readable by any process on the
           # runner and this token grants release write access.
           curl_config="$(mktemp)"
@@ -437,13 +454,13 @@ jobs:
             # a retry possible at all, since a tag cannot be moved to a new version.
             existing_id="$(cat "$decision" 2>/dev/null || true)"
             case "$existing_id" in '' | *[!0-9]*) printf 'unusable existing release id\n' >&2; exit 1 ;; esac
-            "$curl_path" -fsS -X DELETE --config "$curl_config" \
+            "$curl_path" -q -fsS -X DELETE --config "$curl_config" \
               "$api_base/repos/monty033/NookBridge/releases/$existing_id" > /dev/null
           fi
 
           test -f "$payload"
           response="$PWD/.release-created.json"
-          "$curl_path" -fsS -X POST -o "$response" \
+          "$curl_path" -q -fsS -X POST -o "$response" \
             --config "$curl_config" -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary "@$payload" \
@@ -463,7 +480,7 @@ jobs:
                 ;;
             esac
             test -f "$release_dir/$asset_name"
-            "$curl_path" -fsS -X POST \
+            "$curl_path" -q -fsS -X POST \
               --config "$curl_config" -H 'Content-Type: application/octet-stream' \
               --data-binary "@$release_dir/$asset_name" \
               "$upload_base?name=$asset_name" > /dev/null
@@ -484,7 +501,7 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           artifact="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
           state="$PWD/.release-verified.json"
-          curl -fsS -H 'Accept: application/vnd.github+json' \
+          curl -q -fsS -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/monty033/NookBridge/releases/tags/$RELEASE_TAG" -o "$state"
           RELEASE_STATE="$state" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" ARTIFACT="$artifact" node <<'NODE'
           const fs = require('fs');
@@ -548,13 +565,13 @@ jobs:
           # The archive is verified on every run, not only when it is downloaded. A
           # persistent runner, or a preceding job that can write to the temporary
           # directory, could otherwise substitute the runtime that gets packaged.
-          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
+          curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
           expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
           test -n "$expected_sha256"
           cached_sha256="$(sha256sum "$archive_path" 2>/dev/null | awk '{ print $1 }')"
           if [ ! -f "$archive_path" ] || [ "$cached_sha256" != "$expected_sha256" ]; then
             rm -f "$archive_path"
-            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
+            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
             test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
           fi
           # The extraction is rebuilt from the verified archive on every run. A
@@ -575,7 +592,7 @@ jobs:
       - name: Checkout promotion tooling
         run: |
           set -eu
-          for command_name in git curl; do
+          for command_name in git curl cmp; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -619,14 +636,36 @@ jobs:
 
           # The candidate release of a public repository is readable anonymously, so
           # this step needs no token even to read the release metadata.
-          curl -fsS -H 'Accept: application/vnd.github+json' \
+          curl -q -fsS -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
-          release_id="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')); if (!value.id) process.exit(2); process.stdout.write(String(value.id));")"
-          prerelease="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
-          target_commit="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')).target_commitish; if (!/^[0-9a-f]{40,64}$/.test(value || '')) process.exit(2); process.stdout.write(value);")"
-
-          # Only a candidate may be promoted, and only once.
-          test "$prerelease" = "true"
+          # Every field this decision depends on is required: a payload that merely
+          # omits one is not evidence of a promotable candidate, and the draft state in
+          # particular must be established *before* the authenticated write, not by
+          # discovering it afterwards in the post-flip check.
+          export RELEASE_JSON
+          node -e "
+            const fs = require('fs');
+            const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
+            if (!Number.isInteger(release.id) || release.id <= 0) {
+              throw new Error('release payload does not report an id');
+            }
+            if (typeof release.prerelease !== 'boolean' || typeof release.draft !== 'boolean') {
+              throw new Error('release payload does not report its prerelease and draft state');
+            }
+            if (release.prerelease !== true) {
+              throw new Error('release is not a prerelease candidate');
+            }
+            if (release.draft === true) {
+              throw new Error('release is a draft, so it is not a promotable candidate');
+            }
+            const target = String(release.target_commitish || '');
+            if (!/^[0-9a-f]{40,64}$/.test(target)) {
+              throw new Error('release payload does not report a usable target commit');
+            }
+            process.stdout.write(String(release.id));
+          " > "$PWD/.promote-release-id"
+          release_id="$(cat "$PWD/.promote-release-id")"
+          target_commit="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync(process.env.RELEASE_JSON,'utf8')).target_commitish));")"
 
           # The promotion ref must point at the commit the canonical release tag
           # names. Without this, a hand-pushed promote-* ref at another commit
@@ -672,7 +711,7 @@ jobs:
           rm -rf "$work_dir"
           mkdir -p "$work_dir"
           for asset_name in "$ARTIFACT" SHA256SUMS; do
-            curl -fsSL \
+            curl -q -fsSL \
               "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
               -o "$work_dir/$asset_name"
           done
@@ -686,7 +725,7 @@ jobs:
               install.sh) installer_source='scripts/install-from-github.sh' ;;
               *) installer_source="scripts/$installer" ;;
             esac
-            curl -fsSL \
+            curl -q -fsSL \
               "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
               -o "$work_dir/$installer"
             cmp -s "$work_dir/$installer" "$installer_source"
@@ -735,14 +774,31 @@ jobs:
           # fails this step instead of running it with an attacker's startup file.
           BASH_ENV: ""
           ENV: ""
+          # curl -q reads a default configuration file ($HOME/.curlrc or $CURL_HOME) even
+          # when --config is given, and the loader honours LD_PRELOAD: a tagged step
+          # could plant either through $GITHUB_ENV and route the request, or read the
+          # token, without touching this step's text. They are cleared here and the
+          # body re-asserts them.
+          CURL_HOME: ""
+          LD_PRELOAD: ""
+          http_proxy: ""
+          https_proxy: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
           GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "${RELEASE_PUBLISH_TOKEN:-}"
-          test -z "${BASH_ENV:-}" \
-            || { printf 'refusing a BASH_ENV in the token-bearing step\n' >&2; exit 1; }
-          test -z "${ENV:-}" \
-            || { printf 'refusing an ENV in the token-bearing step\n' >&2; exit 1; }
+          # The runner injects what a previous step wrote to $GITHUB_ENV, so each
+          # variable this step relies on being empty is re-checked here: a runner that
+          # applies an injected value fails the step instead of running with it.
+          for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
+            HTTP_PROXY HTTPS_PROXY ALL_PROXY; do
+            refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
+            test -z "$refused_value" \
+              || { printf 'refusing an inherited %s in the token-bearing step\n' "$refused_variable" >&2; exit 1; }
+          done
           curl_path="$(command -v curl)"
           case "$curl_path" in
             /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
@@ -772,7 +828,7 @@ jobs:
           case "$release_id" in '' | *[!0-9]*) printf 'unusable release id\n' >&2; exit 1 ;; esac
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
 
-          # The bearer token is passed through a curl configuration file rather than
+          # The bearer token is passed through a curl -q configuration file rather than
           # an argument, because a command line is readable by any process on the
           # runner and this token grants release write access.
           curl_config="$(mktemp)"
@@ -780,7 +836,7 @@ jobs:
           printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
-          "$curl_path" -fsS -X PATCH --config "$curl_config" \
+          "$curl_path" -q -fsS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
@@ -807,7 +863,7 @@ jobs:
           # state back and assert it: a successful PATCH is not proof, and the
           # assertions must not depend on the step that performed the write.
           state_json="$work_dir/promoted-state.json"
-          curl -fsS -H 'Accept: application/vnd.github+json' \
+          curl -q -fsS -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/monty033/NookBridge/releases/tags/$rel_tag" \
             -o "$state_json"
           node -e "
@@ -855,7 +911,7 @@ jobs:
               install.sh) installer_source='scripts/install-from-github.sh' ;;
               *) installer_source="scripts/$installer" ;;
             esac
-            curl -fsSL \
+            curl -q -fsSL \
               "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$installer" \
               -o "$after_dir/$installer"
             cmp -s "$after_dir/$installer" "$installer_source"
@@ -867,7 +923,7 @@ jobs:
           # The downloads land in a subdirectory so that the checksum file's own
           # asset names still match the files they cover.
           for asset_name in "$artifact" SHA256SUMS; do
-            curl -fsSL \
+            curl -q -fsSL \
               "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$asset_name" \
               -o "$after_dir/$asset_name"
           done

@@ -152,9 +152,14 @@ describe("Forgejo main runner preflight gate", () => {
   it("fails closed when the runs API refuses the read", async () => {
     const requests: string[] = [];
     // A refused read must not look like "no matching run": the difference decides
-    // whether a blocked release is reported as a missing preflight.
+    // whether a blocked release is reported as a missing preflight. The operator is
+    // also told what the refusal means, because the workflow holds no read token by
+    // design and cannot fix it by itself.
     await expect(runChecker({}, requests, { status: 403 })).rejects.toMatchObject({
       stderr: expect.stringContaining("HTTP 403"),
+    });
+    await expect(runChecker({}, requests, { status: 403 })).rejects.toMatchObject({
+      stderr: expect.stringContaining("must be publicly readable"),
     });
   });
 });

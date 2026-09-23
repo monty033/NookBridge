@@ -500,9 +500,35 @@ describe("Linux artifact manifest contract", () => {
     expect(publishedVerifyStep?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
 
     // The candidate is created off the general install path...
-    // Every inline parser that reasons about the release requires the field rather
-    // than defaulting it: an absent `draft` would otherwise read as "not a draft".
-    expect((raw.match(/typeof release\.draft !== 'boolean'/g) ?? []).length).toBe(3);
+    // Every parser that decides on the release requires the field rather than
+    // defaulting it: an absent `draft` would otherwise read as "not a draft". Naming
+    // the steps keeps this from passing on a count that a rename could satisfy.
+    const draftDecidingSteps = [
+      ["linux-artifact", "Prepare the GitHub release upload"],
+      ["linux-artifact", "Re-verify the published release"],
+      ["promote-release", "Verify the candidate artifact"],
+      ["promote-release", "Re-verify the promoted release"],
+    ] as const;
+    // Promotion compares downloads with cmp before and after the token-bearing step,
+    // so the tool must be established as present rather than discovered missing.
+    const promoteTooling = (
+      parseYaml(raw) as {
+        jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
+      }
+    ).jobs["promote-release"]?.steps?.find((step) => step.name === "Checkout promotion tooling");
+    expect(promoteTooling?.run).toContain("for command_name in git curl cmp; do");
+
+    for (const [jobName, stepName] of draftDecidingSteps) {
+      const step = (
+        parseYaml(raw) as {
+          jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
+        }
+      ).jobs[jobName]?.steps?.find((candidate) => candidate.name === stepName);
+      expect(`${jobName}/${stepName}: ${step === undefined ? "missing" : ""}`).toBe(
+        `${jobName}/${stepName}: `,
+      );
+      expect(step?.run ?? "").toContain("typeof release.draft !== 'boolean'");
+    }
     // The artifact must be bound to the release version, not only the commit.
     expect((raw.match(/--expect-version/g) ?? []).length).toBe(3);
     expect(raw).toContain("github.com/monty033/NookBridge");
@@ -586,20 +612,42 @@ describe("Linux artifact manifest contract", () => {
     ).toContain("IFS=.");
     // No script from the released revision runs in a step that holds the publishing
     // token: the write is its own step and uses curl plus embedded Node only.
-    const promoteSteps = (
+    const parsedJobs = (
       parseYaml(raw) as {
         jobs: Record<
           string,
           { steps: { name: string; env?: Record<string, string>; run?: string }[] }
         >;
       }
-    ).jobs["promote-release"]!.steps as {
+    ).jobs;
+    const buildSteps = parsedJobs["linux-artifact"]!.steps as {
       name: string;
       env?: Record<string, string>;
       run?: string;
     }[];
-    const tokenSteps = promoteSteps.filter((step) => step.env?.RELEASE_PUBLISH_TOKEN !== undefined);
-    expect(tokenSteps.map((step) => step.name)).toStrictEqual(["Promote candidate release"]);
+    const promoteSteps = parsedJobs["promote-release"]!.steps as {
+      name: string;
+      env?: Record<string, string>;
+      run?: string;
+    }[];
+    // Every step that holds the token, in either job, is held to the same rules: a
+    // rule asserted only for the promotion step leaves the publish step free to break
+    // it.
+    const allSteps = (
+      [
+        ["linux-artifact", buildSteps],
+        ["promote-release", promoteSteps],
+      ] as const
+    ).flatMap(([jobName, steps]) =>
+      steps
+        .filter((step) => step.env?.RELEASE_PUBLISH_TOKEN !== undefined)
+        .map((step) => ({ jobName, step })),
+    );
+    expect(allSteps.map(({ jobName, step }) => `${jobName}/${step.name}`)).toStrictEqual([
+      "linux-artifact/Publish release assets",
+      "promote-release/Promote candidate release",
+    ]);
+    const tokenSteps = allSteps.map(({ step }) => step);
     for (const step of tokenSteps) {
       const run = step.run ?? "";
       expect(run).not.toContain("scripts/");
@@ -618,8 +666,19 @@ describe("Linux artifact manifest contract", () => {
       // earlier tagged step wrote to GITHUB_ENV would otherwise run with the token.
       expect(step.env?.BASH_ENV).toBe("");
       expect(step.env?.ENV).toBe("");
-      expect(run).toContain('test -z "${BASH_ENV:-}"');
-      expect(run).toContain("context.tsv");
+      // curl reads a default configuration file even when given --config, and the
+      // loader honours LD_PRELOAD, so both are cleared and every call passes -q.
+      expect(step.env?.LD_PRELOAD).toBe("");
+      expect(step.env?.CURL_HOME).toBe("");
+      expect(step.env?.https_proxy).toBe("");
+      expect(run).toContain("for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME");
+      for (const line of run.split("\n")) {
+        // An invocation starts the line; the guard's own `case` does not.
+        if (/^\s*"\$curl_path"/.test(line)) expect(line).toContain("-q");
+      }
+      // The write step reads its inputs from a line-oriented file rather than from
+      // shell it would source; the promotion and publishing paths name it differently.
+      expect(run).toContain(".tsv");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);
       expect(run).not.toContain("node -e");
