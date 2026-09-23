@@ -3,6 +3,18 @@
 All notable user-visible changes are recorded here. The project is pre-alpha;
 release entries describe the supported boundary at the time of the release.
 
+## Unreleased
+
+- Verify the pinned Node archive against a digest that is a constant of the workflow
+  rather than against the checksum file the network serves. The check now needs no
+  network at all, so a runner holding a valid archive prepares its runtime without
+  reaching `nodejs.org` — which the previous revision did on every run, and which this
+  runner does not permit. The archive is still verified on every run, and when the
+  cache is absent or does not match the pin the step names the pre-seed path and digest
+  instead of failing anonymously.
+- Fail with a specific message when the runner provides no `GITHUB_PATH`, rather than
+  letting later steps build with an unverified Node.
+
 ## [0.1.2] - 2026-09-22
 
 Patch release hardening static glibc discovery in the release workflow.
