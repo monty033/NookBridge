@@ -133,12 +133,16 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
     redirect: "manual",
   });
   if (response.status === 404)
-    return { exists: false, prerelease: false, targetCommitish: "", assets: [] };
+    return { exists: false, prerelease: false, draft: false, targetCommitish: "", assets: [] };
   if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`);
   const release = await response.json();
   return {
     exists: true,
     prerelease: release?.prerelease === true,
+    // A draft release is invisible to the install path until it is published, so a
+    // caller that treats "a release exists" as "the release is out" would announce
+    // something users cannot download.
+    draft: release?.draft === true,
     // The promotion workflow re-verifies the artifact against this commit, so
     // the caller must compare it with the canonical tag commit before pushing a
     // promotion ref that would otherwise be rejected after the fact.
@@ -239,6 +243,7 @@ async function main(argv) {
     });
     process.stdout.write(`exists=${state.exists}\n`);
     process.stdout.write(`prerelease=${state.prerelease}\n`);
+    process.stdout.write(`draft=${state.draft}\n`);
     process.stdout.write(`target_commitish=${state.targetCommitish}\n`);
     for (const asset of state.assets) process.stdout.write(`asset=${asset}\n`);
     return;

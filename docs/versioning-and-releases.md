@@ -80,10 +80,14 @@ publish assets if the runner or artifact verification fails. The preflight and
 candidate jobs use the same static glibc discovery, helper compilation, packaging,
 and verifier commands; only the publishing steps are tag-only.
 
-The preflight lookup uses a separate read-only `RELEASE_PREFLIGHT_TOKEN`; the
-source-controlled install, rebuild, test, and packaging commands do not receive
-the repository `GITHUB_TOKEN`. The lookup paginates the Actions API instead of
-assuming the valid run is among the newest 100 records.
+The preflight lookup is anonymous: the Actions API of a public repository is readable
+without a token, so the gate needs no secret and the source-controlled install,
+rebuild, test, and packaging commands receive neither a read token nor the repository
+`GITHUB_TOKEN`. The checker still accepts a token from `PREFLIGHT_READ_TOKEN` for a
+host whose runs API is private, and the workflow deliberately sets none. A refused
+read is an error rather than an empty result, so the gate fails closed when access is
+denied. The lookup paginates the Actions API instead of assuming the valid run is among
+the newest 100 records.
 
 The artifact workflow must fail loudly before compilation when a required runner
 input is missing. Static glibc discovery accounts for Nix store hash prefixes
@@ -218,20 +222,30 @@ untrusted:
 - No secret is reachable by code from the ref being released. The preflight gate
   holds no token at all (the runs API is readable anonymously on a public
   repository), and in the promotion job the publishing token exists only in a step
-  that runs `curl` and workflow-embedded Node: the candidate verification and the
-  post-flip re-verification run the released revision's own verifier, so they hold
-  no secret. Bearer tokens are passed to `curl` through a mode-600 configuration
-  file rather than an argument, because a command line is readable by any process on
-  the runner. The residual is the workflow file itself, which is repository content:
-  the authority that can push a release tag is the authority that can change these
-  steps, so tag-push permission must be restricted to release principals.
-- The pinned Node runtime is verified on every run, not only when it is first
-  downloaded, and its directory is placed on `PATH` for every following step, so a
-  persistent runner or a preceding job cannot substitute the runtime that gets
+  that runs the runner's own `curl` by absolute path over a line-oriented data file:
+  it executes no script from the released revision, sources no cross-step shell, and
+  does not resolve tools from `PATH`. The candidate verification and the post-flip
+  re-verification run the released revision's own verifier, so they hold no secret.
+  Bearer tokens are passed to `curl` through a mode-600 configuration file rather
+  than an argument, because a command line is readable by any process on the runner.
+  Every message that reaches a terminal or a log is stripped of control characters,
+  and every remote-derived URL in a message is redacted, so neither a rewrite target
+  carrying credentials nor an operator's rejected argument can inject output.
+  The residual is the workflow file itself, which is repository content: the
+  authority that can push a release tag is the authority that can change these steps,
+  so tag-push permission must be restricted to release principals.
+- The pinned Node runtime is verified on every run and re-extracted from the verified
+  archive each time, then placed on `PATH` for every following step. Reusing an
+  existing extraction because it reports the pinned version would let a persistent
+  runner, or a preceding source-controlled step, substitute the runtime that gets
   packaged.
-- The version policy lives in one script, `scripts/check-release-version.sh`, used by
-  the operator command's tests and by both workflow paths, because a tag pushed by
-  hand reaches the workflow without passing through the command.
+- The version policy lives in one script, `scripts/check-release-version.sh`. The
+  workflow calls it and the operator command delegates to it, because a tag pushed by
+  hand reaches the workflow without passing through the command and two copies of the
+  rule drift.
+- A draft release is not a candidate and not published: the operator reports it as
+  `mirror_release=candidate-draft` and refuses to promote it, and the publishing
+  workflow rejects a pre-existing draft rather than uploading assets onto one.
 - Canonical API endpoints are derived from the canonical identity with the
   repository path appended exactly once: the API base is an API root, and each
   caller appends `/repos/<owner>/<name>/...`.

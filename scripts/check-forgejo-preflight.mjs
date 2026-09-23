@@ -15,8 +15,15 @@ const WORKFLOW_ID = "linux-artifact.yml";
  * the wrong run as evidence. Pagination and the matching rule live in
  * `release-api.mjs` so the operator command and this CI gate cannot drift apart.
  *
- * A missing token is a configuration failure, not a reason to skip the check:
- * the gate fails closed rather than publishing without preflight evidence.
+ * A missing runs URL or commit is a configuration failure, not a reason to skip
+ * the check: the gate fails closed rather than publishing without preflight
+ * evidence. No token is required, because the Actions API of a public
+ * repository is readable anonymously and a read token in this step would only
+ * be reachable by the tagged revision's own script. A refused read raises from
+ * `findRun` instead of looking like a missing run, so the gate still fails
+ * closed when access is denied. `token` remains supported for a host whose
+ * runs API is private; the CLI reads it from the environment, and the workflow
+ * deliberately sets it to nothing.
  */
 export async function requireSuccessfulMainPreflight({
   runsUrl,
@@ -24,7 +31,7 @@ export async function requireSuccessfulMainPreflight({
   token,
   fetchImpl = fetch,
 }) {
-  if (!runsUrl || !commitSha || !token) {
+  if (!runsUrl || !commitSha) {
     throw new Error("Forgejo preflight gate is missing required configuration");
   }
 

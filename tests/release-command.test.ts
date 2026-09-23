@@ -2,7 +2,7 @@
 
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -324,6 +324,12 @@ function releaseFunctionsPath(): string {
   const source = readFileSync(releaseScript, "utf8").replace(/^main "\$@"\n?$/m, "");
   const target = join(dir, "release-functions.sh");
   writeFileSync(target, source);
+  // The command resolves the shared version validator next to itself, so the copy
+  // must sit beside a copy of it.
+  copyFileSync(
+    resolve(process.cwd(), "scripts", "check-release-version.sh"),
+    join(dir, "check-release-version.sh"),
+  );
   return target;
 }
 
@@ -1448,5 +1454,93 @@ describe("release operator command", () => {
         workflow: expected ? 0 : 1,
       });
     }
+  });
+
+  it("redacts credentials carried by a rewrite target", async () => {
+    const fixture = createFixture();
+    const canonicalUrl = "https://git.montycasa.net/patrick/NookBridge.git";
+    git(["remote", "set-url", "upstream", canonicalUrl], fixture.work);
+    git(["remote", "set-url", "--push", "upstream", canonicalUrl], fixture.work);
+    // A rewrite rule can carry credentials in its target. The rejection message
+    // prints the URL the rule produces, so it must go through the same redaction as
+    // any other remote-derived value.
+    git(
+      [
+        "config",
+        "url.https://release-bot:s3cr3t-token@attacker.invalid/.pushInsteadOf",
+        "https://git.montycasa.net/patrick/",
+      ],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      withoutFixtures(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("not the canonical repository");
+    expect(result.stderr).not.toContain("s3cr3t-token");
+    expect(result.stderr).not.toContain("release-bot");
+  });
+
+  it("treats a draft mirror release as neither a candidate nor published", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: { ...candidateRelease(fixture.commit), draft: true },
+    });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("mirror_release=candidate-draft");
+  });
+
+  it("refuses to report success for a draft mirror release", async () => {
+    const fixture = createFixture();
+    git(["tag", "-a", tag, fixture.commit, "-m", `Release ${tag}`], fixture.work);
+    git(["push", "--quiet", "upstream", `refs/tags/${tag}`], fixture.work);
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: { ...candidateRelease(fixture.commit), draft: true },
+    });
+
+    const result = await runRelease(["promote", "--yes", version], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("still a draft on the mirror");
+  });
+
+  it("keeps terminal controls from an operator-supplied version out of the output", async () => {
+    const fixture = createFixture();
+    const canonicalUrl = "https://git.montycasa.net/patrick/NookBridge.git";
+    git(["remote", "set-url", "upstream", canonicalUrl], fixture.work);
+    git(["remote", "set-url", "--push", "upstream", canonicalUrl], fixture.work);
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["promote", `0.1.2\u001b[31m\nrelease: forged`],
+      fixture,
+      stub.base,
+      withoutFixtures(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("invalid version");
+    // The rejected argument is interpolated into an error message, so it must not
+    // be able to add a line or move the cursor.
+    expect(result.stderr).not.toContain("\u001b");
+    expect(result.stderr.split("\n").filter(Boolean)).toHaveLength(1);
+  });
+
+  it("delegates the version policy to the shared validator", () => {
+    // Two copies of the rule drift: a version the operator accepts and the workflow
+    // rejects consumes an immutable tag before the release fails.
+    const source = readFileSync(releaseScript, "utf8");
+    expect(source).toContain('bash "$script_dir/check-release-version.sh" "$version"');
   });
 });

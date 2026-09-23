@@ -125,13 +125,17 @@ The normal release is: `release.sh tag`, accept on a clean host, then
 TEXT
 }
 
+# Terminal controls must never reach a terminal or a log through a message: a
+# rewrite target can carry credentials and an operator's rejected argument can
+# carry a newline or an escape sequence. Sanitising at the printer covers every
+# message, including the ones added later.
 fail() {
-  printf 'release: %s\n' "$*" >&2
+  printf 'release: %s\n' "$(strip_controls "$*")" >&2
   exit 1
 }
 
 note() {
-  printf '%s\n' "$*"
+  printf '%s\n' "$(strip_controls "$*")"
 }
 
 need_command() {
@@ -388,7 +392,7 @@ check_rewrite_targets() { # $1 = url, $2 = description, $3 = depth
     base=${base%.pushinsteadof}
     expanded="${base}${url#"$prefix"}"
     remote_url_ok "$expanded" \
-      || fail "a Git URL rewrite rule would turn $description into '$expanded', which is not the canonical repository; refusing"
+      || fail "a Git URL rewrite rule would turn $description into '$(redact "$expanded")', which is not the canonical repository; refusing"
     if [ "$expanded" != "$url" ]; then
       check_rewrite_targets "$expanded" "$description" "$((depth + 1))"
     fi
@@ -626,73 +630,14 @@ unexpected_assets() { # $1 = release state text, $2 = version
 # Guards
 ##########
 
-# A numeric component is `0` or starts with a non-zero digit: `01.2.3` is not
-# SemVer, and the version becomes part of a tag name, an asset name, and a URL.
-version_number_ok() {
-  case "$1" in
-    ''|*[!0-9]*) return 1 ;;
-    0) return 0 ;;
-    0*) return 1 ;;
-  esac
-  return 0
-}
-
-# The release policy is SemVer: `major.minor.patch` with an optional `-prerelease`.
-# A filename-safe grammar accepts `foo`, `1.2`, `01.2.3`, and `1.2.3-`, all of
-# which would publish a tag the policy does not allow. Build metadata (`+`) is
-# rejected as well: it is a legal SemVer version but it cannot survive the asset
-# naming and query-string handling in the publishing workflow unchanged.
+# The release policy has exactly one implementation: `check-release-version.sh`,
+# which the publishing workflow runs too. It used to be duplicated here, and two
+# copies of the rule drift — a version the operator accepts and the workflow
+# rejects consumes an immutable tag before the release fails.
 valid_version() {
-  local version=$1 core prerelease major rest minor patch identifier
+  local version=$1
   [ -n "$version" ] || return 1
-  # The artifact builder refuses a version longer than this, so accepting a longer
-  # one here would consume an immutable tag and then fail during the build.
-  [ "${#version}" -le 64 ] || return 1
-  case "$version" in
-    *+*) return 1 ;;
-  esac
-  case "$version" in
-    *-*) core=${version%%-*}; prerelease=${version#*-} ;;
-    *) core=$version; prerelease='' ;;
-  esac
-  case "$core" in
-    *.*.*) ;;
-    *) return 1 ;;
-  esac
-  major=${core%%.*}
-  rest=${core#*.}
-  minor=${rest%%.*}
-  patch=${rest#*.}
-  case "$patch" in
-    *.*) return 1 ;;
-  esac
-  version_number_ok "$major" || return 1
-  version_number_ok "$minor" || return 1
-  version_number_ok "$patch" || return 1
-  if [ -n "$prerelease" ]; then
-    case "$prerelease" in
-      *[!0-9A-Za-z.-]*|.*|*.|*..*|*-) return 1 ;;
-    esac
-    # A prerelease identifier that is all digits must not carry a leading zero,
-    # so `1.2.3-01` is not SemVer.
-    local saved_ifs=$IFS
-    IFS=.
-    for identifier in $prerelease; do
-      case "$identifier" in
-        ''|*[!0-9]*) ;;
-        0) ;;
-        0*) IFS=$saved_ifs; return 1 ;;
-      esac
-    done
-    IFS=$saved_ifs
-  else
-    # A trailing `-` with nothing after it is not a prerelease, and `1.2.3-` is
-    # not a version.
-    case "$version" in
-      *-) return 1 ;;
-    esac
-  fi
-  return 0
+  bash "$script_dir/check-release-version.sh" "$version"
 }
 
 validate_watch_settings() {
@@ -900,8 +845,11 @@ report_candidate() { # $1 = version
     fail "the release run succeeded but the mirror has no release for $tag yet; verify it before announcing it"
   fi
   # The release must still be the candidate this run produced: a published
-  # release, or one pointing at another commit, is not evidence that this
-  # release succeeded.
+  # release, a draft, or one pointing at another commit, is not evidence that
+  # this release succeeded.
+  if [ "$(field_of "$state" draft)" = true ]; then
+    fail "the mirror release for $tag is still a draft, so users cannot install from it; publish it or re-run the release"
+  fi
   if [ "$(field_of "$state" prerelease)" != true ]; then
     fail "the mirror release for $tag is not a prerelease candidate; verify it before announcing it"
   fi
@@ -982,6 +930,10 @@ command_status() {
   if state=$(github_release_state "v$version"); then
     if [ "$(field_of "$state" exists)" != true ]; then
       mirror_state=absent
+    elif [ "$(field_of "$state" draft)" = true ]; then
+      # A draft is not a candidate and not published: users cannot install from it,
+      # and the promotion ref would fail against it.
+      mirror_state=candidate-draft
     elif [ "$(field_of "$state" prerelease)" = true ]; then
       mirror_state=candidate-prerelease
     else
@@ -1052,6 +1004,10 @@ command_promote() {
     fail "cannot read the mirror release state for $tag"
   fi
   [ "$(field_of "$state" exists)" = true ] || fail "the mirror has no release for $tag"
+  # A draft is not a candidate: users cannot install from it, and promoting it would
+  # announce a release that is not reachable.
+  [ "$(field_of "$state" draft)" != true ] \
+    || fail "$tag is still a draft on the mirror, so users cannot install from it; publish it or re-run the release"
   [ "$(field_of "$state" prerelease)" = true ] \
     || fail "$tag is not a prerelease candidate; it may already be promoted"
   missing=$(missing_assets "$state" "$version")

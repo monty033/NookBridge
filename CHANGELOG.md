@@ -71,15 +71,24 @@ Patch release hardening static glibc discovery in the release workflow.
   so a tag pushed by hand cannot publish a mismatched artifact.
 - Hold no secret in any step that executes code from the released revision: the
   preflight gate no longer carries a read token at all (the runs API is readable
-  anonymously), the promotion job is split so the candidate verification and the
-  post-flip re-verification run with no publishing token, and bearer tokens reach
-  `curl` through a mode-600 configuration file rather than a command-line argument.
-- Verify the pinned Node runtime on every run, not only on first download, and put
-  its directory on `PATH` for every following step so the packaged runtime is the
-  verified one.
-- Apply the version policy from one shared script so the workflow and the operator
-  command cannot drift, and validate a rewrite rule by the URL it produces rather
-  than by its replacement base.
+  anonymously, and a refused read is an error rather than an empty result), the
+  promotion job is split so the candidate verification and the post-flip
+  re-verification run with no publishing token, and the step that does hold the token
+  runs the runner's own `curl` by absolute path over a line-oriented data file
+  without sourcing cross-step shell or resolving tools from `PATH`. Bearer tokens
+  reach `curl` through a mode-600 configuration file rather than a command-line
+  argument.
+- Sanitise every message the command prints: remote-derived URLs are redacted and
+  terminal control characters are stripped, so a rewrite target carrying credentials
+  or an operator's rejected argument cannot leak or inject output.
+- Verify the pinned Node runtime on every run and re-extract it from the verified
+  archive each time, so a persistent runner or a preceding source-controlled step
+  cannot substitute the runtime that later gets packaged.
+- Apply the version policy from one shared script, which the operator command
+  delegates to, so a version the command accepts cannot be one the workflow rejects
+  after the tag is already published.
+- Treat a draft mirror release as neither a candidate nor published, in the operator
+  command and in the publishing workflow.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

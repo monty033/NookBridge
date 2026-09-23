@@ -37,14 +37,13 @@ jobs:
             curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
             test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
           fi
-          # A cached extraction is reused only when the runtime it produced is the
-          # pinned one.
-          if [ ! -x "$node_root/bin/node" ] \
-            || [ "$("$node_root/bin/node" --version 2>/dev/null || true)" != "v${NODE_VERSION}" ]; then
-            rm -rf "$node_root"
-            mkdir -p "$node_root"
-            tar -xzf "$archive_path" -C "$node_root" --strip-components=1
-          fi
+          # The extraction is rebuilt from the verified archive on every run. A
+          # cached runtime is not trusted just because it reports the pinned
+          # version: a preceding source-controlled step could have replaced it with
+          # a trojan that prints any version, and this directory goes on PATH.
+          rm -rf "$node_root"
+          mkdir -p "$node_root"
+          tar -xzf "$archive_path" -C "$node_root" --strip-components=1
           # Later steps must use the verified runtime rather than whatever the runner
           # provides, so the pinned directory goes on PATH for every following step.
           echo "$node_root/bin" >> "$GITHUB_PATH"
@@ -295,6 +294,7 @@ jobs:
           const expectedSha = process.env.RELEASE_SHA.toLowerCase();
           if (
             release.tag_name !== expectedTag ||
+            release.draft === true ||
             release.prerelease !== true ||
             String(release.target_commitish || '').toLowerCase() !== expectedSha
           ) {
@@ -489,9 +489,9 @@ jobs:
           work_dir="$PWD/.promote-work"
           rm -rf "$work_dir"
           mkdir -p "$work_dir"
-          for asset_name in "$ARTIFACT" SHA256SUMS; do
+          for asset_name in "$artifact" SHA256SUMS; do
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
+              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$asset_name" \
               -o "$work_dir/$asset_name"
           done
 
@@ -505,7 +505,7 @@ jobs:
               *) installer_source="scripts/$installer" ;;
             esac
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
+              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$installer" \
               -o "$work_dir/$installer"
             cmp -s "$work_dir/$installer" "$installer_source"
           done
@@ -517,31 +517,47 @@ jobs:
             --checksum-file "$work_dir/SHA256SUMS" \
             --expect-git-commit "$target_commit"
 
-          # The checks above run in a step that holds no secret. The write below runs
-          # in its own step, so that no script from the released revision can reach
-          # the publishing token through its environment.
+          # The checks above run in a step that holds no secret. The write below runs in
+          # its own step, and the values it needs cross the boundary as data in a
+          # line-oriented file — not as a shell fragment to source. A preceding step
+          # that the released revision can influence must not be able to hand the
+          # token-bearing step code to execute.
           {
-            printf 'REL_TAG=%q\n' "$REL_TAG"
-            printf 'VERSION=%q\n' "$VERSION"
-            printf 'ARTIFACT=%q\n' "$ARTIFACT"
-            printf 'API=%q\n' "$API"
-            printf 'RELEASE_JSON=%q\n' "$RELEASE_JSON"
-            printf 'release_id=%q\n' "$release_id"
-            printf 'target_commit=%q\n' "$target_commit"
-            printf 'canonical_tag_commit=%q\n' "$canonical_tag_commit"
-            printf 'work_dir=%q\n' "$work_dir"
-          } > "$work_dir/context.env"
+            printf 'rel_tag\t%s\n' "$REL_TAG"
+            printf 'api_base\t%s\n' "$API"
+            printf 'release_id\t%s\n' "$release_id"
+            printf 'target_commit\t%s\n' "$target_commit"
+            printf 'canonical_tag_commit\t%s\n' "$canonical_tag_commit"
+            printf 'artifact\t%s\n' "$ARTIFACT"
+            printf 'work_dir\t%s\n' "$work_dir"
+          } > "$work_dir/context.tsv"
 
       - name: Promote candidate release
-        # This step holds the publishing token, and it runs curl plus workflow-embedded
-        # Node only: no script from the released revision executes here, so a malicious
-        # tagged revision cannot read the token from this step's environment.
+        # This step holds the publishing token. It runs the runner's own curl by
+        # absolute path and reads fields out of a line-oriented file: it sources
+        # nothing, executes no script from the released revision, and does not add
+        # an earlier step's directory to PATH. Otherwise a source-controlled step
+        # could leave a shell fragment or an alternate `curl` behind for this step
+        # to pick up, and the token would go with it.
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
         run: |
           set -eu
           test -n "${RELEASE_PUBLISH_TOKEN:-}"
-          . "$PWD/.promote-work/context.env"
+          test -x /usr/bin/curl
+          context="$PWD/.promote-work/context.tsv"
+          field() { awk -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
+
+          api_base="$(field api_base)"
+          release_id="$(field release_id)"
+          rel_tag="$(field rel_tag)"
+
+          # The values are validated rather than trusted: a wrong one would send an
+          # authenticated request somewhere unintended.
+          test "$api_base" = "https://api.github.com"
+          case "$release_id" in '' | *[!0-9]*) printf 'unusable release id\n' >&2; exit 1 ;; esac
+          case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
+
           # The bearer token is passed through a curl configuration file rather than
           # an argument, because a command line is readable by any process on the
           # runner and this token grants release write access.
@@ -550,28 +566,54 @@ jobs:
           printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
-          curl -fsS -X PATCH --config "$curl_config" -H 'Accept: application/vnd.github+json' \
+          /usr/bin/curl -fsS -X PATCH --config "$curl_config" \
+            -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
-            "$API/releases/$release_id" -o "$RELEASE_JSON"
+            "$api_base/releases/$release_id" -o /dev/null
 
-          # Read back the promoted state; a successful PATCH is not proof.
-          curl -fsS --config "$curl_config" -H 'Accept: application/vnd.github+json' \
-            "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
-          promoted="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).prerelease));")"
-          test "$promoted" = "false"
+          printf 'prerelease flag cleared for %s\n' "$rel_tag"
 
-          # Re-check the release after the flip. Assets can be replaced and the target
-          # commit changed between the checks above and the PATCH, so the promoted
-          # release must still be the one that was verified — the API offers no
-          # transaction that would make this unnecessary.
-          target_after="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync('$RELEASE_JSON')).target_commitish));")"
-          test "$target_after" = "$canonical_tag_commit"
+      - name: Re-verify the promoted release
+        # Back to a step that holds no secret: the post-flip re-verification runs the
+        # tagged revision's verifier, so it must not have a token in its environment.
+        env:
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          context="$PWD/.promote-work/context.tsv"
+          field() { awk -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
+          rel_tag="$(field rel_tag)"
+          target_commit="$(field target_commit)"
+          canonical_tag_commit="$(field canonical_tag_commit)"
+          artifact="$(field artifact)"
+          work_dir="$(field work_dir)"
+
+          # This step holds no secret, so it is the right place to read the promoted
+          # state back and assert it: a successful PATCH is not proof, and the
+          # assertions must not depend on the step that performed the write.
+          state_json="$work_dir/promoted-state.json"
+          curl -fsS -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/monty033/NookBridge/releases/tags/$rel_tag" \
+            -o "$state_json"
           node -e "
             const fs = require('fs');
-            const release = JSON.parse(fs.readFileSync('$RELEASE_JSON'));
+            const release = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            if (release.prerelease !== false) {
+              console.error('the release is still a prerelease after promotion');
+              process.exit(2);
+            }
+            if (release.draft === true) {
+              console.error('the promoted release is a draft, so users cannot install from it');
+              process.exit(2);
+            }
+            const target = String(release.target_commitish || '');
+            if (target !== process.argv[2]) {
+              console.error('the promoted release targets ' + target + ', not the promoted commit');
+              process.exit(2);
+            }
             const names = new Set((release.assets || []).map((asset) => String(asset.name)));
-            const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[1]];
+            const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[3]];
             const missing = required.filter((name) => !names.has(name));
             if (missing.length > 0) {
               console.error('missing GitHub release asset after promotion: ' + missing.join(', '));
@@ -582,16 +624,7 @@ jobs:
               console.error('unexpected GitHub release asset after promotion: ' + extra.join(', '));
               process.exit(2);
             }
-          " "$ARTIFACT"
-
-      - name: Re-verify the promoted release
-        # Back to a step that holds no secret: the post-flip re-verification runs the
-        # tagged revision's verifier, so it must not have a token in its environment.
-        env:
-          GITHUB_TOKEN: ""
-        run: |
-          set -eu
-          . "$PWD/.promote-work/context.env"
+          " "$state_json" "$canonical_tag_commit" "$artifact"
 
           # Re-verify the installer bytes after the flip as well: a concurrent release
           # writer can replace same-named assets between the checks above and the
@@ -605,7 +638,7 @@ jobs:
               *) installer_source="scripts/$installer" ;;
             esac
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
+              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$installer" \
               -o "$after_dir/$installer"
             cmp -s "$after_dir/$installer" "$installer_source"
           done
@@ -615,14 +648,14 @@ jobs:
           # installers fetch unverified at the moment the release became public.
           # The downloads land in a subdirectory so that the checksum file's own
           # asset names still match the files they cover.
-          for asset_name in "$ARTIFACT" SHA256SUMS; do
+          for asset_name in "$artifact" SHA256SUMS; do
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
+              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$asset_name" \
               -o "$after_dir/$asset_name"
           done
           bash scripts/verify-linux-artifact.sh \
-            --artifact "$after_dir/$ARTIFACT" \
+            --artifact "$after_dir/$artifact" \
             --checksum-file "$after_dir/SHA256SUMS" \
             --expect-git-commit "$target_commit"
 
-          printf 'release promoted: %s\n' "$REL_TAG"
+          printf 'release promoted: %s\n' "$rel_tag"

@@ -489,8 +489,10 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('{"prerelease":false}');
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
-    // Promotion reads the state back; a successful PATCH is not proof.
-    expect(raw).toMatch(/test "\$promoted" = "false"/);
+    // Promotion reads the state back in a step that holds no secret; a successful
+    // PATCH is not proof of its own effect.
+    expect(raw).toMatch(/release\.prerelease !== false/);
+    expect(raw).toContain("the release is still a prerelease after promotion");
     // Promotion requires the complete published asset set, not just the two
     // files its own steps download, so a vanished installer cannot ship.
     expect(raw).toContain("missing GitHub release asset");
@@ -524,7 +526,7 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('test "$promote_ref_commit" = "$canonical_tag_commit"');
     expect(raw).toContain("malformed promotion version");
     // The promoted release must still be the verified one after the flip.
-    expect(raw).toContain('test "$target_after" = "$canonical_tag_commit"');
+    expect(raw).toContain("target !== process.argv[2]");
     // Installer bytes are re-verified after the flip as well, because an asset
     // can be replaced between the pre-flip checks and the PATCH.
     expect(raw).toContain('"$after_dir/$installer"');
@@ -566,7 +568,18 @@ describe("Linux artifact manifest contract", () => {
     const tokenSteps = promoteSteps.filter((step) => step.env?.RELEASE_PUBLISH_TOKEN !== undefined);
     expect(tokenSteps.map((step) => step.name)).toStrictEqual(["Promote candidate release"]);
     for (const step of tokenSteps) {
-      expect(step.run ?? "").not.toContain("scripts/");
+      const run = step.run ?? "";
+      expect(run).not.toContain("scripts/");
+      // The step must not source cross-step shell state or depend on PATH: an earlier
+      // step the released revision can influence could otherwise hand it a shell
+      // fragment or an alternate `curl`, and the token would go with it.
+      expect(run).not.toContain('. "$PWD');
+      expect(run).not.toContain("source ");
+      expect(run).toContain("/usr/bin/curl");
+      expect(run).toContain("context.tsv");
+      // No interpreter from PATH in the token-bearing step.
+      expect(run).not.toMatch(/^\s*node /m);
+      expect(run).not.toContain("node -e");
     }
     // The public mirror is readable anonymously, so the verification steps hold no
     // secret at all.
@@ -585,6 +598,10 @@ describe("Linux artifact manifest contract", () => {
     // The preflight gate holds no token: the runs API is readable anonymously, and a
     // secret must not be reachable by the tagged revision's own script.
     expect(raw).not.toContain("RELEASE_PREFLIGHT_TOKEN");
+    // A draft must not be accepted as the matching candidate: users cannot install
+    // from a draft, so publishing assets onto one would report success for a release
+    // nobody can reach.
+    expect(raw).toContain("release.draft === true");
     expect(raw).toContain(
       'PREFLIGHT_RUNS_URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs"',
     );
@@ -607,5 +624,10 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
     expect(raw).toContain('test "$(command -v node)" = "$node_root/bin/node"');
     expect(raw).toContain("cached_sha256");
+    // The extraction is rebuilt from the verified archive every run: trusting a
+    // cached runtime because it reports the pinned version lets a preceding
+    // source-controlled step substitute the binary that later gets packaged.
+    expect(raw).not.toContain('"$node_root/bin/node" --version');
+    expect(raw).toContain('rm -rf "$node_root"');
   });
 });
