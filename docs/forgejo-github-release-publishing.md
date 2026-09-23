@@ -61,8 +61,12 @@ source-controlled build, test, and verification steps explicitly receive an empt
    - `SHA256SUMS`
    - `nookbridge-v<VERSION>-linux-x64-gnu.tar.gz`
 
-The workflow is idempotent for a tag: an existing GitHub release is reused and
-same-named assets are replaced before the final asset-set check.
+The workflow is recoverable for a tag. A run that fails partway through its uploads
+leaves a partial candidate, and the tag cannot be moved to another version, so a
+re-run deletes that candidate and recreates it from its own build before uploading:
+retrying is the documented recovery. An existing release is only touched when it is
+the matching candidate for this tag — same commit, still a prerelease, not a draft —
+and the run ends by reading the release back and asserting its exact asset set.
 
 ## Why the workflow is needed
 

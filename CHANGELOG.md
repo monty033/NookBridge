@@ -56,7 +56,17 @@ Patch release hardening static glibc discovery in the release workflow.
   is given an explicit URL and the rule can be added after the last pre-push check.
 - Validate the release version as SemVer rather than as a filename-safe token, and
   refuse build metadata (`+`), which cannot survive asset naming and query-string
-  handling unchanged; percent-encode asset names where they become query values.
+  handling unchanged; refuse an asset name outside `[A-Za-z0-9._-]` rather than
+  encoding it, so no name can change the request it appears in.
+- Bind the published artifact to the release version and not only to the commit: the
+  verifier refuses an archive whose manifest version or file name disagrees with the
+  version the release is named for.
+- Recreate a partial candidate on a re-run rather than refusing to touch it, because a
+  tag cannot be moved and an interrupted upload would otherwise be unrecoverable.
+- Neutralise `BASH_ENV` and `ENV` in the token-bearing steps and assert they are
+  empty, because a non-interactive shell sources them at startup: a value written to
+  `GITHUB_ENV` by a tagged step would otherwise have that shell read the token before
+  its first line ran.
 - Require exactly the expected release assets, before and after the promotion flip,
   and re-verify the artifact and its checksum file after the flip as well.
 - Derive the canonical API endpoints as an API root plus one repository path, so the

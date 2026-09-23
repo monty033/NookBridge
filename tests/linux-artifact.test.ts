@@ -500,6 +500,17 @@ describe("Linux artifact manifest contract", () => {
     expect(publishedVerifyStep?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
 
     // The candidate is created off the general install path...
+    // Every inline parser that reasons about the release requires the field rather
+    // than defaulting it: an absent `draft` would otherwise read as "not a draft".
+    expect((raw.match(/typeof release\.draft !== 'boolean'/g) ?? []).length).toBe(3);
+    // The artifact must be bound to the release version, not only the commit.
+    expect((raw.match(/--expect-version/g) ?? []).length).toBe(3);
+    expect(raw).toContain("github.com/monty033/NookBridge");
+    // A partial candidate is recreated on a re-run, because a tag cannot be moved and
+    // an interrupted upload would otherwise be unrecoverable.
+    expect(raw).toContain("action\\trecreate");
+    expect(raw).toContain("-X DELETE");
+    expect(raw).toContain('existing_id="$(cat "$decision"');
     expect(raw).toContain("prerelease: true");
     expect(raw).toContain("release.prerelease !== true");
     expect(raw).toContain("release.target_commitish");
@@ -603,6 +614,11 @@ describe("Linux artifact manifest contract", () => {
       expect(run).toContain('curl_path="$(command -v curl)"');
       expect(run).toContain("refusing an untrusted curl");
       expect(step.env?.PATH).toContain("/run/current-system/sw/bin");
+      // A non-interactive shell sources BASH_ENV before its first line, so a value an
+      // earlier tagged step wrote to GITHUB_ENV would otherwise run with the token.
+      expect(step.env?.BASH_ENV).toBe("");
+      expect(step.env?.ENV).toBe("");
+      expect(run).toContain('test -z "${BASH_ENV:-}"');
       expect(run).toContain("context.tsv");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);

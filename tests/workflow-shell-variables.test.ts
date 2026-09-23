@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 
@@ -84,6 +87,33 @@ function referencedNames(script: string): Set<string> {
 }
 
 describe("workflow shell variables", () => {
+  it("parses every step's shell", () => {
+    // A step's body is a shell script; a stray terminator or an unbalanced branch is
+    // a failure of the whole step, so the syntax is checked rather than inferred from
+    // assertions about the YAML text.
+    const raw = readFileSync(".forgejo/workflows/linux-artifact.yml", "utf8");
+    const workflow = parseYaml(raw) as { jobs: Record<string, Job> };
+    const broken: string[] = [];
+    const scratch = mkdtempSync(join(tmpdir(), "nookbridge-step-syntax-"));
+
+    for (const [jobName, job] of Object.entries(workflow.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.run === undefined) continue;
+        const file = join(scratch, "step.sh");
+        writeFileSync(file, step.run);
+        const result = spawnSync("bash", ["-n", file], { encoding: "utf8" });
+        if (result.status !== 0) {
+          broken.push(
+            `${jobName} / ${step.name ?? "(unnamed step)"}: ${result.stderr.split("\n")[0] ?? ""}`,
+          );
+        }
+      }
+    }
+
+    rmSync(scratch, { recursive: true, force: true });
+    expect(broken).toStrictEqual([]);
+  });
+
   it("only references variables each step defines, receives, or is given", () => {
     const raw = readFileSync(".forgejo/workflows/linux-artifact.yml", "utf8");
     const workflow = parseYaml(raw) as {

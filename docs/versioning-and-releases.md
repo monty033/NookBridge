@@ -215,8 +215,14 @@ untrusted:
   leading zeros in any numeric component or numeric prerelease identifier) and at
   most 64 characters, which is the limit the artifact builder enforces. Build
   metadata (`+`) is refused: it is legal SemVer but it cannot survive asset naming
-  and query-string handling unchanged. Asset names are percent-encoded where they
-  become query values. The tag-triggered workflow re-checks the version surfaces
+  and query-string handling unchanged. An asset name that becomes a query value must
+  match `[A-Za-z0-9._-]`; a name outside that set is refused rather than encoded, so
+  no asset name can change the request it appears in. The artifact is also bound to
+  the release version, not merely to the commit: the verifier is given the version the
+  release is named for and refuses an archive whose manifest version or file name
+  disagrees, because an archive can carry one version's payload under another
+  version's name and its checksum file is generated from the archive itself. The
+  tag-triggered workflow re-checks the version surfaces
   (installer pin, `package.json`, `package-lock.json`) before it publishes, because
   a tag pushed by hand does not pass through the operator command.
 - No secret is reachable by code from the ref being released. The preflight gate
@@ -228,6 +234,12 @@ untrusted:
   re-verification run the released revision's own verifier, so they hold no secret.
   Bearer tokens are passed to `curl` through a mode-600 configuration file rather
   than an argument, because a command line is readable by any process on the runner.
+  The step's startup environment is neutralised as well: a non-interactive shell
+  sources `BASH_ENV` before its first line runs, so a tagged step could otherwise
+  write that variable to `GITHUB_ENV` and have the token-bearing shell execute a
+  script with the token in its environment. `BASH_ENV` and `ENV` are set empty for
+  those steps and asserted empty inside them, so a runner that applied an injected
+  value anyway would fail the step rather than run it.
   Every message that reaches a terminal or a log is stripped of control characters,
   and every remote-derived URL in a message is redacted, so neither a rewrite target
   carrying credentials nor an operator's rejected argument can inject output.

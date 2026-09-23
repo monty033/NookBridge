@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
@@ -258,6 +266,92 @@ describe("Linux artifact builder", () => {
       { encoding: "utf8" },
     );
     expect(staged).toContain("exit 0");
+  });
+
+  /**
+   * The release version must bind to the artifact, not only the commit: an archive
+   * named for one version can carry another version's payload, and the checksum file
+   * is generated from the archive itself, so it cannot detect the substitution.
+   */
+  it("refuses an artifact whose version is not the release version", () => {
+    const fixture = createSourceFixture();
+    const built = spawnSync(
+      "bash",
+      [
+        builder,
+        "--source-dir",
+        fixture.source,
+        "--node-runtime",
+        fixture.nodeRuntime,
+        "--operator-peercred-helper",
+        fixture.helper,
+        "--output-dir",
+        fixture.output,
+        "--version",
+        "1.2.3",
+        "--source-date-epoch",
+        "1790000000",
+        "--min-glibc",
+        "2.31",
+        "--min-libstdcxx",
+        "GLIBCXX_3.4.29",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(built.status).toBe(0);
+
+    const artifact = join(fixture.output, "nookbridge-v1.2.3-linux-x64-gnu.tar.gz");
+    const checksum = join(fixture.output, "SHA256SUMS");
+    const verify = (extra: readonly string[]) =>
+      spawnSync(
+        "bash",
+        [
+          join(repositoryRoot, "scripts/verify-linux-artifact.sh"),
+          "--artifact",
+          artifact,
+          "--checksum-file",
+          checksum,
+          ...extra,
+        ],
+        { encoding: "utf8" },
+      );
+
+    expect(verify(["--expect-version", "1.2.3"]).status).toBe(0);
+    expect(verify([]).status).toBe(0);
+    // A version the artifact was not built for is refused even when the file name
+    // agrees with the expectation.
+    const mismatched = verify(["--expect-version", "1.2.5"]);
+    expect(mismatched.status).not.toBe(0);
+    expect(mismatched.stderr).toContain("artifact verification failed");
+
+    // The case that a file-name check alone would miss: an archive renamed to the
+    // release version while its payload is a different version. The checksum file is
+    // regenerated from the renamed archive, so only the manifest can catch it.
+    const renamed = join(fixture.output, "nookbridge-v1.2.4-linux-x64-gnu.tar.gz");
+    copyFileSync(artifact, renamed);
+    const renamedChecksum = join(fixture.output, "renamed-SHA256SUMS");
+    writeFileSync(
+      renamedChecksum,
+      execFileSync("sha256sum", ["nookbridge-v1.2.4-linux-x64-gnu.tar.gz"], {
+        cwd: fixture.output,
+        encoding: "utf8",
+      }),
+    );
+    const renamedVerify = spawnSync(
+      "bash",
+      [
+        join(repositoryRoot, "scripts/verify-linux-artifact.sh"),
+        "--artifact",
+        renamed,
+        "--checksum-file",
+        renamedChecksum,
+        "--expect-version",
+        "1.2.4",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(renamedVerify.status).not.toBe(0);
+    expect(renamedVerify.stderr).toContain("artifact verification failed");
   });
 
   /**

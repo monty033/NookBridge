@@ -18,6 +18,7 @@ fail() {
 artifact=''
 checksum_file=''
 expect_git_commit=''
+expect_version=''
 
 while (($# > 0)); do
   case "$1" in
@@ -36,8 +37,13 @@ while (($# > 0)); do
       expect_git_commit=$2
       shift 2
       ;;
+    --expect-version)
+      (($# >= 2)) || fail
+      expect_version=$2
+      shift 2
+      ;;
     --help)
-      printf '%s\n' 'verify-linux-artifact.sh --artifact PATH --checksum-file PATH [--expect-git-commit SHA]'
+      printf '%s\n' 'verify-linux-artifact.sh --artifact PATH --checksum-file PATH [--expect-git-commit SHA] [--expect-version VERSION]'
       exit 0
       ;;
     *)
@@ -48,6 +54,7 @@ done
 
 [[ -n "$artifact" && -n "$checksum_file" ]] || fail
 [[ -z "$expect_git_commit" || "$expect_git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
+[[ -z "$expect_version" || "$expect_version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || fail
 [[ -f "$artifact" && ! -L "$artifact" ]] || fail
 [[ -f "$checksum_file" && ! -L "$checksum_file" ]] || fail
 [[ "${artifact##*/}" == nookbridge-v*.tar.gz ]] || fail
@@ -161,6 +168,12 @@ build_timestamp=$(json_value buildTimestamp)
 
 [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || fail
 [[ "$top_level" == "nookbridge-v$version" ]] || fail
+# Release-version association: the artifact the caller is about to publish must carry
+# the version the release is named for. Format alone proves nothing -- an archive named
+# for one version can hold another version's payload, and the checksum file is
+# regenerated from the archive itself, so it cannot catch that.
+[[ -z "$expect_version" || "$version" == "$expect_version" ]] || fail
+[[ -z "$expect_version" || "${artifact##*/}" == "nookbridge-v$expect_version-linux-x64-gnu.tar.gz" ]] || fail
 [[ "$git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
 # Source SHA association: the caller names the commit being released, and the
 # artifact must record exactly that commit.  Format alone proves nothing.
