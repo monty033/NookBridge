@@ -128,11 +128,20 @@ Patch release hardening static glibc discovery in the release workflow.
   the preflight reads the public Actions API anonymously and fails closed on a
   refused read, naming the requirement when a host refuses an anonymous read instead
   of reporting a missing preflight.
-- Neutralise the inherited environment of the token-bearing steps beyond `BASH_ENV`:
-  `curl` reads a default configuration file even when given `--config`, and the
-  loader honours `LD_PRELOAD`, so `CURL_HOME`, `LD_PRELOAD`, and the proxy variables
-  are cleared and re-asserted, and every `curl` invocation in the workflow runs with
-  `-q`.
+- Neutralise the inherited environment of the token-bearing steps beyond
+  `BASH_ENV`: `curl` reads a default configuration file even when given `--config`, the
+  loader searches `LD_LIBRARY_PATH` and honours `LD_PRELOAD` and `LD_AUDIT`, and a
+  planted trust anchor would let a request be rewritten rather than stopped. Every one
+  of those variables, plus the proxy variables and both names of the automatic token,
+  is cleared and re-asserted in the step body, and every `curl` invocation in the
+  workflow runs with `-q`.
+- Recheck the commit a release names inside the step that acts on it. The publishing
+  step is given the runner's commit directly and compares both the release payload and
+  the live release against it before deleting or creating anything, and the promotion
+  step compares the release it is about to publish against the commit the token-free
+  verification read from the canonical host's own ref. A release retargeted between
+  verification and the authenticated write is refused instead of being repaired
+  afterwards.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

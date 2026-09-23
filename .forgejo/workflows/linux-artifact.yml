@@ -392,6 +392,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          # The commit this tag names, taken from the runner rather than from a file an
+          # earlier step wrote, so the write step can refuse a payload or a release that
+          # names a different commit before it deletes or creates anything.
+          RELEASE_SHA: ${{ github.sha }}
           # An explicit PATH replaces the runner's own, so directories an earlier
           # step added to GITHUB_PATH are not searched. The trusted prefixes cover
           # both a conventional Linux runner and a NixOS one.
@@ -411,11 +415,23 @@ jobs:
           # body re-asserts them.
           CURL_HOME: ""
           LD_PRELOAD: ""
+          # libcurl and awk are dynamically linked and the loader searches
+          # LD_LIBRARY_PATH and honours LD_AUDIT, so clearing LD_PRELOAD alone leaves the
+          # same door open: a tagged step can export either through $GITHUB_ENV and a
+          # constructor in the planted library runs with the token in the environment.
+          LD_LIBRARY_PATH: ""
+          LD_AUDIT: ""
+          # A planted trust anchor would let the request be rewritten rather than
+          # stopped, so the certificate sources are cleared with the same reasoning.
+          CURL_CA_BUNDLE: ""
+          SSL_CERT_FILE: ""
+          SSL_CERT_DIR: ""
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
           HTTPS_PROXY: ""
           ALL_PROXY: ""
+          NO_PROXY: ""
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -423,8 +439,9 @@ jobs:
           # The runner injects what a previous step wrote to $GITHUB_ENV, so each
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
-          for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
-            HTTP_PROXY HTTPS_PROXY ALL_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+          for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT CURL_HOME \
+            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR http_proxy https_proxy HTTP_PROXY \
+            HTTPS_PROXY ALL_PROXY NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
           do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \
@@ -516,11 +533,25 @@ jobs:
               || { printf 'the release to recreate is not a candidate\n' >&2; exit 1; }
             test "$existing_draft" = "false" \
               || { printf 'the release to recreate is a draft\n' >&2; exit 1; }
+            existing_commit="$(release_field target_commitish "$existing_json")"
+            test "$(printf '%s' "$existing_commit" | tr 'A-Z' 'a-z')" = \
+              "$(printf '%s' "$RELEASE_SHA" | tr 'A-Z' 'a-z')" \
+              || { printf 'the release to recreate names a different commit\n' >&2; exit 1; }
             "$curl_path" -q -fsS -X DELETE --config "$curl_config" \
               "$api_base/repos/monty033/NookBridge/releases/$existing_id" > /dev/null
           fi
 
           test -f "$payload"
+          # The payload is a file an earlier step wrote. Its commit and tag are checked
+          # against the runner's values here, so a swapped payload cannot create a
+          # release for another commit and have that discovered only after the write.
+          payload_sha="$(release_field target_commitish "$payload")"
+          payload_tag="$(release_field tag_name "$payload")"
+          test "$payload_tag" = "$rel_tag" \
+            || { printf 'the release payload names a different tag\n' >&2; exit 1; }
+          test "$(printf '%s' "$payload_sha" | tr 'A-Z' 'a-z')" = \
+            "$(printf '%s' "$RELEASE_SHA" | tr 'A-Z' 'a-z')" \
+            || { printf 'the release payload names a different commit\n' >&2; exit 1; }
           response="$PWD/.release-created.json"
           "$curl_path" -q -fsS -X POST -o "$response" \
             --config "$curl_config" -H 'Accept: application/vnd.github+json' \
@@ -864,11 +895,23 @@ jobs:
           # body re-asserts them.
           CURL_HOME: ""
           LD_PRELOAD: ""
+          # libcurl and awk are dynamically linked and the loader searches
+          # LD_LIBRARY_PATH and honours LD_AUDIT, so clearing LD_PRELOAD alone leaves the
+          # same door open: a tagged step can export either through $GITHUB_ENV and a
+          # constructor in the planted library runs with the token in the environment.
+          LD_LIBRARY_PATH: ""
+          LD_AUDIT: ""
+          # A planted trust anchor would let the request be rewritten rather than
+          # stopped, so the certificate sources are cleared with the same reasoning.
+          CURL_CA_BUNDLE: ""
+          SSL_CERT_FILE: ""
+          SSL_CERT_DIR: ""
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
           HTTPS_PROXY: ""
           ALL_PROXY: ""
+          NO_PROXY: ""
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -876,8 +919,9 @@ jobs:
           # The runner injects what a previous step wrote to $GITHUB_ENV, so each
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
-          for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME http_proxy https_proxy \
-            HTTP_PROXY HTTPS_PROXY ALL_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+          for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT CURL_HOME \
+            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR http_proxy https_proxy HTTP_PROXY \
+            HTTPS_PROXY ALL_PROXY NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
           do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \
@@ -952,6 +996,16 @@ jobs:
             || { printf 'the release to promote is not a candidate\n' >&2; exit 1; }
           test "$release_draft" = "false" \
             || { printf 'the release to promote is a draft\n' >&2; exit 1; }
+          # The commit the candidate must name, established by the token-free step from
+          # the canonical host's own ref, is rechecked here: flipping a release whose
+          # target was changed in between would publish a different commit than the one
+          # the artifact was verified against.
+          expected_commit="$(field canonical_tag_commit)"
+          case "$expected_commit" in '' | *[!0-9a-fA-F]*) printf 'unusable expected commit\n' >&2; exit 1 ;; esac
+          release_commit="$(release_field target_commitish "$promote_json")"
+          test "$(printf '%s' "$release_commit" | tr 'A-Z' 'a-z')" = \
+            "$(printf '%s' "$expected_commit" | tr 'A-Z' 'a-z')" \
+            || { printf 'the release to promote names a different commit\n' >&2; exit 1; }
 
           # The bearer token is passed through a curl -q configuration file rather than
           # an argument, because a command line is readable by any process on the

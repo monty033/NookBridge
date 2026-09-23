@@ -637,6 +637,12 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("draft: false");
     expect(raw).toContain('test "$existing_draft" = "false"');
     expect(raw).toContain('test "$existing_prerelease" = "true"');
+    // The publishing step is given the runner's commit and compares both the payload and
+    // the live release against it before any authenticated request.
+    expect(raw).toContain("RELEASE_SHA: ${{ github.sha }}");
+    expect(raw).toContain("the release payload names a different commit");
+    expect(raw).toContain("the release to recreate names a different commit");
+    expect(raw).toContain("the release to promote names a different commit");
     expect(raw).not.toContain('existing_id="$(cat "$decision"');
     expect(raw).toContain("prerelease: true");
     expect(raw).toContain("release.prerelease !== true");
@@ -770,9 +776,15 @@ describe("Linux artifact manifest contract", () => {
       // curl reads a default configuration file even when given --config, and the
       // loader honours LD_PRELOAD, so both are cleared and every call passes -q.
       expect(step.env?.LD_PRELOAD).toBe("");
+      // LD_PRELOAD is not the only way in: the loader also searches LD_LIBRARY_PATH and
+      // honours LD_AUDIT, and a planted trust anchor would let the request be rewritten
+      // rather than stopped.
+      expect(step.env?.LD_LIBRARY_PATH).toBe("");
+      expect(step.env?.LD_AUDIT).toBe("");
+      expect(step.env?.SSL_CERT_FILE).toBe("");
       expect(step.env?.CURL_HOME).toBe("");
       expect(step.env?.https_proxy).toBe("");
-      expect(run).toContain("for refused_variable in BASH_ENV ENV LD_PRELOAD CURL_HOME");
+      expect(run).toContain("for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH");
       for (const line of run.split("\n")) {
         // An invocation starts the line; the guard's own `case` does not.
         if (/^\s*"\$curl_path"/.test(line)) expect(line).toContain("-q");
@@ -787,6 +799,9 @@ describe("Linux artifact manifest contract", () => {
       expect(run).not.toContain("field release_id");
       // Forgejo exports its automatic token under both names.
       expect(run).toContain("FORGEJO_TOKEN GITHUB_TOKEN");
+      // The commit the release names is rechecked inside the step that deletes,
+      // creates, or flips it, not only by the token-free steps around it.
+      expect(run).toContain("names a different commit");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);
       expect(run).not.toContain("node -e");

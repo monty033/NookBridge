@@ -238,7 +238,12 @@ untrusted:
   secret. Bearer tokens are passed to `curl` through a mode-600 configuration file
   rather than an argument, because a command line is readable by any process on the
   runner, and every `curl` call runs with `-q` so that no default configuration file
-  is read either.
+  is read either. The same step clears and re-asserts the loader variables
+  (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`) and the trust-anchor variables
+  (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), so a planted library cannot run
+  with the token in the environment and a planted certificate cannot rewrite the
+  request, and it compares the commit the release names against the runner's own commit
+  before it writes.
 - What the split does not buy. The runner is a host runner, so code from the released
   revision runs as the same user on the same machine as the steps that hold the
   token. A process left behind by an earlier step can read the token step's
