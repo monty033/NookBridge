@@ -222,6 +222,14 @@ jobs:
 
           installer_version="$(sed -n "s/^readonly RELEASE_VERSION='\([^']*\)'$/\1/p" scripts/install-from-github.sh)"
           test "$installer_version" = "$VERSION"
+          # A tag pushed by hand skips the operator command's version-surface
+          # check, so the same check runs here: a tag whose commit disagrees with
+          # the version in its own manifest must not publish an artifact that
+          # carries one version while the release is named another.
+          package_version="$(node -e "process.stdout.write(String(require('./package.json').version))")"
+          lock_version="$(node -e "process.stdout.write(String(require('./package-lock.json').version))")"
+          test "$package_version" = "$VERSION"
+          test "$lock_version" = "$VERSION"
           cp "artifacts/$ARTIFACT" "$RELEASE_DIR/$ARTIFACT"
           cp scripts/install-from-github.sh "$RELEASE_DIR/install.sh"
           cp scripts/install-systemd.sh "$RELEASE_DIR/install-systemd.sh"
@@ -423,6 +431,30 @@ jobs:
                 ;;
             esac
           done
+          # A prerelease identifier that is all digits must not carry a leading
+          # zero, so `1.2.3-01` is not a version this process may promote.
+          if [ -n "$pre" ]; then
+            case "$pre" in
+              *[!0-9A-Za-z.-]*|.*|*.|*..*|*-)
+                printf 'malformed promotion version: %s\n' "$VERSION" >&2
+                exit 1
+                ;;
+            esac
+            saved_ifs=$IFS
+            IFS=.
+            for identifier in $pre; do
+              case "$identifier" in
+                ''|*[!0-9]*) ;;
+                0) ;;
+                0*)
+                  IFS=$saved_ifs
+                  printf 'malformed promotion version: %s\n' "$VERSION" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            IFS=$saved_ifs
+          fi
           test "${#VERSION}" -le 64
 
           # The commit this ref points at, captured before the canonical tag is

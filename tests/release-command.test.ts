@@ -140,11 +140,15 @@ async function startStub(options: StubOptions) {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     requests.push(`${url.pathname}|${request.headers.authorization ?? "anonymous"}`);
     response.setHeader("content-type", "application/json");
-    if (url.pathname.includes("/git/refs/tags/")) {
+    // The path is matched exactly, so a caller that appends a repository-scoped
+    // path to a base that already names the repository is refused here rather
+    // than silently served.
+    const refPrefix = "/repos/patrick/NookBridge/git/refs/tags/";
+    if (url.pathname.startsWith(refPrefix)) {
       // The tag ref is read from the canonical repository itself, so the stub
       // reports what the push actually accomplished: a redirect that sent the tag
       // elsewhere is visible here as a missing tag.
-      const wanted = decodeURIComponent(url.pathname.split("/git/refs/tags/")[1] ?? "");
+      const wanted = decodeURIComponent(url.pathname.slice(refPrefix.length));
       const repository = options.tagRefRepo ?? latestCanonicalRepo;
       let sha = "";
       if (repository) {
@@ -1134,8 +1138,12 @@ describe("release operator command", () => {
       ],
       fixture.work,
     );
-    // Only the second destination is rewritten.
-    git(["config", `url.${attacker}.pushInsteadOf`, "ssh://git@git.montycasa.net/"], fixture.work);
+    // Only the second destination is rewritten, and the rule's replacement does
+    // not name the canonical repository once the suffix is appended.
+    git(
+      ["config", `url.https://attacker.invalid/.pushInsteadOf`, "ssh://git@git.montycasa.net/"],
+      fixture.work,
+    );
     const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
 
     const result = await runRelease(
@@ -1223,6 +1231,66 @@ describe("release operator command", () => {
     expect(result.stdout).toContain("release_ready=false");
   });
 
+  it("refuses a rewrite rule whose replacement does not name the canonical repository", async () => {
+    const fixture = createFixture();
+    const canonicalUrl = "https://git.montycasa.net/patrick/NookBridge.git";
+    git(["remote", "set-url", "upstream", canonicalUrl], fixture.work);
+    git(["remote", "set-url", "--push", "upstream", canonicalUrl], fixture.work);
+    // The replacement is a prefix of the canonical URL, so checking the
+    // replacement alone would accept it; appending the suffix produces
+    // `.../patrick/NookBridgepatrick/NookBridge.git`, which is not the canonical
+    // repository.
+    git(
+      [
+        "config",
+        "url.https://git.montycasa.net/patrick/NookBridge.pushInsteadOf",
+        "https://git.montycasa.net/",
+      ],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      withoutFixtures(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("rewrite rule");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("queries the tag ref at the canonical API path", async () => {
+    const stub = await startStub({ runsFor: () => [] });
+
+    const result = await runReleaseApi(["tag-ref"], {
+      FORGEJO_API_BASE: `${stub.base}/api/v1`,
+      FORGEJO_REPOSITORY: "patrick/NookBridge",
+      RELEASE_TAG: tag,
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("exists=false");
+    // The repository path is appended exactly once.
+    expect(stub.requests).toContain(
+      `/api/v1/repos/patrick/NookBridge/git/refs/tags/${tag}|anonymous`,
+    );
+  });
+
+  it("derives the canonical API endpoints from the canonical identity", () => {
+    const evaluate = (name: string) =>
+      execFileSync("bash", ["-c", `source ${JSON.stringify(releaseFunctionsPath())}\n${name}`], {
+        encoding: "utf8",
+      }).trim();
+
+    expect(evaluate("forgejo_api_base")).toBe("https://git.montycasa.net/api/v1");
+    expect(evaluate("forgejo_runs_url")).toBe(
+      "https://git.montycasa.net/api/v1/repos/patrick/NookBridge/actions/runs",
+    );
+  });
+
   it("refuses to treat a push as published when the canonical repository has no tag", async () => {
     const fixture = createFixture();
     // The push lands somewhere other than the canonical repository, which is what
@@ -1240,7 +1308,20 @@ describe("release operator command", () => {
   });
 
   it("refuses a version that is not SemVer", async () => {
-    for (const invalid of ["foo", "1.2", "01.2.3", "1.2.3-", "1.2.3+build", "1.2.3.4"]) {
+    for (const invalid of [
+      "foo",
+      "1.2",
+      "01.2.3",
+      "1.2.3-",
+      "1.2.3+build",
+      "1.2.3.4",
+      // A numeric prerelease identifier may not carry a leading zero.
+      "1.2.3-01",
+      "1.2.3-rc.01",
+      // Longer than the artifact builder accepts, so it would consume the tag and
+      // then fail during the build.
+      `1.2.3-${"a".repeat(70)}`,
+    ]) {
       const fixture = createFixture();
       const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
 
@@ -1252,14 +1333,16 @@ describe("release operator command", () => {
   });
 
   it("accepts a SemVer version with a prerelease suffix", async () => {
-    const fixture = createFixture();
-    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+    for (const valid of ["0.2.0-rc.1", "0.1.2", "1.0.0-0", "1.0.0-alpha-2"]) {
+      const fixture = createFixture();
+      const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
 
-    const result = await runRelease(["promote", "0.2.0-rc.1"], fixture, stub.base);
+      const result = await runRelease(["promote", valid], fixture, stub.base);
 
-    // The version is accepted; the command then fails because there is no such
-    // candidate release, so only the version grammar is asserted here.
-    expect(result.stderr).not.toContain("invalid version");
+      // The version is accepted; the command then fails because there is no such
+      // candidate release, so only the version grammar is asserted here.
+      expect(result.stderr).not.toContain("invalid version");
+    }
   });
 
   it("refuses to promote a candidate release that carries an unexpected asset", async () => {

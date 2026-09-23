@@ -59,6 +59,16 @@ Patch release hardening static glibc discovery in the release workflow.
   handling unchanged; percent-encode asset names where they become query values.
 - Require exactly the expected release assets, before and after the promotion flip,
   and re-verify the artifact and its checksum file after the flip as well.
+- Derive the canonical API endpoints as an API root plus one repository path, so the
+  post-push verification cannot build a doubled `/repos/<owner>/<name>/repos/...`
+  URL that 404s and blocks every release.
+- Check a rewrite rule by the URL it actually produces — applied until the URL stops
+  changing — rather than by its replacement base, so a base that appends its suffix
+  into a noncanonical destination is refused.
+- Reject a numeric prerelease identifier with a leading zero (`1.2.3-01`) and a
+  version longer than the 64 characters the artifact builder accepts, and verify the
+  `package.json` and `package-lock.json` version surfaces in the publishing workflow
+  so a tag pushed by hand cannot publish a mismatched artifact.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

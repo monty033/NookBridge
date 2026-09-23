@@ -198,14 +198,26 @@ untrusted:
   last pre-push check cannot be observed beforehand, so a push that reports
   success is only accepted once the canonical ref is confirmed to name the object
   that was pushed. Local git configuration cannot redirect an HTTPS request to the
-  canonical API.
+  canonical API, and the API path appends the repository exactly once.
+- A rewrite rule is accepted only when the URL it actually produces — with the
+  matched prefix removed and the replacement base prepended, applied until the URL
+  stops changing — still names the canonical repository. Checking the replacement
+  base alone accepts a base that appends its suffix into a destination that is not
+  the canonical repository.
 - A canonical URL may not carry HTTPS userinfo: the value is passed to `git` as an
   argument, where a credential is readable by any local process, and the canonical
   remote is addressed anonymously.
 - The release version is SemVer (`major.minor.patch`, optional `-prerelease`, no
-  leading zeros). Build metadata (`+`) is refused: it is legal SemVer but it cannot
-  survive asset naming and query-string handling unchanged. Asset names are
-  percent-encoded where they become query values.
+  leading zeros in any numeric component or numeric prerelease identifier) and at
+  most 64 characters, which is the limit the artifact builder enforces. Build
+  metadata (`+`) is refused: it is legal SemVer but it cannot survive asset naming
+  and query-string handling unchanged. Asset names are percent-encoded where they
+  become query values. The tag-triggered workflow re-checks the version surfaces
+  (installer pin, `package.json`, `package-lock.json`) before it publishes, because
+  a tag pushed by hand does not pass through the operator command.
+- Canonical API endpoints are derived from the canonical identity with the
+  repository path appended exactly once: the API base is an API root, and each
+  caller appends `/repos/<owner>/<name>/...`.
 - A release carries exactly the expected assets. A missing asset and an unexpected
   asset both fail the gate, before and after the promotion flip.
 - Promotion re-verifies the artifact, its checksum file, and the installers after

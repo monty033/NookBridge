@@ -361,55 +361,56 @@ resolve_canonical_remote() {
   resolve_remote_urls "$name"
 }
 
-# A rewrite rule is only acceptable when its replacement still names the
-# canonical repository, so a local https/ssh spelling preference keeps working
-# while a rule that points somewhere else is refused.
-rewrite_base_ok() { # $1 = the replacement base of a rewrite rule
-  local base=$1
-  case "$base" in
-    */) canonical_url_ok "${base}${CANONICAL_PATH}" ;;
-    *) canonical_url_ok "$base" ;;
-  esac
-}
-
-# Print the prefix of the first rewrite rule of the given kind that applies to a
-# URL. `git remote get-url` expands `insteadOf` but not `pushInsteadOf`, so the
-# rules themselves have to be consulted to know what a push will really reach.
-matching_rewrite_rule() { # $1 = url, $2 = rule key pattern
-  local url=$1 pattern=$2 line key base prefix
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    key=${line%%[[:space:]]*}
-    prefix=${line#*[[:space:]]}
-    [ -n "$prefix" ] || continue
-    case "$url" in
-      "$prefix"*) ;;
-      *) continue ;;
-    esac
-    base=${key#url.}
-    base=${base%.insteadof}
-    base=${base%.pushinsteadof}
-    rewrite_base_ok "$base" && continue
-    printf '%s' "$prefix"
-    return 0
-  done < <(git config --get-regexp "$pattern" 2>/dev/null || true)
-  return 1
+# Apply the configured rewrite rules to a URL the way git will, and print the
+# result. `git remote get-url` expands `insteadOf` but not `pushInsteadOf`, so the
+# rules themselves have to be applied to know what an operation will really reach.
+# Rules chain, so the rules are applied until they stop changing the URL.
+apply_rewrite_rules() { # $1 = url
+  local url=$1 line key base prefix changed pass=0
+  while [ "$pass" -lt 10 ]; do
+    pass=$((pass + 1))
+    changed=false
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      key=${line%%[[:space:]]*}
+      prefix=${line#*[[:space:]]}
+      [ -n "$prefix" ] || continue
+      case "$url" in
+        "$prefix"*) ;;
+        *) continue ;;
+      esac
+      base=${key#url.}
+      base=${base%.insteadof}
+      base=${base%.pushinsteadof}
+      url="${base}${url#"$prefix"}"
+      changed=true
+      break
+    done < <(git config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' 2>/dev/null || true)
+    [ "$changed" = true ] || break
+  done
+  printf '%s' "$url"
 }
 
 # A URL rewrite rule (`insteadOf`/`pushInsteadOf`) makes git expand a reported URL
 # and expand it again when that URL is used, so a rule can send the fetch or the
-# push somewhere other than the value that was validated. Every configured URL, in
-# every configuration scope, must equal the URL git reports for it, and no rule
-# may redirect it. This is re-checked immediately before the network operations,
-# because the rules can be edited while the command waits for confirmation.
+# push somewhere other than the value that was validated. A rule is acceptable only
+# when the URL it actually produces still names the canonical repository: checking
+# the replacement alone would accept a base that appends its suffix into a
+# destination that is not the canonical repository at all. Every configured URL, in
+# every configuration scope, must equal the URL git reports for it. This is
+# re-checked immediately before the network operations, because the rules can be
+# edited while the command waits for confirmation.
 check_url_rewrites() { # $1 = remote name
-  local name=$1 url raw_url rule index
+  local name=$1 url raw_url resolved index
   local -a raw_push_list=()
   local -a expanded_push_list=()
   raw_url=$(git config --get-all "remote.$name.url" 2>/dev/null | head -n 1 || true)
   [ -n "$raw_url" ] || fail "remote $name has no configured fetch URL"
   [ "$raw_url" = "$(git remote get-url "$name" 2>/dev/null || true)" ] \
     || fail "a Git URL rewrite rule changes the fetch destination of remote $name; refusing to fetch or push to a URL that differs from its configured value"
+  resolved=$(apply_rewrite_rules "$raw_url")
+  remote_url_ok "$resolved" \
+    || fail "a Git URL rewrite rule turns the fetch destination of remote $name into '$resolved', which is not the canonical repository; refusing"
   while IFS= read -r url; do
     if [ -n "$url" ]; then raw_push_list+=("$url"); fi
   done < <(git config --get-all "remote.$name.pushurl" 2>/dev/null || true)
@@ -419,31 +420,23 @@ check_url_rewrites() { # $1 = remote name
   if [ "${#raw_push_list[@]}" -eq 0 ]; then
     [ "${#expanded_push_list[@]}" -eq 1 ] && [ "${expanded_push_list[0]}" = "$raw_url" ] \
       || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
-  else
-    # Every configured push destination is compared, not just the first one: git
-    # pushes to all of them.
-    [ "${#raw_push_list[@]}" -eq "${#expanded_push_list[@]}" ] \
-      || fail "the push destinations of remote $name do not match their configured values; refusing"
-    for index in "${!raw_push_list[@]}"; do
-      [ "${raw_push_list[$index]}" = "${expanded_push_list[$index]}" ] \
-        || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
-    done
-  fi
-  # Rule scan: `git remote get-url --push` does not expand `pushInsteadOf`, so the
-  # push URLs are checked against the rules directly.
-  if rule=$(matching_rewrite_rule "$raw_url" '^url\..*\.(insteadof|pushinsteadof)$'); then
-    fail "a Git URL rewrite rule matching '$rule' redirects the fetch destination of remote $name; refusing"
-  fi
-  if [ "${#raw_push_list[@]}" -eq 0 ]; then
-    if rule=$(matching_rewrite_rule "$raw_url" '^url\..*\.pushinsteadof$'); then
-      fail "a Git URL rewrite rule matching '$rule' redirects the push destination of remote $name; refusing"
-    fi
+    resolved=$(apply_rewrite_rules "$raw_url")
+    remote_url_ok "$resolved" \
+      || fail "a Git URL rewrite rule turns the push destination of remote $name into '$resolved', which is not the canonical repository; refusing"
     return 0
   fi
+  # Every configured push destination is compared, not just the first one: git
+  # pushes to all of them.
+  [ "${#raw_push_list[@]}" -eq "${#expanded_push_list[@]}" ] \
+    || fail "the push destinations of remote $name do not match their configured values; refusing"
   for index in "${!raw_push_list[@]}"; do
-    if rule=$(matching_rewrite_rule "${raw_push_list[$index]}" '^url\..*\.(insteadof|pushinsteadof)$'); then
-      fail "a Git URL rewrite rule matching '$rule' redirects a push destination of remote $name; refusing"
-    fi
+    [ "${raw_push_list[$index]}" = "${expanded_push_list[$index]}" ] \
+      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
+  done
+  for index in "${!raw_push_list[@]}"; do
+    resolved=$(apply_rewrite_rules "${raw_push_list[$index]}")
+    remote_url_ok "$resolved" \
+      || fail "a Git URL rewrite rule turns a push destination of remote $name into '$resolved', which is not the canonical repository; refusing"
   done
 }
 
@@ -455,7 +448,6 @@ resolve_remote_urls() { # $1 = remote name
   [ -n "$canonical_fetch_url" ] || fail "remote $name has no fetch URL"
   remote_url_ok "$canonical_fetch_url" \
     || fail "remote $name does not fetch from $CANONICAL_HOST/$CANONICAL_PATH: $(redact "$canonical_fetch_url")"
-  check_url_rewrites "$name"
   canonical_push_urls=''
   while IFS= read -r url; do
     [ -n "$url" ] || continue
@@ -466,18 +458,24 @@ resolve_remote_urls() { # $1 = remote name
   if [ -z "$canonical_push_urls" ]; then
     canonical_push_urls="${canonical_fetch_url}"$'\n'
   fi
+  # Rewrite rules are checked after the configured URLs themselves, so that a
+  # merely noncanonical destination is reported as such rather than as a rewrite.
+  check_url_rewrites "$name"
 }
 
+# The API root only. Callers append `/repos/<owner>/<name>/...`, so that a caller
+# cannot build `/repos/<owner>/<name>/repos/<owner>/<name>/...` by appending a
+# repository-scoped path to a base that already names the repository.
 forgejo_api_base() {
   if [ "$test_mode" = true ] && [ -n "${NOOKBRIDGE_FORGEJO_API_BASE:-}" ]; then
     printf '%s' "$NOOKBRIDGE_FORGEJO_API_BASE"
     return 0
   fi
-  printf '%s' "https://$CANONICAL_HOST/api/v1/repos/$CANONICAL_PATH"
+  printf '%s' "https://$CANONICAL_HOST/api/v1"
 }
 
 forgejo_runs_url() {
-  printf '%s/actions/runs' "$(forgejo_api_base)"
+  printf '%s/repos/%s/actions/runs' "$(forgejo_api_base)" "$CANONICAL_PATH"
 }
 
 resolve_mirror_api_base() {
@@ -649,8 +647,11 @@ version_number_ok() {
 # rejected as well: it is a legal SemVer version but it cannot survive the asset
 # naming and query-string handling in the publishing workflow unchanged.
 valid_version() {
-  local version=$1 core prerelease major rest minor patch
+  local version=$1 core prerelease major rest minor patch identifier
   [ -n "$version" ] || return 1
+  # The artifact builder refuses a version longer than this, so accepting a longer
+  # one here would consume an immutable tag and then fail during the build.
+  [ "${#version}" -le 64 ] || return 1
   case "$version" in
     *+*) return 1 ;;
   esac
@@ -676,6 +677,18 @@ valid_version() {
     case "$prerelease" in
       *[!0-9A-Za-z.-]*|.*|*.|*..*|*-) return 1 ;;
     esac
+    # A prerelease identifier that is all digits must not carry a leading zero,
+    # so `1.2.3-01` is not SemVer.
+    local saved_ifs=$IFS
+    IFS=.
+    for identifier in $prerelease; do
+      case "$identifier" in
+        ''|*[!0-9]*) ;;
+        0) ;;
+        0*) IFS=$saved_ifs; return 1 ;;
+      esac
+    done
+    IFS=$saved_ifs
   else
     # A trailing `-` with nothing after it is not a prerelease, and `1.2.3-` is
     # not a version.

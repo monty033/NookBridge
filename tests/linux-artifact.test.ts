@@ -537,6 +537,12 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("encoded_name=");
     // The promotion version must be SemVer, not merely filename-safe.
     expect(raw).toContain("*[!0-9A-Za-z.-]*|*+*|*.|*-|.*)");
+    // A hand-pushed tag must not publish an artifact whose manifest disagrees with
+    // the release version.
+    expect(raw).toContain('test "$package_version" = "$VERSION"');
+    expect(raw).toContain('test "$lock_version" = "$VERSION"');
+    // A numeric prerelease identifier may not carry a leading zero.
+    expect(raw).toContain("IFS=.");
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
