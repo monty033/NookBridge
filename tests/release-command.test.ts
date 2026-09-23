@@ -95,10 +95,11 @@ function tagRun(commit: string, status: string): StubRun {
   };
 }
 
-function candidateRelease(prerelease: boolean): Record<string, unknown> {
+function candidateRelease(commit: string, prerelease = true): Record<string, unknown> {
   return {
     tag_name: tag,
     prerelease,
+    target_commitish: commit,
     assets: [
       { name: "install.sh" },
       { name: "install-systemd.sh" },
@@ -154,25 +155,70 @@ async function startStub(options: StubOptions) {
   return { base: `http://127.0.0.1:${address.port}`, requests };
 }
 
-function releaseEnv(base: string): Record<string, string> {
+function releaseEnv(
+  base: string,
+  overrides: Record<string, string | undefined> = {},
+): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) env[key] = value;
   }
+  env.NOOKBRIDGE_RELEASE_TEST_MODE = "1";
   env.NOOKBRIDGE_CANONICAL_REMOTE = "upstream";
   env.NOOKBRIDGE_FORGEJO_API_BASE = base;
   env.NOOKBRIDGE_GITHUB_API_BASE = base;
   env.NOOKBRIDGE_GITHUB_REPOSITORY = "monty033/NookBridge";
   env.NOOKBRIDGE_WATCH_INTERVAL = "1";
   env.NOOKBRIDGE_WATCH_TIMEOUT = "20";
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
   return env;
 }
 
-async function runRelease(args: readonly string[], fixture: Fixture, base: string) {
+const realGit = execFileSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+
+/**
+ * Put a git wrapper first on PATH that fails a specific subcommand. The release
+ * command must survive a transport failure, and a wrapper is the only way to
+ * provoke one deterministically from a fixture.
+ */
+function gitShim(): string {
+  const dir = mkdtempSync(join(tmpdir(), "nookbridge-git-shim-"));
+  fixtureRoots.push(dir);
+  const script = [
+    "#!/usr/bin/env bash",
+    `real_git=${JSON.stringify(realGit)}`,
+    'if [ "${1:-}" = "ls-remote" ] && [ -n "${NOOKBRIDGE_SHIM_FAIL_LS_REMOTE:-}" ]; then',
+    '  printf "fatal: unable to access the remote repository\\n" >&2',
+    "  exit 128",
+    "fi",
+    'if [ "${1:-}" = "push" ] && [ -n "${NOOKBRIDGE_SHIM_PUSH_AMBIGUOUS:-}" ]; then',
+    '  "$real_git" "$@" || exit $?',
+    '  printf "fatal: the remote end hung up unexpectedly\\n" >&2',
+    "  exit 128",
+    "fi",
+    'exec "$real_git" "$@"',
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "git"), script, { mode: 0o755 });
+  return dir;
+}
+
+async function runRelease(
+  args: readonly string[],
+  fixture: Fixture,
+  base: string,
+  overrides: Record<string, string | undefined> = {},
+  pathPrefix?: string,
+) {
+  const env = releaseEnv(base, overrides);
+  if (pathPrefix !== undefined) env.PATH = `${pathPrefix}:${env.PATH ?? ""}`;
   try {
     const result = await execFileAsync("bash", [releaseScript, ...args], {
       cwd: fixture.work,
-      env: releaseEnv(base),
+      env,
       maxBuffer: 1024 * 1024,
     });
     return { code: 0, stdout: result.stdout, stderr: result.stderr };
@@ -213,7 +259,7 @@ describe("release operator command", () => {
     const fixture = createFixture();
     const stub = await startStub({
       runsFor: () => [mainPreflight(fixture.commit), tagRun(fixture.commit, "success")],
-      release: candidateRelease(true),
+      release: candidateRelease(fixture.commit),
     });
 
     const result = await runRelease(["tag", "--yes"], fixture, stub.base);
@@ -332,7 +378,7 @@ describe("release operator command", () => {
         mainPreflight(fixture.commit),
         { ...tagRun(fixture.commit, "success"), prettyref: promoteTag },
       ],
-      release: candidateRelease(true),
+      release: candidateRelease(fixture.commit),
     });
 
     const result = await runRelease(["promote", "--yes"], fixture, stub.base);
@@ -353,7 +399,7 @@ describe("release operator command", () => {
         mainPreflight(fixture.commit),
         { ...tagRun(fixture.commit, "success"), prettyref: promoteTag },
       ],
-      release: candidateRelease(true),
+      release: candidateRelease(fixture.commit),
     });
 
     const result = await runRelease(["promote", "--yes"], fixture, stub.base);
@@ -368,7 +414,7 @@ describe("release operator command", () => {
     git(["push", "--quiet", "upstream", `refs/tags/${tag}`], fixture.work);
     const stub = await startStub({
       runsFor: () => [mainPreflight(fixture.commit)],
-      release: candidateRelease(false),
+      release: candidateRelease(fixture.commit, false),
     });
 
     const result = await runRelease(["promote", "--yes"], fixture, stub.base);
@@ -382,7 +428,7 @@ describe("release operator command", () => {
     const fixture = createFixture();
     git(["tag", "-a", tag, fixture.commit, "-m", `NookBridge ${tag}`], fixture.work);
     git(["push", "--quiet", "upstream", `refs/tags/${tag}`], fixture.work);
-    const incomplete = candidateRelease(true);
+    const incomplete = candidateRelease(fixture.commit);
     incomplete.assets = [{ name: "install.sh" }];
     const stub = await startStub({
       runsFor: () => [mainPreflight(fixture.commit)],
@@ -393,6 +439,133 @@ describe("release operator command", () => {
 
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("missing release assets");
+    expect(tagPresent(fixture.canonical, promoteTag)).toBe(false);
+  });
+
+  it("refuses a remote whose host is not the canonical host", async () => {
+    const fixture = createFixture();
+    git(
+      ["remote", "add", "lookalike", "https://attacker.invalid/patrick/NookBridge.git"],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base, {
+      NOOKBRIDGE_CANONICAL_REMOTE: "lookalike",
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not fetch from");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("refuses a canonical remote whose push URL points somewhere else", async () => {
+    const fixture = createFixture();
+    git(
+      [
+        "remote",
+        "set-url",
+        "--push",
+        "upstream",
+        "https://attacker.invalid/patrick/NookBridge.git",
+      ],
+      fixture.work,
+    );
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not push to");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("refuses the fixture overrides unless test mode is enabled", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["status"], fixture, stub.base, {
+      NOOKBRIDGE_RELEASE_TEST_MODE: undefined,
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("NOOKBRIDGE_RELEASE_TEST_MODE");
+  });
+
+  it("refuses a non-numeric watch setting before publishing", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["tag", "--yes"], fixture, stub.base, {
+      NOOKBRIDGE_WATCH_INTERVAL: "soon",
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("NOOKBRIDGE_WATCH_INTERVAL");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("rejects a positional version for the tag command", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [] });
+
+    const result = await runRelease(["tag", "0.1.1", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not take an argument");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("treats a failed remote tag lookup as an error, not as an absent tag", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      { NOOKBRIDGE_SHIM_FAIL_LS_REMOTE: "1" },
+      gitShim(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("cannot check tag");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("reports an uncertain push instead of claiming nothing was published", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      { NOOKBRIDGE_SHIM_PUSH_AMBIGUOUS: "1" },
+      gitShim(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("may already be running");
+    expect(result.stderr).not.toContain("nothing was published");
+    // The tag really did land, and the command must not have deleted its local copy.
+    expect(tagPresent(fixture.canonical, tag)).toBe(true);
+    expect(tagPresent(fixture.work, tag)).toBe(true);
+  });
+
+  it("refuses to promote a candidate whose release targets another commit", async () => {
+    const fixture = createFixture();
+    git(["tag", "-a", tag, fixture.commit, "-m", `NookBridge ${tag}`], fixture.work);
+    git(["push", "--quiet", "upstream", `refs/tags/${tag}`], fixture.work);
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: candidateRelease("a".repeat(40)),
+    });
+
+    const result = await runRelease(["promote", "--yes"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("targets");
     expect(tagPresent(fixture.canonical, promoteTag)).toBe(false);
   });
 });

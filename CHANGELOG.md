@@ -21,6 +21,12 @@ Patch release hardening static glibc discovery in the release workflow.
   non-matching store glob.
 - Build the operator peer-credential helper freestanding so portable artifacts
   cannot embed host `/nix/store` paths.
+- Authenticate the release command's canonical remote by host and repository
+  path for both its fetch and push URLs, derive the Forgejo and GitHub endpoints
+  from that identity, refuse a remote tag lookup error as an error rather than
+  as an absent tag, and report a push whose outcome is unknown as uncertain.
+- Require the promotion workflow to verify the complete published asset set
+  before it clears the prerelease flag.
 
 ## [0.1.1] - 2026-09-22
 

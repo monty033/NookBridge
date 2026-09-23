@@ -491,6 +491,19 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back; a successful PATCH is not proof.
     expect(raw).toMatch(/test "\$promoted" = "false"/);
+    // Promotion requires the complete published asset set, not just the two
+    // files its own steps download, so a vanished installer cannot ship.
+    expect(raw).toContain("missing GitHub release asset");
+    for (const required of [
+      "install.sh",
+      "install-systemd.sh",
+      "verify-linux-artifact.sh",
+      "SHA256SUMS",
+    ]) {
+      expect(raw).toContain(`'${required}'`);
+    }
+    // The versioned artifact name is supplied by the job, not hard-coded.
+    expect(raw).toContain("process.argv[1]");
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {

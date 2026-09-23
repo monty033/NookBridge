@@ -124,15 +124,35 @@ is bypassed by hand.
   working-tree state cannot change what is released.
 - `release.sh promote` refuses to run unless the tag exists, the mirror release
   is still a prerelease candidate at that commit with the complete five-asset
-  set, and no promotion tag exists. It then pushes `promote-v<VERSION>` and
-  waits for the promotion run.
+  set, the release's `target_commitish` equals the canonical tag commit, and no
+  promotion tag exists. It then pushes `promote-v<VERSION>` and waits for the
+  promotion run. The promotion job itself re-checks the complete asset set
+  before it clears the prerelease flag.
 
 Both mutating commands confirm before pushing; `--yes` skips the prompt and
-`--no-watch` skips waiting for the run. A failed tag push deletes the local tag
-that was just created, so a failed release does not leave a half-created tag
-behind. The command reads public release state anonymously; it never needs a
-token unless the Forgejo API requires one, in which case
-`NOOKBRIDGE_API_TOKEN` is read from the environment rather than the command line.
+`--no-watch` skips waiting for the run. The command reads public release state
+anonymously; it never needs a token unless the Forgejo API requires one, in
+which case `NOOKBRIDGE_API_TOKEN` is read from the environment rather than the
+command line.
+
+The command treats every input that decides whether a guard passes as
+untrusted:
+
+- The canonical remote is authenticated by host **and** repository path for both
+  its fetch URL and its push URL, so a lookalike host or a divergent `pushurl`
+  cannot receive the tag.
+- The Forgejo and GitHub endpoints are derived from that identity. The
+  environment overrides used by the test fixtures are refused unless
+  `NOOKBRIDGE_RELEASE_TEST_MODE` is set, and even then they only relax the
+  identity check for a local filesystem remote. Never set them for a real
+  release.
+- A remote lookup that cannot be performed is an error, never evidence that a
+  tag is absent.
+- A push whose outcome cannot be determined is reported as uncertain. Only a
+  push that provably did not reach the remote deletes the local tag.
+
+The preflight gate is always `main`; there is no branch selection to configure,
+because the tag-triggered workflow accepts only a `main` preflight.
 
 ## When NookBridge reaches 1.0
 

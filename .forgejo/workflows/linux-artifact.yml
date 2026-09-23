@@ -383,6 +383,22 @@ jobs:
           # Only a candidate may be promoted, and only once.
           test "$prerelease" = "true"
 
+          # Asset gate: promotion must require the complete published asset set,
+          # not just the two files this job happens to download. An installer
+          # asset that disappeared after the candidate run must fail the
+          # promotion rather than reach the general install path.
+          node -e "
+            const fs = require('fs');
+            const release = JSON.parse(fs.readFileSync('$RELEASE_JSON'));
+            const names = new Set((release.assets || []).map((asset) => String(asset.name)));
+            const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[1]];
+            const missing = required.filter((name) => !names.has(name));
+            if (missing.length > 0) {
+              console.error('missing GitHub release asset: ' + missing.join(', '));
+              process.exit(2);
+            }
+          " "$ARTIFACT"
+
           work_dir="$(mktemp -d)"
           for asset_name in "$ARTIFACT" SHA256SUMS; do
             curl -fsSL \

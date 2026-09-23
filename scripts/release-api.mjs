@@ -83,12 +83,17 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
   const response = await fetchImpl(`${apiBase}/repos/${repository}/releases/tags/${tag}`, {
     headers,
   });
-  if (response.status === 404) return { exists: false, prerelease: false, assets: [] };
+  if (response.status === 404)
+    return { exists: false, prerelease: false, targetCommitish: "", assets: [] };
   if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`);
   const release = await response.json();
   return {
     exists: true,
     prerelease: release?.prerelease === true,
+    // The promotion workflow re-verifies the artifact against this commit, so
+    // the caller must compare it with the canonical tag commit before pushing a
+    // promotion ref that would otherwise be rejected after the fact.
+    targetCommitish: String(release?.target_commitish ?? ""),
     assets: Array.isArray(release?.assets)
       ? release.assets.map((asset) => String(asset?.name ?? "")).filter(Boolean)
       : [],
@@ -147,6 +152,7 @@ async function main(argv) {
     });
     process.stdout.write(`exists=${state.exists}\n`);
     process.stdout.write(`prerelease=${state.prerelease}\n`);
+    process.stdout.write(`target_commitish=${state.targetCommitish}\n`);
     for (const asset of state.assets) process.stdout.write(`asset=${asset}\n`);
     return;
   }
