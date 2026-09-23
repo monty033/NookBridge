@@ -33,6 +33,22 @@ Patch release hardening static glibc discovery in the release workflow.
   "nothing was published".
 - Exit non-zero when the release run succeeds but the candidate release cannot
   be verified, instead of reporting an unverified release as success.
+- Forward the `Justfile` release recipes' arguments as positional parameters
+  instead of interpolating them into the command text, so an argument cannot run
+  a command before the release command validates it.
+- Compare each release tooling module URL with `pathToFileURL(process.argv[1])`
+  so a checkout path containing a space cannot reduce the preflight gate to a
+  silent success, and refuse a preflight query that returns no data.
+- Check every configured push destination, and consult `insteadOf` and
+  `pushInsteadOf` rules directly, because `git remote get-url --push` does not
+  expand `pushInsteadOf`; accept a rule only when its replacement still names the
+  canonical repository.
+- Keep the local tag when a failed push cannot be shown to have published
+  nothing, and tell the operator to confirm the remote instead of asserting that
+  nothing was published.
+- Report `release_ready=false` when a mirror release or a promotion tag already
+  exists for the version, and re-verify installer bytes after the prerelease flag
+  is flipped.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

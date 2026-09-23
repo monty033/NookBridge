@@ -496,4 +496,19 @@ jobs:
             }
           " "$ARTIFACT"
 
+          # Re-verify the installer bytes after the flip as well: a concurrent
+          # release writer can replace same-named assets between the checks above
+          # and the PATCH, and the release API offers no transaction that would
+          # make this unnecessary.
+          for installer in install.sh install-systemd.sh verify-linux-artifact.sh; do
+            case "$installer" in
+              install.sh) installer_source='scripts/install-from-github.sh' ;;
+              *) installer_source="scripts/$installer" ;;
+            esac
+            curl -fsSL \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
+              -o "$work_dir/$installer.after"
+            cmp -s "$work_dir/$installer.after" "$installer_source"
+          done
+
           printf 'release promoted: %s\n' "$REL_TAG"

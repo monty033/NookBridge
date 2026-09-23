@@ -1,5 +1,7 @@
 /* global fetch */
 
+import { pathToFileURL } from "node:url";
+
 import { findRun } from "./release-api.mjs";
 
 const WORKFLOW_ID = "linux-artifact.yml";
@@ -43,7 +45,10 @@ export async function requireSuccessfulMainPreflight({
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `import.meta.url` percent-encodes the path while `process.argv[1]` does not, so
+// comparing them directly would silently skip the gate in a checkout whose path
+// contains a space — a no-op that exits 0, which reads as a passing check.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     await requireSuccessfulMainPreflight({
       runsUrl: process.env.PREFLIGHT_RUNS_URL,

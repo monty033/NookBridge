@@ -159,8 +159,10 @@ untrusted:
   release.
 - A remote lookup that cannot be performed is an error, never evidence that a
   tag is absent.
-- A push whose outcome cannot be determined is reported as uncertain. Only a
-  push that provably did not reach the remote deletes the local tag.
+- A push whose outcome cannot be determined is reported as uncertain. A push that
+  failed without proof that nothing reached the remote keeps the local tag and
+  tells the operator to confirm the remote state; the command does not decide for
+  them by deleting the evidence.
 - Remote-derived values are escaped before they are printed as `key=value`
   fields, so a forged newline in a run URL or an asset name cannot satisfy a
   status or asset check, and error output is redacted so no credential or raw
@@ -168,12 +170,31 @@ untrusted:
 - A remote whose fetch or push destination is changed by a Git URL rewrite rule
   (`insteadOf`/`pushInsteadOf`) is refused rather than used: git expands a
   rewrite when it reports a URL and again when the URL is used, so the configured
-  value and the reported value must agree. A `.git` path segment, an explicit
-  port, or an SSH principal other than the hosting account is likewise not the
-  canonical repository.
+  value and the reported value must agree. Every configured push destination is
+  checked, not only the first one, and the rules are consulted directly because
+  `git remote get-url --push` does not expand `pushInsteadOf`. A rule is accepted
+  only when its replacement still names the canonical repository, so a local
+  https/ssh spelling preference keeps working. A `.git` path segment in any
+  spelling, an explicit port, or an SSH principal other than the hosting account
+  is likewise not the canonical repository.
+- The `Justfile` recipes forward their arguments to the command as positional
+  parameters (`"$@"`), never interpolated into the command text, so an argument
+  cannot run before the release command validates it.
+- The command-line entry points of the release tooling compare their module URL
+  with `pathToFileURL(process.argv[1])`, because `import.meta.url` percent-encodes
+  a path while `process.argv[1]` does not: a checkout under a path containing a
+  space would otherwise run nothing and exit successfully, which reads as a passed
+  gate. A preflight query that returns no data is likewise a failure, not a match.
 - No read token is ever sent while test mode is on, and a reported candidate must
   still be a prerelease pointing at the commit that was built. An exhausted
-  run-page budget is a failed lookup, not a missing run.
+  run-page budget or an unrecognized API payload is a failed lookup, not a missing
+  run.
+- Readiness requires that nothing has been published for the version yet: an
+  existing mirror release or promotion tag makes `release_ready=false`, because
+  the tag would be rejected after it had already been created locally.
+- Promotion re-verifies the installer bytes after the prerelease flag is flipped,
+  not only before, because a release asset can be replaced between the checks and
+  the update.
 
 The preflight gate is always `main`; there is no branch selection to configure,
 because the tag-triggered workflow accepts only a `main` preflight.

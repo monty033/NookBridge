@@ -39,7 +39,9 @@ type Fixture = {
   readonly commit: string;
 };
 
-function createFixture(options: { installerVersion?: string; lockVersion?: string } = {}): Fixture {
+function createFixture(
+  options: { installerVersion?: string; lockVersion?: string; packageVersion?: string } = {},
+): Fixture {
   const root = mkdtempSync(join(tmpdir(), "nookbridge-release-"));
   fixtureRoots.push(root);
   const canonical = join(root, "canonical.git");
@@ -49,7 +51,10 @@ function createFixture(options: { installerVersion?: string; lockVersion?: strin
   git(["config", "user.email", "release-test@example.invalid"], work);
   git(["config", "user.name", "Release Test"], work);
   mkdirSync(join(work, "scripts"), { recursive: true });
-  writeFileSync(join(work, "package.json"), `${JSON.stringify({ name: "nookbridge", version })}\n`);
+  writeFileSync(
+    join(work, "package.json"),
+    `${JSON.stringify({ name: "nookbridge", version: options.packageVersion ?? version })}\n`,
+  );
   writeFileSync(
     join(work, "package-lock.json"),
     `${JSON.stringify({
@@ -117,6 +122,7 @@ type StubOptions = {
   readonly releaseStatus?: number;
   readonly releaseRedirect?: string;
   readonly fullPages?: boolean;
+  readonly runsPayload?: unknown;
 };
 
 async function startStub(options: StubOptions) {
@@ -134,6 +140,10 @@ async function startStub(options: StubOptions) {
         return;
       }
       const page = Number(url.searchParams.get("page") ?? "1");
+      if (options.runsPayload !== undefined) {
+        response.end(JSON.stringify(options.runsPayload));
+        return;
+      }
       const runs =
         options.fullPages === true || page === 1 ? (options.runsFor?.(runRequests) ?? []) : [];
       response.end(JSON.stringify({ workflow_runs: runs }));
@@ -212,6 +222,11 @@ function gitShim(): string {
     "#!/usr/bin/env bash",
     `real_git=${JSON.stringify(realGit)}`,
     'if [ "${1:-}" = "ls-remote" ] && [ -n "${NOOKBRIDGE_SHIM_FAIL_LS_REMOTE:-}" ]; then',
+    '  printf "fatal: unable to access the remote repository\\n" >&2',
+    "  exit 128",
+    "fi",
+    // A push that fails without publishing anything.
+    'if [ "${1:-}" = "push" ] && [ -n "${NOOKBRIDGE_SHIM_PUSH_FAILS:-}" ]; then',
     '  printf "fatal: unable to access the remote repository\\n" >&2',
     "  exit 128",
     "fi",
@@ -294,12 +309,13 @@ async function runReleaseApi(args: readonly string[], env: Record<string, string
         maxBuffer: 1024 * 1024,
       },
     );
-    return { code: 0, stdout: result.stdout };
+    return { code: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
-    const failure = error as { code?: number; stdout?: string };
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
     return {
       code: typeof failure.code === "number" ? failure.code : 1,
       stdout: failure.stdout ?? "",
+      stderr: failure.stderr ?? "",
     };
   }
 }
@@ -679,6 +695,7 @@ describe("release operator command", () => {
       "https://git.elsewhere.invalid:443/patrick/NookBridge.git",
       // A `.git` path segment is a different endpoint, not the same repository.
       "https://git.montycasa.net/patrick/NookBridge/.git",
+      "https://git.montycasa.net/patrick/NookBridge/.git/",
       "https://git.montycasa.net/patrick/NookBridge.git/.git",
       // A principal other than the hosting account may select another
       // destination on the same host.
@@ -1018,4 +1035,149 @@ describe("release operator command", () => {
     expect(result.stderr).toContain("cannot read Forgejo run state");
     expect(stub.requests.length).toBeGreaterThanOrEqual(1000);
   }, 60000);
+
+  it("forwards Justfile arguments as positional parameters, not as command text", () => {
+    // `just --dry-run` prints the command line it would run on stderr.
+    const result = spawnSync("just", ["--dry-run", "release-promote", "0.1.2; printf INJECTED"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+
+    expect(output).toContain('"$@"');
+    // The argument must never be interpolated into the shell line.
+    expect(output).not.toContain("INJECTED");
+    expect(readFileSync(resolve(process.cwd(), "Justfile"), "utf8")).toContain(
+      "set positional-arguments",
+    );
+  });
+
+  it("runs the release API command from a checkout path containing a space", async () => {
+    const spaced = mkdtempSync(join(tmpdir(), "nookbridge space "));
+    fixtureRoots.push(spaced);
+    mkdirSync(join(spaced, "scripts"), { recursive: true });
+    for (const name of ["release-api.mjs", "check-forgejo-preflight.mjs"]) {
+      writeFileSync(
+        join(spaced, "scripts", name),
+        readFileSync(resolve(process.cwd(), "scripts", name), "utf8"),
+      );
+    }
+
+    for (const name of ["release-api.mjs", "check-forgejo-preflight.mjs"]) {
+      const result = spawnSync("node", [join(spaced, "scripts", name), "find-run"], {
+        encoding: "utf8",
+        env: { ...process.env, RUNS_URL: "", PREFLIGHT_RUNS_URL: "" },
+      });
+      // A missing entrypoint match would exit 0 with no output, which reads as a
+      // passing gate instead of a failed one.
+      expect(result.status).not.toBe(0);
+      expect(result.stderr.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("refuses a rewrite rule that matches only a later push destination", async () => {
+    const fixture = createFixture();
+    const attacker = createAttackerRepository(fixture);
+    const canonicalUrl = "https://git.montycasa.net/patrick/NookBridge.git";
+    git(["remote", "set-url", "upstream", canonicalUrl], fixture.work);
+    git(["remote", "set-url", "--push", "upstream", canonicalUrl], fixture.work);
+    git(
+      [
+        "remote",
+        "set-url",
+        "--add",
+        "--push",
+        "upstream",
+        "ssh://git@git.montycasa.net/patrick/NookBridge.git",
+      ],
+      fixture.work,
+    );
+    // Only the second destination is rewritten.
+    git(["config", `url.${attacker}.pushInsteadOf`, "ssh://git@git.montycasa.net/"], fixture.work);
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      withoutFixtures(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("rewrite rule");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+    expect(tagPresent(attacker, tag)).toBe(false);
+  });
+
+  it("keeps the local tag when a failed push cannot be confirmed as unpublished", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(
+      ["tag", "--yes", "--no-watch"],
+      fixture,
+      stub.base,
+      { NOOKBRIDGE_SHIM_PUSH_FAILS: "1" },
+      gitShim(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not report the tag");
+    // An empty lookup is not proof that nothing was published.
+    expect(result.stderr).not.toContain("nothing was published");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+    expect(tagPresent(fixture.work, tag)).toBe(true);
+  });
+
+  it("refuses a version whose literal value carries whitespace", async () => {
+    const fixture = createFixture({ packageVersion: "0.1.2\n" });
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("cannot read the version");
+    expect(tagPresent(fixture.canonical, tag)).toBe(false);
+  });
+
+  it("treats an unrecognized API payload as a failed lookup, not as absence", async () => {
+    const stub = await startStub({ runsPayload: { error: "temporary failure" } });
+
+    const result = await runReleaseApi(["find-run"], {
+      RUNS_URL: `${stub.base}/actions/runs`,
+      EXPECT_WORKFLOW: "linux-artifact.yml",
+      EXPECT_EVENT: "push",
+      EXPECT_REF: "main",
+      EXPECT_COMMIT: "a".repeat(40),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized payload");
+  });
+
+  it("does not report readiness when a mirror release already exists", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: candidateRelease(fixture.commit),
+    });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("mirror_release=candidate-prerelease");
+    expect(result.stdout).toContain("release_ready=false");
+  });
+
+  it("does not report readiness when the promotion tag already exists", async () => {
+    const fixture = createFixture();
+    git(["tag", "-a", promoteTag, fixture.commit, "-m", `Promote ${tag}`], fixture.work);
+    git(["push", "--quiet", "upstream", `refs/tags/${promoteTag}`], fixture.work);
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)], release: null });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("release_ready=false");
+  });
 });

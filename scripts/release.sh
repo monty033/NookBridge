@@ -154,7 +154,13 @@ json_field() { # dotted path, JSON on stdin
         value = value[key];
       }
       if (typeof value !== "string" && typeof value !== "number") process.exit(2);
-      process.stdout.write(String(value));
+      const text = String(value);
+      // A version carrying whitespace or a control character is a malformed
+      // value, not a version to be trimmed: command substitution would silently
+      // remove a trailing newline and the command would tag something other than
+      // the literal repository value.
+      if (/[\s\u0000-\u001f\u007f]/.test(text)) process.exit(2);
+      process.stdout.write(text);
     });
   ' "$1"
 }
@@ -169,7 +175,10 @@ json_field() { # dotted path, JSON on stdin
 # anything reaches a log.
 redact() {
   printf '%s' "$1" \
-    | sed -e 's#\(://\)[^/@[:space:]]*@#\1#' -e 's#[?#][^[:space:]]*##g' -e 's#[[:cntrl:]]# #g'
+    | sed -e 's#\(://\)[^[:space:]]*@#\1#g' \
+      -e 's#[?#][^[:space:]]*##g' \
+      -e 's#^[^/[:space:]]*@##' \
+      -e 's#[[:cntrl:]]# #g'
 }
 
 # Terminal controls can also arrive through repository content (a commit
@@ -198,11 +207,13 @@ git_error_text() { # $1 = file holding captured stderr
 # it is rejected rather than normalized away.
 normalize_repo_path() { # $1 = path; prints the normalized path, fails when malformed
   local path=$1
-  case "$path" in
-    */.git|.git) return 1 ;;
-  esac
+  # Trim one trailing slash first, so that `NookBridge/.git/` is still visible as
+  # a `.git` segment rather than being normalized into the canonical path.
   case "$path" in
     */) path=${path%/} ;;
+  esac
+  case "$path" in
+    */.git|.git) return 1 ;;
   esac
   case "$path" in
     *.git) path=${path%.git} ;;
@@ -341,35 +352,101 @@ resolve_canonical_remote() {
   resolve_remote_urls "$name"
 }
 
+# A rewrite rule is only acceptable when its replacement still names the
+# canonical repository, so a local https/ssh spelling preference keeps working
+# while a rule that points somewhere else is refused.
+rewrite_base_ok() { # $1 = the replacement base of a rewrite rule
+  local base=$1
+  case "$base" in
+    */) canonical_url_ok "${base}${CANONICAL_PATH}" ;;
+    *) canonical_url_ok "$base" ;;
+  esac
+}
+
+# Print the prefix of the first rewrite rule of the given kind that applies to a
+# URL. `git remote get-url` expands `insteadOf` but not `pushInsteadOf`, so the
+# rules themselves have to be consulted to know what a push will really reach.
+matching_rewrite_rule() { # $1 = url, $2 = rule key pattern
+  local url=$1 pattern=$2 line key base prefix
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%[[:space:]]*}
+    prefix=${line#*[[:space:]]}
+    [ -n "$prefix" ] || continue
+    case "$url" in
+      "$prefix"*) ;;
+      *) continue ;;
+    esac
+    base=${key#url.}
+    base=${base%.insteadof}
+    base=${base%.pushinsteadof}
+    rewrite_base_ok "$base" && continue
+    printf '%s' "$prefix"
+    return 0
+  done < <(git config --get-regexp "$pattern" 2>/dev/null || true)
+  return 1
+}
+
+# A URL rewrite rule (`insteadOf`/`pushInsteadOf`) makes git expand a reported URL
+# and expand it again when that URL is used, so a rule can send the fetch or the
+# push somewhere other than the value that was validated. Every configured URL, in
+# every configuration scope, must equal the URL git reports for it, and no rule
+# may redirect it. This is re-checked immediately before the network operations,
+# because the rules can be edited while the command waits for confirmation.
+check_url_rewrites() { # $1 = remote name
+  local name=$1 url raw_url rule index
+  local -a raw_push_list=()
+  local -a expanded_push_list=()
+  raw_url=$(git config --get-all "remote.$name.url" 2>/dev/null | head -n 1 || true)
+  [ -n "$raw_url" ] || fail "remote $name has no configured fetch URL"
+  [ "$raw_url" = "$(git remote get-url "$name" 2>/dev/null || true)" ] \
+    || fail "a Git URL rewrite rule changes the fetch destination of remote $name; refusing to fetch or push to a URL that differs from its configured value"
+  while IFS= read -r url; do
+    if [ -n "$url" ]; then raw_push_list+=("$url"); fi
+  done < <(git config --get-all "remote.$name.pushurl" 2>/dev/null || true)
+  while IFS= read -r url; do
+    if [ -n "$url" ]; then expanded_push_list+=("$url"); fi
+  done < <(git remote get-url --all --push "$name" 2>/dev/null || true)
+  if [ "${#raw_push_list[@]}" -eq 0 ]; then
+    [ "${#expanded_push_list[@]}" -eq 1 ] && [ "${expanded_push_list[0]}" = "$raw_url" ] \
+      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
+  else
+    # Every configured push destination is compared, not just the first one: git
+    # pushes to all of them.
+    [ "${#raw_push_list[@]}" -eq "${#expanded_push_list[@]}" ] \
+      || fail "the push destinations of remote $name do not match their configured values; refusing"
+    for index in "${!raw_push_list[@]}"; do
+      [ "${raw_push_list[$index]}" = "${expanded_push_list[$index]}" ] \
+        || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
+    done
+  fi
+  # Rule scan: `git remote get-url --push` does not expand `pushInsteadOf`, so the
+  # push URLs are checked against the rules directly.
+  if rule=$(matching_rewrite_rule "$raw_url" '^url\..*\.(insteadof|pushinsteadof)$'); then
+    fail "a Git URL rewrite rule matching '$rule' redirects the fetch destination of remote $name; refusing"
+  fi
+  if [ "${#raw_push_list[@]}" -eq 0 ]; then
+    if rule=$(matching_rewrite_rule "$raw_url" '^url\..*\.pushinsteadof$'); then
+      fail "a Git URL rewrite rule matching '$rule' redirects the push destination of remote $name; refusing"
+    fi
+    return 0
+  fi
+  for index in "${!raw_push_list[@]}"; do
+    if rule=$(matching_rewrite_rule "${raw_push_list[$index]}" '^url\..*\.(insteadof|pushinsteadof)$'); then
+      fail "a Git URL rewrite rule matching '$rule' redirects a push destination of remote $name; refusing"
+    fi
+  done
+}
+
 # Validate the fetch URL and every configured push URL of the chosen remote, and
 # keep them by value so that nothing later re-reads mutable configuration.
-#
-# Comparing the configured value with the URL git reports is what detects an
-# `insteadOf`/`pushInsteadOf` rule: git expands a rewrite when it reports a URL
-# and expands it again when the URL is used, so a chained rule would otherwise
-# turn a validated destination into a different one at fetch or push time.
 resolve_remote_urls() { # $1 = remote name
-  local name=$1 url raw_url raw_push expanded_push
+  local name=$1 url
   canonical_fetch_url=$(git remote get-url "$name" 2>/dev/null || true)
   [ -n "$canonical_fetch_url" ] || fail "remote $name has no fetch URL"
   remote_url_ok "$canonical_fetch_url" \
     || fail "remote $name does not fetch from $CANONICAL_HOST/$CANONICAL_PATH: $(redact "$canonical_fetch_url")"
-  # `git config --get-all` exits non-zero for an absent key, and under
-  # `set -o pipefail` that would end the command silently rather than fail a
-  # guard, so both reads tolerate a missing key.
-  raw_url=$(git config --get-all "remote.$name.url" 2>/dev/null | head -n 1 || true)
-  [ -n "$raw_url" ] || fail "remote $name has no configured fetch URL"
-  [ "$raw_url" = "$canonical_fetch_url" ] \
-    || fail "a Git URL rewrite rule changes the destination of remote $name; refusing to fetch or push to a URL that differs from its configured value"
-  raw_push=$(git config --get-all "remote.$name.pushurl" 2>/dev/null | head -n 1 || true)
-  expanded_push=$(git remote get-url --push "$name" 2>/dev/null || true)
-  if [ -n "$raw_push" ]; then
-    [ "$raw_push" = "$expanded_push" ] \
-      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
-  else
-    [ "$expanded_push" = "$raw_url" ] \
-      || fail "a Git URL rewrite rule changes the push destination of remote $name; refusing"
-  fi
+  check_url_rewrites "$name"
   canonical_push_urls=''
   while IFS= read -r url; do
     [ -n "$url" ] || continue
@@ -525,6 +602,9 @@ resolve_release_target() {
   runs_url=$(forgejo_runs_url)
   mirror_api_base=$(resolve_mirror_api_base)
   mirror_repository=$(resolve_mirror_repository)
+  # Re-check immediately before the fetch: the rewrite rules can be edited while
+  # the command is running.
+  check_url_rewrites "$canonical_remote"
   git fetch --quiet --no-tags "$canonical_fetch_url" "$RELEASE_BRANCH" 2>"$work_dir/fetch-error.txt" \
     || fail "cannot fetch $RELEASE_BRANCH from $canonical_remote: $(git_error_text "$work_dir/fetch-error.txt")"
   if ! release_commit=$(git rev-parse --verify --quiet FETCH_HEAD); then
@@ -581,7 +661,12 @@ require_tag_absent() { # $1 = tag
 require_main_preflight() { # $1 = commit; the gate is always the release branch
   collect_run "$RELEASE_BRANCH" "$1" success
   case $run_code in
-    0) return 0 ;;
+    0)
+      # A query that produced no data must not read as a successful preflight.
+      [ -n "$run_output" ] \
+        || fail "the Forgejo run query returned no data; refusing to treat it as a successful preflight"
+      return 0
+      ;;
     2)
       fail "no successful $RELEASE_BRANCH runner preflight for $1; wait for it before tagging"
       ;;
@@ -615,6 +700,9 @@ confirm() {
 # after validation cannot redirect the tag.
 publish_tag() { # $1 = tag, $2 = commit, $3 = message
   local tag=$1 commit=$2 message=$3 state url failed=false
+  # The last check before the network write: a rewrite rule added while the
+  # command waited at the confirmation prompt must not redirect the tag.
+  check_url_rewrites "$canonical_remote"
   git tag -a "$tag" "$commit" -m "$message" || fail "cannot create tag $tag"
   while IFS= read -r url; do
     [ -n "$url" ] || continue
@@ -634,8 +722,11 @@ publish_tag() { # $1 = tag, $2 = commit, $3 = message
       fail "pushing $tag reported an error but the canonical tag now exists at ${state#present }; the release may already be running — inspect the run before taking any further action"
       ;;
   esac
-  git tag -d "$tag" >/dev/null 2>&1 || true
-  fail "pushing $tag failed and $canonical_remote has no such tag; the local tag was removed and nothing was published"
+  # An empty lookup is not proof that nothing was published: a server can accept
+  # the ref and then lose the connection, and fetch and push can observe
+  # different replicas. The local tag is kept so the version cannot be silently
+  # re-tagged; the operator decides, having checked.
+  fail "pushing $tag failed and $canonical_remote does not report the tag; confirm whether $tag exists on the remote, then delete the local tag with 'git tag -d $tag' if it does not"
 }
 
 watch_release_run() { # $1 = ref, $2 = commit, $3 = description
@@ -779,8 +870,11 @@ command_status() {
     note "mirror_release=unreachable"
   fi
 
+  # Ready to release means every gate is clear *and* nothing has been published
+  # for this version yet: an existing mirror release or promotion tag means the
+  # tag would be rejected after it had already been created.
   if [ -z "$problems" ] && [ "$preflight" = success ] && [ "$release_tag_state" = absent ] \
-    && [ "$mirror_state" != unreachable ]; then
+    && [ "$promote_tag_state" = absent ] && [ "$mirror_state" = absent ]; then
     note "release_ready=true"
   else
     note "release_ready=false"

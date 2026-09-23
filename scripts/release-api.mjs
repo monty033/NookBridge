@@ -1,5 +1,7 @@
 /* global fetch, URL */
 
+import { pathToFileURL } from "node:url";
+
 /**
  * Release-state queries shared by the tag-triggered release gate and the
  * operator release command.
@@ -46,6 +48,22 @@ export function runEntries(payload) {
 }
 
 /**
+ * A 200 response that carries no recognisable run list is an unreadable API, not
+ * an empty history: treating `{"error": ...}` as "no runs" is how a proxy or
+ * version mismatch becomes a missing-preflight report.
+ */
+export function assertRunPayload(payload) {
+  if (
+    Array.isArray(payload) ||
+    Array.isArray(payload?.workflow_runs) ||
+    Array.isArray(payload?.runs)
+  ) {
+    return;
+  }
+  throw new Error("Forgejo runs API returned an unrecognized payload");
+}
+
+/**
  * Match a Forgejo Actions run against the exact expected identity. Every
  * supplied field must agree; omitted fields are not constrained. The caller is
  * expected to supply enough fields to identify one run: for a release tag the
@@ -87,7 +105,9 @@ export async function findRun({ runsUrl, expected, token, fetchImpl = fetch }) {
       redirect: "manual",
     });
     if (!response.ok) throw new Error(`Forgejo runs API returned HTTP ${response.status}`);
-    const entries = runEntries(await response.json());
+    const payload = await response.json();
+    assertRunPayload(payload);
+    const entries = runEntries(payload);
     const match = entries.find((run) => matchesRun(run, expected));
     if (match) return match;
     if (entries.length < PAGE_SIZE) return undefined;
@@ -188,7 +208,10 @@ async function main(argv) {
   throw new Error("unknown release API command");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `import.meta.url` percent-encodes the path while `process.argv[1]` does not, so
+// comparing them directly would silently skip this command in a checkout whose
+// path contains a space — a no-op that exits 0, which reads as success.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((error) => {
     console.error(error instanceof Error ? error.message : "release API query failed");
     process.exitCode = 1;

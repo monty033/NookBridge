@@ -525,6 +525,9 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("malformed promotion version");
     // The promoted release must still be the verified one after the flip.
     expect(raw).toContain('test "$target_after" = "$canonical_tag_commit"');
+    // Installer bytes are re-verified after the flip as well, because an asset
+    // can be replaced between the pre-flip checks and the PATCH.
+    expect(raw).toContain('"$work_dir/$installer.after"');
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
