@@ -125,7 +125,7 @@ is bypassed by hand.
   succeeded but whose candidate release cannot be read or is incomplete exits
   non-zero, so automation cannot read an unverified release as success.
 - `release.sh promote` refuses to run unless the tag exists, the mirror release
-  is still a prerelease candidate at that commit with the complete five-asset
+  is still a prerelease candidate at that commit with exactly the five-asset
   set, the release's `target_commitish` equals the canonical tag commit, and no
   promotion tag exists. It then pushes `promote-v<VERSION>` and waits for the
   promotion run. The promotion job itself validates the promotion ref's version
@@ -192,9 +192,25 @@ untrusted:
 - Readiness requires that nothing has been published for the version yet: an
   existing mirror release or promotion tag makes `release_ready=false`, because
   the tag would be rejected after it had already been created locally.
-- Promotion re-verifies the installer bytes after the prerelease flag is flipped,
-  not only before, because a release asset can be replaced between the checks and
-  the update.
+- A push is verified against the host's own record of the tag, read through the
+  API rather than through git: a `pushInsteadOf` rule can redirect a push even
+  when the destination is given as an explicit URL, and a rule added after the
+  last pre-push check cannot be observed beforehand, so a push that reports
+  success is only accepted once the canonical ref is confirmed to name the object
+  that was pushed. Local git configuration cannot redirect an HTTPS request to the
+  canonical API.
+- A canonical URL may not carry HTTPS userinfo: the value is passed to `git` as an
+  argument, where a credential is readable by any local process, and the canonical
+  remote is addressed anonymously.
+- The release version is SemVer (`major.minor.patch`, optional `-prerelease`, no
+  leading zeros). Build metadata (`+`) is refused: it is legal SemVer but it cannot
+  survive asset naming and query-string handling unchanged. Asset names are
+  percent-encoded where they become query values.
+- A release carries exactly the expected assets. A missing asset and an unexpected
+  asset both fail the gate, before and after the promotion flip.
+- Promotion re-verifies the artifact, its checksum file, and the installers after
+  the prerelease flag is flipped, not only before, because a release asset can be
+  replaced between the checks and the update.
 
 The preflight gate is always `main`; there is no branch selection to configure,
 because the tag-triggered workflow accepts only a `main` preflight.

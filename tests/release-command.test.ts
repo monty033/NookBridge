@@ -45,6 +45,7 @@ function createFixture(
   const root = mkdtempSync(join(tmpdir(), "nookbridge-release-"));
   fixtureRoots.push(root);
   const canonical = join(root, "canonical.git");
+  latestCanonicalRepo = canonical;
   const work = join(root, "work");
   git(["init", "--bare", "--initial-branch=main", canonical], root);
   git(["init", "--initial-branch=main", work], root);
@@ -123,7 +124,14 @@ type StubOptions = {
   readonly releaseRedirect?: string;
   readonly fullPages?: boolean;
   readonly runsPayload?: unknown;
+  readonly tagRefRepo?: string;
 };
+
+// The most recently created fixture's canonical repository. The stub answers tag
+// ref queries from it by default, so a test that pushes through the real fixture
+// sees the tag it actually pushed; a test that needs a different answer passes
+// `tagRefRepo` explicitly.
+let latestCanonicalRepo = "";
 
 async function startStub(options: StubOptions) {
   let runRequests = 0;
@@ -132,6 +140,34 @@ async function startStub(options: StubOptions) {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     requests.push(`${url.pathname}|${request.headers.authorization ?? "anonymous"}`);
     response.setHeader("content-type", "application/json");
+    if (url.pathname.includes("/git/refs/tags/")) {
+      // The tag ref is read from the canonical repository itself, so the stub
+      // reports what the push actually accomplished: a redirect that sent the tag
+      // elsewhere is visible here as a missing tag.
+      const wanted = decodeURIComponent(url.pathname.split("/git/refs/tags/")[1] ?? "");
+      const repository = options.tagRefRepo ?? latestCanonicalRepo;
+      let sha = "";
+      if (repository) {
+        try {
+          sha = execFileSync(
+            "git",
+            [`--git-dir=${repository}`, "rev-parse", `refs/tags/${wanted}`],
+            {
+              encoding: "utf8",
+            },
+          ).trim();
+        } catch {
+          sha = "";
+        }
+      }
+      if (!sha) {
+        response.statusCode = 404;
+        response.end(JSON.stringify({ message: "tag not found" }));
+        return;
+      }
+      response.end(JSON.stringify([{ ref: `refs/tags/${wanted}`, object: { type: "tag", sha } }]));
+      return;
+    }
     if (url.pathname.endsWith("/actions/runs")) {
       runRequests += 1;
       if (options.runsStatus !== undefined && options.runsStatus !== 200) {
@@ -693,6 +729,12 @@ describe("release operator command", () => {
       "https://git.montycasa.net/openclaw/NookBridge.git",
       "https://user:pw@attacker.invalid/patrick/NookBridge.git",
       "https://git.elsewhere.invalid:443/patrick/NookBridge.git",
+      // HTTPS userinfo is a credential that would be passed to `git` as an
+      // argument. The host and path are canonical here, so only the userinfo
+      // check can refuse these.
+      "https://user:pw@git.montycasa.net/patrick/NookBridge.git",
+      "https://git:token@git.montycasa.net/patrick/NookBridge.git",
+      "https://git:token@git.montycasa.net/patrick/NookBridge",
       // A `.git` path segment is a different endpoint, not the same repository.
       "https://git.montycasa.net/patrick/NookBridge/.git",
       "https://git.montycasa.net/patrick/NookBridge/.git/",
@@ -1179,5 +1221,65 @@ describe("release operator command", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("release_ready=false");
+  });
+
+  it("refuses to treat a push as published when the canonical repository has no tag", async () => {
+    const fixture = createFixture();
+    // The push lands somewhere other than the canonical repository, which is what
+    // a rewrite rule added after the last pre-push check produces.
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      tagRefRepo: join(fixture.root, "elsewhere.git"),
+    });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("does not have");
+    expect(result.stdout).not.toContain("Pushed");
+  });
+
+  it("refuses a version that is not SemVer", async () => {
+    for (const invalid of ["foo", "1.2", "01.2.3", "1.2.3-", "1.2.3+build", "1.2.3.4"]) {
+      const fixture = createFixture();
+      const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+      const result = await runRelease(["promote", invalid], fixture, stub.base);
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("invalid version");
+    }
+  });
+
+  it("accepts a SemVer version with a prerelease suffix", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["promote", "0.2.0-rc.1"], fixture, stub.base);
+
+    // The version is accepted; the command then fails because there is no such
+    // candidate release, so only the version grammar is asserted here.
+    expect(result.stderr).not.toContain("invalid version");
+  });
+
+  it("refuses to promote a candidate release that carries an unexpected asset", async () => {
+    const fixture = createFixture();
+    // The canonical tag must exist before the asset gate is reached.
+    git(["tag", "-a", tag, fixture.commit, "-m", `Release ${tag}`], fixture.work);
+    git(["push", "--quiet", "upstream", `refs/tags/${tag}`], fixture.work);
+    const release = candidateRelease(fixture.commit);
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: {
+        ...release,
+        assets: [...(release.assets as { name: string }[]), { name: "extra-tool.sh" }],
+      },
+    });
+
+    const result = await runRelease(["promote", version], fixture, stub.base);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("unexpected");
+    expect(tagPresent(fixture.canonical, promoteTag)).toBe(false);
   });
 });

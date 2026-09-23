@@ -233,7 +233,15 @@ normalize_repo_path() { # $1 = path; prints the normalized path, fails when malf
 canonical_url_ok() {
   local url=$1 rest host path normalized user=''
   case "$url" in
-    https://*) rest=${url#https://} ;;
+    https://*)
+      rest=${url#https://}
+      # HTTPS userinfo is a credential. It would be passed to `git fetch`,
+      # `ls-remote`, and `push` as a command argument, where it is readable by any
+      # local process, and the canonical remote is addressed anonymously.
+      case "${rest%%/*}" in
+        *@*) return 1 ;;
+      esac
+      ;;
     ssh://*)
       rest=${url#ssh://}
       # An ssh URL may name a principal. A principal other than the hosting
@@ -261,7 +269,8 @@ canonical_url_ok() {
       ;;
     *) return 1 ;;
   esac
-  rest=${rest#*@}
+  # The remaining branches have already consumed any userinfo they accept: a
+  # silent strip here is what let an HTTPS credential ride along to `git`.
   host=${rest%%/*}
   path=${rest#*/}
   # A port in the authority means a service other than the canonical one.
@@ -459,14 +468,16 @@ resolve_remote_urls() { # $1 = remote name
   fi
 }
 
-forgejo_runs_url() {
-  local base
+forgejo_api_base() {
   if [ "$test_mode" = true ] && [ -n "${NOOKBRIDGE_FORGEJO_API_BASE:-}" ]; then
-    base=$NOOKBRIDGE_FORGEJO_API_BASE
-  else
-    base="https://$CANONICAL_HOST/api/v1/repos/$CANONICAL_PATH"
+    printf '%s' "$NOOKBRIDGE_FORGEJO_API_BASE"
+    return 0
   fi
-  printf '%s/actions/runs' "$base"
+  printf '%s' "https://$CANONICAL_HOST/api/v1/repos/$CANONICAL_PATH"
+}
+
+forgejo_runs_url() {
+  printf '%s/actions/runs' "$(forgejo_api_base)"
 }
 
 resolve_mirror_api_base() {
@@ -513,6 +524,37 @@ github_release_state() { # $1 = tag
   RELEASE_TAG="$1" \
   GITHUB_READ_TOKEN="$(usable_token "${NOOKBRIDGE_GITHUB_READ_TOKEN:-}")" \
     node "$script_dir/release-api.mjs" release-state
+}
+
+canonical_tag_ref() { # $1 = tag; prints exists= and sha= from the host's record
+  FORGEJO_API_BASE="$(forgejo_api_base)" \
+  FORGEJO_REPOSITORY="$CANONICAL_PATH" \
+  RELEASE_TAG="$1" \
+  RUNS_TOKEN="$api_token" \
+    node "$script_dir/release-api.mjs" tag-ref
+}
+
+# A push is not evidence that the tag arrived where it was meant to go: a rewrite
+# rule can redirect a push even when the destination is given as an explicit URL,
+# and such a rule can be added after the last pre-push check. The host's own record
+# of the ref is therefore read back through the API, which local git configuration
+# cannot redirect, and compared with the object that was pushed.
+verify_pushed_tag() { # $1 = tag, $2 = released commit
+  local tag=$1 commit=$2 output exists sha local_tag
+  output=$(canonical_tag_ref "$tag") \
+    || fail "pushed $tag but the canonical tag could not be read back through the host API; confirm $tag on $canonical_remote before treating the release as started"
+  exists=$(field_of "$output" exists)
+  sha=$(field_of "$output" sha)
+  [ "$exists" = true ] \
+    || fail "the push reported success but the canonical repository does not have $tag; the tag was not published where it was intended, so do not treat the release as started"
+  local_tag=$(git rev-parse "refs/tags/$tag") \
+    || fail "cannot resolve the local tag $tag"
+  # The host reports the tag object for an annotated tag and the commit for a
+  # lightweight one, and both are the object that was pushed.
+  case "$sha" in
+    "$local_tag"|"$commit") return 0 ;;
+  esac
+  fail "the canonical $tag resolves to ${sha:-an unreadable object}, not to the object that was pushed; do not treat the release as started"
 }
 
 # Print "absent" or "present <sha>" for a canonical tag. A lookup that cannot be
@@ -571,12 +613,77 @@ missing_assets() { # $1 = release state text, $2 = version
   done < <(expected_asset_names "$2")
 }
 
+# The release is documented as carrying exactly the expected assets, so an extra
+# one is a finding rather than noise: it means the release was written by something
+# other than this workflow, and the promotion gate must not bless it.
+unexpected_assets() { # $1 = release state text, $2 = version
+  local name expected
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    expected=false
+    while IFS= read -r candidate; do
+      if [ "$candidate" = "$name" ]; then expected=true; fi
+    done < <(expected_asset_names "$2")
+    [ "$expected" = true ] || printf '%s\n' "$name"
+  done < <(printf '%s\n' "$1" | sed -n 's/^asset=//p')
+}
+
 ##########
 # Guards
 ##########
 
+# A numeric component is `0` or starts with a non-zero digit: `01.2.3` is not
+# SemVer, and the version becomes part of a tag name, an asset name, and a URL.
+version_number_ok() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    0) return 0 ;;
+    0*) return 1 ;;
+  esac
+  return 0
+}
+
+# The release policy is SemVer: `major.minor.patch` with an optional `-prerelease`.
+# A filename-safe grammar accepts `foo`, `1.2`, `01.2.3`, and `1.2.3-`, all of
+# which would publish a tag the policy does not allow. Build metadata (`+`) is
+# rejected as well: it is a legal SemVer version but it cannot survive the asset
+# naming and query-string handling in the publishing workflow unchanged.
 valid_version() {
-  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]
+  local version=$1 core prerelease major rest minor patch
+  [ -n "$version" ] || return 1
+  case "$version" in
+    *+*) return 1 ;;
+  esac
+  case "$version" in
+    *-*) core=${version%%-*}; prerelease=${version#*-} ;;
+    *) core=$version; prerelease='' ;;
+  esac
+  case "$core" in
+    *.*.*) ;;
+    *) return 1 ;;
+  esac
+  major=${core%%.*}
+  rest=${core#*.}
+  minor=${rest%%.*}
+  patch=${rest#*.}
+  case "$patch" in
+    *.*) return 1 ;;
+  esac
+  version_number_ok "$major" || return 1
+  version_number_ok "$minor" || return 1
+  version_number_ok "$patch" || return 1
+  if [ -n "$prerelease" ]; then
+    case "$prerelease" in
+      *[!0-9A-Za-z.-]*|.*|*.|*..*|*-) return 1 ;;
+    esac
+  else
+    # A trailing `-` with nothing after it is not a prerelease, and `1.2.3-` is
+    # not a version.
+    case "$version" in
+      *-) return 1 ;;
+    esac
+  fi
+  return 0
 }
 
 validate_watch_settings() {
@@ -711,6 +818,10 @@ publish_tag() { # $1 = tag, $2 = commit, $3 = message
     fi
   done <<< "$canonical_push_urls"
   if [ "$failed" = false ]; then
+    # A push that reported success is verified against the host's own record: the
+    # destination can have been rewritten by local configuration, and a redirect
+    # produces a successful push that left the canonical repository untouched.
+    verify_pushed_tag "$tag" "$commit"
     note "Pushed $tag."
     return 0
   fi
@@ -794,6 +905,12 @@ report_candidate() { # $1 = version
     note "Release $tag is missing assets:"
     printf '%s\n' "$missing"
     fail "the candidate release for $tag is incomplete"
+  fi
+  extra=$(unexpected_assets "$state" "$1")
+  if [ -n "$extra" ]; then
+    note "Release $tag carries unexpected assets:"
+    printf '%s\n' "$extra"
+    fail "the candidate release for $tag was not written by this release process"
   fi
   note "Candidate $tag has all five assets:"
   note "  https://github.com/$mirror_repository/releases/tag/$tag"
@@ -931,6 +1048,9 @@ command_promote() {
   missing=$(missing_assets "$state" "$version")
   [ -z "$missing" ] \
     || fail "$tag is missing release assets: $(printf '%s' "$missing" | tr '\n' ' ')"
+  extra=$(unexpected_assets "$state" "$version")
+  [ -z "$extra" ] \
+    || fail "$tag carries unexpected release assets: $(printf '%s' "$extra" | tr '\n' ' ')"
 
   # The promotion workflow re-verifies the artifact against the release's own
   # target commit, so pushing the promotion ref at a different commit is a

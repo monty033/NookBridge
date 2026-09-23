@@ -149,6 +149,33 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
   };
 }
 
+/**
+ * Read a tag ref from the canonical host. This exists because a push cannot be
+ * verified by asking git: a rewrite rule in the local configuration can redirect
+ * a `git push` even when it is given an explicit URL, and a rule added between
+ * the last check and the push cannot be observed beforehand. An HTTPS request to
+ * the host's own API is not redirected by local git configuration, so the host's
+ * record of the tag is the only evidence that the tag is where it was meant to
+ * go. A missing tag is a normal answer; an unreadable one is an error.
+ */
+export async function tagRefState({ apiBase, repository, tag, token, fetchImpl = fetch }) {
+  if (!apiBase || !repository || !tag) throw new Error("tag ref query is missing configuration");
+  const response = await fetchImpl(
+    `${apiBase}/repos/${repository}/git/refs/tags/${encodeURIComponent(tag)}`,
+    { headers: requestHeaders(token), redirect: "manual" },
+  );
+  if (response.status === 404) return { exists: false, sha: "" };
+  if (!response.ok) throw new Error(`Forgejo refs API returned HTTP ${response.status}`);
+  const payload = await response.json();
+  const entries = Array.isArray(payload) ? payload : [payload];
+  // The endpoint answers a prefix query, so the exact ref must be selected rather
+  // than assumed: `v0.1.2` also matches `v0.1.20`.
+  const wanted = `refs/tags/${tag}`;
+  const match = entries.find((entry) => entry?.ref === wanted);
+  if (!match) return { exists: false, sha: "" };
+  return { exists: true, sha: sanitize(match?.object?.sha ?? "", 64) };
+}
+
 function requiredEnv(name) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
@@ -190,6 +217,17 @@ async function main(argv) {
       return;
     }
     printRun(run);
+    return;
+  }
+  if (command === "tag-ref") {
+    const state = await tagRefState({
+      apiBase: requiredEnv("FORGEJO_API_BASE"),
+      repository: requiredEnv("FORGEJO_REPOSITORY"),
+      tag: requiredEnv("RELEASE_TAG"),
+      token: process.env.RUNS_TOKEN,
+    });
+    process.stdout.write(`exists=${state.exists}\n`);
+    if (state.exists) process.stdout.write(`sha=${state.sha}\n`);
     return;
   }
   if (command === "release-state") {

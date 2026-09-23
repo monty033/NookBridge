@@ -527,7 +527,16 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain('test "$target_after" = "$canonical_tag_commit"');
     // Installer bytes are re-verified after the flip as well, because an asset
     // can be replaced between the pre-flip checks and the PATCH.
-    expect(raw).toContain('"$work_dir/$installer.after"');
+    expect(raw).toContain('"$after_dir/$installer"');
+    // The artifact and its checksum file are re-verified too, so the promoted
+    // release is not verified only in part.
+    expect(raw).toContain('--checksum-file "$after_dir/SHA256SUMS"');
+    // The asset set must be exactly the expected one, before and after the flip.
+    expect(raw).toContain("unexpected GitHub release asset");
+    // Asset names become query-string values and are encoded, not interpolated.
+    expect(raw).toContain("encoded_name=");
+    // The promotion version must be SemVer, not merely filename-safe.
+    expect(raw).toContain("*[!0-9A-Za-z.-]*|*+*|*.|*-|.*)");
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {

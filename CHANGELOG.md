@@ -49,6 +49,16 @@ Patch release hardening static glibc discovery in the release workflow.
 - Report `release_ready=false` when a mirror release or a promotion tag already
   exists for the version, and re-verify installer bytes after the prerelease flag
   is flipped.
+- Refuse a canonical remote that carries HTTPS userinfo, so a credential cannot
+  reach `git` as a command argument.
+- Verify a successful tag push against the host's own record of the ref, read
+  through the API, because a `pushInsteadOf` rule can redirect a push even when it
+  is given an explicit URL and the rule can be added after the last pre-push check.
+- Validate the release version as SemVer rather than as a filename-safe token, and
+  refuse build metadata (`+`), which cannot survive asset naming and query-string
+  handling unchanged; percent-encode asset names where they become query values.
+- Require exactly the expected release assets, before and after the promotion flip,
+  and re-verify the artifact and its checksum file after the flip as well.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.

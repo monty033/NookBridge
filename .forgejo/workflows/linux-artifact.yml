@@ -314,10 +314,13 @@ jobs:
             if [ -n "$asset_id" ]; then
               curl -fsS -X DELETE -H "$AUTH_HEADER" "$API/releases/assets/$asset_id" >/dev/null
             fi
+            # The asset name becomes a query-string value, so it is encoded rather
+            # than interpolated: a `+` would otherwise be read as a space.
+            encoded_name="$(ASSET_NAME="$asset_name" node -e 'process.stdout.write(encodeURIComponent(process.env.ASSET_NAME))')"
             curl -fsS -X POST \
               -H "$AUTH_HEADER" -H 'Content-Type: application/octet-stream' \
               --data-binary "@$asset_path" \
-              "$upload_base?name=$asset_name" >/dev/null
+              "$upload_base?name=$encoded_name" >/dev/null
           done
 
           curl -fsS -H "$AUTH_HEADER" -H 'Accept: application/vnd.github+json' \
@@ -334,6 +337,10 @@ jobs:
           const actual = new Set(JSON.parse(fs.readFileSync(process.env.RELEASE_ASSETS_JSON)).map((asset) => asset.name));
           for (const name of required) {
             if (!actual.has(name)) throw new Error(`missing GitHub release asset: ${name}`);
+          }
+          const extra = [...actual].filter((name) => !required.has(name));
+          if (extra.length > 0) {
+            throw new Error(`unexpected GitHub release asset: ${extra.join(', ')}`);
           }
           NODE
           printf 'GitHub release published: %s\n' "$RELEASE_TAG"
@@ -384,12 +391,38 @@ jobs:
               exit 1
               ;;
           esac
+          # The version must be SemVer: the release policy is SemVer, and the
+          # version is interpolated into API and download paths and into asset
+          # names, so a filename-safe grammar (`foo`, `1.2`, `01.2.3`, `1.2.3-`,
+          # `1.2.3+build`) is not strict enough to keep the tags it refers to and
+          # the names it builds in agreement.
           case "$VERSION" in
-            ''|*[!0-9A-Za-z._+-]*)
+            *[!0-9A-Za-z.-]*|*+*|*.|*-|.*)
               printf 'malformed promotion version: %s\n' "$VERSION" >&2
               exit 1
               ;;
           esac
+          case "$VERSION" in
+            *.*.*-*) core="${VERSION%%-*}"; pre="${VERSION#*-}" ;;
+            *.*.*) core="$VERSION"; pre='' ;;
+            *)
+              printf 'malformed promotion version: %s\n' "$VERSION" >&2
+              exit 1
+              ;;
+          esac
+          major="${core%%.*}"
+          rest="${core#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          case "$patch" in *.*) printf 'malformed promotion version: %s\n' "$VERSION" >&2; exit 1 ;; esac
+          for component in "$major" "$minor" "$patch"; do
+            case "$component" in
+              ''|*[!0-9]*|0*[0-9]*)
+                printf 'malformed promotion version: %s\n' "$VERSION" >&2
+                exit 1
+                ;;
+            esac
+          done
           test "${#VERSION}" -le 64
 
           # The commit this ref points at, captured before the canonical tag is
@@ -425,7 +458,9 @@ jobs:
           # Asset gate: promotion must require the complete published asset set,
           # not just the two files this job happens to download. An installer
           # asset that disappeared after the candidate run must fail the
-          # promotion rather than reach the general install path.
+          # promotion rather than reach the general install path. The set must be
+          # exactly the expected one: an extra asset means the release was written
+          # by something other than this workflow.
           node -e "
             const fs = require('fs');
             const release = JSON.parse(fs.readFileSync('$RELEASE_JSON'));
@@ -434,6 +469,11 @@ jobs:
             const missing = required.filter((name) => !names.has(name));
             if (missing.length > 0) {
               console.error('missing GitHub release asset: ' + missing.join(', '));
+              process.exit(2);
+            }
+            const extra = [...names].filter((name) => !required.includes(name));
+            if (extra.length > 0) {
+              console.error('unexpected GitHub release asset: ' + extra.join(', '));
               process.exit(2);
             }
           " "$ARTIFACT"
@@ -494,12 +534,19 @@ jobs:
               console.error('missing GitHub release asset after promotion: ' + missing.join(', '));
               process.exit(2);
             }
+            const extra = [...names].filter((name) => !required.includes(name));
+            if (extra.length > 0) {
+              console.error('unexpected GitHub release asset after promotion: ' + extra.join(', '));
+              process.exit(2);
+            }
           " "$ARTIFACT"
 
           # Re-verify the installer bytes after the flip as well: a concurrent
           # release writer can replace same-named assets between the checks above
           # and the PATCH, and the release API offers no transaction that would
           # make this unnecessary.
+          after_dir="$work_dir/after"
+          mkdir -p "$after_dir"
           for installer in install.sh install-systemd.sh verify-linux-artifact.sh; do
             case "$installer" in
               install.sh) installer_source='scripts/install-from-github.sh' ;;
@@ -507,8 +554,23 @@ jobs:
             esac
             curl -fsSL \
               "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
-              -o "$work_dir/$installer.after"
-            cmp -s "$work_dir/$installer.after" "$installer_source"
+              -o "$after_dir/$installer"
+            cmp -s "$after_dir/$installer" "$installer_source"
           done
+
+          # Re-verify the artifact and its checksum file too, for the same reason:
+          # verifying only the installers after the flip leaves the artifact that
+          # installers fetch unverified at the moment the release became public.
+          # The downloads land in a subdirectory so that the checksum file's own
+          # asset names still match the files they cover.
+          for asset_name in "$ARTIFACT" SHA256SUMS; do
+            curl -fsSL \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
+              -o "$after_dir/$asset_name"
+          done
+          bash scripts/verify-linux-artifact.sh \
+            --artifact "$after_dir/$ARTIFACT" \
+            --checksum-file "$after_dir/SHA256SUMS" \
+            --expect-git-commit "$target_commit"
 
           printf 'release promoted: %s\n' "$REL_TAG"
