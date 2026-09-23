@@ -62,7 +62,14 @@ readonly MIRROR_REPOSITORY="monty033/NookBridge"
 readonly RELEASE_BRANCH="main"
 readonly WORKFLOW_ID="linux-artifact.yml"
 readonly RUN_EVENT="push"
-readonly CANONICAL_PRINCIPAL="git"
+# The hosting account that serves the canonical repository. A Forgejo deployment
+# serves it through the service account its module creates, so an ssh remote
+# naming that account is the canonical destination exactly as one naming the
+# conventional git account is. A different name is a different destination.
+readonly CANONICAL_PRINCIPALS="git forgejo"
+# The port the canonical host serves git on. Any other port addresses a service
+# other than the canonical one; an ssh URL without one uses the conventional port.
+readonly CANONICAL_SSH_PORT="443"
 readonly WATCH_INTERVAL="${NOOKBRIDGE_WATCH_INTERVAL:-10}"
 readonly WATCH_TIMEOUT="${NOOKBRIDGE_WATCH_TIMEOUT:-1800}"
 
@@ -228,14 +235,24 @@ normalize_repo_path() { # $1 = path; prints the normalized path, fails when malf
   printf '%s' "$path"
 }
 
-# Accept a remote URL only when it names the canonical host and repository with
-# no explicit port and no unexpected SSH principal. A suffix match on the
-# repository path alone would accept an attacker-controlled host that mirrors the
-# path, an explicit port selects a different service than the one the API
-# identity is derived from, and a principal other than the hosting account may
-# select a different destination on the same host.
+# The account names an instance serves the canonical repository through: the
+# conventional git account, and the service account a Forgejo module creates.
+# Any other name is a different destination on the same host.
+canonical_principal_ok() {
+  case " $CANONICAL_PRINCIPALS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Accept a remote URL only when it names the canonical host and repository, the
+# account that serves it, and no port other than the one it serves git on. A
+# suffix match on the repository path alone would accept an attacker-controlled
+# host that mirrors the path, another port selects a different service than the
+# one the API identity is derived from, and a principal other than a hosting
+# account may select a different destination on the same host.
 canonical_url_ok() {
-  local url=$1 rest host path normalized user=''
+  local url=$1 rest host path authority normalized user=''
   case "$url" in
     https://*)
       rest=${url#https://}
@@ -255,12 +272,17 @@ canonical_url_ok() {
         *@*) ;;
         *) return 1 ;;
       esac
-      case "$rest" in
-        *@*)
-          user=${rest%%@*}
-          [ "$user" = "$CANONICAL_PRINCIPAL" ] || return 1
-          rest=${rest#*@}
-          ;;
+      user=${rest%%@*}
+      canonical_principal_ok "$user" || return 1
+      rest=${rest#*@}
+      # The authority may name the port this instance serves git on. It is removed
+      # here so the shared check below sees a host and a path only; any other port
+      # addresses a service other than the canonical one.
+      authority=${rest%%/*}
+      case "$authority" in
+        "$CANONICAL_HOST") ;;
+        "$CANONICAL_HOST:$CANONICAL_SSH_PORT") rest="${CANONICAL_HOST}${rest#"$authority"}" ;;
+        *) return 1 ;;
       esac
       ;;
     *@*:*)
@@ -268,7 +290,7 @@ canonical_url_ok() {
       # the hosting account.
       user=${url%%@*}
       rest=${url#*@}
-      [ "$user" = "$CANONICAL_PRINCIPAL" ] || return 1
+      canonical_principal_ok "$user" || return 1
       host=${rest%%:*}
       path=${rest#*:}
       [ "$host" = "$CANONICAL_HOST" ] || return 1

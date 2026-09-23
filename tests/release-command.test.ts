@@ -735,6 +735,14 @@ describe("release operator command", () => {
       "https://git.montycasa.net/patrick/NookBridge/",
       "ssh://git@git.montycasa.net/patrick/NookBridge.git",
       "git@git.montycasa.net:patrick/NookBridge.git",
+      // A Forgejo deployment serves git through the service account its module
+      // creates, so that account names the same destination as the conventional one.
+      "ssh://forgejo@git.montycasa.net/patrick/NookBridge.git",
+      "forgejo@git.montycasa.net:patrick/NookBridge.git",
+      // The port the canonical host serves git on may be named explicitly. It is the
+      // same destination, whether or not the URL spells the port out.
+      "ssh://forgejo@git.montycasa.net:443/patrick/NookBridge.git",
+      "ssh://git@git.montycasa.net:443/patrick/NookBridge.git",
     ];
     const refused = [
       // A non-default port selects a different service.
@@ -761,9 +769,21 @@ describe("release operator command", () => {
       // destination on the same host.
       "ssh://root@git.montycasa.net/patrick/NookBridge.git",
       "ssh://someone:else@git.montycasa.net/patrick/NookBridge.git",
+      "ssh://forgejo:password@git.montycasa.net/patrick/NookBridge.git",
+      "ssh://admin@git.montycasa.net:443/patrick/NookBridge.git",
       // Without a principal, ssh selects the local user.
       "ssh://git.montycasa.net/patrick/NookBridge.git",
       "root@git.montycasa.net:patrick/NookBridge.git",
+      // Only the declared port is the canonical service; any other port is a
+      // different service on the same host.
+      "ssh://forgejo@git.montycasa.net:2222/patrick/NookBridge.git",
+      "ssh://forgejo@git.montycasa.net:22/patrick/NookBridge.git",
+      "ssh://forgejo@attacker.invalid:443/patrick/NookBridge.git",
+      // Stripping the port must not let the path or the host slip past the check.
+      "ssh://forgejo@git.montycasa.net:443/patrick/NookBridge-extra.git",
+      "ssh://forgejo@git.montycasa.net:443/openclaw/NookBridge.git",
+      "ssh://forgejo@git.montycasa.net.attacker.invalid:443/patrick/NookBridge.git",
+      "ssh://forgejo@git.montycasa.net:443",
       "/tmp/canonical.git",
       "attacker.example:patrick/NookBridge.git",
     ];

@@ -179,8 +179,11 @@ untrusted:
   `git remote get-url --push` does not expand `pushInsteadOf`. A rule is accepted
   only when its replacement still names the canonical repository, so a local
   https/ssh spelling preference keeps working. A `.git` path segment in any
-  spelling, an explicit port, or an SSH principal other than the hosting account
-  is likewise not the canonical repository.
+  spelling, a port other than the one the canonical host serves git on, or an SSH
+  principal other than an account the instance defines for git is likewise not the
+  canonical repository: the conventional `git` account and the service account a
+  Forgejo module creates both name it, and any other name, host, or port addresses
+  a different destination.
 - The `Justfile` recipes forward their arguments to the command as positional
   parameters (`"$@"`), never interpolated into the command text, so an argument
   cannot run before the release command validates it.
