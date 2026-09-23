@@ -453,28 +453,40 @@ describe("Linux artifact manifest contract", () => {
       >;
     };
 
-    // The step that selects the pinned runtime also installs it, so `node` cannot be a
-    // precondition of that step: on a runner without a host Node the job would exit
-    // before it could install the runtime it is about to use.
+    // Later steps build with the runner's Node, so the runtime must be the pinned one
+    // and must sit outside the directories a source-controlled step can write. The
+    // upstream archive is a generic Linux build that this NixOS runner cannot execute,
+    // so it is verified for packaging but never unpacked and never put on PATH.
     for (const jobName of ["linux-artifact", "promote-release"]) {
       const job = workflow.jobs[jobName]!;
-      const runtimeStep = job.steps.find(
-        (step) => step.name === "Verify pinned Node runtime and prepare portable runtime",
+      const runtimeStep = job.steps.find((step) =>
+        (step.name ?? "").startsWith("Verify pinned Node runtime"),
       )!;
-      expect(runtimeStep.run ?? "").not.toMatch(/for command_name in [^\n]*\bnode\b/);
-      expect(runtimeStep.run ?? "").toContain("command -v node");
-      // The archive is verified against a digest that is a constant of this workflow, so
-      // the check needs no network at all; a warm cache must not reach nodejs.org, or a
-      // runner without a route to it cannot prepare a runtime it already holds.
-      expect(runtimeStep.env?.NODE_ARCHIVE_SHA256).toMatch(/^[0-9a-f]{64}$/);
-      expect(runtimeStep.run ?? "").not.toContain("SHASUMS256.txt");
-      expect(runtimeStep.run ?? "").toContain('if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]');
-      // ...and it says what to do when it must fetch and cannot.
-      expect(runtimeStep.run ?? "").toContain("pre-seed");
-      // The verified runtime reaches later steps only through GITHUB_PATH; a runner that
-      // does not provide it must fail here rather than build with an unverified Node.
-      expect(runtimeStep.run ?? "").toContain('test -n "${GITHUB_PATH:-}"');
-      expect(runtimeStep.run ?? "").toContain('test "$(node --version)" = "v${NODE_VERSION}"');
+      const body = runtimeStep.run ?? "";
+      expect(body).toContain('test "$(node --version)" = "v${NODE_VERSION}"');
+      expect(body).toContain('test "$(npm --version)" = "10.9.8"');
+      expect(body).toContain("refusing to build with a Node inside a workflow-writable directory");
+      expect(body).not.toContain('>> "$GITHUB_PATH"');
+      expect(body).not.toContain("export PATH=");
+      expect(body).not.toContain("tar -xzf");
+      expect(runtimeStep.env?.NODE_VERSION).toBe("22.23.2");
+
+      if (jobName === "linux-artifact") {
+        // The archive that ships in the artifact is verified against a digest that is a
+        // constant of this workflow, so the check needs no network at all: a runner that
+        // already holds the archive must not reach nodejs.org, and the network must not
+        // be able to decide what the expected digest is.
+        expect(runtimeStep.env?.NODE_ARCHIVE_SHA256).toMatch(/^[0-9a-f]{64}$/);
+        expect(body).not.toContain("SHASUMS256.txt");
+        expect(body).toContain('if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]');
+        // ...and it says what to do when it must fetch and cannot.
+        expect(body).toContain("pre-seed");
+      } else {
+        // The promote job republishes an artifact it does not build, so it must not
+        // depend on the upstream archive at all.
+        expect(body).not.toContain("nodejs.org");
+        expect(runtimeStep.env?.NODE_ARCHIVE_SHA256).toBeUndefined();
+      }
 
       // Forgejo exports its automatic token as FORGEJO_TOKEN and GITHUB_TOKEN, either of
       // which can write to the repository, so a job that clears one name and not the
@@ -897,15 +909,13 @@ describe("Linux artifact manifest contract", () => {
       (step) => step.name === "Build and verify x86_64 glibc artifact",
     );
     expect(buildStep?.run).toContain('--expect-git-commit "$GITHUB_SHA"');
-    // The pinned runtime is verified on every run and put on PATH, so later steps
-    // package the runtime that was verified.
-    expect(raw).toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
-    expect(raw).toContain('test "$(command -v node)" = "$node_root/bin/node"');
+    // The archive the packaging step consumes must be the one this step staged, at the
+    // same deterministic path, and the runtime that runs the build must not be an
+    // unpacked copy of it: the upstream binary cannot execute on this NixOS runner.
+    expect(raw).toContain('RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"');
+    expect(raw).toContain('archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"');
     expect(raw).toContain("cached_sha256");
-    // The extraction is rebuilt from the verified archive every run: trusting a
-    // cached runtime because it reports the pinned version lets a preceding
-    // source-controlled step substitute the binary that later gets packaged.
-    expect(raw).not.toContain('"$node_root/bin/node" --version');
-    expect(raw).toContain('rm -rf "$node_root"');
+    expect(raw).not.toContain("tar -xzf");
+    expect(raw).not.toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
   });
 });

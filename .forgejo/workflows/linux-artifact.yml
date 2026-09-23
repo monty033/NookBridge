@@ -48,15 +48,28 @@ jobs:
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
-          node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
+          # Later steps build with the runner's Node, so the runtime the build uses
+          # must be the pinned one and must live outside every directory a
+          # source-controlled step can write. The upstream archive is deliberately
+          # not unpacked here: it is a generic Linux build that this NixOS runner
+          # cannot execute, and the packaging step consumes the tarball itself.
+          node_bin="$(command -v node)"
+          case "$node_bin" in
+            "${RUNNER_TEMP:-/tmp}"/*|"${GITHUB_WORKSPACE:-/nonexistent}"/*)
+              printf 'refusing to build with a Node inside a workflow-writable directory: %s\n' "$node_bin" >&2
+              exit 1
+              ;;
+          esac
+          test "$(node --version)" = "v${NODE_VERSION}" \
+            || { printf 'the runner provides %s, not v%s\n' "$(node --version)" "$NODE_VERSION" >&2; exit 1; }
+          test "$(npm --version)" = "10.9.8" \
+            || { printf 'the runner provides npm %s, not 10.9.8\n' "$(npm --version)" >&2; exit 1; }
+          # The portable runtime the artifact ships is the upstream archive, verified
+          # against the digest pinned above. The check itself needs no network, so a
+          # runner that already holds the archive reaches nodejs.org not at all; the
+          # download happens only when the cache is missing or does not match the pin.
           archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
           archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
-          # The archive is verified on every run against the pinned digest above, not
-          # only when it is downloaded: a persistent runner, or a preceding job that can
-          # write to the temporary directory, could otherwise substitute the runtime
-          # that gets packaged. The check itself needs no network, so a runner with a
-          # warm cache prepares its runtime without reaching nodejs.org at all — the
-          # download happens only when the cache is missing or does not match the pin.
           cached_sha256=""
           if [ -f "$archive_path" ]; then
             cached_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
@@ -74,24 +87,6 @@ jobs:
             test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$NODE_ARCHIVE_SHA256" \
               || { printf 'the Node archive does not match the pinned digest\n' >&2; exit 1; }
           fi
-          # The extraction is rebuilt from the verified archive on every run. A
-          # cached runtime is not trusted just because it reports the pinned
-          # version: a preceding source-controlled step could have replaced it with
-          # a trojan that prints any version, and this directory goes on PATH.
-          rm -rf "$node_root"
-          mkdir -p "$node_root"
-          tar -xzf "$archive_path" -C "$node_root" --strip-components=1
-          # Later steps must use the verified runtime rather than whatever the runner
-          # provides, so the pinned directory goes on PATH for every following step. If
-          # the runner offers no way to do that, this fails rather than letting the later
-          # steps build with an unverified Node.
-          test -n "${GITHUB_PATH:-}" \
-            || { printf 'this runner provides no GITHUB_PATH, so the verified runtime cannot be put on PATH for later steps\n' >&2; exit 1; }
-          echo "$node_root/bin" >> "$GITHUB_PATH"
-          export PATH="$node_root/bin:$PATH"
-          test "$(command -v node)" = "$node_root/bin/node"
-          test "$(node --version)" = "v${NODE_VERSION}"
-          test "$(npm --version)" = "10.9.8"
 
       - name: Checkout
         run: |
@@ -699,66 +694,32 @@ jobs:
             test -z "$refused_value" \
               || { printf 'the runner injected %s; refusing to run repository code with it\n' "$refused_name" >&2; exit 1; }
           done
-      - name: Verify pinned Node runtime and prepare portable runtime
+      - name: Verify pinned Node runtime
         env:
           NODE_VERSION: 22.23.2
-          # The digest of node-v22.23.2-linux-x64.tar.gz, checked against both the
-          # published SHASUMS256.txt and a download of the archive itself. It is a
-          # constant of this workflow rather than something the network reports at run
-          # time, so the check needs no network and a substituted archive cannot be
-          # blessed by a substituted checksum file.
-          NODE_ARCHIVE_SHA256: b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
           GITHUB_TOKEN: ""
         run: |
           set -eu
-          for command_name in curl git g++ make sha256sum gzip tar awk; do
+          for command_name in curl git cmp getconf strings grep sort tail awk; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
-          node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
-          archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
-          archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
-          # The archive is verified on every run against the pinned digest above, not
-          # only when it is downloaded: a persistent runner, or a preceding job that can
-          # write to the temporary directory, could otherwise substitute the runtime
-          # that gets packaged. The check itself needs no network, so a runner with a
-          # warm cache prepares its runtime without reaching nodejs.org at all — the
-          # download happens only when the cache is missing or does not match the pin.
-          cached_sha256=""
-          if [ -f "$archive_path" ]; then
-            cached_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
-          fi
-          if [ "$cached_sha256" != "$NODE_ARCHIVE_SHA256" ]; then
-            printf 'fetching the pinned Node archive (cache miss or digest mismatch)\n' >&2
-            rm -f "$archive_path"
-            curl -q -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path" \
-              || {
-                printf 'could not fetch %s\n' "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" >&2
-                printf 'if this runner has no route to nodejs.org, pre-seed %s with that archive and digest %s\n' \
-                  "$archive_path" "$NODE_ARCHIVE_SHA256" >&2
-                exit 1
-              }
-            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$NODE_ARCHIVE_SHA256" \
-              || { printf 'the Node archive does not match the pinned digest\n' >&2; exit 1; }
-          fi
-          # The extraction is rebuilt from the verified archive on every run. A
-          # cached runtime is not trusted just because it reports the pinned
-          # version: a preceding source-controlled step could have replaced it with
-          # a trojan that prints any version, and this directory goes on PATH.
-          rm -rf "$node_root"
-          mkdir -p "$node_root"
-          tar -xzf "$archive_path" -C "$node_root" --strip-components=1
-          # Later steps must use the verified runtime rather than whatever the runner
-          # provides, so the pinned directory goes on PATH for every following step. If
-          # the runner offers no way to do that, this fails rather than letting the later
-          # steps build with an unverified Node.
-          test -n "${GITHUB_PATH:-}" \
-            || { printf 'this runner provides no GITHUB_PATH, so the verified runtime cannot be put on PATH for later steps\n' >&2; exit 1; }
-          echo "$node_root/bin" >> "$GITHUB_PATH"
-          export PATH="$node_root/bin:$PATH"
-          test "$(command -v node)" = "$node_root/bin/node"
-          test "$(node --version)" = "v${NODE_VERSION}"
-          test "$(npm --version)" = "10.9.8"
+          # Later steps build with the runner's Node, so the runtime the build uses
+          # must be the pinned one and must live outside every directory a
+          # source-controlled step can write. The upstream archive is deliberately
+          # not unpacked here: it is a generic Linux build that this NixOS runner
+          # cannot execute, and the packaging step consumes the tarball itself.
+          node_bin="$(command -v node)"
+          case "$node_bin" in
+            "${RUNNER_TEMP:-/tmp}"/*|"${GITHUB_WORKSPACE:-/nonexistent}"/*)
+              printf 'refusing to build with a Node inside a workflow-writable directory: %s\n' "$node_bin" >&2
+              exit 1
+              ;;
+          esac
+          test "$(node --version)" = "v${NODE_VERSION}" \
+            || { printf 'the runner provides %s, not v%s\n' "$(node --version)" "$NODE_VERSION" >&2; exit 1; }
+          test "$(npm --version)" = "10.9.8" \
+            || { printf 'the runner provides npm %s, not 10.9.8\n' "$(npm --version)" >&2; exit 1; }
 
       - name: Checkout promotion tooling
         run: |
