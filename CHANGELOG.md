@@ -5,6 +5,13 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
+- The release command accepts the account names an instance actually defines for
+  git. A Forgejo deployment serves the canonical repository through the service
+  account its module creates, and the command refused that remote outright, which
+  made an ssh-only operator machine unable to release at all. The canonical host
+  may also be spelled with the port it serves git on; any other port is still
+  refused, because it addresses a different service on the same host.
+
 - Verify the pinned Node archive against a digest that is a constant of the workflow
   rather than against the checksum file the network serves. The check now needs no
   network at all, so a runner holding a valid archive prepares its runtime without
