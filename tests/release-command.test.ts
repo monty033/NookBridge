@@ -104,6 +104,9 @@ function tagRun(commit: string, status: string): StubRun {
 function candidateRelease(commit: string, prerelease = true): Record<string, unknown> {
   return {
     tag_name: tag,
+    // A real payload always carries `draft`; the command refuses a release payload
+    // that omits a field it reasons about rather than defaulting it.
+    draft: false,
     prerelease,
     target_commitish: commit,
     assets: [
@@ -125,6 +128,7 @@ type StubOptions = {
   readonly fullPages?: boolean;
   readonly runsPayload?: unknown;
   readonly tagRefRepo?: string;
+  readonly tagRefPayload?: unknown;
 };
 
 // The most recently created fixture's canonical repository. The stub answers tag
@@ -150,6 +154,10 @@ async function startStub(options: StubOptions) {
       // elsewhere is visible here as a missing tag.
       const wanted = decodeURIComponent(url.pathname.slice(refPrefix.length));
       const repository = options.tagRefRepo ?? latestCanonicalRepo;
+      if (options.tagRefPayload !== undefined) {
+        response.end(JSON.stringify(options.tagRefPayload));
+        return;
+      }
       let sha = "";
       if (repository) {
         try {
@@ -944,6 +952,7 @@ describe("release operator command", () => {
       runsFor: () => [mainPreflight(fixture.commit)],
       release: {
         tag_name: tag,
+        draft: false,
         prerelease: true,
         target_commitish: fixture.commit,
         assets: [{ name: forged }],
@@ -1542,5 +1551,53 @@ describe("release operator command", () => {
     // rejects consumes an immutable tag before the release fails.
     const source = readFileSync(releaseScript, "utf8");
     expect(source).toContain('bash "$script_dir/check-release-version.sh" "$version"');
+  });
+
+  it("refuses a release payload that omits the fields it reasons about", async () => {
+    const fixture = createFixture();
+    const { draft: _draft, ...withoutDraft } = candidateRelease(fixture.commit);
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      release: withoutDraft,
+    });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    // An absent `draft` must not be read as "not a draft": the state is unreadable
+    // rather than absent, so the mirror must not be reported as having no release.
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("mirror_release=unreachable");
+    expect(result.stdout).not.toContain("mirror_release=absent");
+  });
+
+  it("treats a tag ref payload it cannot read as unreadable, not as a missing tag", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit)],
+      tagRefPayload: [{}],
+    });
+
+    const result = await runRelease(["tag", "--yes", "--no-watch"], fixture, stub.base);
+
+    // The push succeeded, so a payload without a ref means the read-back is
+    // unreadable: reporting it as "the tag is not there" would tell the operator
+    // their published tag does not exist.
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized payload");
+  });
+
+  it("does not report readiness while a local tag reserves the version", async () => {
+    const fixture = createFixture();
+    // A local tag is not published, but the release command refuses to proceed with
+    // one present: reporting readiness would send the operator to the remote looking
+    // for a tag that only exists in this working copy.
+    git(["tag", "-a", tag, fixture.commit, "-m", `NookBridge ${tag}`], fixture.work);
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(`local_tag_${tag}=present`);
+    expect(result.stdout).toContain("release_ready=false");
   });
 });

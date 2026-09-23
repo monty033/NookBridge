@@ -261,33 +261,39 @@ jobs:
             sha256sum install-systemd.sh verify-linux-artifact.sh "$ARTIFACT" > SHA256SUMS
           )
 
-      - name: Publish GitHub release
+      - name: Prepare the GitHub release upload
+        # Token-free: the mirror repository is public, so its release metadata is
+        # readable anonymously. This step decides what the write step must do and
+        # writes that decision as data. The write step holds the token and runs no
+        # repository code, so a tagged script cannot reach the credential through
+        # PATH, GITHUB_ENV, or a file it asks the write step to source.
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          GITHUB_TOKEN: ""
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_SHA: ${{ github.sha }}
-          GITHUB_TOKEN: ""
         run: |
           set -eu
-          test -n "$RELEASE_PUBLISH_TOKEN"
+          VERSION="${RELEASE_TAG#v}"
+          bash scripts/check-release-version.sh "$VERSION" \
+            || { printf 'malformed release tag: %s\n' "$RELEASE_TAG" >&2; exit 1; }
           API="https://api.github.com/repos/monty033/NookBridge"
-          # The bearer token is passed through a curl configuration file rather
-          # than an argument, because a command line is readable by any process on
-          # the runner and this token grants release write access.
-          curl_config="$(mktemp)"
-          chmod 600 "$curl_config"
-          printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
-          trap 'rm -f "$curl_config"' EXIT
           RELEASE_DIR="$PWD/github-release"
-          RELEASE_JSON=/tmp/nookbridge-github-release.json
+          ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
+          RELEASE_JSON="$PWD/.release-state.json"
+          PAYLOAD="$PWD/.release-payload.json"
+          context="$PWD/.release-upload.tsv"
 
           http_status="$(curl -sS -o "$RELEASE_JSON" -w '%{http_code}' \
-            --config "$curl_config" -H 'Accept: application/vnd.github+json' \
+            -H 'Accept: application/vnd.github+json' \
             "$API/releases/tags/$RELEASE_TAG")"
           case "$http_status" in
             200)
-              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
+              # An existing candidate must be exactly the one this tag produced: the
+              # same commit, still a prerelease, not a draft, and already carrying the
+              # complete asset set. Anything else is an inconsistent release, so this
+              # run stops instead of mutating it.
+              RELEASE_JSON="$RELEASE_JSON" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" ARTIFACT="$ARTIFACT" node <<'NODE'
           const fs = require('fs');
           const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
           const expectedTag = process.env.RELEASE_TAG;
@@ -300,32 +306,46 @@ jobs:
           ) {
             throw new Error('existing GitHub release is not the matching prerelease candidate');
           }
+          const required = new Set([
+            'install.sh',
+            'install-systemd.sh',
+            'verify-linux-artifact.sh',
+            'SHA256SUMS',
+            process.env.ARTIFACT
+          ]);
+          const actual = new Set((release.assets || []).map((asset) => String(asset.name)));
+          for (const name of required) {
+            if (!actual.has(name)) {
+              throw new Error('existing candidate release is missing asset: ' + name);
+            }
+          }
+          const extra = [...actual].filter((name) => !required.has(name));
+          if (extra.length > 0) {
+            throw new Error('existing candidate release carries unexpected assets: ' + extra.join(', '));
+          }
           NODE
+              printf 'create\tfalse\n' > "$context"
               ;;
             404)
-              RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" node <<'NODE'
+              RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" PAYLOAD="$PAYLOAD" node <<'NODE'
           const fs = require('fs');
           const tag = process.env.RELEASE_TAG;
           const sha = process.env.RELEASE_SHA;
-          fs.writeFileSync('/tmp/nookbridge-release-payload.json', JSON.stringify({
+          fs.writeFileSync(process.env.PAYLOAD, JSON.stringify({
             tag_name: tag,
             target_commitish: sha,
             name: tag,
             body: `NookBridge ${tag}\n\nCandidate release. Verified by the Linux artifact job and awaiting clean-LXC rendered acceptance before promotion.\n\nInstall once promoted:\n\n    curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/install.sh | sudo bash\n\nBuild source: Forgejo canonical commit ${sha}.`,
             draft: false,
             // Candidate gate: a tag push must never publish to the general
-            // install path.  Promotion to a normal release is a separate,
+            // install path. Promotion to a normal release is a separate,
             // explicit step (push a promote-<tag> ref) that re-verifies the
             // artifact before flipping this flag.
             prerelease: true,
             generate_release_notes: false
           }, null, 2));
           NODE
-              curl -fsS -X POST -o "$RELEASE_JSON" \
-                --config "$curl_config" -H 'Accept: application/vnd.github+json' \
-                -H 'Content-Type: application/json' \
-                --data-binary @/tmp/nookbridge-release-payload.json \
-                "$API/releases"
+              printf 'create\ttrue\n' > "$context"
               ;;
             *)
               cat "$RELEASE_JSON"
@@ -333,50 +353,153 @@ jobs:
               ;;
           esac
 
-          release_id="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('$RELEASE_JSON')); if (!value.id) process.exit(2); process.stdout.write(String(value.id));")"
-          assets_json=/tmp/nookbridge-github-assets.json
-          curl -fsS --config "$curl_config" -H 'Accept: application/vnd.github+json' \
-            "$API/releases/$release_id/assets?per_page=100" -o "$assets_json"
-          upload_base="https://uploads.github.com/repos/monty033/NookBridge/releases/$release_id/assets"
-
-          for asset_path in \
-            "$RELEASE_DIR/install.sh" \
-            "$RELEASE_DIR/install-systemd.sh" \
-            "$RELEASE_DIR/verify-linux-artifact.sh" \
-            "$RELEASE_DIR/SHA256SUMS" \
-            "$RELEASE_DIR/nookbridge-v${RELEASE_TAG#v}-linux-x64-gnu.tar.gz"; do
-            asset_name="${asset_path##*/}"
-            asset_id="$(ASSET_NAME="$asset_name" node -e "const fs=require('fs'); const name=process.env.ASSET_NAME; const assets=JSON.parse(fs.readFileSync('$assets_json')); const match=assets.find((asset) => asset.name === name); if (match) process.stdout.write(String(match.id));")"
-            if [ -n "$asset_id" ]; then
-              curl -fsS -X DELETE --config "$curl_config" "$API/releases/assets/$asset_id" >/dev/null
-            fi
-            # The asset name becomes a query-string value, so it is encoded rather
-            # than interpolated: a `+` would otherwise be read as a space.
-            encoded_name="$(ASSET_NAME="$asset_name" node -e 'process.stdout.write(encodeURIComponent(process.env.ASSET_NAME))')"
-            curl -fsS -X POST \
-              --config "$curl_config" -H 'Content-Type: application/octet-stream' \
-              --data-binary "@$asset_path" \
-              "$upload_base?name=$encoded_name" >/dev/null
+          for asset_name in install.sh install-systemd.sh verify-linux-artifact.sh SHA256SUMS "$ARTIFACT"; do
+            test -f "$RELEASE_DIR/$asset_name"
           done
+          {
+            printf 'api_base\thttps://api.github.com\n'
+            printf 'rel_tag\t%s\n' "$RELEASE_TAG"
+            printf 'release_dir\t%s\n' "$RELEASE_DIR"
+            printf 'artifact\t%s\n' "$ARTIFACT"
+            printf 'payload\t%s\n' "$PAYLOAD"
+          } >> "$context"
 
-          curl -fsS --config "$curl_config" -H 'Accept: application/vnd.github+json' \
-            "$API/releases/$release_id/assets?per_page=100" -o "$assets_json"
-          RELEASE_ASSETS_JSON="$assets_json" node <<'NODE'
+      - name: Publish release assets
+        # This step holds the publishing token. It resolves its tools from a fixed
+        # PATH and reads the upload facts as data: it runs no repository script,
+        # sources no file, and cannot be handed a substituted `curl` through a
+        # GITHUB_PATH entry an earlier step wrote.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          # An explicit PATH replaces the runner's own, so directories an earlier
+          # step added to GITHUB_PATH are not searched. The trusted prefixes cover
+          # both a conventional Linux runner and a NixOS one.
+          PATH: /run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          test -n "${RELEASE_PUBLISH_TOKEN:-}"
+          curl_path="$(command -v curl)"
+          case "$curl_path" in
+            /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
+            *)
+              printf 'refusing an untrusted curl: %s\n' "$curl_path" >&2
+              exit 1
+              ;;
+          esac
+          awk_path="$(command -v awk)"
+          case "$awk_path" in
+            /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
+            *)
+              printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
+              exit 1
+              ;;
+          esac
+
+          context="$PWD/.release-upload.tsv"
+          field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
+          api_base="$(field api_base)"
+          rel_tag="$(field rel_tag)"
+          release_dir="$(field release_dir)"
+          artifact="$(field artifact)"
+          payload="$(field payload)"
+          create="$(field create)"
+          test "$api_base" = "https://api.github.com"
+          case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
+          case "$create" in true | false) ;; *) printf 'unusable upload decision\n' >&2; exit 1 ;; esac
+          case "$release_dir" in "$PWD"/*) ;; *) printf 'unusable release directory\n' >&2; exit 1 ;; esac
+
+          # The bearer token is passed through a curl configuration file rather than
+          # an argument, because a command line is readable by any process on the
+          # runner and this token grants release write access.
+          curl_config="$(mktemp)"
+          chmod 600 "$curl_config"
+          printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
+          trap 'rm -f "$curl_config"' EXIT
+
+          if [ "$create" = true ]; then
+            test -f "$payload"
+            response="$PWD/.release-created.json"
+            "$curl_path" -fsS -X POST -o "$response" \
+              --config "$curl_config" -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/json' \
+              --data-binary "@$payload" \
+              "$api_base/repos/monty033/NookBridge/releases"
+          else
+            # The candidate already exists and was verified to carry the complete
+            # asset set, so this step writes nothing.
+            response="$PWD/.release-state.json"
+          fi
+
+          release_id="$(grep -o '"id" *: *[0-9][0-9]*' "$response" | head -1 | tr -dc '0-9')"
+          case "$release_id" in '' | *[!0-9]*) printf 'could not read the release id\n' >&2; exit 1 ;; esac
+
+          if [ "$create" = true ]; then
+            upload_base="https://uploads.github.com/repos/monty033/NookBridge/releases/$release_id/assets"
+            for asset_name in install.sh install-systemd.sh verify-linux-artifact.sh SHA256SUMS "$artifact"; do
+              # The asset name becomes a query-string value, so a name outside this
+              # set could change the request: it is refused rather than encoded.
+              case "$asset_name" in
+                *[!A-Za-z0-9._-]*)
+                  printf 'unusable asset name\n' >&2
+                  exit 1
+                  ;;
+              esac
+              test -f "$release_dir/$asset_name"
+              "$curl_path" -fsS -X POST \
+                --config "$curl_config" -H 'Content-Type: application/octet-stream' \
+                --data-binary "@$release_dir/$asset_name" \
+                "$upload_base?name=$asset_name" > /dev/null
+            done
+          fi
+          printf 'release assets published: %s\n' "$rel_tag"
+
+      - name: Re-verify the published release
+        # Back to a step that holds no secret: it reads the public release back and
+        # asserts the state the write step claims to have produced, because a
+        # successful upload is not proof of the release users will see.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ""
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          VERSION="${RELEASE_TAG#v}"
+          artifact="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
+          state="$PWD/.release-verified.json"
+          curl -fsS -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/monty033/NookBridge/releases/tags/$RELEASE_TAG" -o "$state"
+          RELEASE_STATE="$state" RELEASE_TAG="$RELEASE_TAG" RELEASE_SHA="$RELEASE_SHA" ARTIFACT="$artifact" node <<'NODE'
           const fs = require('fs');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_STATE, 'utf8'));
+          if (release.tag_name !== process.env.RELEASE_TAG) {
+            throw new Error('published release carries the wrong tag');
+          }
+          if (release.prerelease !== true) {
+            throw new Error('a tag push must publish a prerelease candidate');
+          }
+          if (release.draft === true) {
+            throw new Error('published release is a draft, so users cannot reach it');
+          }
+          if (String(release.target_commitish || '').toLowerCase() !== process.env.RELEASE_SHA.toLowerCase()) {
+            throw new Error('published release targets a different commit');
+          }
           const required = new Set([
             'install.sh',
             'install-systemd.sh',
             'verify-linux-artifact.sh',
             'SHA256SUMS',
-            `nookbridge-v${process.env.RELEASE_TAG.slice(1)}-linux-x64-gnu.tar.gz`
+            process.env.ARTIFACT
           ]);
-          const actual = new Set(JSON.parse(fs.readFileSync(process.env.RELEASE_ASSETS_JSON)).map((asset) => asset.name));
+          const actual = new Set((release.assets || []).map((asset) => String(asset.name)));
           for (const name of required) {
-            if (!actual.has(name)) throw new Error(`missing GitHub release asset: ${name}`);
+            if (!actual.has(name)) throw new Error('missing GitHub release asset: ' + name);
           }
           const extra = [...actual].filter((name) => !required.has(name));
           if (extra.length > 0) {
-            throw new Error(`unexpected GitHub release asset: ${extra.join(', ')}`);
+            throw new Error('unexpected GitHub release asset: ' + extra.join(', '));
           }
           NODE
           printf 'GitHub release published: %s\n' "$RELEASE_TAG"
@@ -390,6 +513,47 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/promote-v')
     runs-on: nixos
     steps:
+      - name: Verify pinned Node runtime and prepare portable runtime
+        env:
+          NODE_VERSION: 22.23.2
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          for command_name in curl git g++ make node npm sha256sum gzip tar awk; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
+          done
+          node_root="${RUNNER_TEMP:-/tmp}/nookbridge-node-v${NODE_VERSION}"
+          archive_name="node-v${NODE_VERSION}-linux-x64.tar.gz"
+          archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"
+          sums_path="${RUNNER_TEMP:-/tmp}/SHASUMS256.txt"
+          # The archive is verified on every run, not only when it is downloaded. A
+          # persistent runner, or a preceding job that can write to the temporary
+          # directory, could otherwise substitute the runtime that gets packaged.
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$sums_path"
+          expected_sha256="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$sums_path")"
+          test -n "$expected_sha256"
+          cached_sha256="$(sha256sum "$archive_path" 2>/dev/null | awk '{ print $1 }')"
+          if [ ! -f "$archive_path" ] || [ "$cached_sha256" != "$expected_sha256" ]; then
+            rm -f "$archive_path"
+            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$archive_name" -o "$archive_path"
+            test "$(sha256sum "$archive_path" | awk '{ print $1 }')" = "$expected_sha256"
+          fi
+          # The extraction is rebuilt from the verified archive on every run. A
+          # cached runtime is not trusted just because it reports the pinned
+          # version: a preceding source-controlled step could have replaced it with
+          # a trojan that prints any version, and this directory goes on PATH.
+          rm -rf "$node_root"
+          mkdir -p "$node_root"
+          tar -xzf "$archive_path" -C "$node_root" --strip-components=1
+          # Later steps must use the verified runtime rather than whatever the runner
+          # provides, so the pinned directory goes on PATH for every following step.
+          echo "$node_root/bin" >> "$GITHUB_PATH"
+          export PATH="$node_root/bin:$PATH"
+          test "$(command -v node)" = "$node_root/bin/node"
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "10.9.8"
+
       - name: Checkout promotion tooling
         run: |
           set -eu
@@ -489,9 +653,9 @@ jobs:
           work_dir="$PWD/.promote-work"
           rm -rf "$work_dir"
           mkdir -p "$work_dir"
-          for asset_name in "$artifact" SHA256SUMS; do
+          for asset_name in "$ARTIFACT" SHA256SUMS; do
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$asset_name" \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$asset_name" \
               -o "$work_dir/$asset_name"
           done
 
@@ -505,7 +669,7 @@ jobs:
               *) installer_source="scripts/$installer" ;;
             esac
             curl -fsSL \
-              "https://github.com/monty033/NookBridge/releases/download/$rel_tag/$installer" \
+              "https://github.com/monty033/NookBridge/releases/download/$REL_TAG/$installer" \
               -o "$work_dir/$installer"
             cmp -s "$work_dir/$installer" "$installer_source"
           done
@@ -533,20 +697,39 @@ jobs:
           } > "$work_dir/context.tsv"
 
       - name: Promote candidate release
-        # This step holds the publishing token. It runs the runner's own curl by
-        # absolute path and reads fields out of a line-oriented file: it sources
-        # nothing, executes no script from the released revision, and does not add
-        # an earlier step's directory to PATH. Otherwise a source-controlled step
-        # could leave a shell fragment or an alternate `curl` behind for this step
-        # to pick up, and the token would go with it.
+        # This step holds the publishing token. It resolves its tools from a fixed
+        # PATH and reads fields out of a line-oriented file: it sources nothing,
+        # executes no script from the released revision, and cannot be handed a
+        # substituted `curl` or `awk` through a GITHUB_PATH entry an earlier step
+        # wrote. Otherwise the token would go with the substitution.
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          # An explicit PATH replaces the runner's own, so directories an earlier
+          # step added to GITHUB_PATH are not searched. The trusted prefixes cover
+          # both a conventional Linux runner and a NixOS one.
+          PATH: /run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          GITHUB_TOKEN: ""
         run: |
           set -eu
           test -n "${RELEASE_PUBLISH_TOKEN:-}"
-          test -x /usr/bin/curl
+          curl_path="$(command -v curl)"
+          case "$curl_path" in
+            /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
+            *)
+              printf 'refusing an untrusted curl: %s\n' "$curl_path" >&2
+              exit 1
+              ;;
+          esac
+          awk_path="$(command -v awk)"
+          case "$awk_path" in
+            /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
+            *)
+              printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
+              exit 1
+              ;;
+          esac
           context="$PWD/.promote-work/context.tsv"
-          field() { awk -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
+          field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
 
           api_base="$(field api_base)"
           release_id="$(field release_id)"
@@ -566,7 +749,7 @@ jobs:
           printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
-          /usr/bin/curl -fsS -X PATCH --config "$curl_config" \
+          "$curl_path" -fsS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \

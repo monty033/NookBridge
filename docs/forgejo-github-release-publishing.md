@@ -14,18 +14,20 @@ Store it in the Forgejo repository secret:
 RELEASE_PUBLISH_TOKEN
 ```
 
-Create a separate read-only token that can list Actions runs for the canonical
-repository, with no write or release permissions. Store it as:
+The preflight lookup needs no secret. The Actions API of a public repository is
+readable anonymously, and the workflow deliberately sets no token for that step, so
+no credential is reachable by code from the tag being released. A read that is
+refused is an error rather than an empty result, so the gate still fails closed. Only
+configure `PREFLIGHT_READ_TOKEN` if the Actions API of the canonical repository is
+not publicly readable; the checker accepts it from the environment for that case, and
+the workflow does not pass one.
 
-```text
-RELEASE_PREFLIGHT_TOKEN
-```
-
-Do not put either token in the repository, workflow YAML, a commit, or a chat
-message. The publish token is used only by the tag-triggered publishing steps;
-the read-only preflight token is used only to verify the prior `main` run. Pull
-request and branch builds do not receive either secret, and source-controlled
-build/test steps explicitly receive an empty `GITHUB_TOKEN`.
+Do not put a token in the repository, workflow YAML, a commit, or a chat message.
+The publish token is used only by the tag-triggered publishing step, which runs the
+runner's own tools over a data file and executes no script from the released
+revision. Pull request and branch builds do not receive the secret, and the
+source-controlled build, test, and verification steps explicitly receive an empty
+`GITHUB_TOKEN`.
 
 ## Publishing a release
 

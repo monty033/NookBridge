@@ -450,7 +450,7 @@ describe("Linux artifact manifest contract", () => {
         string,
         {
           if?: string;
-          steps?: Array<{ if?: string; name?: string; env?: Record<string, string> }>;
+          steps?: Array<{ if?: string; name?: string; env?: Record<string, string>; run?: string }>;
         }
       >;
     };
@@ -466,7 +466,13 @@ describe("Linux artifact manifest contract", () => {
     const assetsStep = buildJob?.steps?.find(
       (step) => step.name === "Prepare GitHub release assets",
     );
-    const publishStep = buildJob?.steps?.find((step) => step.name === "Publish GitHub release");
+    const uploadStep = buildJob?.steps?.find(
+      (step) => step.name === "Prepare the GitHub release upload",
+    );
+    const publishStep = buildJob?.steps?.find((step) => step.name === "Publish release assets");
+    const publishedVerifyStep = buildJob?.steps?.find(
+      (step) => step.name === "Re-verify the published release",
+    );
 
     expect(doc.on.push.branches).toEqual(["main", "runner-test/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
@@ -478,7 +484,20 @@ describe("Linux artifact manifest contract", () => {
     );
     expect(artifactStep?.env?.GITHUB_TOKEN).toBe("");
     expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    expect(uploadStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(publishStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    expect(publishedVerifyStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
+    // The publishing step must not resolve its tools from a PATH an earlier step can
+    // extend, and it must refuse a resolved tool from outside the trusted prefixes.
+    expect(publishStep?.env?.PATH).toContain("/run/current-system/sw/bin");
+    expect(publishStep?.env?.PATH).not.toContain("$");
+    expect(publishStep?.run).toContain("refusing an untrusted curl");
+    expect(publishStep?.run).toContain('curl_path="$(command -v curl)"');
+    expect(publishStep?.run).not.toContain("/usr/bin/curl");
+    // The candidate is created in the token-free step; the token step writes only
+    // what the earlier step decided.
+    expect(uploadStep?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
+    expect(publishedVerifyStep?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
 
     // The candidate is created off the general install path...
     expect(raw).toContain("prerelease: true");
@@ -536,7 +555,10 @@ describe("Linux artifact manifest contract", () => {
     // The asset set must be exactly the expected one, before and after the flip.
     expect(raw).toContain("unexpected GitHub release asset");
     // Asset names become query-string values and are encoded, not interpolated.
-    expect(raw).toContain("encoded_name=");
+    // An asset name becomes a query-string value, so a name outside the permitted
+    // character set is refused rather than encoded.
+    expect(raw).toContain("unusable asset name");
+    expect(raw).toContain("*[!A-Za-z0-9._-]*)");
     // The promotion version must satisfy the release policy, checked by the same
     // script the operator command's rules are tested against rather than by a
     // second inline copy that can drift.
@@ -575,7 +597,12 @@ describe("Linux artifact manifest contract", () => {
       // fragment or an alternate `curl`, and the token would go with it.
       expect(run).not.toContain('. "$PWD');
       expect(run).not.toContain("source ");
-      expect(run).toContain("/usr/bin/curl");
+      // The tool is resolved from an explicit PATH and validated against the trusted
+      // prefixes, rather than hardcoding a path that does not exist on every runner
+      // (a NixOS runner has no /usr/bin/curl).
+      expect(run).toContain('curl_path="$(command -v curl)"');
+      expect(run).toContain("refusing an untrusted curl");
+      expect(step.env?.PATH).toContain("/run/current-system/sw/bin");
       expect(run).toContain("context.tsv");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);

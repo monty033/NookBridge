@@ -881,6 +881,7 @@ report_candidate() { # $1 = version
 
 command_status() {
   local problems state preflight='missing' release_tag_state promote_tag_state
+  local local_tag_state local_promote_tag_state
   local mirror_state='unknown'
   resolve_release_target
   version=${requested_version:-$(canonical_version)}
@@ -915,6 +916,22 @@ command_status() {
     *) note "tag_promote-v$version=present" ;;
   esac
 
+  # A local tag is not a published release, but it does block this working copy from
+  # releasing: reporting readiness that the release command then refuses would send
+  # the operator to the remote to look for a tag that is only here.
+  if local_tag_exists "v$version"; then
+    local_tag_state=present
+  else
+    local_tag_state=absent
+  fi
+  if local_tag_exists "promote-v$version"; then
+    local_promote_tag_state=present
+  else
+    local_promote_tag_state=absent
+  fi
+  note "local_tag_v$version=$local_tag_state"
+  note "local_tag_promote-v$version=$local_promote_tag_state"
+
   collect_run "$RELEASE_BRANCH" "$release_commit" ''
   if [ $run_code -eq 0 ]; then
     preflight=$(field_of "$run_output" status)
@@ -948,11 +965,13 @@ command_status() {
     note "mirror_release=unreachable"
   fi
 
-  # Ready to release means every gate is clear *and* nothing has been published
-  # for this version yet: an existing mirror release or promotion tag means the
-  # tag would be rejected after it had already been created.
+  # Ready to release means every gate is clear *and* nothing has been published or
+  # reserved for this version yet: an existing mirror release, promotion tag, or even
+  # a local tag means the release command would refuse after the operator had already
+  # been told the version was ready.
   if [ -z "$problems" ] && [ "$preflight" = success ] && [ "$release_tag_state" = absent ] \
-    && [ "$promote_tag_state" = absent ] && [ "$mirror_state" = absent ]; then
+    && [ "$promote_tag_state" = absent ] && [ "$mirror_state" = absent ] \
+    && [ "$local_tag_state" = absent ] && [ "$local_promote_tag_state" = absent ]; then
     note "release_ready=true"
   else
     note "release_ready=false"

@@ -246,6 +246,14 @@ untrusted:
 - A draft release is not a candidate and not published: the operator reports it as
   `mirror_release=candidate-draft` and refuses to promote it, and the publishing
   workflow rejects a pre-existing draft rather than uploading assets onto one.
+- The publishing path is three steps: prepare the upload (token-free, decides and
+  writes the decision as data), publish the assets (the only step holding the token,
+  resolving tools from an explicit PATH), and re-read the published release
+  (token-free). A step that can be influenced by the released revision therefore never
+  shares an environment with the token, and no step sources cross-step shell.
+- Every step's variables are checked against what that step defines or is given,
+  because a step runs in a fresh shell and a renamed variable is an unbound-variable
+  failure rather than a test failure.
 - Canonical API endpoints are derived from the canonical identity with the
   repository path appended exactly once: the API base is an API root, and each
   caller appends `/repos/<owner>/<name>/...`.

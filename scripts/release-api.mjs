@@ -81,6 +81,21 @@ export function matchesRun(run, expected) {
   return true;
 }
 
+/**
+ * The refs endpoint answers `[]`, a single ref object, or an array of them. Anything
+ * else is an unreadable answer, and an unreadable answer must not be reported as an
+ * absent tag.
+ */
+function assertRefPayload(payload) {
+  const entries = Array.isArray(payload) ? payload : [payload];
+  if (entries.length === 0) return;
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object" || typeof entry.ref !== "string") {
+      throw new Error("Forgejo refs API returned an unrecognized payload");
+    }
+  }
+}
+
 function requestHeaders(token) {
   const headers = { Accept: "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -136,6 +151,18 @@ export async function releaseState({ apiBase, repository, tag, token, fetchImpl 
     return { exists: false, prerelease: false, draft: false, targetCommitish: "", assets: [] };
   if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`);
   const release = await response.json();
+  // The caller decides whether a release is a promotable candidate from these two
+  // fields. A payload that omits one of them is not evidence of a safe state, so it
+  // is refused rather than defaulted: an absent `draft` would otherwise read as
+  // "not a draft".
+  if (
+    release === null ||
+    typeof release !== "object" ||
+    typeof release.prerelease !== "boolean" ||
+    typeof release.draft !== "boolean"
+  ) {
+    throw new Error("GitHub releases API returned an unrecognized release payload");
+  }
   return {
     exists: true,
     prerelease: release?.prerelease === true,
@@ -171,13 +198,21 @@ export async function tagRefState({ apiBase, repository, tag, token, fetchImpl =
   if (response.status === 404) return { exists: false, sha: "" };
   if (!response.ok) throw new Error(`Forgejo refs API returned HTTP ${response.status}`);
   const payload = await response.json();
+  // An entry that does not carry a ref and an object sha is not evidence about this
+  // tag: reading it as "the tag is absent" would report a missing release when the
+  // answer was merely unparseable.
+  assertRefPayload(payload);
   const entries = Array.isArray(payload) ? payload : [payload];
   // The endpoint answers a prefix query, so the exact ref must be selected rather
   // than assumed: `v0.1.2` also matches `v0.1.20`.
   const wanted = `refs/tags/${tag}`;
   const match = entries.find((entry) => entry?.ref === wanted);
   if (!match) return { exists: false, sha: "" };
-  return { exists: true, sha: sanitize(match?.object?.sha ?? "", 64) };
+  const sha = sanitize(match?.object?.sha ?? "", 64);
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+    throw new Error("Forgejo refs API returned a tag ref without a usable commit sha");
+  }
+  return { exists: true, sha };
 }
 
 function requiredEnv(name) {

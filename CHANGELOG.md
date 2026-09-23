@@ -87,8 +87,27 @@ Patch release hardening static glibc discovery in the release workflow.
 - Apply the version policy from one shared script, which the operator command
   delegates to, so a version the command accepts cannot be one the workflow rejects
   after the tag is already published.
-- Treat a draft mirror release as neither a candidate nor published, in the operator
-  command and in the publishing workflow.
+- Keep the publishing token out of any step that can be influenced by the released
+  revision. The candidate is prepared, the release is written, and the result is
+  re-read in three separate steps: only the middle one holds the token, it resolves
+  its tools from an explicit PATH whose directories cover a conventional Linux runner
+  and a NixOS one rather than hardcoding a path, and it refuses a `curl` or `awk`
+  resolved from outside those prefixes. A workflow test asserts that the token steps
+  carry that PATH and name no repository script.
+- Check every shell variable a workflow step references against what that step
+  defines, receives through `env`, or is given by the runner. A step runs in a fresh
+  shell, so a variable renamed in one place and read in another is an unbound-variable
+  failure under `set -u`; this class has twice broken a release path that the
+  behavioural tests did not execute.
+- Refuse an API response whose schema does not carry the fields the decision depends
+  on: a release payload without `draft`, or a tag ref without a ref and commit sha, is
+  unreadable rather than absent. Reporting "no release exists" for an answer that
+  could not be parsed tells an operator their published tag is missing.
+- Include local tags in the readiness report: a working copy holding `v<version>` or
+  `promote-v<version>` is not ready to release, even though nothing is published yet.
+- Configure the preflight lookup with no secret. Only the publish token is needed;
+  the preflight reads the public Actions API anonymously and fails closed on a
+  refused read.
 - Escape remote-derived values before printing them as `key=value` fields, so a
   forged newline in a run URL or an asset name cannot satisfy a status or asset
   check, and redact credentials and raw remote diagnostics from error output.
