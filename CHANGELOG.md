@@ -5,26 +5,20 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
-- The release command accepts the account names an instance actually defines for
-  git. A Forgejo deployment serves the canonical repository through the service
-  account its module creates, and the command refused that remote outright, which
-  made an ssh-only operator machine unable to release at all. The canonical host
-  may also be spelled with the port it serves git on; any other port is still
-  refused, because it addresses a different service on the same host.
-
-- Verify the pinned Node archive against a digest that is a constant of the workflow
-  rather than against the checksum file the network serves. The check now needs no
-  network at all, so a runner holding a valid archive prepares its runtime without
-  reaching `nodejs.org` — which the previous revision did on every run, and which this
-  runner does not permit. The archive is still verified on every run, and when the
-  cache is absent or does not match the pin the step names the pre-seed path and digest
-  instead of failing anonymously.
-- Fail with a specific message when the runner provides no `GITHUB_PATH`, rather than
-  letting later steps build with an unverified Node.
-
 ## [0.1.2] - 2026-09-22
 
-Patch release hardening static glibc discovery in the release workflow.
+Release focused on safer, more reproducible releases and portable Linux
+artifacts.
+
+### Summary
+
+- Added guarded release commands and gates for synchronized versions, exact source
+  commits, annotated tags, complete asset sets, and artifact verification.
+- Hardened the Linux artifact workflow for a reproducible self-hosted build
+  environment and portable release artifacts.
+- Added a freestanding operator credential helper so portable artifacts do not
+  depend on the build host's filesystem.
+- Hardened canonical repository validation and secure release publishing.
 
 ### Added
 
@@ -40,10 +34,11 @@ Patch release hardening static glibc discovery in the release workflow.
   non-matching store glob.
 - Build the operator peer-credential helper freestanding so portable artifacts
   cannot embed host `/nix/store` paths.
-- Authenticate the release command's canonical remote by host and repository
-  path, with no explicit port, for its fetch URL and for every configured push
-  URL, and push to the validated URLs rather than to a remote name so a
-  configuration change after validation cannot redirect a release.
+- Authenticate the release command's canonical remote by host, repository path,
+  explicit hosting account, and the instance's canonical SSH port, for its fetch
+  URL and for every configured push URL; push to the validated URLs rather than to
+  a remote name so a configuration change after validation cannot redirect a
+  release.
 - Derive the Forgejo and GitHub endpoints from that remote identity, refuse API
   responses served through a redirect, and refuse fixture overrides unless test
   mode is set and the remote is a filesystem path.
