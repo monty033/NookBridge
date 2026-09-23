@@ -76,19 +76,28 @@ jobs:
       - name: Checkout
         run: |
           set -eu
-          for command_name in git curl g++ make sha256sum gzip tar; do
+          for command_name in git curl g++ make sha256sum gzip tar getconf strings grep sort tail; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
           done
+          # A runner reuses its workspace, so a previous failed run can leave a
+          # repository, build output, or release context files behind; start from an
+          # empty directory rather than meeting them later, when the build would refuse
+          # a dirty tree with no useful diagnosis.
+          case "$PWD" in
+            / | "$HOME")
+              printf 'refusing to clean %s\n' "$PWD" >&2
+              exit 1
+              ;;
+          esac
+          rm -rf ./* ./.[!.]* 2>/dev/null || true
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           checkout_ref="${GITHUB_REF:-$GITHUB_SHA}"
-          if [ -n "${GITHUB_TOKEN:-}" ]; then
-            git -c http.extraheader="Authorization: Bearer ${GITHUB_TOKEN}" \
-              fetch --no-tags --depth=1 origin "$checkout_ref"
-          else
-            git fetch --no-tags --depth=1 origin "$checkout_ref"
-          fi
+          # Anonymous, like every other read in this workflow: every job clears the
+          # automatic token, which can write to this repository, and the canonical
+          # repository is readable without a credential.
+          git fetch --no-tags --depth=1 origin "$checkout_ref"
           git checkout -q --detach FETCH_HEAD
 
       - name: Verify npm registry access
@@ -426,6 +435,13 @@ jobs:
           CURL_CA_BUNDLE: ""
           SSL_CERT_FILE: ""
           SSL_CERT_DIR: ""
+          # The TLS stack is configurable by environment too: OpenSSL loads a
+          # configuration file and provider modules named by these, and a curl built
+          # against it does that before the request. Clearing the certificate sources
+          # does not stop a provider from being loaded.
+          OPENSSL_CONF: ""
+          OPENSSL_MODULES: ""
+          OPENSSL_ENGINES: ""
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
@@ -440,8 +456,9 @@ jobs:
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
           for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT CURL_HOME \
-            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR http_proxy https_proxy HTTP_PROXY \
-            HTTPS_PROXY ALL_PROXY NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR OPENSSL_CONF OPENSSL_MODULES \
+            OPENSSL_ENGINES http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY \
+            NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
           do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \
@@ -506,6 +523,17 @@ jobs:
           printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
+          test -f "$payload"
+          # The payload is a file an earlier step wrote. Its commit and tag are checked
+          # against the runner's values here, so a swapped payload cannot create a
+          # release for another commit and have that discovered only after the write.
+          payload_sha="$(release_field target_commitish "$payload")"
+          payload_tag="$(release_field tag_name "$payload")"
+          test "$payload_tag" = "$rel_tag" \
+            || { printf 'the release payload names a different tag\n' >&2; exit 1; }
+          test "$(printf '%s' "$payload_sha" | tr 'A-Z' 'a-z')" = \
+            "$(printf '%s' "$RELEASE_SHA" | tr 'A-Z' 'a-z')" \
+            || { printf 'the release payload names a different commit\n' >&2; exit 1; }
           if [ "$action" = recreate ]; then
             # An earlier run left a partial candidate. Deleting it first is what makes
             # a retry possible at all, since a tag cannot be moved to a new version.
@@ -541,17 +569,6 @@ jobs:
               "$api_base/repos/monty033/NookBridge/releases/$existing_id" > /dev/null
           fi
 
-          test -f "$payload"
-          # The payload is a file an earlier step wrote. Its commit and tag are checked
-          # against the runner's values here, so a swapped payload cannot create a
-          # release for another commit and have that discovered only after the write.
-          payload_sha="$(release_field target_commitish "$payload")"
-          payload_tag="$(release_field tag_name "$payload")"
-          test "$payload_tag" = "$rel_tag" \
-            || { printf 'the release payload names a different tag\n' >&2; exit 1; }
-          test "$(printf '%s' "$payload_sha" | tr 'A-Z' 'a-z')" = \
-            "$(printf '%s' "$RELEASE_SHA" | tr 'A-Z' 'a-z')" \
-            || { printf 'the release payload names a different commit\n' >&2; exit 1; }
           response="$PWD/.release-created.json"
           "$curl_path" -q -fsS -X POST -o "$response" \
             --config "$curl_config" -H 'Accept: application/vnd.github+json' \
@@ -706,10 +723,20 @@ jobs:
       - name: Checkout promotion tooling
         run: |
           set -eu
-          for command_name in git curl cmp; do
+          for command_name in git curl cmp getconf strings grep sort tail; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
           done
+          # A runner reuses its workspace, so a previous failed run can leave a
+          # repository, a candidate, or the promotion context behind; start from an empty
+          # directory rather than discovering them mid-promotion.
+          case "$PWD" in
+            / | "$HOME")
+              printf 'refusing to clean %s\n' "$PWD" >&2
+              exit 1
+              ;;
+          esac
+          rm -rf ./* ./.[!.]* 2>/dev/null || true
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "${GITHUB_REF:-$GITHUB_SHA}"
@@ -906,6 +933,13 @@ jobs:
           CURL_CA_BUNDLE: ""
           SSL_CERT_FILE: ""
           SSL_CERT_DIR: ""
+          # The TLS stack is configurable by environment too: OpenSSL loads a
+          # configuration file and provider modules named by these, and a curl built
+          # against it does that before the request. Clearing the certificate sources
+          # does not stop a provider from being loaded.
+          OPENSSL_CONF: ""
+          OPENSSL_MODULES: ""
+          OPENSSL_ENGINES: ""
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
@@ -920,8 +954,9 @@ jobs:
           # variable this step relies on being empty is re-checked here: a runner that
           # applies an injected value fails the step instead of running with it.
           for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT CURL_HOME \
-            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR http_proxy https_proxy HTTP_PROXY \
-            HTTPS_PROXY ALL_PROXY NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
+            CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR OPENSSL_CONF OPENSSL_MODULES \
+            OPENSSL_ENGINES http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY \
+            NO_PROXY FORGEJO_TOKEN GITHUB_TOKEN
           do
             refused_value="$(printenv "$refused_variable" 2>/dev/null || true)"
             test -z "$refused_value" \

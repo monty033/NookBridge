@@ -135,6 +135,20 @@ Patch release hardening static glibc discovery in the release workflow.
   of those variables, plus the proxy variables and both names of the automatic token,
   is cleared and re-asserted in the step body, and every `curl` invocation in the
   workflow runs with `-q`.
+- Clear the OpenSSL environment in the token-bearing steps as well: `OPENSSL_CONF`,
+  `OPENSSL_MODULES`, and `OPENSSL_ENGINES` let a step running released code nominate a
+  configuration and provider modules that the TLS stack loads before the request, which
+  clearing the certificate sources does not prevent.
+- Validate the release payload before anything authenticated happens. The publishing
+  retry path deletes a release before it recreates it, so a tampered or missing payload
+  used to take the immutable tag's candidate with it and leave nothing to retry from.
+- Start each checkout from an empty workspace. A runner reuses its workspace, so a
+  previous failed run could leave a repository, build output, or release context files
+  that the next run tripped over, and `git init` fails outright on an existing `.git`.
+- Name every command the build invokes in the prerequisite check, including `getconf`,
+  `strings`, `grep`, `sort`, and `tail`, so a runner missing one fails with a diagnosis
+  instead of halfway through artifact assembly, and read the source anonymously: the
+  checkout no longer carries a token-bearing branch that no job can reach.
 - Recheck the commit a release names inside the step that acts on it. The publishing
   step is given the runner's commit directly and compares both the release payload and
   the live release against it before deleting or creating anything, and the promotion

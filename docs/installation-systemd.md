@@ -184,7 +184,11 @@ exit status; a sync failure surfaces to the operator unchanged.
 ## Building an artifact
 
 Artifact assembly is package-manager-neutral at the target, but release builds
-must run in the pinned CI/container environment. The builder requires:
+must run where the builder's requirements hold. The release workflow selects the
+runner registered under the `nixos` label rather than pinning a container or entering
+the repository's flake, so the compiler, glibc, and utility versions are properties of
+that machine; the builder checks for the tools it needs and refuses a tree it cannot
+build. The builder requires:
 
 - a clean Git source tree;
 - a completed `dist/` and production `node_modules/` tree;

@@ -144,8 +144,9 @@ then:
    publishing a release. If the change is release-sensitive, run the same gate
    first on a `runner-test/<name>` branch before merging.
 3. Create and push the tag `v$VERSION` to Forgejo. The workflow repeats the
-   artifact build in the pinned
-   CI/container environment:
+   artifact build on the runner registered under the `nixos` label — the same
+   environment, not a pinned container — and refuses to publish unless the artifact
+   verifies against the tag's commit and version:
 
    ```bash
    npm ci

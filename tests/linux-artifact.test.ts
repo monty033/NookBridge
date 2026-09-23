@@ -477,6 +477,36 @@ describe("Linux artifact manifest contract", () => {
     }
   });
 
+  it("starts from an empty workspace and checks the commands the build invokes", () => {
+    const workflow = parseYaml(readFileSync(linuxArtifactWorkflow, "utf8")) as {
+      jobs: Record<string, { steps: { name: string; run?: string }[] }>;
+    };
+
+    // A runner reuses its workspace. Without cleaning it, a previous failed run leaves a
+    // repository, build output, or release context files that the next run trips over —
+    // and `git init` fails outright when `.git` already exists.
+    for (const [jobName, stepName] of [
+      ["linux-artifact", "Checkout"],
+      ["promote-release", "Checkout promotion tooling"],
+    ] as const) {
+      const step = workflow.jobs[jobName]?.steps.find((candidate) => candidate.name === stepName);
+      const run = step?.run ?? "";
+      expect(run).toContain('case "$PWD" in');
+      expect(run).toContain("refusing to clean");
+      expect(run).toContain("rm -rf ./* ./.[!.]* 2>/dev/null");
+      // Every job clears the automatic token, so the checkout can only read
+      // anonymously; a token-bearing branch would be unreachable code holding a
+      // credential.
+      expect(run).not.toContain("http.extraheader");
+      // The build invokes all of these, so their absence belongs here rather than
+      // halfway through artifact assembly.
+      const prerequisites = /for command_name in ([^;]+); do/.exec(run)?.[1] ?? "";
+      for (const command of ["getconf", "strings", "grep", "sort", "tail"]) {
+        expect(`${jobName}: ${prerequisites}`).toContain(command);
+      }
+    }
+  });
+
   it("reads a release identity from a real payload with the workflow's own awk helper", () => {
     // The token-bearing steps decide what to delete or flip from this helper, and it has
     // never run: an awk that silently returns nothing would make those steps fail closed
@@ -611,7 +641,7 @@ describe("Linux artifact manifest contract", () => {
         jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
       }
     ).jobs["promote-release"]?.steps?.find((step) => step.name === "Checkout promotion tooling");
-    expect(promoteTooling?.run).toContain("for command_name in git curl cmp; do");
+    expect(promoteTooling?.run).toContain("for command_name in git curl cmp");
 
     for (const [jobName, stepName] of draftDecidingSteps) {
       const step = (
@@ -644,6 +674,12 @@ describe("Linux artifact manifest contract", () => {
     expect(raw).toContain("the release to recreate names a different commit");
     expect(raw).toContain("the release to promote names a different commit");
     expect(raw).not.toContain('existing_id="$(cat "$decision"');
+    // Nothing authenticated may happen before the payload is known to be the right one:
+    // the retry path deletes a release, so a tampered payload would otherwise take the
+    // immutable tag's candidate with it and leave nothing to retry from.
+    expect(raw.indexOf("the release payload names a different commit")).toBeLessThan(
+      raw.indexOf('if [ "$action" = recreate ]'),
+    );
     expect(raw).toContain("prerelease: true");
     expect(raw).toContain("release.prerelease !== true");
     expect(raw).toContain("release.target_commitish");
@@ -782,6 +818,11 @@ describe("Linux artifact manifest contract", () => {
       expect(step.env?.LD_LIBRARY_PATH).toBe("");
       expect(step.env?.LD_AUDIT).toBe("");
       expect(step.env?.SSL_CERT_FILE).toBe("");
+      // The TLS stack is configured by environment too: OpenSSL loads a configuration
+      // file and provider modules named by these, before any request is made.
+      expect(step.env?.OPENSSL_CONF).toBe("");
+      expect(step.env?.OPENSSL_MODULES).toBe("");
+      expect(step.env?.OPENSSL_ENGINES).toBe("");
       expect(step.env?.CURL_HOME).toBe("");
       expect(step.env?.https_proxy).toBe("");
       expect(run).toContain("for refused_variable in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH");
@@ -802,6 +843,7 @@ describe("Linux artifact manifest contract", () => {
       // The commit the release names is rechecked inside the step that deletes,
       // creates, or flips it, not only by the token-free steps around it.
       expect(run).toContain("names a different commit");
+      expect(run).toContain("OPENSSL_CONF OPENSSL_MODULES");
       // No interpreter from PATH in the token-bearing step.
       expect(run).not.toMatch(/^\s*node /m);
       expect(run).not.toContain("node -e");
