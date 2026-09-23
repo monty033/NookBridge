@@ -5,6 +5,12 @@ on:
     branches: [main, "runner-test/**"]
     tags: ["v*", "promote-v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing candidate tag to promote (for example, a vX.Y.Z tag)
+        required: true
+        type: string
 
 jobs:
   linux-artifact:
@@ -597,7 +603,11 @@ jobs:
           # runner and this token grants release write access.
           curl_config="$(mktemp)"
           chmod 600 "$curl_config"
-          printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
+          {
+            printf 'header = "Authorization: Bearer '
+            printf '%s' "$RELEASE_PUBLISH_TOKEN"
+            printf '"\n'
+          } > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
           test -f "$payload"
@@ -732,7 +742,7 @@ jobs:
     # path.  It re-verifies the published artifact against the release's own
     # target commit before flipping the flag, so promotion cannot bless a
     # candidate that does not match the commit it claims.
-    if: startsWith(github.ref, 'refs/tags/promote-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/promote-v')
     runs-on: nixos
     env:
       # Forgejo exports its automatic token under both names, so a step that clears only
@@ -762,7 +772,7 @@ jobs:
           GITHUB_TOKEN: ""
         run: |
           set -eu
-          for command_name in curl git cmp getconf strings grep sort tail awk; do
+          for command_name in curl git cmp getconf strings grep sort tail awk cut tr; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing host command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -784,9 +794,12 @@ jobs:
             || { printf 'the runner provides npm %s, not 10.9.8\n' "$(npm --version)" >&2; exit 1; }
 
       - name: Checkout promotion tooling
+        env:
+          PROMOTION_TAG: ${{ inputs.release_tag }}
+          PROMOTION_EVENT: ${{ github.event_name }}
         run: |
           set -eu
-          for command_name in git curl cmp getconf strings grep sort tail; do
+          for command_name in git curl cmp getconf strings grep sort tail cut tr; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -802,14 +815,26 @@ jobs:
           rm -rf ./* ./.[!.]* 2>/dev/null || true
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "${GITHUB_REF:-$GITHUB_SHA}"
+          if [ "$PROMOTION_EVENT" = workflow_dispatch ]; then
+            case "$PROMOTION_TAG" in
+              v?*) ;;
+              *) printf 'malformed release tag input: %s\n' "$PROMOTION_TAG" >&2; exit 1 ;;
+            esac
+            case "$PROMOTION_TAG" in
+              *[!0-9A-Za-z.-]*) printf 'malformed release tag input: %s\n' "$PROMOTION_TAG" >&2; exit 1 ;;
+            esac
+            checkout_ref="refs/tags/$PROMOTION_TAG"
+          else
+            checkout_ref="${GITHUB_REF:-$GITHUB_SHA}"
+          fi
+          git fetch --no-tags --depth=1 origin "$checkout_ref"
           git checkout -q --detach FETCH_HEAD
 
       - name: Verify the candidate artifact
         # This step runs the tagged revision's verifier, so it holds no secret: the
         # write to the public release happens in the step after it.
         env:
-          PROMOTE_REF: ${{ github.ref_name }}
+          PROMOTE_REF: ${{ github.event_name == 'workflow_dispatch' && format('promote-{0}', inputs.release_tag) || github.ref_name }}
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -1110,14 +1135,25 @@ jobs:
           # runner and this token grants release write access.
           curl_config="$(mktemp)"
           chmod 600 "$curl_config"
-          printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_PUBLISH_TOKEN" > "$curl_config"
+          {
+            printf 'header = "Authorization: Bearer '
+            printf '%s' "$RELEASE_PUBLISH_TOKEN"
+            printf '"\n'
+          } > "$curl_config"
           trap 'rm -f "$curl_config"' EXIT
 
-          "$curl_path" -q -fsS -X PATCH --config "$curl_config" \
+          patch_response="$PWD/.promote-work/patch-response.json"
+          patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
-            "$api_base/releases/$release_id" -o /dev/null
+            "$api_base/releases/$release_id" -o "$patch_response" -w '%{http_code}')"
+          if [ "$patch_status" != 200 ]; then
+            printf 'GitHub promotion failed (HTTP %s): ' "$patch_status" >&2
+            tr '\n' ' ' < "$patch_response" | cut -c 1-1000 >&2
+            printf '\n' >&2
+            exit 1
+          fi
 
           printf 'prerelease flag cleared for %s\n' "$rel_tag"
 
