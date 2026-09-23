@@ -1100,20 +1100,50 @@ describe("release operator command", () => {
   }, 60000);
 
   it("forwards Justfile arguments as positional parameters, not as command text", () => {
-    // `just --dry-run` prints the command line it would run on stderr.
-    const result = spawnSync("just", ["--dry-run", "release-promote", "0.1.2; printf INJECTED"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    });
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    // The property is structural, so it is asserted from the Justfile itself: that
+    // keeps it meaningful wherever the suite runs, including on a runner that does
+    // not provide the `just` binary. `set positional-arguments` is what makes the
+    // arguments reach the shell as positional parameters, and each pass-through
+    // recipe must expand them through "$@" rather than interpolate them into the
+    // command text, where the shell would run shell metacharacters in an argument
+    // before the release command can validate them.
+    const justfile = readFileSync(resolve(process.cwd(), "Justfile"), "utf8");
+    expect(justfile).toContain("set positional-arguments");
 
-    expect(output).toContain('"$@"');
-    // The argument must never be interpolated into the shell line.
-    expect(output).not.toContain("INJECTED");
-    expect(readFileSync(resolve(process.cwd(), "Justfile"), "utf8")).toContain(
-      "set positional-arguments",
-    );
+    for (const recipe of ["release", "release-promote"]) {
+      const lines = justfile.split("\n");
+      const header = lines.findIndex((line) => line.startsWith(`${recipe} *ARGS:`));
+      expect(header, `${recipe} must accept pass-through arguments`).toBeGreaterThan(-1);
+      const body: string[] = [];
+      for (const line of lines.slice(header + 1)) {
+        if (!line.startsWith(" ") && !line.startsWith("\t")) break;
+        body.push(line);
+      }
+      const recipeBody = body.join("\n");
+      expect(recipeBody).toContain('"$@"');
+      expect(recipeBody).not.toMatch(/\{\{[^}]*ARGS[^}]*\}\}/);
+    }
   });
+
+  // `just --dry-run` prints the command line it would run, confirming the structural
+  // property above against the real `just` implementation. The release runner does not
+  // install `just` (it is a developer-shell tool, and the workflow itself never calls
+  // it), so this confirmation runs wherever the binary is available.
+  const justAvailable = spawnSync("just", ["--version"], { encoding: "utf8" }).status === 0;
+  (justAvailable ? it : it.skip)(
+    "shells the Justfile arguments as positional parameters, not as command text",
+    () => {
+      const result = spawnSync("just", ["--dry-run", "release-promote", "0.1.2; printf INJECTED"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      });
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+
+      expect(output).toContain('"$@"');
+      // The argument must never be interpolated into the shell line.
+      expect(output).not.toContain("INJECTED");
+    },
+  );
 
   it("runs the release API command from a checkout path containing a space", async () => {
     const spaced = mkdtempSync(join(tmpdir(), "nookbridge space "));
