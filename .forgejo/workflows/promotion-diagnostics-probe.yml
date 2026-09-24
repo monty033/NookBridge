@@ -192,20 +192,13 @@ jobs:
             printf '%s\n' "$path"
           done
           printf 'summary.after\n' >> $PROBE_DIR/checkpoints.tsv
-
-      - name: Upload probe evidence
-        id: upload_probe_evidence
-        if: always()
-        continue-on-error: true
-        uses: https://code.forgejo.org/actions/upload-artifact@v3
-        with:
-          name: promotion-diagnostics-probe-${{ github.run_id }}
-          path: "${{ github.workspace }}/.probe-work"
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Require evidence upload
-        if: always()
-        run: |
-          set -eu
-          test "${{ steps.upload_probe_evidence.outcome }}" = success
+          printf '%s\n' 'PROBE_PATHS_BEGIN'
+          if [ -f "$PWD/probe-paths.tsv" ]; then
+            tr '\n\t' '  ' < "$PWD/probe-paths.tsv"
+            printf '\n'
+          fi
+          printf '%s\n' 'PROBE_CHECKPOINTS_BEGIN'
+          tr '\n\t' '  ' < $PROBE_DIR/checkpoints.tsv
+          printf '\n%s\n' 'PROBE_DIAGNOSTICS_BEGIN'
+          tr '\n\t' '  ' < $PROBE_DIR/promotion-diagnostics.tsv
+          printf '\n%s\n' 'PROBE_EVIDENCE_END'
