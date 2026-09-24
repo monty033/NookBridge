@@ -945,14 +945,21 @@ describe("Linux artifact manifest contract", () => {
     expect(workDirMkdirIndex).toBeGreaterThanOrEqual(0);
     expect(workDirMkdirIndex).toBeLessThan(patchBlockStart);
     const patchBlock = raw.slice(patchBlockStart, patchBlockEnd);
-    const setPlusEIndex = patchBlock.indexOf("set +e");
-    const patchStatusIndex = patchBlock.indexOf("patch_status=");
+    const guardedCurlIndex = patchBlock.indexOf("if patch_status=");
+    const curlElseIndex = patchBlock.indexOf("\n          else", guardedCurlIndex);
     const curlExitIndex = patchBlock.indexOf("patch_curl_exit=$?");
-    const setMinusEIndex = patchBlock.indexOf("set -e");
-    expect(setPlusEIndex).toBeGreaterThanOrEqual(0);
-    expect(patchStatusIndex).toBeGreaterThan(setPlusEIndex);
-    expect(curlExitIndex).toBeGreaterThan(patchStatusIndex);
-    expect(setMinusEIndex).toBeGreaterThan(curlExitIndex);
+    const curlGuardEndIndex = patchBlock.indexOf("\n          fi", guardedCurlIndex);
+    const promoteStepStart = raw.indexOf("- name: Promote candidate release");
+    const promoteSetEIndex = raw.indexOf("set -eu", promoteStepStart);
+    expect(guardedCurlIndex).toBeGreaterThanOrEqual(0);
+    expect(curlElseIndex).toBeGreaterThan(guardedCurlIndex);
+    expect(curlExitIndex).toBeGreaterThan(curlElseIndex);
+    expect(curlGuardEndIndex).toBeGreaterThan(curlExitIndex);
+    const guardedCurlAbsolute = patchBlockStart + guardedCurlIndex;
+    expect(promoteStepStart).toBeGreaterThanOrEqual(0);
+    expect(promoteSetEIndex).toBeGreaterThan(promoteStepStart);
+    expect(promoteSetEIndex).toBeLessThan(guardedCurlAbsolute);
+    expect(patchBlock).not.toContain("set +e");
     expect(patchBlock).toContain('[ -s "$patch_response" ]');
     expect(patchBlock).toContain("<no response body>");
     expect(patchBlock).toContain(': > "$patch_response"');
@@ -1244,6 +1251,93 @@ describe("Linux artifact manifest contract", () => {
       const step = promoteSteps.find((candidate) => candidate.name === name);
       expect(step?.env?.RELEASE_PUBLISH_TOKEN).toBeUndefined();
     }
+  });
+
+  it("captures a failed PATCH under errexit and writes promotion diagnostics", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const patchStart = raw.indexOf(
+      '          patch_response="$PWD/.promote-work/patch-response.json"',
+    );
+    const patchEnd = raw.indexOf("          printf 'prerelease flag cleared", patchStart);
+    expect(patchStart).toBeGreaterThanOrEqual(0);
+    expect(patchEnd).toBeGreaterThan(patchStart);
+    const patchScript = raw
+      .slice(patchStart, patchEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-curl-test-"));
+    fixtureRoots.push(root);
+    mkdirSync(join(root, ".promote-work"));
+    const fakeCurl = join(root, "curl");
+    writeFileSync(fakeCurl, "#!/bin/sh\nexit 22\n");
+    chmodSync(fakeCurl, 0o755);
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          'curl_path="$PWD/curl"',
+          'curl_config="$PWD/curl.conf"',
+          'api_base="https://api.example.test"',
+          "release_id=1",
+          'rel_tag="v0.1.2"',
+          'RELEASE_PUBLISH_TOKEN="fixture-token"',
+          'patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"',
+          patchScript,
+        ].join("\n"),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
+      "curl_exit\t22\nhttp_status\t\nresponse_body\t<no response body>\n",
+    );
+  });
+
+  it("preserves an HTTP error body in promotion diagnostics", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const patchStart = raw.indexOf(
+      '          patch_response="$PWD/.promote-work/patch-response.json"',
+    );
+    const patchEnd = raw.indexOf("          printf 'prerelease flag cleared", patchStart);
+    const patchScript = raw
+      .slice(patchStart, patchEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-body-test-"));
+    fixtureRoots.push(root);
+    mkdirSync(join(root, ".promote-work"));
+    const fakeCurl = join(root, "curl");
+    writeFileSync(
+      fakeCurl,
+      '#!/bin/sh\nprintf \'403\'\nprintf \'{"message":"denied"}\' > "$PWD/.promote-work/patch-response.json"\nexit 0\n',
+    );
+    chmodSync(fakeCurl, 0o755);
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          'curl_path="$PWD/curl"',
+          'curl_config="$PWD/curl.conf"',
+          'api_base="https://api.example.test"',
+          "release_id=1",
+          'rel_tag="v0.1.2"',
+          'RELEASE_PUBLISH_TOKEN="fixture-token"',
+          'patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"',
+          patchScript,
+        ].join("\n"),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
+      'curl_exit\t0\nhttp_status\t403\nresponse_body\t{"message":"denied"}\n',
+    );
   });
 
   it("runs the real artifact build on main and runner-test refs without publishing", () => {

@@ -1147,14 +1147,16 @@ jobs:
 
           patch_response="$PWD/.promote-work/patch-response.json"
           : > "$patch_response"
-          set +e
-          patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
+          patch_curl_exit=0
+          if patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
-            "$api_base/releases/$release_id" -o "$patch_response" -w '%{http_code}')"
-          patch_curl_exit=$?
-          set -e
+            "$api_base/releases/$release_id" -o "$patch_response" -w '%{http_code}')"; then
+            :
+          else
+            patch_curl_exit=$?
+          fi
           if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
             response_body='<no response body>'
             if [ -s "$patch_response" ]; then
