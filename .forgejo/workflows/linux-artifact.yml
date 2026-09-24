@@ -1159,9 +1159,11 @@ jobs:
               printf 'curl_exit\t%s\n' "$patch_curl_exit"
               printf 'http_status\t%s\n' "$patch_status"
               if [ -s "$patch_response" ]; then
-                printf 'response_body\t'
-                tr '\n' ' ' < "$patch_response" | cut -c 1-1000 || true
-                printf '\n'
+                response_body="$(tr '\n' ' ' < "$patch_response" | cut -c 1-1000 || true)"
+                case "$response_body" in
+                  *"$RELEASE_PUBLISH_TOKEN"*) response_body='<redacted response body>' ;;
+                esac
+                printf 'response_body\t%s\n' "$response_body"
               else
                 printf 'response_body\t<no response body>\n'
               fi
@@ -1195,6 +1197,16 @@ jobs:
           printf 'PROMOTION_RESPONSE_BODY %s\n' "$response_body"
           printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' "$curl_exit" "$http_status"
           printf '::error title=GitHub promotion response::%s\n' "$response_body"
+
+      - name: Upload promotion diagnostics artifact
+        if: always()
+        continue-on-error: true
+        uses: https://code.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: promotion-diagnostics-${{ github.run_id }}
+          path: .promote-work/promotion-diagnostics.tsv
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Re-verify the promoted release
         # Back to a step that holds no secret: the post-flip re-verification runs the

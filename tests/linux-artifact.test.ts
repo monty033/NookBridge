@@ -959,6 +959,9 @@ describe("Linux artifact manifest contract", () => {
     expect(patchBlock).toContain("curl exit %s");
     expect(patchBlock).toContain('rm -f "$patch_diagnostics"');
     expect(patchBlock).toContain("cut -c 1-1000");
+    expect(patchBlock).toContain('response_body="$(tr');
+    expect(patchBlock).toContain("<redacted response body>");
+    expect(patchBlock).toContain("printf 'response_body\\t%s\\n' \"$response_body\"");
     const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
     const failureExitIndex = patchBlock.lastIndexOf("exit 1");
     expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
@@ -973,7 +976,17 @@ describe("Linux artifact manifest contract", () => {
       parseYaml(raw) as {
         jobs: Record<
           string,
-          { steps?: { name?: string; if?: string; run?: string; env?: Record<string, string> }[] }
+          {
+            steps?: {
+              name?: string;
+              if?: string;
+              run?: string;
+              uses?: string;
+              "continue-on-error"?: boolean;
+              with?: Record<string, string>;
+              env?: Record<string, string>;
+            }[];
+          }
         >;
       }
     ).jobs["promote-release"];
@@ -1002,6 +1015,24 @@ describe("Linux artifact manifest contract", () => {
     const reverifyIndex = promotionSteps.findIndex(
       (step) => step.name === "Re-verify the promoted release",
     );
+    const promoteStep = promotionSteps.find((step) => step.name === "Promote candidate release");
+    expect(promoteStep?.env?.RELEASE_PUBLISH_TOKEN).toBe("${{ secrets.RELEASE_PUBLISH_TOKEN }}");
+    const diagnosticsArtifact = promotionSteps.find(
+      (step) => step.name === "Upload promotion diagnostics artifact",
+    );
+    expect(diagnosticsArtifact?.if).toBe("always()");
+    expect(diagnosticsArtifact?.["continue-on-error"]).toBe(true);
+    expect(diagnosticsArtifact?.uses).toBe("https://code.forgejo.org/actions/upload-artifact@v3");
+    const diagnosticsPath = ".promote-work/promotion-diagnostics.tsv";
+    expect(patchBlock).toContain(`patch_diagnostics="$PWD/${diagnosticsPath}"`);
+    const diagnosticsWriterStart = patchBlock.indexOf("printf 'curl_exit");
+    const diagnosticsWriteBlock = patchBlock.slice(diagnosticsWriterStart, diagnosticsWriteIndex);
+    expect(diagnosticsWriterStart).toBeGreaterThanOrEqual(0);
+    expect((diagnosticsWriteBlock.match(/RELEASE_PUBLISH_TOKEN/g) ?? []).length).toBe(1);
+    expect(diagnosticsArtifact?.with?.path).toBe(diagnosticsPath);
+    expect(raw).toContain("promotion-diagnostics-${{ github.run_id }}");
+    expect(raw).toContain("if-no-files-found: ignore");
+    expect(raw).toContain("retention-days: 7");
     expect(promoteIndex).toBeGreaterThanOrEqual(0);
     expect(diagnosticsIndex).toBeGreaterThan(promoteIndex);
     expect(reverifyIndex).toBeGreaterThan(diagnosticsIndex);
