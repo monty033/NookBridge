@@ -957,6 +957,50 @@ describe("Linux artifact manifest contract", () => {
     expect(patchBlock).toContain("<no response body>");
     expect(patchBlock).toContain(': > "$patch_response"');
     expect(patchBlock).toContain("curl exit %s");
+    expect(patchBlock).toContain('rm -f "$patch_diagnostics"');
+    expect(patchBlock).toContain("cut -c 1-1000");
+    const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
+    const failureExitIndex = patchBlock.lastIndexOf("exit 1");
+    expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
+    expect(failureExitIndex).toBeGreaterThan(diagnosticsWriteIndex);
+    expect(patchBlock.indexOf('rm -f "$patch_diagnostics"')).toBeLessThan(
+      patchBlock.indexOf("patch_status="),
+    );
+    expect(patchBlock).toContain("promotion-diagnostics.tsv");
+    expect(patchBlock).toContain("printf 'curl_exit\\t%s\\n' \"$patch_curl_exit\"");
+    expect(patchBlock).toContain("printf 'http_status\\t%s\\n' \"$patch_status\"");
+    const promotionJob = (
+      parseYaml(raw) as {
+        jobs: Record<
+          string,
+          { steps?: { name?: string; if?: string; run?: string; env?: Record<string, string> }[] }
+        >;
+      }
+    ).jobs["promote-release"];
+    const promotionDiagnostics = promotionJob?.steps?.find(
+      (step) => step.name === "Report promotion diagnostics",
+    );
+    expect(promotionDiagnostics?.if).toBe("always()");
+    expect(promotionDiagnostics?.run ?? "").toContain("::error title=GitHub promotion::");
+    expect(promotionDiagnostics?.run ?? "").toContain("promotion-diagnostics.tsv");
+    expect(promotionDiagnostics?.run ?? "").not.toContain("RELEASE_PUBLISH_TOKEN");
+    expect(promotionDiagnostics?.env).toEqual({
+      FORGEJO_TOKEN: "",
+      GITHUB_TOKEN: "",
+    });
+    const promotionSteps = promotionJob?.steps ?? [];
+    const promoteIndex = promotionSteps.findIndex(
+      (step) => step.name === "Promote candidate release",
+    );
+    const diagnosticsIndex = promotionSteps.findIndex(
+      (step) => step.name === "Report promotion diagnostics",
+    );
+    const reverifyIndex = promotionSteps.findIndex(
+      (step) => step.name === "Re-verify the promoted release",
+    );
+    expect(promoteIndex).toBeGreaterThanOrEqual(0);
+    expect(diagnosticsIndex).toBeGreaterThan(promoteIndex);
+    expect(reverifyIndex).toBeGreaterThan(diagnosticsIndex);
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back in a step that holds no secret; a successful
