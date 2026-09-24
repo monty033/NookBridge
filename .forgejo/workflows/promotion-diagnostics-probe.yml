@@ -195,7 +195,7 @@ jobs:
         uses: https://code.forgejo.org/actions/upload-artifact@v3
         with:
           name: promotion-diagnostics-probe-${{ github.run_id }}
-          path: .probe-work
+          path: "${{ github.workspace }}/.probe-work"
           if-no-files-found: error
           retention-days: 7
 
