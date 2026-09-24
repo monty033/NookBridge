@@ -1143,6 +1143,8 @@ jobs:
           trap 'rm -f "$curl_config"' EXIT
 
           patch_response="$PWD/.promote-work/patch-response.json"
+          patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"
+          rm -f "$patch_diagnostics"
           : > "$patch_response"
           set +e
           patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
@@ -1153,6 +1155,17 @@ jobs:
           patch_curl_exit=$?
           set -e
           if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
+            {
+              printf 'curl_exit\t%s\n' "$patch_curl_exit"
+              printf 'http_status\t%s\n' "$patch_status"
+              if [ -s "$patch_response" ]; then
+                printf 'response_body\t'
+                tr '\n' ' ' < "$patch_response" | cut -c 1-1000 || true
+                printf '\n'
+              else
+                printf 'response_body\t<no response body>\n'
+              fi
+            } > "$patch_diagnostics"
             printf 'GitHub promotion failed (curl exit %s, HTTP %s): ' "$patch_curl_exit" "$patch_status" >&2
             if [ -s "$patch_response" ]; then
               tr '\n' ' ' < "$patch_response" | cut -c 1-1000 >&2 || true
@@ -1162,8 +1175,24 @@ jobs:
             printf '\n' >&2
             exit 1
           fi
-
           printf 'prerelease flag cleared for %s\n' "$rel_tag"
+
+      - name: Report promotion diagnostics
+        if: always()
+        env:
+          FORGEJO_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          set -eu
+          report="$PWD/.promote-work/promotion-diagnostics.tsv"
+          if [ ! -s "$report" ]; then
+            exit 0
+          fi
+          curl_exit="$(awk -F '\t' '$1 == "curl_exit" { print $2; exit }' "$report")"
+          http_status="$(awk -F '\t' '$1 == "http_status" { print $2; exit }' "$report")"
+          response_body="$(awk -F '\t' '$1 == "response_body" { sub(/^[^\t]*\t/, ""); print; exit }' "$report")"
+          printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' "$curl_exit" "$http_status"
+          printf '::error title=GitHub promotion response::%s\n' "$response_body"
 
       - name: Re-verify the promoted release
         # Back to a step that holds no secret: the post-flip re-verification runs the
