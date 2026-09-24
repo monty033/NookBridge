@@ -935,8 +935,28 @@ describe("Linux artifact manifest contract", () => {
     // body; otherwise a rerun can fail closed without revealing whether the token,
     // endpoint, or release state was rejected.
     expect(raw).toContain("patch-response.json");
-    expect(raw).toContain("GitHub promotion failed (HTTP %s)");
+    expect(raw).toContain("GitHub promotion failed (curl exit %s, HTTP %s)");
     expect(raw).toContain("tr '\\n' ' '");
+    const patchBlockStart = raw.indexOf('patch_response="$PWD/.promote-work/patch-response.json"');
+    const patchBlockEnd = raw.indexOf("printf 'prerelease flag cleared", patchBlockStart);
+    expect(patchBlockStart).toBeGreaterThanOrEqual(0);
+    expect(patchBlockEnd).toBeGreaterThan(patchBlockStart);
+    const workDirMkdirIndex = raw.indexOf('mkdir -p "$work_dir"');
+    expect(workDirMkdirIndex).toBeGreaterThanOrEqual(0);
+    expect(workDirMkdirIndex).toBeLessThan(patchBlockStart);
+    const patchBlock = raw.slice(patchBlockStart, patchBlockEnd);
+    const setPlusEIndex = patchBlock.indexOf("set +e");
+    const patchStatusIndex = patchBlock.indexOf("patch_status=");
+    const curlExitIndex = patchBlock.indexOf("patch_curl_exit=$?");
+    const setMinusEIndex = patchBlock.indexOf("set -e");
+    expect(setPlusEIndex).toBeGreaterThanOrEqual(0);
+    expect(patchStatusIndex).toBeGreaterThan(setPlusEIndex);
+    expect(curlExitIndex).toBeGreaterThan(patchStatusIndex);
+    expect(setMinusEIndex).toBeGreaterThan(curlExitIndex);
+    expect(patchBlock).toContain('[ -s "$patch_response" ]');
+    expect(patchBlock).toContain("<no response body>");
+    expect(patchBlock).toContain(': > "$patch_response"');
+    expect(patchBlock).toContain("curl exit %s");
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back in a step that holds no secret; a successful

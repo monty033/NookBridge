@@ -1143,14 +1143,22 @@ jobs:
           trap 'rm -f "$curl_config"' EXIT
 
           patch_response="$PWD/.promote-work/patch-response.json"
+          : > "$patch_response"
+          set +e
           patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
             "$api_base/releases/$release_id" -o "$patch_response" -w '%{http_code}')"
-          if [ "$patch_status" != 200 ]; then
-            printf 'GitHub promotion failed (HTTP %s): ' "$patch_status" >&2
-            tr '\n' ' ' < "$patch_response" | cut -c 1-1000 >&2
+          patch_curl_exit=$?
+          set -e
+          if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
+            printf 'GitHub promotion failed (curl exit %s, HTTP %s): ' "$patch_curl_exit" "$patch_status" >&2
+            if [ -s "$patch_response" ]; then
+              tr '\n' ' ' < "$patch_response" | cut -c 1-1000 >&2 || true
+            else
+              printf '<no response body>' >&2
+            fi
             printf '\n' >&2
             exit 1
           fi
