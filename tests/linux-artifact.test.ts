@@ -957,7 +957,6 @@ describe("Linux artifact manifest contract", () => {
     expect(patchBlock).toContain("<no response body>");
     expect(patchBlock).toContain(': > "$patch_response"');
     expect(patchBlock).toContain("curl exit %s");
-    expect(patchBlock).toContain('rm -f "$patch_diagnostics"');
     expect(patchBlock).toContain("cut -c 1-1000");
     expect(patchBlock).toContain('response_body="$(tr');
     expect(patchBlock).toContain("<redacted response body>");
@@ -971,19 +970,27 @@ describe("Linux artifact manifest contract", () => {
     expect(patchBlock).toContain(
       'printf \'response_body=%s\\n\' "$response_body" >> "$FORGEJO_OUTPUT"',
     );
+    expect(patchBlock).toContain("printf 'promotion_failed=true\\n' >> \"$FORGEJO_OUTPUT\"");
+    expect(patchBlock).not.toContain("exit 1");
+    expect(patchBlock).toContain(
+      "printf 'promotion diagnostics captured; deferring failure until after upload\\n'",
+    );
+    expect(patchBlock).toContain("exit 0");
     const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
-    const failureExitIndex = patchBlock.lastIndexOf("exit 1");
     const outputWriteIndex = patchBlock.indexOf("printf 'curl_exit=%s");
+    const deferredSuccessIndex = patchBlock.indexOf("printf 'promotion_failed=true");
     expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
-    expect(failureExitIndex).toBeGreaterThan(diagnosticsWriteIndex);
     expect(outputWriteIndex).toBeGreaterThan(diagnosticsWriteIndex);
-    expect(outputWriteIndex).toBeLessThan(failureExitIndex);
+    expect(deferredSuccessIndex).toBeGreaterThan(outputWriteIndex);
     expect(patchBlock).toContain('case "$response_body" in');
     expect(patchBlock).toContain('*"$RELEASE_PUBLISH_TOKEN"*)');
-    expect(patchBlock.indexOf('rm -f "$patch_diagnostics"')).toBeLessThan(
-      patchBlock.indexOf("patch_status="),
-    );
-    expect(patchBlock).toContain("promotion-diagnostics.tsv");
+    const diagnosticsResetIndex = raw.indexOf('rm -f "$patch_diagnostics"');
+    const patchRequestIndex = raw.indexOf('patch_status="$("$curl_path"');
+    expect(raw).toContain('patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"');
+    expect(diagnosticsResetIndex).toBeGreaterThanOrEqual(0);
+    expect(diagnosticsResetIndex).toBeLessThan(patchRequestIndex);
+    expect(patchRequestIndex).toBeGreaterThanOrEqual(0);
+    expect(raw).toContain("promotion-diagnostics.tsv");
     expect(patchBlock).toContain("printf 'curl_exit\\t%s\\n' \"$patch_curl_exit\"");
     expect(patchBlock).toContain("printf 'http_status\\t%s\\n' \"$patch_status\"");
     const promotionJob = (
@@ -1009,11 +1016,15 @@ describe("Linux artifact manifest contract", () => {
       (step) => step.name === "Report promotion diagnostics",
     );
     expect(promotionDiagnostics?.if).toBe("always()");
+    expect(promotionDiagnostics?.["continue-on-error"]).toBeUndefined();
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_CURL_EXIT");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_HTTP_STATUS");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_RESPONSE_BODY");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_STEP_OUTCOME");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_DIAGNOSTICS_OUTPUT_MISSING");
+    expect(promotionDiagnostics?.run ?? "").toContain(
+      "step outputs unavailable; artifact preserved",
+    );
     expect(promotionDiagnostics?.run ?? "").toContain("mkdir -p");
     expect(promotionDiagnostics?.run ?? "").toContain('> "$report"');
     expect(promotionDiagnostics?.run ?? "").toContain("::error title=GitHub promotion::");
@@ -1029,6 +1040,7 @@ describe("Linux artifact manifest contract", () => {
       PROMOTION_CURL_EXIT: "${{ steps.promote_candidate.outputs.curl_exit }}",
       PROMOTION_HTTP_STATUS: "${{ steps.promote_candidate.outputs.http_status }}",
       PROMOTION_RESPONSE_BODY: "${{ steps.promote_candidate.outputs.response_body }}",
+      PROMOTION_FAILED: "${{ steps.promote_candidate.outputs.promotion_failed }}",
       PROMOTION_STEP_OUTCOME: "${{ steps.promote_candidate.outcome }}",
     });
     const promotionSteps = promotionJob?.steps ?? [];
@@ -1047,22 +1059,45 @@ describe("Linux artifact manifest contract", () => {
     const diagnosticsArtifact = promotionSteps.find(
       (step) => step.name === "Upload promotion diagnostics artifact",
     );
+    const deferredFailure = promotionSteps.find(
+      (step) => step.name === "Fail after promotion diagnostics",
+    );
     expect(diagnosticsArtifact?.if).toBe("always()");
     expect(diagnosticsArtifact?.["continue-on-error"]).toBe(true);
     expect(diagnosticsArtifact?.uses).toBe("https://code.forgejo.org/actions/upload-artifact@v3");
     const diagnosticsPath = ".promote-work/promotion-diagnostics.tsv";
-    expect(patchBlock).toContain(`patch_diagnostics="$PWD/${diagnosticsPath}"`);
+    expect(raw).toContain(`patch_diagnostics="$PWD/${diagnosticsPath}"`);
     const diagnosticsWriterStart = patchBlock.indexOf("printf 'curl_exit");
     const diagnosticsWriteBlock = patchBlock.slice(diagnosticsWriterStart, diagnosticsWriteIndex);
     expect(diagnosticsWriterStart).toBeGreaterThanOrEqual(0);
     expect((diagnosticsWriteBlock.match(/RELEASE_PUBLISH_TOKEN/g) ?? []).length).toBe(0);
     expect(diagnosticsArtifact?.with?.path).toBe(diagnosticsPath);
+    expect(deferredFailure?.if).toBe("always()");
+    expect(deferredFailure?.["continue-on-error"]).toBeUndefined();
+    expect(deferredFailure?.env).toEqual({
+      PROMOTION_FAILED: "${{ steps.promote_candidate.outputs.promotion_failed }}",
+    });
+    expect(deferredFailure?.run ?? "").toContain("PROMOTION_FAILED");
+    expect(deferredFailure?.run ?? "").toContain('if [ "${PROMOTION_FAILED:-}" = true ]; then');
+    expect(deferredFailure?.run ?? "").toContain(
+      "GitHub promotion failed after diagnostics handling",
+    );
+    expect(deferredFailure?.run ?? "").toContain("exit 1");
     expect(raw).toContain("promotion-diagnostics-${{ github.run_id }}");
     expect(raw).toContain("if-no-files-found: ignore");
     expect(raw).toContain("retention-days: 7");
     expect(promoteIndex).toBeGreaterThanOrEqual(0);
     expect(diagnosticsIndex).toBeGreaterThan(promoteIndex);
-    expect(reverifyIndex).toBeGreaterThan(diagnosticsIndex);
+    const deferredFailureIndex = promotionSteps.findIndex(
+      (step) => step.name === "Fail after promotion diagnostics",
+    );
+    expect(deferredFailureIndex).toBeGreaterThan(diagnosticsIndex);
+    const diagnosticsArtifactIndex = promotionSteps.findIndex(
+      (step) => step.name === "Upload promotion diagnostics artifact",
+    );
+    expect(diagnosticsArtifactIndex).toBeGreaterThan(diagnosticsIndex);
+    expect(deferredFailureIndex).toBeGreaterThan(diagnosticsArtifactIndex);
+    expect(reverifyIndex).toBeGreaterThan(deferredFailureIndex);
     // Promotion re-verifies provenance against the release's own target commit.
     expect(raw).toContain('--expect-git-commit "$target_commit"');
     // Promotion reads the state back in a step that holds no secret; a successful

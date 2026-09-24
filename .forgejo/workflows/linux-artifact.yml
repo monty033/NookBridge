@@ -1090,6 +1090,8 @@ jobs:
           }
           context="$PWD/.promote-work/context.tsv"
           field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
+          patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"
+          rm -f "$patch_diagnostics"
 
           api_base="$(field api_base)"
           rel_tag="$(field rel_tag)"
@@ -1144,8 +1146,6 @@ jobs:
           trap 'rm -f "$curl_config"' EXIT
 
           patch_response="$PWD/.promote-work/patch-response.json"
-          patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"
-          rm -f "$patch_diagnostics"
           : > "$patch_response"
           set +e
           patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
@@ -1171,9 +1171,14 @@ jobs:
             printf 'curl_exit=%s\n' "$patch_curl_exit" >> "$FORGEJO_OUTPUT"
             printf 'http_status=%s\n' "$patch_status" >> "$FORGEJO_OUTPUT"
             printf 'response_body=%s\n' "$response_body" >> "$FORGEJO_OUTPUT"
+            printf 'promotion_failed=true\n' >> "$FORGEJO_OUTPUT"
             printf 'GitHub promotion failed (curl exit %s, HTTP %s): %s\n' \
               "$patch_curl_exit" "$patch_status" "$response_body" >&2
-            exit 1
+            # Keep this step successful so Forgejo preserves the workspace and step
+            # outputs for the diagnostics and artifact steps. A later step fails the
+            # job after those evidence paths have run.
+            printf 'promotion diagnostics captured; deferring failure until after upload\n'
+            exit 0
           fi
           printf 'prerelease flag cleared for %s\n' "$rel_tag"
 
@@ -1185,17 +1190,22 @@ jobs:
           PROMOTION_CURL_EXIT: ${{ steps.promote_candidate.outputs.curl_exit }}
           PROMOTION_HTTP_STATUS: ${{ steps.promote_candidate.outputs.http_status }}
           PROMOTION_RESPONSE_BODY: ${{ steps.promote_candidate.outputs.response_body }}
+          PROMOTION_FAILED: ${{ steps.promote_candidate.outputs.promotion_failed }}
           PROMOTION_STEP_OUTCOME: ${{ steps.promote_candidate.outcome }}
         run: |
           set -eu
+          report="$PWD/.promote-work/promotion-diagnostics.tsv"
           if [ -z "${PROMOTION_CURL_EXIT:-}" ]; then
+            if [ -s "$report" ]; then
+              printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING step outputs unavailable; artifact preserved\n' >&2
+              exit 1
+            fi
             if [ "${PROMOTION_STEP_OUTCOME:-}" = "failure" ]; then
               printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING failed promotion step produced no outputs\n' >&2
               exit 1
             fi
             exit 0
           fi
-          report="$PWD/.promote-work/promotion-diagnostics.tsv"
           mkdir -p "$(dirname "$report")"
           {
             printf 'curl_exit\t%s\n' "$PROMOTION_CURL_EXIT"
@@ -1218,6 +1228,17 @@ jobs:
           path: .promote-work/promotion-diagnostics.tsv
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Fail after promotion diagnostics
+        if: always()
+        env:
+          PROMOTION_FAILED: ${{ steps.promote_candidate.outputs.promotion_failed }}
+        run: |
+          set -eu
+          if [ "${PROMOTION_FAILED:-}" = true ]; then
+            printf 'GitHub promotion failed after diagnostics handling\n' >&2
+            exit 1
+          fi
 
       - name: Re-verify the promoted release
         # Back to a step that holds no secret: the post-flip re-verification runs the
