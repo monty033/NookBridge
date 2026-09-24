@@ -984,6 +984,7 @@ jobs:
           } > "$work_dir/context.tsv"
 
       - name: Promote candidate release
+        id: promote_candidate
         # This step holds the publishing token. It resolves its tools from a fixed
         # PATH and reads fields out of a line-oriented file: it sources nothing,
         # executes no script from the released revision, and cannot be handed a
@@ -1155,26 +1156,23 @@ jobs:
           patch_curl_exit=$?
           set -e
           if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
+            response_body='<no response body>'
+            if [ -s "$patch_response" ]; then
+              response_body="$(tr '\n\t' '  ' < "$patch_response" | cut -c 1-1000 || true)"
+              case "$response_body" in
+                *"$RELEASE_PUBLISH_TOKEN"*) response_body='<redacted response body>' ;;
+              esac
+            fi
             {
               printf 'curl_exit\t%s\n' "$patch_curl_exit"
               printf 'http_status\t%s\n' "$patch_status"
-              if [ -s "$patch_response" ]; then
-                response_body="$(tr '\n' ' ' < "$patch_response" | cut -c 1-1000 || true)"
-                case "$response_body" in
-                  *"$RELEASE_PUBLISH_TOKEN"*) response_body='<redacted response body>' ;;
-                esac
-                printf 'response_body\t%s\n' "$response_body"
-              else
-                printf 'response_body\t<no response body>\n'
-              fi
+              printf 'response_body\t%s\n' "$response_body"
             } > "$patch_diagnostics"
-            printf 'GitHub promotion failed (curl exit %s, HTTP %s): ' "$patch_curl_exit" "$patch_status" >&2
-            if [ -s "$patch_response" ]; then
-              tr '\n' ' ' < "$patch_response" | cut -c 1-1000 >&2 || true
-            else
-              printf '<no response body>' >&2
-            fi
-            printf '\n' >&2
+            printf 'curl_exit=%s\n' "$patch_curl_exit" >> "$FORGEJO_OUTPUT"
+            printf 'http_status=%s\n' "$patch_status" >> "$FORGEJO_OUTPUT"
+            printf 'response_body=%s\n' "$response_body" >> "$FORGEJO_OUTPUT"
+            printf 'GitHub promotion failed (curl exit %s, HTTP %s): %s\n' \
+              "$patch_curl_exit" "$patch_status" "$response_body" >&2
             exit 1
           fi
           printf 'prerelease flag cleared for %s\n' "$rel_tag"
@@ -1184,19 +1182,32 @@ jobs:
         env:
           FORGEJO_TOKEN: ""
           GITHUB_TOKEN: ""
+          PROMOTION_CURL_EXIT: ${{ steps.promote_candidate.outputs.curl_exit }}
+          PROMOTION_HTTP_STATUS: ${{ steps.promote_candidate.outputs.http_status }}
+          PROMOTION_RESPONSE_BODY: ${{ steps.promote_candidate.outputs.response_body }}
+          PROMOTION_STEP_OUTCOME: ${{ steps.promote_candidate.outcome }}
         run: |
           set -eu
-          report="$PWD/.promote-work/promotion-diagnostics.tsv"
-          if [ ! -s "$report" ]; then
+          if [ -z "${PROMOTION_CURL_EXIT:-}" ]; then
+            if [ "${PROMOTION_STEP_OUTCOME:-}" = "failure" ]; then
+              printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING failed promotion step produced no outputs\n' >&2
+              exit 1
+            fi
             exit 0
           fi
-          curl_exit="$(awk -F '\t' '$1 == "curl_exit" { print $2; exit }' "$report")"
-          http_status="$(awk -F '\t' '$1 == "http_status" { print $2; exit }' "$report")"
-          response_body="$(awk -F '\t' '$1 == "response_body" { sub(/^[^\t]*\t/, ""); print; exit }' "$report")"
-          printf 'PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s\n' "$curl_exit" "$http_status"
-          printf 'PROMOTION_RESPONSE_BODY %s\n' "$response_body"
-          printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' "$curl_exit" "$http_status"
-          printf '::error title=GitHub promotion response::%s\n' "$response_body"
+          report="$PWD/.promote-work/promotion-diagnostics.tsv"
+          mkdir -p "$(dirname "$report")"
+          {
+            printf 'curl_exit\t%s\n' "$PROMOTION_CURL_EXIT"
+            printf 'http_status\t%s\n' "$PROMOTION_HTTP_STATUS"
+            printf 'response_body\t%s\n' "$PROMOTION_RESPONSE_BODY"
+          } > "$report"
+          printf 'PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s\n' \
+            "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
+          printf 'PROMOTION_RESPONSE_BODY %s\n' "$PROMOTION_RESPONSE_BODY"
+          printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' \
+            "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
+          printf '::error title=GitHub promotion response::%s\n' "$PROMOTION_RESPONSE_BODY"
 
       - name: Upload promotion diagnostics artifact
         if: always()
