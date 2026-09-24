@@ -982,6 +982,10 @@ describe("Linux artifact manifest contract", () => {
     );
     expect(promotionDiagnostics?.if).toBe("always()");
     expect(promotionDiagnostics?.run ?? "").toContain("::error title=GitHub promotion::");
+    expect(promotionDiagnostics?.run ?? "").toContain(
+      "PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s",
+    );
+    expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_RESPONSE_BODY %s");
     expect(promotionDiagnostics?.run ?? "").toContain("promotion-diagnostics.tsv");
     expect(promotionDiagnostics?.run ?? "").not.toContain("RELEASE_PUBLISH_TOKEN");
     expect(promotionDiagnostics?.env).toEqual({
