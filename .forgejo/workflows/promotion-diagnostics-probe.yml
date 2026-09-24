@@ -1,0 +1,206 @@
+name: Promotion diagnostics probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing public release tag to read without mutating
+        required: true
+        default: v0.1.2
+        type: string
+
+jobs:
+  probe:
+    runs-on: nixos
+    env:
+      FORGEJO_TOKEN: ""
+      GITHUB_TOKEN: ""
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Prepare probe workspace
+        run: |
+          set -eu
+          case "$PWD" in
+            / | "$HOME")
+              printf 'refusing to clean %s\n' "$PWD" >&2
+              exit 1
+              ;;
+          esac
+          rm -rf .probe-work
+          mkdir -p .probe-work
+          : > .probe-work/checkpoints.tsv
+          printf 'prepare.before\n' >> .probe-work/checkpoints.tsv
+          printf 'prepare.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Check environment and tools
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'environment.before\n' >> .probe-work/checkpoints.tsv
+          for refused_name in FORGEJO_TOKEN GITHUB_TOKEN; do
+            refused_value="$(printenv "$refused_name" 2>/dev/null || true)"
+            test -z "$refused_value" \
+              || { printf 'injected token: %s\n' "$refused_name" >&2; exit 1; }
+          done
+          for command_name in curl awk head tr cut mktemp; do
+            command -v "$command_name" >/dev/null 2>&1 \
+              || { printf 'missing probe command: %s\n' "$command_name" >&2; exit 1; }
+          done
+          printf 'environment.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Read public release without mutation
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'release_get.before\n' >> .probe-work/checkpoints.tsv
+          case "$RELEASE_TAG" in
+            v[0-9A-Za-z.-]*) ;;
+            *) printf 'malformed release tag\n' >&2; exit 1 ;;
+          esac
+          release_status="$(curl -q -fsS -o .probe-work/release.json -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/monty033/NookBridge/releases/tags/$RELEASE_TAG")"
+          test "$release_status" = 200
+          printf 'release_get.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Parse release fields
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'release_parse.before\n' >> .probe-work/checkpoints.tsv
+          test -s .probe-work/release.json
+          awk_path="$(command -v awk)"
+          release_field() {
+            "$awk_path" -v wanted="$1" '
+              {
+                pattern = "\\\"" wanted "\\\"[[:space:]]*:[[:space:]]*"
+                if (match($0, pattern)) {
+                  rest = substr($0, RSTART + RLENGTH)
+                  if (match(rest, /^[^,}]*/)) {
+                    value = substr(rest, RSTART, RLENGTH)
+                    gsub(/[[:space:]]/, "", value)
+                    gsub(/^\"|\"$/, "", value)
+                    print value
+                  }
+                }
+              }' .probe-work/release.json | head -1
+          }
+          parsed_tag="$(release_field tag_name)"
+          parsed_prerelease="$(release_field prerelease)"
+          parsed_draft="$(release_field draft)"
+          test "$parsed_tag" = "$RELEASE_TAG"
+          printf 'tag\t%s\nprerelease\t%s\ndraft\t%s\n' \
+            "$parsed_tag" "$parsed_prerelease" "$parsed_draft" > .probe-work/context.tsv
+          printf 'release_parse.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Guarded fake PATCH and TSV handoff
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'fake_patch.before\n' >> .probe-work/checkpoints.tsv
+          curl_config="$(mktemp)"
+          chmod 600 "$curl_config"
+          printf 'header = "X-Promotion-Probe: true"\n' > "$curl_config"
+          trap 'rm -f "$curl_config"' EXIT
+          fake_curl="$PWD/.probe-work/fake-curl"
+          cat > "$fake_curl" <<'SCRIPT'
+          #!/bin/sh
+          output=''
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = -o ]; then
+              output="$2"
+              shift 2
+            else
+              shift
+            fi
+          done
+          printf '%s' '503'
+          printf '%s' '{"message":"probe denied"}' > "$output"
+          exit 22
+          SCRIPT
+          chmod 700 "$fake_curl"
+          patch_response="$PWD/.probe-work/patch-response.json"
+          patch_diagnostics="$PWD/.probe-work/promotion-diagnostics.tsv"
+          : > "$patch_response"
+          patch_curl_exit=0
+          if patch_status="$("$fake_curl" -q -sS -X PATCH --config "$curl_config" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"prerelease":false}' \
+            'https://api.example.invalid/releases/1' -o "$patch_response" -w '%{http_code}')"; then
+            :
+          else
+            patch_curl_exit=$?
+          fi
+          printf 'fake_patch.after_capture\n' >> .probe-work/checkpoints.tsv
+          if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
+            response_body='<no response body>'
+            if [ -s "$patch_response" ]; then
+              response_body="$(tr '\n\t' '  ' < "$patch_response" | cut -c 1-1000 || true)"
+            fi
+            {
+              printf 'curl_exit\t%s\n' "$patch_curl_exit"
+              printf 'http_status\t%s\n' "$patch_status"
+              printf 'response_body\t%s\n' "$response_body"
+            } > "$patch_diagnostics"
+            printf 'fake_patch.after_tsv_write\n' >> .probe-work/checkpoints.tsv
+            test -s "$patch_diagnostics"
+            printf 'fake_patch.before_deferred_exit\n' >> .probe-work/checkpoints.tsv
+            exit 0
+          fi
+          printf 'fake PATCH unexpectedly succeeded\n' >&2
+          exit 1
+
+      - name: Verify cross-step handoff
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'handoff.before\n' >> .probe-work/checkpoints.tsv
+          test -s .probe-work/promotion-diagnostics.tsv
+          awk -F '\t' '
+            $1 == "curl_exit" { exit_code = ($2 == "22"); seen_exit = 1 }
+            $1 == "http_status" { http_ok = ($2 == "503"); seen_http = 1 }
+            $1 == "response_body" { body_ok = ($2 == "{\"message\":\"probe denied\"}"); seen_body = 1 }
+            END { exit !(seen_exit && seen_http && seen_body && exit_code && http_ok && body_ok) }
+          ' .probe-work/promotion-diagnostics.tsv
+          printf 'handoff.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Summarize probe evidence
+        if: always()
+        run: |
+          set -eu
+          mkdir -p .probe-work
+          printf 'summary.before\n' >> .probe-work/checkpoints.tsv
+          printf '%s\n' '--- checkpoints ---'
+          if [ -f .probe-work/checkpoints.tsv ]; then
+            tr '\n\t' '  ' < .probe-work/checkpoints.tsv
+            printf '\n'
+          fi
+          printf '%s\n' '--- files ---'
+          for path in .probe-work/*; do
+            [ -f "$path" ] || continue
+            printf '%s\n' "$path"
+          done
+          printf 'summary.after\n' >> .probe-work/checkpoints.tsv
+
+      - name: Upload probe evidence
+        id: upload_probe_evidence
+        if: always()
+        continue-on-error: true
+        uses: https://code.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: promotion-diagnostics-probe-${{ github.run_id }}
+          path: .probe-work
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Require evidence upload
+        if: always()
+        run: |
+          set -eu
+          test "${{ steps.upload_probe_evidence.outcome }}" = success
