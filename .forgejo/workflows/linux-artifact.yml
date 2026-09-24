@@ -1191,6 +1191,8 @@ jobs:
           curl_exit="$(awk -F '\t' '$1 == "curl_exit" { print $2; exit }' "$report")"
           http_status="$(awk -F '\t' '$1 == "http_status" { print $2; exit }' "$report")"
           response_body="$(awk -F '\t' '$1 == "response_body" { sub(/^[^\t]*\t/, ""); print; exit }' "$report")"
+          printf 'PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s\n' "$curl_exit" "$http_status"
+          printf 'PROMOTION_RESPONSE_BODY %s\n' "$response_body"
           printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' "$curl_exit" "$http_status"
           printf '::error title=GitHub promotion response::%s\n' "$response_body"
 
