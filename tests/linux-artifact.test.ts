@@ -715,6 +715,44 @@ describe("Linux artifact manifest contract", () => {
     }
   });
 
+  it("accepts trusted Nix store tool paths in every promotion gate", () => {
+    const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
+    const curlGates = [...workflow.matchAll(/case "\$curl_path" in[\s\S]*?\n          esac/g)].map(
+      (match) => match[0],
+    );
+    const awkGates = [...workflow.matchAll(/case "\$awk_path" in[\s\S]*?\n          esac/g)].map(
+      (match) => match[0],
+    );
+
+    expect(curlGates).toHaveLength(2);
+    expect(awkGates).toHaveLength(3);
+    for (const [name, gates] of [
+      ["curl_path", curlGates],
+      ["awk_path", awkGates],
+    ] as const) {
+      for (const gate of gates) {
+        expect(gate).toContain("/nix/store/*");
+        for (const candidate of [
+          "/nix/store/hash-tool/bin/tool",
+          "/run/current-system/sw/bin/tool",
+        ]) {
+          const result = spawnSync(
+            "bash",
+            ["-c", `set -eu\n${name}="$1"\n${gate}`, "guard", candidate],
+            { encoding: "utf8" },
+          );
+          expect(result.status, `${name} should accept ${candidate}`).toBe(0);
+        }
+        const rejected = spawnSync(
+          "bash",
+          ["-c", `set -eu\n${name}="$1"\n${gate}`, "guard", "/tmp/untrusted-tool"],
+          { encoding: "utf8" },
+        );
+        expect(rejected.status, `${name} should reject /tmp/untrusted-tool`).not.toBe(0);
+      }
+    }
+  });
+
   it("reads a release identity from a real payload with the workflow's own awk helper", () => {
     // The token-bearing steps decide what to delete or flip from this helper, and it has
     // never run: an awk that silently returns nothing would make those steps fail closed

@@ -549,7 +549,7 @@ jobs:
           done
           curl_path="$(command -v curl)"
           case "$curl_path" in
-            /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
             *)
               printf 'refusing an untrusted curl: %s\n' "$curl_path" >&2
               exit 1
@@ -557,7 +557,7 @@ jobs:
           esac
           awk_path="$(command -v awk)"
           case "$awk_path" in
-            /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
             *)
               printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
               exit 1
@@ -1055,7 +1055,7 @@ jobs:
           done
           curl_path="$(command -v curl)"
           case "$curl_path" in
-            /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
             *)
               printf 'refusing an untrusted curl: %s\n' "$curl_path" >&2
               exit 1
@@ -1063,7 +1063,7 @@ jobs:
           esac
           awk_path="$(command -v awk)"
           case "$awk_path" in
-            /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
             *)
               printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
               exit 1
@@ -1198,7 +1198,7 @@ jobs:
           fi
           awk_path="$(command -v awk)"
           case "$awk_path" in
-            /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/bin/* | /bin/*) ;;
             *)
               printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
               exit 1
