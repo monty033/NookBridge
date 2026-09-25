@@ -804,7 +804,7 @@ jobs:
           PROMOTION_EVENT: ${{ github.event_name }}
         run: |
           set -eu
-          for command_name in git curl cmp getconf strings grep sort tail cut tr; do
+          for command_name in git curl cmp getconf strings grep sort tail cut tr sleep; do
             command -v "$command_name" >/dev/null 2>&1 \
               || { printf 'missing runner command: %s\n' "$command_name" >&2; exit 1; }
           done
@@ -1395,46 +1395,80 @@ jobs:
           artifact="$(field artifact)"
           work_dir="$(field work_dir)"
 
-          # This step holds no secret, so it is the right place to read the promoted
-          # state back and assert it: a successful PATCH is not proof, and the
-          # assertions must not depend on the step that performed the write.
+          # GitHub's release API is eventually consistent after the authenticated
+          # PATCH. Retry only the explicitly retryable stale prerelease read; structural
+          # mismatches still fail immediately and the retry budget is bounded.
           state_json="$work_dir/promoted-state.json"
-          curl -q -fsS -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/monty033/NookBridge/releases/tags/$rel_tag" \
-            -o "$state_json"
-          node -e "
-            const fs = require('fs');
-            const release = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-            if (release.prerelease !== false) {
-              console.error('the release is still a prerelease after promotion');
-              process.exit(2);
-            }
-            if (typeof release.draft !== 'boolean') {
-              console.error('the promoted release payload does not report its draft state');
-              process.exit(2);
-            }
-            if (release.draft === true) {
-              console.error('the promoted release is a draft, so users cannot install from it');
-              process.exit(2);
-            }
-            const target = String(release.target_commitish || '');
-            if (target !== process.argv[2]) {
-              console.error('the promoted release targets ' + target + ', not the promoted commit');
-              process.exit(2);
-            }
-            const names = new Set((release.assets || []).map((asset) => String(asset.name)));
-            const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[3]];
-            const missing = required.filter((name) => !names.has(name));
-            if (missing.length > 0) {
-              console.error('missing GitHub release asset after promotion: ' + missing.join(', '));
-              process.exit(2);
-            }
-            const extra = [...names].filter((name) => !required.includes(name));
-            if (extra.length > 0) {
-              console.error('unexpected GitHub release asset after promotion: ' + extra.join(', '));
-              process.exit(2);
-            }
-          " "$state_json" "$canonical_tag_commit" "$artifact"
+          readback_attempt=1
+          readback_delay=1
+          readback_status=1
+          while [ "$readback_attempt" -le 5 ]; do
+            if curl -q -fsS -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/monty033/NookBridge/releases/tags/$rel_tag" \
+              -o "$state_json"; then
+              if node -e "
+                const fs = require('fs');
+                const release = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+                if (release.prerelease === true) {
+                  console.error('the release is still a prerelease after promotion; retrying readback');
+                  process.exit(10);
+                }
+                if (typeof release.prerelease !== 'boolean') {
+                  console.error('the promoted release payload does not report its prerelease state');
+                  process.exit(2);
+                }
+                if (release.prerelease !== false) {
+                  console.error('the promoted release has an invalid prerelease state');
+                  process.exit(2);
+                }
+                if (typeof release.draft !== 'boolean') {
+                  console.error('the promoted release payload does not report its draft state');
+                  process.exit(2);
+                }
+                if (release.draft === true) {
+                  console.error('the promoted release is a draft, so users cannot install from it');
+                  process.exit(2);
+                }
+                const target = String(release.target_commitish || '');
+                if (target !== process.argv[2]) {
+                  console.error('the promoted release targets ' + target + ', not the promoted commit');
+                  process.exit(2);
+                }
+                const names = new Set((release.assets || []).map((asset) => String(asset.name)));
+                const required = ['install.sh', 'install-systemd.sh', 'verify-linux-artifact.sh', 'SHA256SUMS', process.argv[3]];
+                const missing = required.filter((name) => !names.has(name));
+                if (missing.length > 0) {
+                  console.error('missing GitHub release asset after promotion: ' + missing.join(', '));
+                  process.exit(2);
+                }
+                const extra = [...names].filter((name) => !required.includes(name));
+                if (extra.length > 0) {
+                  console.error('unexpected GitHub release asset after promotion: ' + extra.join(', '));
+                  process.exit(2);
+                }
+              " "$state_json" "$canonical_tag_commit" "$artifact"; then
+                readback_status=0
+                break
+              else
+                readback_status=$?
+              fi
+            else
+              readback_status=$?
+            fi
+            if [ "$readback_status" -ne 10 ]; then
+              exit "$readback_status"
+            fi
+            if [ "$readback_attempt" -lt 5 ]; then
+              printf 'promotion readback still sees the candidate state; retry %s/5 after %ss\n' \
+                "$((readback_attempt + 1))" "$readback_delay"
+              sleep "$readback_delay"
+              readback_delay=$((readback_delay * 2))
+            fi
+            readback_attempt=$((readback_attempt + 1))
+          done
+          if [ "$readback_status" -ne 0 ]; then
+            exit "$readback_status"
+          fi
 
           # Re-verify the installer bytes after the flip as well: a concurrent release
           # writer can replace same-named assets between the checks above and the

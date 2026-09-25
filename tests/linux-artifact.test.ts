@@ -921,7 +921,7 @@ describe("Linux artifact manifest contract", () => {
       }
     ).jobs["promote-release"]?.steps?.find((step) => step.name === "Checkout promotion tooling");
     expect(promoteTooling?.run).toContain(
-      "for command_name in git curl cmp getconf strings grep sort tail cut tr;",
+      "for command_name in git curl cmp getconf strings grep sort tail cut tr sleep;",
     );
     expect(raw).toContain("printf '%s' \"$RELEASE_PUBLISH_TOKEN\"");
     expect(raw).not.toContain("Authorization: Bearer ***");
@@ -1582,6 +1582,67 @@ printf '200'
       'phase\tpatch\nreason\tpatch_failed\ncurl_exit\t0\nhttp_status\t403\nresponse_body\t{"message":"denied"}\n',
     );
   });
+  it("retries an eventually consistent promoted-release readback", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const reverifyStart = raw.indexOf('          state_json="$work_dir/promoted-state.json"');
+    const reverifyEnd = raw.indexOf("          # Re-verify the installer bytes", reverifyStart);
+    expect(reverifyStart).toBeGreaterThanOrEqual(0);
+    expect(reverifyEnd).toBeGreaterThan(reverifyStart);
+    const readbackScript = raw
+      .slice(reverifyStart, reverifyEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-readback-test-"));
+    fixtureRoots.push(root);
+    mkdirSync(join(root, ".promote-work"));
+    writeFileSync(
+      join(root, "curl"),
+      `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+count=0
+if [ -f "$PWD/curl-count" ]; then count="$(cat "$PWD/curl-count")"; fi
+count=$((count + 1))
+printf '%s' "$count" > "$PWD/curl-count"
+prerelease=true
+if [ "$count" -ge 2 ]; then prerelease=false; fi
+printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef0123456789abcdef01234567","assets":[{"name":"install.sh"},{"name":"install-systemd.sh"},{"name":"verify-linux-artifact.sh"},{"name":"SHA256SUMS"},{"name":"nookbridge-v0.1.2-linux-x64-gnu.tar.gz"}]}' "$prerelease" > "$out"
+`,
+    );
+    writeFileSync(join(root, "sleep"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(root, "curl"), 0o755);
+    chmodSync(join(root, "sleep"), 0o755);
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          'rel_tag="v0.1.2"',
+          'target_commit="0123456789abcdef0123456789abcdef01234567"',
+          'canonical_tag_commit="0123456789abcdef0123456789abcdef01234567"',
+          'artifact="nookbridge-v0.1.2-linux-x64-gnu.tar.gz"',
+          'work_dir="$PWD/.promote-work"',
+          readbackScript,
+        ].join("\n"),
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${root}:${process.env.PATH ?? ""}` },
+      },
+    );
+    expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
+    expect(readFileSync(join(root, "curl-count"), "utf8")).toBe("2");
+    expect(result.stdout).toContain("promotion readback still sees the candidate state");
+  });
+
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     expect(raw).toContain("refs/heads/runner-test/");
