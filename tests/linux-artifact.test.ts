@@ -717,15 +717,15 @@ describe("Linux artifact manifest contract", () => {
 
   it("accepts trusted Nix store tool paths in every promotion gate", () => {
     const workflow = readFileSync(linuxArtifactWorkflow, "utf8");
-    const curlGates = [...workflow.matchAll(/case "\$curl_path" in[\s\S]*?\n          esac/g)].map(
+    const curlGates = [...workflow.matchAll(/case "\$curl_path" in[\s\S]*?\n {10}esac/g)].map(
       (match) => match[0],
     );
-    const awkGates = [...workflow.matchAll(/case "\$awk_path" in[\s\S]*?\n          esac/g)].map(
+    const awkGates = [...workflow.matchAll(/case "\$awk_path" in[\s\S]*?\n {10}esac/g)].map(
       (match) => match[0],
     );
 
     expect(curlGates).toHaveLength(2);
-    expect(awkGates).toHaveLength(3);
+    expect(awkGates).toHaveLength(4);
     for (const [name, gates] of [
       ["curl_path", curlGates],
       ["awk_path", awkGates],
@@ -788,7 +788,7 @@ describe("Linux artifact manifest contract", () => {
     writeFileSync(
       script,
       [
-        "set -eu",
+        "set -euo pipefail",
         'awk_path="$(command -v awk)"',
         "export awk_path",
         helper?.[0] ?? "",
@@ -940,11 +940,22 @@ describe("Linux artifact manifest contract", () => {
     // The artifact must be bound to the release version, not only the commit.
     expect((raw.match(/--expect-version/g) ?? []).length).toBe(3);
     expect(raw).toContain("github.com/monty033/NookBridge");
+    expect(raw).toContain('API_ORIGIN="https://api.github.com"');
+    expect(raw).toContain('REPO_API="$API_ORIGIN/repos/monty033/NookBridge"');
+    expect(raw).toContain("printf 'api_origin\\t%s\\n' \"$API_ORIGIN\"");
+    expect(raw).toContain('api_origin="$(field api_origin)"');
+    expect(raw).not.toContain(`printf 'api_base\\t%s\\n' "$API"`);
+    expect(raw).not.toContain('api_base="$(field api_base)"');
+    expect(raw).not.toContain('}\' "$2" | head -1');
+    expect(raw).not.toContain("| head -1 | tr -dc");
+    expect(raw).toContain("trap on_exit EXIT");
+    expect(raw).toContain("PROMOTION_PHASE");
+    expect(raw).toContain("api_origin_validation");
     // A partial candidate is recreated on a re-run, because a tag cannot be moved and
     // an interrupted upload would otherwise be unrecoverable.
     expect(raw).toContain("action\\trecreate");
     expect(raw).toContain("-X DELETE");
-    expect(raw).toContain('"$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag"');
+    expect(raw).toContain('"$repo_api/releases/tags/$rel_tag"');
     // The retry path must accept the shape the publishing path creates — draft:false,
     // prerelease:true — or every retry of a partial upload would abort.
     expect(raw).toContain("draft: false");
@@ -998,7 +1009,7 @@ describe("Linux artifact manifest contract", () => {
     expect(promoteSetEIndex).toBeGreaterThan(promoteStepStart);
     expect(promoteSetEIndex).toBeLessThan(guardedCurlAbsolute);
     expect(patchBlock).toContain("set +e");
-    expect(patchBlock).toContain("patch_status=\"\"");
+    expect(patchBlock).toContain('patch_status=""');
     expect(patchBlock).toContain("set -e");
     const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
     expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
@@ -1017,7 +1028,7 @@ describe("Linux artifact manifest contract", () => {
     expect(patchBlock).not.toContain("FORGEJO_OUTPUT");
     expect(patchBlock).not.toContain("exit 1");
     expect(patchBlock).toContain(
-      "printf 'promotion diagnostics captured; deferring failure until after upload\\n'",
+      "printf 'promotion diagnostics captured; deferring failure to the final diagnostics gate\\n'",
     );
     expect(patchBlock).toContain("exit 0");
     expect(patchBlock).toContain('case "$response_body" in');
@@ -1058,14 +1069,13 @@ describe("Linux artifact manifest contract", () => {
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_CURL_EXIT");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_HTTP_STATUS");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_RESPONSE_BODY");
-    expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_STEP_OUTCOME");
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_DIAGNOSTICS_OUTPUT_MISSING");
     expect(promotionDiagnostics?.run ?? "").toContain("promotion-diagnostics.tsv");
     expect(promotionDiagnostics?.run ?? "").toContain("mkdir -p");
     expect(promotionDiagnostics?.run ?? "").toContain('> "$report"');
     expect(promotionDiagnostics?.run ?? "").toContain("::error title=GitHub promotion::");
     expect(promotionDiagnostics?.run ?? "").toContain(
-      "PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s",
+      "PROMOTION_DIAGNOSTICS phase=%s reason=%s curl_exit=%s http_status=%s",
     );
     expect(promotionDiagnostics?.run ?? "").toContain("PROMOTION_RESPONSE_BODY %s");
     expect(promotionDiagnostics?.run ?? "").toContain("promotion-diagnostics.tsv");
@@ -1324,10 +1334,12 @@ describe("Linux artifact manifest contract", () => {
         [
           'curl_path="$PWD/curl"',
           'curl_config="$PWD/curl.conf"',
-          'api_base="https://api.example.test"',
+          'repo_api="https://api.example.test/repos/monty033/NookBridge"',
           "release_id=1",
           'rel_tag="v0.1.2"',
           'RELEASE_PUBLISH_TOKEN="fixture-token"',
+          'phase="patch"',
+          "write_result() { :; }",
           'patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"',
           patchScript,
         ].join("\n"),
@@ -1336,7 +1348,7 @@ describe("Linux artifact manifest contract", () => {
     );
     expect(result.status).toBe(0);
     expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
-      "curl_exit\t22\nhttp_status\t\nresponse_body\t<no response body>\n",
+      "phase\tpatch\nreason\tpatch_failed\ncurl_exit\t22\nhttp_status\t\nresponse_body\t<no response body>\n",
     );
   });
 
@@ -1368,10 +1380,12 @@ describe("Linux artifact manifest contract", () => {
         [
           'curl_path="$PWD/curl"',
           'curl_config="$PWD/curl.conf"',
-          'api_base="https://api.example.test"',
+          'repo_api="https://api.example.test/repos/monty033/NookBridge"',
           "release_id=1",
           'rel_tag="v0.1.2"',
           'RELEASE_PUBLISH_TOKEN="fixture-token"',
+          'phase="patch"',
+          "write_result() { :; }",
           'patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"',
           patchScript,
         ].join("\n"),
@@ -1380,13 +1394,196 @@ describe("Linux artifact manifest contract", () => {
     );
     expect(result.status).toBe(0);
     expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
-      'curl_exit\t0\nhttp_status\t403\nresponse_body\t{"message":"denied"}\n',
+      'phase\tpatch\nreason\tpatch_failed\ncurl_exit\t0\nhttp_status\t403\nresponse_body\t{"message":"denied"}\n',
     );
   });
 
+  it("executes the deferred promotion report gate for failed, successful, and missing results", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const steps = (
+      parseYaml(raw) as { jobs: Record<string, { steps: { name: string; run?: string }[] }> }
+    ).jobs["promote-release"]!.steps;
+    const reportRun = steps.find((step) => step.name === "Report promotion diagnostics")?.run;
+    expect(reportRun).toBeTruthy();
+
+    const runReport = (resultBody?: string, reportBody?: string) => {
+      const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-report-test-"));
+      fixtureRoots.push(root);
+      mkdirSync(join(root, ".promote-work"));
+      if (resultBody !== undefined)
+        writeFileSync(join(root, ".promote-work", "promotion-result.tsv"), resultBody);
+      if (reportBody !== undefined)
+        writeFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), reportBody);
+      return spawnSync("bash", ["-eu", "-c", reportRun!], { cwd: root, encoding: "utf8" });
+    };
+
+    const failed = runReport(
+      "status\tfailed\nphase\tpatch\nreason\tpatch_failed\ncurl_exit\t22\nhttp_status\t\nresponse_body\t<no response body>\n",
+      "phase\tpatch\nreason\tpatch_failed\ncurl_exit\t22\nhttp_status\t\nresponse_body\t<no response body>\n",
+    );
+    expect(failed.status).toBe(1);
+    expect(failed.stdout).toContain("PROMOTION_DIAGNOSTICS phase=patch reason=patch_failed");
+
+    const successful = runReport(
+      "status\tsuccess\nphase\tpatch\nreason\tsucceeded\ncurl_exit\t0\nhttp_status\t200\nresponse_body\t\n",
+    );
+    expect(successful.status).toBe(0);
+
+    const missing = runReport();
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("PROMOTION_RESULT_OUTPUT_MISSING");
+  });
+
+  it("executes public GET failure capture and the non-failure branch", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const promoteStart = raw.indexOf("- name: Promote candidate release");
+    const runStart = raw.indexOf("          set -eu\n          patch_diagnostics=", promoteStart);
+    const setupEnd = raw.indexOf('          rm -f "$patch_diagnostics"', runStart);
+    const publicStart = raw.indexOf("          phase=public_get", setupEnd);
+    const publicEnd = raw.indexOf("          phase=release_validation", publicStart);
+    expect(runStart).toBeGreaterThanOrEqual(0);
+    expect(publicStart).toBeGreaterThan(runStart);
+    expect(publicEnd).toBeGreaterThan(publicStart);
+    const extract = (start: number, end: number) =>
+      raw
+        .slice(start, end)
+        .split("\n")
+        .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+        .join("\n");
+    const setupScript = extract(runStart, setupEnd);
+    const publicScript = extract(publicStart, publicEnd);
+
+    const runPublicGet = (mode: "fail" | "success") => {
+      const root = mkdtempSync(join(tmpdir(), "nookbridge-public-get-test-"));
+      fixtureRoots.push(root);
+      mkdirSync(join(root, ".promote-work"));
+      writeFileSync(
+        join(root, "curl"),
+        `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "${mode}" = fail ]; then
+  printf '{"message":"denied"}' > "$out"
+  exit 22
+fi
+printf '{"id":1,"tag_name":"v0.1.2","prerelease":true,"draft":false}' > "$out"
+printf '200'
+`,
+      );
+      chmodSync(join(root, "curl"), 0o755);
+      return {
+        root,
+        result: spawnSync(
+          "bash",
+          [
+            "-eu",
+            "-c",
+            [
+              setupScript,
+              'curl_path="$PWD/curl"',
+              'repo_api="https://api.github.com/repos/monty033/NookBridge"',
+              'rel_tag="v0.1.2"',
+              'promote_json="$PWD/.promote-work/promote-existing.json"',
+              publicScript,
+            ].join("\n"),
+          ],
+          { cwd: root, encoding: "utf8" },
+        ),
+      };
+    };
+
+    const failed = runPublicGet("fail");
+    expect(failed.result.status).toBe(0);
+    expect(
+      readFileSync(join(failed.root, ".promote-work", "promotion-result.tsv"), "utf8"),
+    ).toContain("phase\tpublic_get\nreason\tpublic_get_failed\n");
+    expect(
+      readFileSync(join(failed.root, ".promote-work", "promotion-diagnostics.tsv"), "utf8"),
+    ).toContain('response_body\t{"message":"denied"}\n');
+
+    const successful = runPublicGet("success");
+    expect(successful.result.status).toBe(0);
+    expect(
+      readFileSync(join(successful.root, ".promote-work", "promotion-result.tsv"), "utf8"),
+    ).toContain("phase\tpublic_get\nreason\trunning\n");
+  });
+
+  it("records pre-PATCH contract failures through the promotion trap", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const promoteStart = raw.indexOf("- name: Promote candidate release");
+    const runStart = raw.indexOf("          set -eu\n          patch_diagnostics=", promoteStart);
+    const setupEnd = raw.indexOf('          rm -f "$patch_diagnostics"', runStart);
+    expect(runStart).toBeGreaterThanOrEqual(0);
+    expect(setupEnd).toBeGreaterThan(runStart);
+    const setupScript = raw
+      .slice(runStart, setupEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-trap-test-"));
+    fixtureRoots.push(root);
+    mkdirSync(join(root, ".promote-work"));
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          setupScript,
+          'phase="api_origin_validation"',
+          'test "https://api.github.com/repos/monty033/NookBridge" = "https://api.github.com"',
+        ].join("\n"),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
+      "phase\tapi_origin_validation\nreason\tstep_failed\ncurl_exit\t1\nhttp_status\t\nresponse_body\t<no response body>\n",
+    );
+    expect(readFileSync(join(root, ".promote-work", "promotion-result.tsv"), "utf8")).toBe(
+      "status\tfailed\nphase\tapi_origin_validation\nreason\tstep_failed\ncurl_exit\t1\nhttp_status\t\nresponse_body\t<no response body>\n",
+    );
+  });
+
+  it("does not clobber rich PATCH diagnostics when the deferred shell exits", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const promoteStart = raw.indexOf("- name: Promote candidate release");
+    const runStart = raw.indexOf("          set -eu\n          patch_diagnostics=", promoteStart);
+    const setupEnd = raw.indexOf('          rm -f "$patch_diagnostics"', runStart);
+    const setupScript = raw
+      .slice(runStart, setupEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-trap-preserve-test-"));
+    fixtureRoots.push(root);
+    mkdirSync(join(root, ".promote-work"));
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          setupScript,
+          'phase="patch"',
+          '{ printf \'phase\\tpatch\\nreason\\tpatch_failed\\ncurl_exit\\t0\\nhttp_status\\t403\\nresponse_body\\t{\\"message\\":\\"denied\\"}\\n\'; } > "$patch_diagnostics"',
+          "exit 1",
+        ].join("\n"),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(root, ".promote-work", "promotion-diagnostics.tsv"), "utf8")).toBe(
+      'phase\tpatch\nreason\tpatch_failed\ncurl_exit\t0\nhttp_status\t403\nresponse_body\t{"message":"denied"}\n',
+    );
+  });
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
-
     expect(raw).toContain("refs/heads/runner-test/");
     expect(raw).toContain("github.ref == 'refs/heads/main'");
     expect(raw).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');

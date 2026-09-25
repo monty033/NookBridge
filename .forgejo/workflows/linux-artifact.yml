@@ -329,7 +329,8 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           bash scripts/check-release-version.sh "$VERSION" \
             || { printf 'malformed release tag: %s\n' "$RELEASE_TAG" >&2; exit 1; }
-          API="https://api.github.com/repos/monty033/NookBridge"
+          API_ORIGIN="https://api.github.com"
+          REPO_API="$API_ORIGIN/repos/monty033/NookBridge"
           RELEASE_DIR="$PWD/github-release"
           ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
           RELEASE_JSON="$PWD/.release-state.json"
@@ -338,7 +339,7 @@ jobs:
 
           http_status="$(curl -q -sS -o "$RELEASE_JSON" -w '%{http_code}' \
             -H 'Accept: application/vnd.github+json' \
-            "$API/releases/tags/$RELEASE_TAG")"
+            "$REPO_API/releases/tags/$RELEASE_TAG")"
           case "$http_status" in
             200)
               # An existing candidate must be exactly the one this tag produced: the
@@ -469,7 +470,8 @@ jobs:
             test -f "$RELEASE_DIR/$asset_name"
           done
           {
-            printf 'api_base\thttps://api.github.com\n'
+            printf 'api_origin\t%s\n' "$API_ORIGIN"
+            printf 'repo_api\t%s\n' "$REPO_API"
             printf 'rel_tag\t%s\n' "$RELEASE_TAG"
             printf 'release_dir\t%s\n' "$RELEASE_DIR"
             printf 'artifact\t%s\n' "$ARTIFACT"
@@ -581,19 +583,22 @@ jobs:
                     gsub(/[[:space:]]/, "", value)
                     gsub(/^"|"$/, "", value)
                     print value
+                    exit
                   }
                 }
-              }' "$2" | head -1
+              }' "$2"
           }
           context="$PWD/.release-upload.tsv"
           field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
-          api_base="$(field api_base)"
+          api_origin="$(field api_origin)"
+          repo_api="$(field repo_api)"
           rel_tag="$(field rel_tag)"
           release_dir="$(field release_dir)"
           artifact="$(field artifact)"
           payload="$(field payload)"
           action="$(field action)"
-          test "$api_base" = "https://api.github.com"
+          test "$api_origin" = "https://api.github.com"
+          test "$repo_api" = "https://api.github.com/repos/monty033/NookBridge"
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
           case "$action" in create | recreate) ;; *) printf 'unusable upload decision\n' >&2; exit 1 ;; esac
           case "$release_dir" in "$PWD"/*) ;; *) printf 'unusable release directory\n' >&2; exit 1 ;; esac
@@ -632,7 +637,7 @@ jobs:
             existing_json="$PWD/.release-existing.json"
             existing_status="$("$curl_path" -q -sS -o "$existing_json" -w '%{http_code}' \
               --config "$curl_config" -H 'Accept: application/vnd.github+json' \
-              "$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag")"
+              "$repo_api/releases/tags/$rel_tag")"
             test "$existing_status" = 200 \
               || { printf 'the release to recreate could not be read (HTTP %s)\n' "$existing_status" >&2; exit 1; }
             existing_id="$(release_field id "$existing_json")"
@@ -653,7 +658,7 @@ jobs:
               "$(printf '%s' "$RELEASE_SHA" | tr 'A-Z' 'a-z')" \
               || { printf 'the release to recreate names a different commit\n' >&2; exit 1; }
             "$curl_path" -q -fsS -X DELETE --config "$curl_config" \
-              "$api_base/repos/monty033/NookBridge/releases/$existing_id" > /dev/null
+              "$repo_api/releases/$existing_id" > /dev/null
           fi
 
           response="$PWD/.release-created.json"
@@ -661,9 +666,9 @@ jobs:
             --config "$curl_config" -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary "@$payload" \
-            "$api_base/repos/monty033/NookBridge/releases"
+            "$repo_api/releases"
 
-          release_id="$(grep -o '"id" *: *[0-9][0-9]*' "$response" | head -1 | tr -dc '0-9')"
+          release_id="$(release_field id "$response")"
           case "$release_id" in '' | *[!0-9]*) printf 'could not read the release id\n' >&2; exit 1 ;; esac
 
           upload_base="https://uploads.github.com/repos/monty033/NookBridge/releases/$release_id/assets"
@@ -838,7 +843,8 @@ jobs:
           GITHUB_TOKEN: ""
         run: |
           set -eu
-          API="https://api.github.com/repos/monty033/NookBridge"
+          API_ORIGIN="https://api.github.com"
+          REPO_API="$API_ORIGIN/repos/monty033/NookBridge"
           REL_TAG="${PROMOTE_REF#promote-}"
           VERSION="${REL_TAG#v}"
           ARTIFACT="nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"
@@ -866,7 +872,7 @@ jobs:
           # The candidate release of a public repository is readable anonymously, so
           # this step needs no token even to read the release metadata.
           curl -q -fsS -H 'Accept: application/vnd.github+json' \
-            "$API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
+            "$REPO_API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
           # Every field this decision depends on is required: a payload that merely
           # omits one is not evidence of a promotable candidate, and the draft state in
           # particular must be established *before* the authenticated write, not by
@@ -975,7 +981,8 @@ jobs:
           # token-bearing step code to execute.
           {
             printf 'rel_tag\t%s\n' "$REL_TAG"
-            printf 'api_base\t%s\n' "$API"
+            printf 'api_origin\t%s\n' "$API_ORIGIN"
+            printf 'repo_api\t%s\n' "$REPO_API"
             printf 'release_id\t%s\n' "$release_id"
             printf 'target_commit\t%s\n' "$target_commit"
             printf 'canonical_tag_commit\t%s\n' "$canonical_tag_commit"
@@ -1039,7 +1046,62 @@ jobs:
         run: |
           set -eu
           patch_diagnostics="$PWD/.promote-work/promotion-diagnostics.tsv"
+          promotion_result="$PWD/.promote-work/promotion-result.tsv"
+          phase=initialize
+          curl_config=""
+          failure_recorded=0
+          write_result() {
+            result_status="$1"
+            result_phase="$2"
+            result_reason="$3"
+            result_curl_exit="$4"
+            result_http_status="$5"
+            result_response_body="$6"
+            {
+              printf 'status\t%s\n' "$result_status"
+              printf 'phase\t%s\n' "$result_phase"
+              printf 'reason\t%s\n' "$result_reason"
+              printf 'curl_exit\t%s\n' "$result_curl_exit"
+              printf 'http_status\t%s\n' "$result_http_status"
+              printf 'response_body\t%s\n' "$result_response_body"
+            } > "$promotion_result" 2>/dev/null || true
+          }
+          write_result pending initialize pending 0 "" ""
+          record_failure() {
+            if [ -s "$patch_diagnostics" ]; then
+              return 0
+            fi
+            if [ "$failure_recorded" -eq 1 ]; then
+              return 0
+            fi
+            failure_phase="$1"
+            failure_reason="$2"
+            failure_curl_exit="$3"
+            failure_http_status="$4"
+            failure_response_body="$5"
+            failure_recorded=1
+            write_result failed "$failure_phase" "$failure_reason" "$failure_curl_exit" "$failure_http_status" "$failure_response_body"
+            {
+              printf 'phase\t%s\n' "$failure_phase"
+              printf 'reason\t%s\n' "$failure_reason"
+              printf 'curl_exit\t%s\n' "$failure_curl_exit"
+              printf 'http_status\t%s\n' "$failure_http_status"
+              printf 'response_body\t%s\n' "$failure_response_body"
+            } > "$patch_diagnostics" 2>/dev/null || true
+          }
+          on_exit() {
+            exit_status=$?
+            if [ "$exit_status" -ne 0 ]; then
+              set +e
+              record_failure "$phase" "step_failed" "$exit_status" "" "<no response body>"
+            fi
+            [ -z "$curl_config" ] || rm -f "$curl_config"
+            exit 0
+          }
+          trap on_exit EXIT
           rm -f "$patch_diagnostics"
+          phase=credential_validation
+          write_result pending "$phase" running 0 "" ""
           test -n "${RELEASE_PUBLISH_TOKEN:-}"
           # The runner injects what a previous step wrote to $GITHUB_ENV, so each
           # variable this step relies on being empty is re-checked here: a runner that
@@ -1053,6 +1115,8 @@ jobs:
             test -z "$refused_value" \
               || { printf 'refusing an inherited %s in the token-bearing step\n' "$refused_variable" >&2; exit 1; }
           done
+          phase=tool_validation
+          write_result pending "$phase" running 0 "" ""
           curl_path="$(command -v curl)"
           case "$curl_path" in
             /nix/store/* | /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
@@ -1086,31 +1150,58 @@ jobs:
                     gsub(/[[:space:]]/, "", value)
                     gsub(/^"|"$/, "", value)
                     print value
+                    exit
                   }
                 }
-              }' "$2" | head -1
+              }' "$2"
           }
           context="$PWD/.promote-work/context.tsv"
           field() { "$awk_path" -F'\t' -v key="$1" '$1 == key { print $2; exit }' "$context"; }
 
-          api_base="$(field api_base)"
+          phase=context_validation
+          write_result pending "$phase" running 0 "" ""
+          api_origin="$(field api_origin)"
+          repo_api="$(field repo_api)"
           rel_tag="$(field rel_tag)"
 
           # The values are validated rather than trusted: a wrong one would send an
           # authenticated request somewhere unintended.
-          test "$api_base" = "https://api.github.com"
+          phase=api_origin_validation
+          write_result pending "$phase" running 0 "" ""
+          test "$api_origin" = "https://api.github.com"
+          test "$repo_api" = "https://api.github.com/repos/monty033/NookBridge"
+          phase=tag_validation
+          write_result pending "$phase" running 0 "" ""
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
 
           # The release to flip is read here, by this step, from its tag: taking the id
           # from a file written by an earlier step lets a process that step left behind
           # redirect the authenticated write onto another release. This read needs no
           # credential and happens before the token file exists.
+          phase=public_get
+          write_result pending "$phase" running 0 "" ""
           promote_json="$PWD/.promote-work/promote-existing.json"
-          promote_status="$("$curl_path" -q -sS -o "$promote_json" -w '%{http_code}' \
+          promote_status=""
+          promote_curl_exit=0
+          if promote_status="$("$curl_path" -q -sS -o "$promote_json" -w '%{http_code}' \
             -H 'Accept: application/vnd.github+json' \
-            "$api_base/repos/monty033/NookBridge/releases/tags/$rel_tag")"
-          test "$promote_status" = 200 \
-            || { printf 'the candidate release could not be read (HTTP %s)\n' "$promote_status" >&2; exit 1; }
+            "$repo_api/releases/tags/$rel_tag")"; then
+            :
+          else
+            promote_curl_exit=$?
+          fi
+          if [ "$promote_curl_exit" -ne 0 ] || [ "$promote_status" != 200 ]; then
+            response_body='<no response body>'
+            if [ -s "$promote_json" ]; then
+              response_body="$(tr '\n\t' '  ' < "$promote_json" | cut -c 1-1000 || true)"
+            fi
+            record_failure "$phase" "public_get_failed" "$promote_curl_exit" "$promote_status" "$response_body"
+            printf 'the candidate release could not be read (curl exit %s, HTTP %s): %s\n' \
+              "$promote_curl_exit" "$promote_status" "$response_body" >&2
+            exit 1
+          fi
+          phase=release_validation
+          write_result pending "$phase" running "$promote_curl_exit" "$promote_status" ""
           release_id="$(release_field id "$promote_json")"
           release_tag="$(release_field tag_name "$promote_json")"
           release_prerelease="$(release_field prerelease "$promote_json")"
@@ -1136,6 +1227,8 @@ jobs:
           # The bearer token is passed through a curl -q configuration file rather than
           # an argument, because a command line is readable by any process on the
           # runner and this token grants release write access.
+          phase=credential_setup
+          write_result pending "$phase" running 0 "" ""
           curl_config="$(mktemp)"
           chmod 600 "$curl_config"
           {
@@ -1143,8 +1236,9 @@ jobs:
             printf '%s' "$RELEASE_PUBLISH_TOKEN"
             printf '"\n'
           } > "$curl_config"
-          trap 'rm -f "$curl_config"' EXIT
 
+          phase=patch
+          write_result pending "$phase" running 0 "" ""
           patch_response="$PWD/.promote-work/patch-response.json"
           : > "$patch_response"
           # Keep the mutation step successful even when the request itself fails. A
@@ -1157,7 +1251,7 @@ jobs:
             -H 'Accept: application/vnd.github+json' \
             -H 'Content-Type: application/json' \
             --data-binary '{"prerelease":false}' \
-            "$api_base/releases/$release_id" -o "$patch_response" -w '%{http_code}')"; then
+            "$repo_api/releases/$release_id" -o "$patch_response" -w '%{http_code}')"; then
             :
           else
             patch_curl_exit=$?
@@ -1172,6 +1266,9 @@ jobs:
               esac
             fi
             {
+              write_result failed "$phase" patch_failed "$patch_curl_exit" "$patch_status" "$response_body"
+              printf 'phase\t%s\n' "$phase"
+              printf 'reason\t%s\n' "patch_failed"
               printf 'curl_exit\t%s\n' "$patch_curl_exit"
               printf 'http_status\t%s\n' "$patch_status"
               printf 'response_body\t%s\n' "$response_body"
@@ -1181,9 +1278,10 @@ jobs:
             # Keep this step successful so Forgejo preserves the workspace and step
             # outputs for the diagnostics and artifact steps. A later step fails the
             # job after those evidence paths have run.
-            printf 'promotion diagnostics captured; deferring failure until after upload\n'
+            printf 'promotion diagnostics captured; deferring failure to the final diagnostics gate\n'
             exit 0
           fi
+          write_result success "$phase" succeeded "$patch_curl_exit" "$patch_status" ""
           printf 'prerelease flag cleared for %s\n' "$rel_tag"
 
       - name: Report promotion diagnostics
@@ -1195,12 +1293,12 @@ jobs:
         run: |
           set -eu
           report="$PWD/.promote-work/promotion-diagnostics.tsv"
-          if [ ! -s "$report" ]; then
-            if [ "${PROMOTION_STEP_OUTCOME:-}" = "failure" ]; then
-              printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING failed promotion step produced no outputs\n' >&2
-              exit 1
-            fi
-            exit 0
+          result="$PWD/.promote-work/promotion-result.tsv"
+          # The promotion step is unconditional; a missing result is therefore a
+          # failed handoff, not a skipped promotion.
+          if [ ! -s "$result" ]; then
+            printf 'PROMOTION_RESULT_OUTPUT_MISSING promotion step produced no phase result\n' >&2
+            exit 1
           fi
           awk_path="$(command -v awk)"
           case "$awk_path" in
@@ -1210,25 +1308,57 @@ jobs:
               exit 1
               ;;
           esac
+          PROMOTION_RESULT_STATUS="$("$awk_path" -F '\t' '$1 == "status" { print $2; exit }' "$result")"
+          PROMOTION_RESULT_PHASE="$("$awk_path" -F '\t' '$1 == "phase" { print $2; exit }' "$result")"
+          PROMOTION_RESULT_REASON="$("$awk_path" -F '\t' '$1 == "reason" { print $2; exit }' "$result")"
+          PROMOTION_RESULT_CURL_EXIT="$("$awk_path" -F '\t' '$1 == "curl_exit" { print $2; exit }' "$result")"
+          PROMOTION_RESULT_HTTP_STATUS="$("$awk_path" -F '\t' '$1 == "http_status" { print $2; exit }' "$result")"
+          if [ -z "$PROMOTION_RESULT_STATUS" ] || [ -z "$PROMOTION_RESULT_PHASE" ] || [ -z "$PROMOTION_RESULT_REASON" ]; then
+            printf 'PROMOTION_RESULT_OUTPUT_MISSING promotion phase result was incomplete\n' >&2
+            exit 1
+          fi
+          printf 'PROMOTION_PHASE_RESULT status=%s phase=%s reason=%s curl_exit=%s http_status=%s\n' \
+            "$PROMOTION_RESULT_STATUS" "$PROMOTION_RESULT_PHASE" "$PROMOTION_RESULT_REASON" \
+            "$PROMOTION_RESULT_CURL_EXIT" "$PROMOTION_RESULT_HTTP_STATUS"
+          if [ ! -s "$report" ]; then
+            test "$PROMOTION_RESULT_STATUS" = success \
+              || { printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING failed promotion step produced no diagnostics\n' >&2; exit 1; }
+            exit 0
+          fi
+          awk_path="$(command -v awk)"
+          case "$awk_path" in
+            /nix/store/* | /run/current-system/sw/bin/* | /usr/local/* | /usr/bin/* | /bin/* | /sbin/*) ;;
+            *)
+              printf 'refusing an untrusted awk: %s\n' "$awk_path" >&2
+              exit 1
+              ;;
+          esac
+          PROMOTION_PHASE="$("$awk_path" -F '\t' '$1 == "phase" { print $2; exit }' "$report")"
+          PROMOTION_REASON="$("$awk_path" -F '\t' '$1 == "reason" { print $2; exit }' "$report")"
           PROMOTION_CURL_EXIT="$("$awk_path" -F '\t' '$1 == "curl_exit" { print $2; exit }' "$report")"
           PROMOTION_HTTP_STATUS="$("$awk_path" -F '\t' '$1 == "http_status" { print $2; exit }' "$report")"
           PROMOTION_RESPONSE_BODY="$("$awk_path" -F '\t' '$1 == "response_body" { print $2; exit }' "$report")"
-          if [ -z "$PROMOTION_CURL_EXIT" ] || [ -z "$PROMOTION_HTTP_STATUS" ] || [ -z "$PROMOTION_RESPONSE_BODY" ]; then
+          if [ -z "$PROMOTION_PHASE" ] || [ -z "$PROMOTION_REASON" ] || [ -z "$PROMOTION_CURL_EXIT" ] || [ -z "$PROMOTION_RESPONSE_BODY" ]; then
             printf 'PROMOTION_DIAGNOSTICS_OUTPUT_MISSING diagnostics file was incomplete\n' >&2
             exit 1
           fi
           mkdir -p "$(dirname "$report")"
           {
+            printf 'phase\t%s\n' "$PROMOTION_PHASE"
+            printf 'reason\t%s\n' "$PROMOTION_REASON"
             printf 'curl_exit\t%s\n' "$PROMOTION_CURL_EXIT"
             printf 'http_status\t%s\n' "$PROMOTION_HTTP_STATUS"
             printf 'response_body\t%s\n' "$PROMOTION_RESPONSE_BODY"
           } > "$report"
-          printf 'PROMOTION_DIAGNOSTICS curl_exit=%s http_status=%s\n' \
-            "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
+          printf 'PROMOTION_DIAGNOSTICS phase=%s reason=%s curl_exit=%s http_status=%s\n' \
+            "$PROMOTION_PHASE" "$PROMOTION_REASON" "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
           printf 'PROMOTION_RESPONSE_BODY %s\n' "$PROMOTION_RESPONSE_BODY"
-          printf '::error title=GitHub promotion::curl_exit=%s;http_status=%s\n' \
-            "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
+          printf '::error title=GitHub promotion::phase=%s;reason=%s;curl_exit=%s;http_status=%s\n' \
+            "$PROMOTION_PHASE" "$PROMOTION_REASON" "$PROMOTION_CURL_EXIT" "$PROMOTION_HTTP_STATUS"
           printf '::error title=GitHub promotion response::%s\n' "$PROMOTION_RESPONSE_BODY"
+          if [ "$PROMOTION_RESULT_STATUS" != success ]; then
+            exit 1
+          fi
 
       - name: Upload promotion diagnostics artifact
         if: always()
