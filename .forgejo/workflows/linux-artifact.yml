@@ -869,8 +869,9 @@ jobs:
           # fetched and checked out below.
           promote_ref_commit="$(git rev-parse --verify 'HEAD^{commit}')"
 
-          # The candidate release of a public repository is readable anonymously, so
-          # this step needs no token even to read the release metadata.
+          # The candidate or already-promoted release of a public repository is
+          # readable anonymously, so this step needs no token even to read the
+          # release metadata.
           curl -q -fsS -H 'Accept: application/vnd.github+json' \
             "$REPO_API/releases/tags/$REL_TAG" -o "$RELEASE_JSON"
           # Every field this decision depends on is required: a payload that merely
@@ -887,9 +888,6 @@ jobs:
             if (typeof release.prerelease !== 'boolean' || typeof release.draft !== 'boolean') {
               throw new Error('release payload does not report its prerelease and draft state');
             }
-            if (release.prerelease !== true) {
-              throw new Error('release is not a prerelease candidate');
-            }
             if (release.draft === true) {
               throw new Error('release is a draft, so it is not a promotable candidate');
             }
@@ -897,9 +895,11 @@ jobs:
             if (!/^[0-9a-f]{40,64}$/.test(target)) {
               throw new Error('release payload does not report a usable target commit');
             }
-            process.stdout.write(String(release.id));
+            process.stdout.write(String(release.id) + '\t' + (release.prerelease ? 'promote' : 'already_promoted') + '\n');
           " > "$PWD/.promote-release-id"
-          release_id="$(cat "$PWD/.promote-release-id")"
+          release_id=""
+          promotion_action=""
+          IFS=$'\t' read -r release_id promotion_action < "$PWD/.promote-release-id"
           target_commit="$(node -e "const fs=require('fs'); process.stdout.write(String(JSON.parse(fs.readFileSync(process.env.RELEASE_JSON,'utf8')).target_commitish));")"
 
           # The promotion ref must point at the commit the canonical release tag
@@ -984,6 +984,7 @@ jobs:
             printf 'api_origin\t%s\n' "$API_ORIGIN"
             printf 'repo_api\t%s\n' "$REPO_API"
             printf 'release_id\t%s\n' "$release_id"
+            printf 'promotion_action\t%s\n' "$promotion_action"
             printf 'target_commit\t%s\n' "$target_commit"
             printf 'canonical_tag_commit\t%s\n' "$canonical_tag_commit"
             printf 'artifact\t%s\n' "$ARTIFACT"
@@ -1163,6 +1164,7 @@ jobs:
           api_origin="$(field api_origin)"
           repo_api="$(field repo_api)"
           rel_tag="$(field rel_tag)"
+          promotion_action="$(field promotion_action)"
 
           # The values are validated rather than trusted: a wrong one would send an
           # authenticated request somewhere unintended.
@@ -1173,6 +1175,21 @@ jobs:
           phase=tag_validation
           write_result pending "$phase" running 0 "" ""
           case "$rel_tag" in v[0-9]*) ;; *) printf 'unusable release tag\n' >&2; exit 1 ;; esac
+
+          case "$promotion_action" in
+            promote|already_promoted) ;;
+            *) printf 'unusable promotion action\n' >&2; exit 1 ;;
+          esac
+
+          # A verified release that is already public is an idempotent no-op. It
+          # must not require the write credential or issue another PATCH; the
+          # token-free verification step already proved its target and assets.
+          if [ "$promotion_action" = already_promoted ]; then
+            phase=already_promoted
+            write_result success "$phase" already_promoted 0 "" ""
+            printf 'release already promoted and verified; no mutation needed for %s\n' "$rel_tag"
+            exit 0
+          fi
 
           # The release to flip is read here, by this step, from its tag: taking the id
           # from a file written by an earlier step lets a process that step left behind
