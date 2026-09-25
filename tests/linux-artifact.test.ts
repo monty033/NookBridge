@@ -1643,6 +1643,80 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     expect(result.stdout).toContain("promotion readback still sees the candidate state");
   });
 
+  it("treats an already-promoted exact release as a verified no-op", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const decisionStart = raw.indexOf("          export RELEASE_JSON\n");
+    const decisionEnd = raw.indexOf(
+      "          IFS=$'\\t' read -r release_id promotion_action < \"$PWD/.promote-release-id\"",
+      decisionStart,
+    );
+    expect(decisionStart).toBeGreaterThanOrEqual(0);
+    expect(decisionEnd).toBeGreaterThan(decisionStart);
+    const decisionScript = raw
+      .slice(decisionStart, decisionEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-idempotent-test-"));
+    fixtureRoots.push(root);
+    writeFileSync(
+      join(root, "promote.json"),
+      JSON.stringify({
+        id: 394888968,
+        prerelease: false,
+        draft: false,
+        target_commitish: "0123456789abcdef0123456789abcdef01234567",
+      }),
+    );
+    const result = spawnSync(
+      "bash",
+      ["-eu", "-c", ['RELEASE_JSON="$PWD/promote.json"', decisionScript].join("\n")],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
+    expect(readFileSync(join(root, ".promote-release-id"), "utf8")).toBe(
+      "394888968\talready_promoted\n",
+    );
+  });
+
+  it("skips the authenticated mutation for an already-promoted release", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const noOpStart = raw.indexOf(
+      "          phase=tag_validation\n",
+      raw.indexOf("- name: Promote candidate release"),
+    );
+    const noOpEnd = raw.indexOf("          # The release to flip is read here", noOpStart);
+    expect(noOpStart).toBeGreaterThanOrEqual(0);
+    expect(noOpEnd).toBeGreaterThan(noOpStart);
+    const noOpScript = raw
+      .slice(noOpStart, noOpEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+    const root = mkdtempSync(join(tmpdir(), "nookbridge-promotion-noop-test-"));
+    fixtureRoots.push(root);
+    const result = spawnSync(
+      "bash",
+      [
+        "-eu",
+        "-c",
+        [
+          'promotion_result="$PWD/promotion-result.tsv"',
+          'write_result() { printf "status\\t%s\\nphase\\t%s\\nreason\\t%s\\ncurl_exit\\t%s\\nhttp_status\\t%s\\nresponse_body\\t%s\\n" "$1" "$2" "$3" "$4" "$5" "$6" > "$promotion_result"; }',
+          'rel_tag="v0.1.2"',
+          'promotion_action="already_promoted"',
+          noOpScript,
+        ].join("\n"),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
+    expect(result.stdout).toContain("no mutation needed for v0.1.2");
+    expect(readFileSync(join(root, "promotion-result.tsv"), "utf8")).toContain(
+      "status\tsuccess\nphase\talready_promoted\nreason\talready_promoted\n",
+    );
+  });
+
   it("runs the real artifact build on main and runner-test refs without publishing", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     expect(raw).toContain("refs/heads/runner-test/");
