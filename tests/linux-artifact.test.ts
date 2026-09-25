@@ -997,7 +997,15 @@ describe("Linux artifact manifest contract", () => {
     expect(promoteStepStart).toBeGreaterThanOrEqual(0);
     expect(promoteSetEIndex).toBeGreaterThan(promoteStepStart);
     expect(promoteSetEIndex).toBeLessThan(guardedCurlAbsolute);
-    expect(patchBlock).not.toContain("set +e");
+    expect(patchBlock).toContain("set +e");
+    expect(patchBlock).toContain("patch_status=\"\"");
+    expect(patchBlock).toContain("set -e");
+    const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
+    expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
+    const errexitRestoreIndex = patchBlock.indexOf("\n          set -e");
+    const guardedCurlRelativeIndex = patchBlock.indexOf("if patch_status=");
+    expect(errexitRestoreIndex).toBeGreaterThan(guardedCurlRelativeIndex);
+    expect(errexitRestoreIndex).toBeLessThan(diagnosticsWriteIndex);
     expect(patchBlock).toContain('[ -s "$patch_response" ]');
     expect(patchBlock).toContain("<no response body>");
     expect(patchBlock).toContain(': > "$patch_response"');
@@ -1012,8 +1020,6 @@ describe("Linux artifact manifest contract", () => {
       "printf 'promotion diagnostics captured; deferring failure until after upload\\n'",
     );
     expect(patchBlock).toContain("exit 0");
-    const diagnosticsWriteIndex = patchBlock.indexOf('> "$patch_diagnostics"');
-    expect(diagnosticsWriteIndex).toBeGreaterThanOrEqual(0);
     expect(patchBlock).toContain('case "$response_body" in');
     expect(patchBlock).toContain('*"$RELEASE_PUBLISH_TOKEN"*)');
     const diagnosticsResetIndex = raw.indexOf('rm -f "$patch_diagnostics"');
@@ -1291,7 +1297,7 @@ describe("Linux artifact manifest contract", () => {
     }
   });
 
-  it("captures a failed PATCH under errexit and writes promotion diagnostics", () => {
+  it("keeps the promote step successful when the PATCH fails and writes diagnostics", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     const patchStart = raw.indexOf(
       '          patch_response="$PWD/.promote-work/patch-response.json"',

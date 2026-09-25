@@ -1147,6 +1147,11 @@ jobs:
 
           patch_response="$PWD/.promote-work/patch-response.json"
           : > "$patch_response"
+          # Keep the mutation step successful even when the request itself fails. A
+          # failed Forgejo step can lose its workspace before the always-run report
+          # step; the later deferred-failure step must receive the diagnostics file.
+          set +e
+          patch_status=""
           patch_curl_exit=0
           if patch_status="$("$curl_path" -q -sS -X PATCH --config "$curl_config" \
             -H 'Accept: application/vnd.github+json' \
@@ -1157,6 +1162,7 @@ jobs:
           else
             patch_curl_exit=$?
           fi
+          set -e
           if [ "$patch_curl_exit" -ne 0 ] || [ "$patch_status" != 200 ]; then
             response_body='<no response body>'
             if [ -s "$patch_response" ]; then
