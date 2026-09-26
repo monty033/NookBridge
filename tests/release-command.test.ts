@@ -123,6 +123,7 @@ type StubOptions = {
   readonly runsFor?: (requestIndex: number) => StubRun[];
   readonly runsStatus?: number;
   readonly release?: Record<string, unknown> | null;
+  readonly releaseFor?: (requestIndex: number) => Record<string, unknown> | null;
   readonly releaseStatus?: number;
   readonly releaseRedirect?: string;
   readonly fullPages?: boolean;
@@ -139,6 +140,7 @@ let latestCanonicalRepo = "";
 
 async function startStub(options: StubOptions) {
   let runRequests = 0;
+  let releaseRequests = 0;
   const requests: string[] = [];
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -202,6 +204,7 @@ async function startStub(options: StubOptions) {
       return;
     }
     if (url.pathname.includes("/releases/tags/")) {
+      releaseRequests += 1;
       if (options.releaseRedirect !== undefined) {
         // Redirect to a reachable endpoint that answers 200, so following the
         // redirect would actually satisfy the caller.
@@ -215,12 +218,13 @@ async function startStub(options: StubOptions) {
         response.end(JSON.stringify({ message: "release unavailable" }));
         return;
       }
-      if (!options.release) {
+      const release = options.releaseFor?.(releaseRequests) ?? options.release;
+      if (!release) {
         response.statusCode = 404;
         response.end(JSON.stringify({ message: "Not Found" }));
         return;
       }
-      response.end(JSON.stringify(options.release));
+      response.end(JSON.stringify(release));
       return;
     }
     response.statusCode = 404;
@@ -955,6 +959,32 @@ describe("release operator command", () => {
     expect(tagPresent(fixture.canonical, tag)).toBe(true);
   });
 
+  it("retries a briefly absent mirror release after a successful run", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit), tagRun(fixture.commit, "success")],
+      releaseFor: (requestIndex) => (requestIndex < 2 ? null : candidateRelease(fixture.commit)),
+    });
+
+    const result = await runRelease(["tag", "--yes"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Candidate v0.1.2 has all five assets");
+  });
+  it("fails after a bounded wait when the mirror release stays absent", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({
+      runsFor: () => [mainPreflight(fixture.commit), tagRun(fixture.commit, "success")],
+      releaseFor: () => null,
+    });
+
+    const result = await runRelease(["tag", "--yes"], fixture, stub.base, {
+      NOOKBRIDGE_MIRROR_WAIT_TIMEOUT: "0",
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("after 0s");
+  });
   it("is not fooled by forged asset names in the release response", async () => {
     const fixture = createFixture();
     git(["tag", "-a", tag, fixture.commit, "-m", `NookBridge ${tag}`], fixture.work);
