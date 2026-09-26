@@ -166,20 +166,27 @@ the service is unhealthy; inspect the categorical service state first.
 From a protected host TTY, run the installed operator wrappers:
 
 ```text
-nookbridge-provision
-nookbridge-sync
+notesbridge provision
+notesbridge sync
 ```
+
+The product-name alias `nookbridge provision` / `nookbridge sync` is also
+installed. The standalone `nookbridge-provision` and `nookbridge-sync` names
+remain available for compatibility.
 
 Both are root-gated transient systemd operations. Authentication material is
 collected interactively and is never placed in command arguments or environment
-snapshots. The sync operation is fetch-only; it is not a generic full-sync path.
+snapshots. The wrappers suspend `nookd.service` automatically while they own
+the shared state, then restore its prior active state on every exit path. A
+successful provisioning operation activates the daemon when it was initially
+inactive. The sync operation is fetch-only; it is not a generic full-sync path.
 
 The fetch-only sync wrapper briefly stops `nookd.service` before invoking the
 sync transient unit so the transient unit is the only process holding
-`/var/lib/nookbridge/nookbridge.lock`. `nookd.service` is restarted on every
-sync-wrapper exit path (success or failure) so a categorical sync failure
-never leaves the daemon stopped. The wrapper preserves the sync command's
-exit status; a sync failure surfaces to the operator unchanged.
+`/var/lib/nookbridge/nookbridge.lock`. If the daemon was active before sync, it
+is started again on both success and failure; if it was initially inactive, the
+wrapper leaves it inactive. The wrapper preserves the sync command's exit
+status; a sync failure surfaces to the operator unchanged.
 
 ## Building an artifact
 
