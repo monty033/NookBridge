@@ -124,7 +124,11 @@ is bypassed by hand.
   exists locally or on the canonical remote, and the exact commit has a
   terminal-successful `main` preflight. It then creates the annotated
   `NookBridge v<VERSION>` tag, pushes it, waits for the run, and reports the
-  candidate assets. The tag targets the fetched canonical commit, so local
+  candidate assets. After a successful workflow, it tolerates the mirror's
+  short eventual-consistency window by retrying an absent release for the
+  bounded `NOOKBRIDGE_MIRROR_WAIT_TIMEOUT` (default 60 seconds); API read
+  failures, incomplete assets, wrong targets, and exhausted waits still exit
+  non-zero. The tag targets the fetched canonical commit, so local
   working-tree state cannot change what is released. A release whose workflow
   succeeded but whose candidate release cannot be read or is incomplete exits
   non-zero, so automation cannot read an unverified release as success.

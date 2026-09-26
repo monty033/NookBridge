@@ -53,6 +53,7 @@
 #   NOOKBRIDGE_API_TOKEN           read token when the Forgejo API needs one
 #   NOOKBRIDGE_WATCH_INTERVAL      seconds between run polls (default 10)
 #   NOOKBRIDGE_WATCH_TIMEOUT       seconds to wait for a run (default 1800)
+#   NOOKBRIDGE_MIRROR_WAIT_TIMEOUT seconds to wait for the mirror release (default 60)
 
 set -euo pipefail
 
@@ -72,6 +73,7 @@ readonly CANONICAL_PRINCIPALS="git forgejo"
 readonly CANONICAL_SSH_PORT="443"
 readonly WATCH_INTERVAL="${NOOKBRIDGE_WATCH_INTERVAL:-10}"
 readonly WATCH_TIMEOUT="${NOOKBRIDGE_WATCH_TIMEOUT:-1800}"
+readonly MIRROR_WAIT_TIMEOUT="${NOOKBRIDGE_MIRROR_WAIT_TIMEOUT:-60}"
 
 test_mode=false
 if [ -n "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" ] && [ "${NOOKBRIDGE_RELEASE_TEST_MODE:-}" != "0" ]; then
@@ -667,6 +669,8 @@ validate_watch_settings() {
     || fail "NOOKBRIDGE_WATCH_INTERVAL must be a whole number of seconds"
   [[ "$WATCH_TIMEOUT" =~ ^[0-9]+$ ]] \
     || fail "NOOKBRIDGE_WATCH_TIMEOUT must be a whole number of seconds"
+  [[ "$MIRROR_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] \
+    || fail "NOOKBRIDGE_MIRROR_WAIT_TIMEOUT must be a whole number of seconds"
 }
 
 resolve_release_target() {
@@ -855,17 +859,29 @@ watch_release_run() { # $1 = ref, $2 = commit, $3 = description
   done
 }
 
+wait_for_mirror_release() { # $1 = tag
+  local tag=$1 deadline=$((SECONDS + MIRROR_WAIT_TIMEOUT)) state
+  while :; do
+    if ! state=$(github_release_state "$tag"); then
+      fail "the release run succeeded but the mirror release state could not be read; verify $tag before announcing it"
+    fi
+    if [ "$(field_of "$state" exists)" = true ]; then
+      printf '%s' "$state"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "the release run succeeded but the mirror has no release for $tag after ${MIRROR_WAIT_TIMEOUT}s; verify it before announcing it"
+    fi
+    sleep "$WATCH_INTERVAL"
+  done
+}
+
 # The workflow succeeding is not the same as the candidate existing. A candidate
 # that cannot be verified exits non-zero, so automation cannot read an unverified
 # release as success.
 report_candidate() { # $1 = version
   local tag="v$1" state missing target
-  if ! state=$(github_release_state "$tag"); then
-    fail "the release run succeeded but the mirror release state could not be read; verify $tag before announcing it"
-  fi
-  if [ "$(field_of "$state" exists)" != true ]; then
-    fail "the release run succeeded but the mirror has no release for $tag yet; verify it before announcing it"
-  fi
+  state=$(wait_for_mirror_release "$tag")
   # The release must still be the candidate this run produced: a published
   # release, a draft, or one pointing at another commit, is not evidence that
   # this release succeeded.
