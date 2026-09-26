@@ -2351,15 +2351,15 @@ describe("Stage 4 write adapter — categorical redaction", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
-  it("refuses a create note whose content uses a Markdown table", async () => {
+  it("refuses a create note whose content uses inline HTML", async () => {
     const database = createFakeDatabase();
     const codec = htmlCodec();
     const adapter = createNotesnookWriteAdapter({ source: database, codec });
 
     const code = await codeOfAsync(() =>
       adapter.createNote({
-        title: "Tables not supported",
-        content: "| a | b |\n| - | - |\n| 1 | 2 |",
+        title: "Inline HTML not supported",
+        content: "<div>raw</div>",
       }),
     );
     expect(code).toBe("unsupported_content");
