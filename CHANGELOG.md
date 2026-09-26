@@ -5,6 +5,26 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
+## [0.1.3] - 2026-09-26
+
+Release focused on reliable production operator workflows and clearer command
+entrypoints.
+
+### Summary
+
+- Fixed provisioning and sync state-lock collisions by suspending `nookd`
+  automatically around transient operator commands.
+- Added the `notesbridge provision` and `notesbridge sync` umbrella commands,
+  while retaining the legacy standalone wrappers for compatibility.
+- Added runtime contract coverage for daemon restoration, failure handling,
+  inactive-service behavior, and umbrella command dispatch.
+
+### Fixed
+
+- Prevented provisioning from failing before the interactive credential flow
+  when `nookd` already owns the shared encrypted state.
+- Preserved the daemon's prior active state on operator failure and sync.
+
 ## [0.1.2] - 2026-09-22
 
 Release focused on safer, more reproducible releases and portable Linux
@@ -233,6 +253,7 @@ support boundary remain subject to change.
 - Sync and mutation support remain narrowly scoped; do not infer general account
   or cross-device support from the validated scenarios.
 
+[0.1.3]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.3
 [0.1.2]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.2
 [0.1.1]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.1
 [0.1.0]: https://git.montycasa.net/patrick/NookBridge/releases/tag/v0.1.0
