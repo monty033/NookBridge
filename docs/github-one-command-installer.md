@@ -16,11 +16,11 @@ curl -fsSL https://github.com/monty033/NookBridge/releases/latest/download/insta
 The interactive run asks whether to:
 
 1. Provision the Notesnook account (echo-disabled TTY prompt inside
-   `nookbridge-provision` — no secrets in argv, environment, or logs).
+   `notesbridge provision` — no secrets in argv, environment, or logs).
 2. Edit access settings (after provisioning, writes through `nookctl settings
    edit` against `/etc/nookbridge/settings.json` — the exact file the daemon
    consumes via `LoadCredential=`).
-3. Run the fetch-only sync (`nookbridge-sync`).
+3. Run the fetch-only sync (`notesbridge sync`).
 
 The download, outer SHA256SUMS verification, fresh database key, default
 closed settings JSON, and the existing transactional installer run
@@ -70,7 +70,7 @@ override of the release base URL.
 7. Downloads and verifies the matching `install-systemd.sh` and
    `verify-linux-artifact.sh` helpers from the same release, then invokes the
    transactional installer with the generated inputs.
-8. Optionally prompts for `nookbridge-provision`. Authentication
+8. Optionally prompts for `notesbridge provision`. Authentication
    material is collected only through the existing echo-disabled TTY
    prompt inside the operator wrapper; the bootstrap never puts
    passwords, MFA codes, tokens, or key contents in argv or environment
@@ -78,7 +78,7 @@ override of the release base URL.
 9. Runs the categorical health probe via `nookbridge-health`.
 10. Optionally prompts for `nookctl settings edit`, pinned to the system
     settings path, and verifies health again after the restart.
-11. Optionally prompts for the fetch-only sync (`nookbridge-sync`).
+11. Optionally prompts for the fetch-only sync (`notesbridge sync`).
 
 ## Security boundary
 

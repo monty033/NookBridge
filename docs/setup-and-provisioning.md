@@ -8,8 +8,11 @@ an MCP capability and must never be delegated to an agent.
 On the deployed host, use a real host TTY as root:
 
 ```text
-nookbridge-provision
+notesbridge provision
 ```
+
+`nookbridge provision` is also installed as a product-name alias. The older
+standalone `nookbridge-provision` wrapper remains available for compatibility.
 
 Enter the Notesnook account information only when the program prompts with
 echo-disabled input. Never pass passwords, MFA codes, recovery material,
@@ -27,13 +30,20 @@ provisioning: they can use a separate development store.
 After successful provisioning, run the separate root-operated wrapper:
 
 ```text
-nookbridge-sync
+notesbridge sync
 ```
 
-The provisioning wrapper starts `nookd` automatically after successful
-authentication. The sync wrapper performs the bridge's fetch-only synchronization
-path and must not be replaced by a generic or full-sync command. Once it
-completes, verify the approved MCP client can connect to the Unix socket.
+`nookbridge sync` is also installed as a product-name alias. The older
+standalone `nookbridge-sync` wrapper remains available for compatibility.
+
+The wrappers suspend `nookd` automatically while they own the shared encrypted
+state, then restore its prior active state on every exit path. Users must not
+stop the service manually. Provisioning starts `nookd` after successful
+authentication when it was initially inactive; sync preserves an initially
+inactive daemon state. The sync wrapper performs the bridge's fetch-only
+synchronization path and must not be replaced by a generic or full-sync
+command. Once it completes, verify the approved MCP client can connect to the
+Unix socket.
 
 ## Routine operation
 

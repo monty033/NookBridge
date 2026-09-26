@@ -325,25 +325,24 @@ transaction_exit() {
 
 install_operator_wrapper() {
   # The fourth argument selects the daemon-lifecycle shape:
-  #   - restart: restart nookd.service after the wrapper exits 0
-  #     (the post-auth bring-up path used by nookbridge-provision).
-  #   - suspend: stop nookd.service BEFORE the transient unit runs,
-  #     then restart it unconditionally via an EXIT trap so the
-  #     daemon is always restored, even on a categorical sync
-  #     failure (the single-instance-lock collision path used by
-  #     nookbridge-sync).
+  #   - restart: restart nookd.service after the wrapper exits 0.
+  #   - suspend: snapshot nookd.service's state, stop it BEFORE the
+  #     transient unit runs, then restore that state on exit. Provisioning
+  #     starts it after successful authentication even when initially inactive
+  #     (the shared-state path used by provisioning and sync).
   #   - unset:  no daemon-lifecycle change; the transient unit
   #     assumes nookd is already in the desired state.
-  local name command gate post_success wrapper suspend
+  local name command gate lifecycle start_on_success wrapper suspend
   name="$1"
   command="$2"
   gate="$3"
-  post_success="${4:-}"
+  lifecycle="${4:-}"
+  start_on_success="${5:-0}"
   wrapper="${USR_LOCAL_BIN}/${name}"
   suspend=0
-  if [ "$post_success" = 'restart' ]; then
+  if [ "$lifecycle" = 'restart' ]; then
     suspend=0
-  elif [ "$post_success" = 'suspend' ]; then
+  elif [ "$lifecycle" = 'suspend' ]; then
     suspend=1
   fi
   rm -f "$wrapper"
@@ -353,11 +352,16 @@ install_operator_wrapper() {
     printf '%s\n' "  printf '%s\\n' '${name}: must be run as root' >&2"
     printf '%s\n' '  exit 77' 'fi'
     if [ "$suspend" -eq 1 ]; then
-      # Restore nookd on every exit path: normal completion, a
-      # stop failure, set -e abort, or signal. The restart is
-      # best-effort so a transient restart failure does NOT mask the
-      # sync or stop command's categorical exit status.
-      printf '%s\n' "trap 'systemctl start nookd.service >/dev/null 2>&1 || :' EXIT INT TERM HUP"
+      # Preserve the daemon's initial state. Provisioning starts it after
+      # successful authentication; a failed first provisioning attempt must
+      # leave an originally inactive daemon inactive. An already-active
+      # daemon is always restored after the transient operator exits.
+      printf '%s\n' 'was_active=0' "start_on_success=${start_on_success}" 'if systemctl is-active --quiet nookd.service >/dev/null 2>&1; then was_active=1; fi'
+      printf '%s\n' 'restore_nookd() {' '  status="$?"' \
+        "  if [ \"\$was_active\" -eq 1 ] || { [ \"\$start_on_success\" -eq 1 ] && [ \"\$status\" -eq 0 ]; }; then" \
+        '    systemctl start nookd.service >/dev/null 2>&1 || :' \
+        '  fi' '  trap - EXIT INT TERM HUP' '  exit "$status"' '}' \
+        "trap 'restore_nookd' EXIT INT TERM HUP"
       # Stop the live nookd so the transient sync unit is the only
       # DB-owning process on nookbridge.lock. Do not continue when
       # stop fails: launching sync against a still-live daemon would
@@ -389,12 +393,29 @@ install_operator_wrapper() {
       '  --property=TimeoutStartSec=10min' \
       '  --property=RuntimeMaxSec=10min'
     printf '%s\n' "  \"${CURRENT_LINK}/bin/${command}\" \"\$@\""
-    if [ "$post_success" = 'restart' ]; then
+    if [ "$lifecycle" = 'restart' ]; then
       printf '%s\n' 'status=$?' 'if [ "$status" -ne 0 ]; then' '  exit "$status"' 'fi'
       printf '%s\n' 'if ! systemctl restart nookd.service >/dev/null 2>&1; then' \
         "  printf '%s\\n' '${name}: service activation failed' >&2" \
         '  exit 1' 'fi'
     fi
+  } >"$wrapper"
+  chmod 0755 "$wrapper"
+}
+
+install_subcommand_wrapper() {
+  local name="$1"
+  local wrapper="${USR_LOCAL_BIN}/${name}"
+  rm -f "$wrapper"
+  {
+    printf '%s\n' '#!/bin/sh' 'set -eu'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' \
+      "  provision) shift; exec \"${USR_LOCAL_BIN}/nookbridge-provision\" \"\$@\" ;;" \
+      "  sync) shift; exec \"${USR_LOCAL_BIN}/nookbridge-sync\" \"\$@\" ;;" \
+      "  help|-h) printf '%s\\n' 'Usage: ${name} <provision|sync>'; exit 0 ;;" \
+      "  *) printf '%s\\n' 'Usage: ${name} <provision|sync>' >&2; exit 2 ;;"
+    printf '%s\n' 'esac'
   } >"$wrapper"
   chmod 0755 "$wrapper"
 }
@@ -407,13 +428,16 @@ install_wrappers() {
     [ -x "${CURRENT_LINK}/bin/${name}" ] || continue
     ln -sfn "${CURRENT_LINK}/bin/${name}" "${USR_LOCAL_BIN}/${name}"
   done
-  install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH restart
+  # Provisioning and sync both open the daemon's persistent state. Suspend
+  # nookd around either operation so users never need to stop it manually.
+  install_operator_wrapper nookbridge-provision nookbridge-provision-cli NOOKBRIDGE_ENABLE_LIVE_AUTH suspend 1
   # The fetch-only sync wrapper uses the suspend mode so the
   # transient unit never collides with the active nookd on
-  # nookbridge.lock; the daemon is restarted unconditionally on
-  # the wrapper exit path so a sync failure never leaves nookd
-  # down.
+  # nookbridge.lock; the daemon's prior state is restored on
+  # every wrapper exit path.
   install_operator_wrapper nookbridge-sync nookbridge-sync-cli NOOKBRIDGE_ENABLE_LIVE_SYNC suspend
+  install_subcommand_wrapper nookbridge
+  install_subcommand_wrapper notesbridge
 }
 
 run_health_gate() {

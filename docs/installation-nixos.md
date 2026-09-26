@@ -28,7 +28,11 @@ following:
 - a systemd credential named `nookbridge-db-key`, sourced from approved secret
   management rather than plaintext configuration or the Nix store;
 - a Unix socket under `/run/nookbridge`, with no TCP/HTTP listener;
-- the root-operated `nookbridge-provision` and `nookbridge-sync` wrappers.
+- root-operated provisioning and sync wrappers supplied by the canonical
+  deployment repository. The generic systemd installer exposes these as
+  `notesbridge provision` and `notesbridge sync`; NixOS command names and
+  lifecycle wrappers are deployment-module contracts and must be verified
+  against the active Nix configuration before use;
 
 The daemon must fail closed if its credential or secure configuration is absent
 or invalid. Do not substitute a development file-backed key store for this

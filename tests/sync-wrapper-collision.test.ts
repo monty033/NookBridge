@@ -429,11 +429,11 @@ describe("nookbridge-sync operator wrapper — single-instance lock collision co
     const trapIndex = source.indexOf("systemctl start nookd.service");
     expect(trapIndex, `source=${source}`).toBeGreaterThanOrEqual(0);
     expect(trapIndex).toBeLessThan(runIndex);
-    expect(source).toMatch(/trap '.*systemctl start nookd\.service.*' EXIT INT TERM HUP/);
-    // The legacy provision wrapper retained restart-on-success; the
-    // sync wrapper does NOT use `systemctl restart nookd.service`
-    // (which would mask a sync failure). It only uses start (in the
-    // trap) and stop (in the preamble).
+    expect(source).toMatch(/trap 'restore_nookd' EXIT INT TERM HUP/);
+    expect(source).toMatch(/systemctl is-active --quiet nookd\.service/);
+    // The sync wrapper does NOT use `systemctl restart nookd.service`
+    // (which would mask a sync failure). It only uses start in the
+    // state-preserving trap and stop in the preamble.
     expect(source).not.toMatch(/systemctl restart nookd\.service/);
   });
 

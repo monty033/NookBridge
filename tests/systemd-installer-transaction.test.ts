@@ -204,10 +204,18 @@ describe("generic systemd installer — health rollback and retention", () => {
       "systemd-run --quiet --pty --wait --collect \\\n",
     );
     const provisionWrapper = readFileSync(join(ctx.usrLocalBinDir, "nookbridge-provision"), "utf8");
-    expect(provisionWrapper).toContain("systemctl restart nookd.service");
+    expect(provisionWrapper).toContain("systemctl stop nookd.service");
+    expect(provisionWrapper).toContain("systemctl start nookd.service");
     expect(readFileSync(join(ctx.usrLocalBinDir, "nookbridge-sync"), "utf8")).not.toContain(
       "systemctl restart nookd.service",
     );
+    for (const name of ["nookbridge", "notesbridge"]) {
+      const wrapper = readFileSync(join(ctx.usrLocalBinDir, name), "utf8");
+      expect(wrapper).toContain(
+        `provision) shift; exec "${ctx.usrLocalBinDir}/nookbridge-provision" "$@"`,
+      );
+      expect(wrapper).toContain(`sync) shift; exec "${ctx.usrLocalBinDir}/nookbridge-sync" "$@"`);
+    }
     expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-runtime-check")).isSymbolicLink()).toBe(
       true,
     );

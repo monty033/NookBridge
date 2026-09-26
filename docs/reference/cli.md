@@ -8,7 +8,7 @@ version's help for exact syntax and availability.
 | Command family | Intended use | Safety boundary |
 | --- | --- | --- |
 | `doctor` | Local diagnostics and optional endpoint reachability probe. | Inspection only; do not include secrets in arguments. |
-| `auth` | Development/acceptance authentication state. | Production provisioning uses `nookbridge-provision` from a real root TTY instead. |
+| `auth` | Development/acceptance authentication state. | Production provisioning uses `notesbridge provision` from a real root TTY instead. |
 | `sync` | Development/acceptance read-only synchronization. | Live operations are explicitly gated. |
 | `write` | Bounded acceptance write workflow. | Explicitly gated; do not pass note content through argv or environment. |
 | `conflicts` | Read-only local conflict-marker observation. | Explicitly gated; never resolves a conflict. |
@@ -28,14 +28,16 @@ flag.
 
 ## Production wrappers
 
-Use these root-operated NixOS wrappers for production state provisioning and
+Use these root-operated wrappers for production state provisioning and
 fetch-only synchronization:
 
 ```text
-nookbridge-provision
-nookbridge-sync
+notesbridge provision
+notesbridge sync
 ```
 
-They are separate from `nookctl` because they run with the production service
-identity and systemd credential delivery. See
+The equivalent product-name form is `nookbridge provision` / `nookbridge sync`.
+Standalone legacy names remain available. These commands are separate from
+`nookctl` because they run with the production service identity and systemd
+credential delivery. See
 [setup and provisioning](../setup-and-provisioning.md).
