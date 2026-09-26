@@ -15,9 +15,15 @@
  *
  * What this fixture deliberately does NOT assert:
  *
- *   - Markdown tables and fenced code blocks.  The codec refuses both
- *     categorically, so a table or callout reaches a note only as an opaque
- *     directive; this fixture asserts the refusal instead of a rendered table.
+ *   - Math/formula, callout, image, attachment and embed blocks (Wave 2/3 of
+ *     the native-block-parity plan).  The codec still refuses these
+ *     categorically; this fixture asserts the refusal, not a rendered node.
+ *
+ * Wave 1 of the native-block-parity plan added real rendering for Markdown
+ * tables, fenced code blocks, blockquotes and horizontal rules — the
+ * `describe("T13 rendered acceptance — Wave 1 native blocks")` block below
+ * asserts their rendered tree the same way the pre-existing tests assert
+ * headings/lists/checklists.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -222,8 +228,6 @@ describe("T13 rendered acceptance — the tree a created note renders from", () 
 
 describe("T13 rendered acceptance — constructs the surface refuses", () => {
   const refused: ReadonlyArray<readonly [string, string]> = [
-    ["a Markdown table", "| a | b |\n| --- | --- |\n| 1 | 2 |\n"],
-    ["a fenced code block", "```\nconst x = 1;\n```\n"],
     ["a link", "see [the docs](https://example.com/docs)\n"],
     ["an image", "![alt text](https://example.com/x.png)\n"],
     ["inline HTML", "<div>raw</div>\n"],
@@ -250,9 +254,50 @@ describe("T13 rendered acceptance — constructs the surface refuses", () => {
     await expect(
       adapter.createNote({
         title: "Mixed",
-        content: "# Heading\n\n- [ ] item\n\n| a | b |\n| --- | --- |\n",
+        content: "# Heading\n\n- [ ] item\n\n<div>raw</div>\n",
       }),
     ).rejects.toThrow();
     expect(captured).toHaveLength(0);
+  });
+});
+
+describe("T13 rendered acceptance — Wave 1 native blocks", () => {
+  it("renders a Markdown table as a native table and stores no literal pipes", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({
+      title: "Table note",
+      content: "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+    });
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain("<table><thead><tr><th>a</th><th>b</th></tr></thead>");
+    expect(data).toContain("<tbody><tr><td>1</td><td>2</td></tr></tbody>");
+    expect(data).not.toContain("| a | b |");
+  });
+
+  it("renders a fenced code block as <pre><code> and stores no literal backticks", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({ title: "Code note", content: "```js\nconst x = 1;\n```\n" });
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain('<pre><code class="language-js">const x = 1;</code></pre>');
+    expect(data).not.toContain("```");
+  });
+
+  it("renders a blockquote as <blockquote> and stores no literal '>'", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({ title: "Quote note", content: "> a wise quote\n" });
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain("<blockquote><p>a wise quote</p></blockquote>");
+    expect(data).not.toContain("&gt; a wise quote");
+  });
+
+  it("renders a horizontal rule as <hr /> and stores no literal dashes", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({ title: "Rule note", content: "above\n\n---\n\nbelow\n" });
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain("<p>above</p><hr /><p>below</p>");
   });
 });
