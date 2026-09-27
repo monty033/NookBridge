@@ -851,7 +851,7 @@ describe("Linux artifact manifest contract", () => {
       (step) => step.name === "Verify the candidate artifact",
     );
 
-    expect(doc.on.push.branches).toEqual(["main", "runner-test/**"]);
+    expect(doc.on.push.branches).toEqual(["main", "runner-test/**", "beta/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
     expect(raw).toContain("workflow_dispatch:");
     expect(raw).toContain("release_tag:");
@@ -884,7 +884,7 @@ describe("Linux artifact manifest contract", () => {
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
     expect(preflightStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(artifactStep?.if).toBe(
-      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
+      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || startsWith(github.ref, 'refs/heads/beta/') || github.ref == 'refs/heads/main'",
     );
     expect(artifactStep?.env?.GITHUB_TOKEN).toBe("");
     expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
@@ -1754,5 +1754,68 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     expect(raw).toContain("cached_sha256");
     expect(raw).not.toContain("tar -xzf");
     expect(raw).not.toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
+  });
+
+  it("runs and archives a distinguishable beta build off a beta branch", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const doc = parseYaml(raw) as {
+      on: { push: { branches: string[] } };
+      jobs: Record<
+        string,
+        {
+          steps: Array<{ name?: string; if?: string; run?: string; uses?: string }>;
+        }
+      >;
+    };
+    const steps = doc.jobs["linux-artifact"]!.steps;
+    const buildStep = steps.find((step) => step.name === "Build and verify x86_64 glibc artifact");
+    const uploadStep = steps.find((step) => step.name === "Upload beta build artifact");
+
+    // A beta branch is validated by the same job, but its build must never be
+    // mistaken for a release: the version carries an ephemeral beta marker and
+    // the artifact is uploaded to the workflow run, not to a GitHub release.
+    expect(doc.on.push.branches).toContain("beta/**");
+    expect(buildStep?.if).toContain("startsWith(github.ref, 'refs/heads/beta/')");
+    expect(buildStep?.run).toContain("refs/heads/beta/*");
+    expect(buildStep?.run).toContain('VERSION="ci-beta-${GITHUB_SHA:0:12}"');
+    expect(uploadStep?.if).toBe("startsWith(github.ref, 'refs/heads/beta/')");
+    expect(uploadStep?.uses).toContain("upload-artifact");
+    // A branch build may not publish: every release-publishing step stays tag-only.
+    for (const name of [
+      "Prepare GitHub release assets",
+      "Prepare the GitHub release upload",
+      "Publish release assets",
+      "Re-verify the published release",
+    ]) {
+      const step = steps.find((candidate) => candidate.name === name);
+      expect(step?.if, name).toBe("startsWith(github.ref, 'refs/tags/v')");
+    }
+  });
+
+  it("refuses to promote a non-stable release channel", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const promoteSteps = (
+      parseYaml(raw) as {
+        jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }>;
+      }
+    ).jobs["promote-release"]!.steps;
+    const verifyStep = promoteSteps.find((step) => step.name === "Verify the candidate artifact");
+
+    // Beta pre-releases are promoted by merging to main and releasing the next
+    // stable version, so the in-place promotion path must refuse them before it
+    // reaches the token-bearing write step.
+    expect(verifyStep?.run).toContain('bash scripts/release-channel.sh "$VERSION"');
+    expect(verifyStep?.run).toContain('test "$channel" = stable');
+    expect(verifyStep?.run).toContain("refusing to promote a");
+    const channelGuard =
+      verifyStep?.run?.indexOf('bash scripts/release-channel.sh "$VERSION"') ?? -1;
+    const tokenStep = promoteSteps.findIndex((step) => step.name === "Promote candidate release");
+    expect(channelGuard).toBeGreaterThanOrEqual(0);
+    expect(tokenStep).toBeGreaterThan(0);
+    // The guard lives in the token-free verification step, which precedes the
+    // only step that holds the publishing token.
+    expect(
+      promoteSteps.findIndex((step) => step.name === "Verify the candidate artifact"),
+    ).toBeLessThan(tokenStep);
   });
 });

@@ -664,6 +664,16 @@ valid_version() {
   bash "$script_dir/check-release-version.sh" "$version"
 }
 
+# The release channel rule has exactly one implementation too:
+# `release-channel.sh`, which the publishing workflow runs. A second copy would
+# drift, and a version the operator promotes but the workflow refuses (or the
+# reverse) is a failed release that has already consumed an immutable tag.
+release_channel() {
+  local version=$1
+  [ -n "$version" ] || return 1
+  bash "$script_dir/release-channel.sh" "$version"
+}
+
 validate_watch_settings() {
   [[ "$WATCH_INTERVAL" =~ ^[0-9]+$ ]] \
     || fail "NOOKBRIDGE_WATCH_INTERVAL must be a whole number of seconds"
@@ -924,8 +934,13 @@ command_status() {
   resolve_release_target
   version=${requested_version:-$(canonical_version)}
   valid_version "$version" || fail "invalid version: $version"
+  # A version that is grammatically valid but is not on a defined channel (an
+  # rc, an alpha, an unnumbered beta) still reports its channel so status never
+  # claims a candidate is promotable when the promote command would refuse it.
+  channel=$(release_channel "$version" 2>/dev/null) || channel=unsupported
 
   note "version=$version"
+  note "channel=$channel"
   note "canonical_remote=$canonical_remote"
   note "canonical_commit=$release_commit"
   note "canonical_subject=$(strip_controls "$(git show -s --format=%s "$release_commit")")"
@@ -1048,6 +1063,14 @@ command_promote() {
   resolve_release_target
   version=${requested_version:-$(canonical_version)}
   valid_version "$version" || fail "invalid version: $version"
+  # Only a stable release is promoted in place. A beta or any other pre-release
+  # reaches the stable line by merging to main and releasing the next stable
+  # version; clearing a prerelease flag in place would publish a preview build
+  # as the general install without a fresh stable build behind it.
+  channel=$(release_channel "$version") \
+    || fail "refusing to promote a version outside the release channels: $version"
+  [ "$channel" = stable ] \
+    || fail "refusing to promote a $channel pre-release; beta candidates are released by merging to main and tagging the next stable version"
   tag="v$version"
   promote_tag="promote-v$version"
 

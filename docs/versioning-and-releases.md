@@ -6,9 +6,42 @@ NookBridge uses Semantic Versioning with a deliberate pre-1.0 policy. The
 project is still pre-alpha, so the public release line begins at `0.1.0`, not
 `1.0.0`.
 
-The project does not use `alpha`, `beta`, or `rc` suffixes by default. A
-pre-release suffix is appropriate only when there is a real staged testing
-cycle that needs to distinguish candidate builds from the normal release line.
+The project reserves `alpha` and `rc` and uses `beta` only on the `beta/**`
+pre-release development line. A pre-release suffix is appropriate only when
+there is a real staged testing cycle that needs to distinguish candidate builds
+from the normal release line; see [Release channels](#release-channels).
+
+## Release channels
+
+`main` is the stable/release line; `beta/**` is the pre-release development
+line. The channel of a version is defined once, in
+`scripts/release-channel.sh`, which both `scripts/release.sh` and the publishing
+workflow call:
+
+- **stable** is a `major.minor.patch` version. Only a stable version is promoted,
+  from a `main` merge commit, and only promotion moves the general install path
+  (`latest`).
+- **beta** is a `major.minor.patch-beta.<counter>` version, where `counter` is a
+  non-negative integer with no leading zero. A beta is a pre-release build, not
+  a release: it is never published to GitHub Releases and is never promoted in
+  place.
+
+A push to `beta/**` runs the same Linux artifact build and verifier as `main`,
+with an ephemeral `ci-beta-<commit>` version, and archives the result as the
+run's `nookbridge-beta-<commit>` workflow artifact. No publishing step runs on a
+branch: every asset upload and release step stays tag-only, so a beta push
+cannot publish a GitHub release or alter `latest`.
+
+Test a beta from its branch/workflow artifact or an isolated live state. Do not
+test a beta against the production `/var/lib/nookbridge` deployment.
+
+A beta is not promoted in place. After acceptance, merge the beta work to `main`
+and release the next stable version: synchronize the stable version surfaces,
+wait for the terminal-success `main` preflight, and tag `v<next-stable>`.
+`release.sh promote` and the promotion workflow reject any non-stable channel
+before any token-bearing mutation, because clearing a prerelease flag in place
+would publish a preview build as the general install without a fresh stable
+build behind it.
 
 ## Version meanings before 1.0
 
@@ -63,7 +96,10 @@ The release is deliberately split into four gates:
    Linux artifact build and verifier on the `nixos` Forgejo runner using an
    ephemeral `ci-<commit>` artifact version. A `runner-test/<name>` branch runs
    the same path before merge when a release-sensitive workflow change needs a
-   direct runner check. These runs never publish a release or alter `latest`.
+   direct runner check, and a `beta/**` branch runs it as a pre-release
+   development check under an ephemeral `ci-beta-<commit>` version, archiving
+   the build as a workflow artifact. These runs never publish a release or alter
+   `latest`.
 3. **Candidate gate:** pushing `v<VERSION>` runs the artifact build, verifies the
    manifest against the tag commit, publishes the exact five GitHub assets, and
    creates a prerelease candidate. The candidate must not move the `latest`
@@ -116,9 +152,11 @@ release is no less strict when the command is used, and no more correct when it
 is bypassed by hand.
 
 - `release.sh status` is read-only. It prints the version from the canonical
-  commit, whether the version surfaces agree, whether the `main` preflight for
-  that commit succeeded, whether the version and promotion tags already exist,
-  and the current mirror release state.
+  commit, its release channel (`channel=stable`, `channel=beta`, or
+  `channel=unsupported` for a well-formed version on no defined channel), whether
+  the version surfaces agree, whether the `main` preflight for that commit
+  succeeded, whether the version and promotion tags already exist, and the
+  current mirror release state.
 - `release.sh tag` reads the version from the canonical commit, refuses to run
   unless the version surfaces agree, no `v<VERSION>` or `promote-v<VERSION>`
   exists locally or on the canonical remote, and the exact commit has a
@@ -132,11 +170,13 @@ is bypassed by hand.
   working-tree state cannot change what is released. A release whose workflow
   succeeded but whose candidate release cannot be read or is incomplete exits
   non-zero, so automation cannot read an unverified release as success.
-- `release.sh promote` refuses to run unless the tag exists, the mirror release
-  is still a prerelease candidate at that commit with exactly the five-asset
-  set, the release's `target_commitish` equals the canonical tag commit, and no
-  promotion tag exists. It then pushes `promote-v<VERSION>` and waits for the
-  promotion run. The promotion job itself validates the promotion ref's version
+- `release.sh promote` first refuses any version whose channel is not `stable`,
+  before any authenticated mutation, so a beta is released by merging to `main`
+  rather than promoted in place. It then refuses to run unless the tag exists,
+  the mirror release is still a prerelease candidate at that commit with exactly
+  the five-asset set, the release's `target_commitish` equals the canonical tag
+  commit, and no promotion tag exists. It then pushes `promote-v<VERSION>` and
+  waits for the promotion run. The promotion job itself validates the promotion ref's version
   syntax, matches the promotion ref against the canonical tag's commit, runs its
   verification tooling from that tagged revision, compares the published
   installers byte-for-byte with the tagged sources, and re-checks the complete
@@ -282,6 +322,11 @@ untrusted:
   workflow calls it and the operator command delegates to it, because a tag pushed by
   hand reaches the workflow without passing through the command and two copies of the
   rule drift.
+- The release channel rule lives in one script, `scripts/release-channel.sh`, which
+  validates the version with `check-release-version.sh` and then classifies it. Both
+  `release.sh promote` and the promotion workflow call it and refuse every non-stable
+  channel before any token-bearing write, so the command cannot promote a version the
+  workflow would reject after the immutable tag already exists.
 - A draft release is not a candidate and not published: the operator reports it as
   `mirror_release=candidate-draft` and refuses to promote it, and the publishing
   workflow rejects a pre-existing draft rather than uploading assets onto one.
@@ -337,3 +382,7 @@ Until then, the `0.x` line is an honest signal that users should expect change.
 9. Accept the candidate on a clean host, then promote it with
    `just release-promote`. Promotion is the only step that moves the general
    install path.
+
+For a `beta/**` pre-release, do not follow the promotion steps. Test the branch
+build from its workflow artifact or an isolated live state, then merge the
+accepted work to `main` and run the checklist above for the next stable version.

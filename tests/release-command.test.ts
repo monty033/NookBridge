@@ -1478,6 +1478,40 @@ describe("release operator command", () => {
     }
   });
 
+  it("reports the release channel and refuses to promote a beta pre-release", async () => {
+    const fixture = createFixture({
+      packageVersion: "0.2.0-beta.1",
+      lockVersion: "0.2.0-beta.1",
+      installerVersion: "0.2.0-beta.1",
+    });
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const status = await runRelease(["status"], fixture, stub.base);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain("version=0.2.0-beta.1");
+    expect(status.stdout).toContain("channel=beta");
+
+    // A beta candidate reaches the stable line by merging to main and releasing
+    // the next stable version, never by clearing its prerelease flag in place.
+    const promoted = await runRelease(["promote", "0.2.0-beta.1"], fixture, stub.base);
+    expect(promoted.code).not.toBe(0);
+    expect(promoted.stderr).toContain("beta");
+    expect(promoted.stderr).not.toContain("invalid version");
+    expect(tagPresent(fixture.canonical, "promote-v0.2.0-beta.1")).toBe(false);
+    // No authenticated mutation is attempted for a channel that is never promoted.
+    expect(stub.requests.every((entry) => entry.endsWith("|anonymous"))).toBe(true);
+  });
+
+  it("reports the stable channel for the normal release line", async () => {
+    const fixture = createFixture();
+    const stub = await startStub({ runsFor: () => [mainPreflight(fixture.commit)] });
+
+    const result = await runRelease(["status"], fixture, stub.base);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(`channel=stable`);
+  });
+
   it("refuses to promote a candidate release that carries an unexpected asset", async () => {
     const fixture = createFixture();
     // The canonical tag must exist before the asset gate is reached.
