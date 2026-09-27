@@ -397,7 +397,10 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
     });
 
     it("isolates a horizontal rule with no blank lines around it", () => {
-      rendersTo("above\n---\nbelow", "<p>above</p><hr /><p>below</p>");
+      rendersTo(
+        "above\n---\nbelow",
+        '<p>above</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>below</p>',
+      );
     });
 
     it("does not treat a blockquote mixed with plain text as one block", () => {
@@ -544,9 +547,13 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
   describe("Wave 1 native block rendering (horizontal rule, code block, blockquote, table)", () => {
     const wrap = (inner: string) => `<div data-type="document">${inner}</div>`;
 
-    it("renders a horizontal rule as <hr>", () => {
+    it("renders a horizontal rule with an explicit visible rule style", () => {
       const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("above\n\n---\n\nbelow");
-      expect(encoded.data).toBe(wrap("<p>above</p><hr /><p>below</p>"));
+      expect(encoded.data).toBe(
+        wrap(
+          '<p>above</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>below</p>',
+        ),
+      );
     });
 
     it("renders a fenced code block with an escaped, unmodified body and no inline marks", () => {

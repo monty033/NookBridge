@@ -293,11 +293,14 @@ describe("T13 rendered acceptance — Wave 1 native blocks", () => {
     expect(data).not.toContain("&gt; a wise quote");
   });
 
-  it("renders a horizontal rule as <hr /> and stores no literal dashes", async () => {
+  it("renders a visible horizontal rule and stores no literal dashes", async () => {
     const captured: CapturedCreate[] = [];
     const adapter = adapterOver(captured);
     await adapter.createNote({ title: "Rule note", content: "above\n\n---\n\nbelow\n" });
     const data = captured[0]?.content.data ?? "";
-    expect(data).toContain("<p>above</p><hr /><p>below</p>");
+    expect(data).toContain(
+      '<p>above</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>below</p>',
+    );
+    expect(data).not.toContain(">---</hr>");
   });
 });
