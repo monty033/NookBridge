@@ -852,7 +852,7 @@ describe("Linux artifact manifest contract", () => {
       (step) => step.name === "Verify the candidate artifact",
     );
 
-    expect(doc.on.push.branches).toEqual(["main", "runner-test/**", "beta/**"]);
+    expect(doc.on.push.branches).toEqual(["main", "runner-test/**", "beta", "beta/**"]);
     expect(doc.on.push.tags).toEqual(["v*", "promote-v*"]);
     expect(raw).toContain("workflow_dispatch:");
     expect(raw).toContain("release_tag:");
@@ -885,7 +885,7 @@ describe("Linux artifact manifest contract", () => {
     expect(promoteJob?.if).toContain("refs/tags/promote-v");
     expect(preflightStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
     expect(artifactStep?.if).toBe(
-      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || startsWith(github.ref, 'refs/heads/beta/') || github.ref == 'refs/heads/main'",
+      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/beta' || startsWith(github.ref, 'refs/heads/beta/') || github.ref == 'refs/heads/main'",
     );
     expect(artifactStep?.env?.GITHUB_TOKEN).toBe("");
     expect(assetsStep?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
@@ -1775,11 +1775,15 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     // A beta branch is validated by the same job, but its build must never be
     // mistaken for a release: the version carries an ephemeral beta marker and
     // the artifact is uploaded to the workflow run, not to a GitHub release.
+    expect(doc.on.push.branches).toContain("beta");
     expect(doc.on.push.branches).toContain("beta/**");
+    expect(buildStep?.if).toContain("github.ref == 'refs/heads/beta'");
     expect(buildStep?.if).toContain("startsWith(github.ref, 'refs/heads/beta/')");
-    expect(buildStep?.run).toContain("refs/heads/beta/*");
+    expect(buildStep?.run).toContain("refs/heads/beta|refs/heads/beta/*");
     expect(buildStep?.run).toContain('VERSION="ci-beta-${GITHUB_SHA:0:12}"');
-    expect(uploadStep?.if).toBe("startsWith(github.ref, 'refs/heads/beta/')");
+    expect(uploadStep?.if).toBe(
+      "github.ref == 'refs/heads/beta' || startsWith(github.ref, 'refs/heads/beta/')",
+    );
     expect(uploadStep?.uses).toContain("upload-artifact");
     // A branch build may not publish: every release-publishing step stays tag-only.
     for (const name of [
