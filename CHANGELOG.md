@@ -5,6 +5,22 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
+### Added
+
+- Split the release lines: `main` is the stable/release line and `beta/**` is
+  the pre-release development line.
+- `beta/**` pushes run the full Linux artifact build and verifier under an
+  ephemeral `ci-beta-<commit>` version and archive a distinguishable
+  `nookbridge-beta-<commit>` workflow artifact, without publishing a GitHub
+  release or moving `latest`. A beta is tested from its branch artifact or an
+  isolated live state, never against the production deployment.
+- Added `scripts/release-channel.sh`, the single version-to-channel rule shared
+  by the operator command and the publishing workflow. `release.sh status` now
+  reports the channel, and `release.sh promote` plus the promotion workflow
+  refuse any non-stable channel before token-bearing mutation, so a beta is
+  released by merging to `main` and tagging the next stable version rather than
+  promoted in place.
+
 ## [0.1.3] - 2026-09-26
 
 Release focused on reliable production operator workflows and clearer command

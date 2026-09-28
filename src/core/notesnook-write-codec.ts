@@ -956,7 +956,10 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const first = lines[0] ?? "";
 
   if (isHorizontalRuleBlock(lines)) {
-    return "<hr />";
+    // Notesnook's dark-mode editor reset can leave a bare `<hr>` visually
+    // collapsed.  Keep the native horizontal-rule node, but provide an
+    // explicit, theme-neutral border so the rule is visible in every client.
+    return '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />';
   }
 
   if (isFencedCodeBlock(lines)) {
