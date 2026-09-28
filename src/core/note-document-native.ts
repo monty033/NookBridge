@@ -677,6 +677,17 @@ function renderBlocks(
           return `<table><thead><tr>${b.columns.map((c) => `<th>${escape(c)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((row) => `<tr>${row.map((c) => `<td>${escape(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
         case "callout":
           return `<div data-type="callout" data-variant="${b.variant}">${render(b.blocks)}</div>`;
+        case "horizontal-rule":
+        case "image":
+        case "attachment":
+        case "embed":
+          // T01 (native-block-parity plan, Task 1.1) added these as
+          // closed structured-reference AST nodes only. Native HTML
+          // encoding is Task 2.x/3.x and requires a pinned-runtime
+          // schema proof that has not happened yet, so this renderer
+          // refuses categorically rather than guessing a native shape
+          // or silently dropping the block.
+          return fail();
         case "opaque":
           return payloads?.get(b.sentinel.token) ?? fail();
       }
@@ -712,6 +723,10 @@ function closedDocument(doc: NoteDocumentV1): void {
         "code-block": ["type", "text", "language"],
         table: ["type", "columns", "rows"],
         callout: ["type", "variant", "blocks"],
+        "horizontal-rule": ["type"],
+        image: ["type", "url", "alt"],
+        attachment: ["type", "url", "name", "mime"],
+        embed: ["type", "url"],
         opaque: ["type", "nodeType", "sentinel"],
       };
       record(b, fields[b.type]);
