@@ -12,7 +12,7 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
-| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; under review as source PR #125. The dedicated lock proof and the read-only sync proof remain open — see below. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; source PR #125 merged `beaff27811f08bcd010e56b519ad3725053d6c9d` on 2026-09-21. The dedicated lock proof and the read-only sync proof remain open — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
@@ -71,18 +71,35 @@ directory is derived from the working directory when the environment variable is
 unset.
 
 An independent read-only review of source PR #125 returned `REQUEST_CHANGES`
-twice. Round 1 raised seven findings; four are now fixed — list-class semantics
-(`f119808`), inline attribute strictness (`f31e017`), the sync request shape
-(`053c322`), and the lock category on the write paths (`52c0231`, with the
-remaining paths covered in `4da0fe9`). One deferral was upheld (unknown tags are
-separable from this PR). One was corrected as documentation rather than code
-(creates are not automatically uploaded). One was reclassified: authorization is
-not notebook- or lock-aware, which is a defect against the frozen T00
-requirement rather than a future improvement, and it blocks the merge. Round 2
-additionally found that `categoricalCode` trusted arbitrary error text
-(`03ebb32`) and that the operator vocabulary header contradicted its own
-constant; the shape check from round 1 was also found evadable and is now
-un-evadable (`2f9b66b`).
+across three rounds before merge. Round 1 raised seven findings; four are now
+fixed — list-class semantics (`f119808`), inline attribute strictness
+(`f31e017`), the sync request shape (`053c322`), and the lock category on the
+write paths (`52c0231`, with the remaining paths covered in `4da0fe9`). One
+deferral was upheld (unknown tags are separable from this PR). One was
+corrected as documentation rather than code (creates are not automatically
+uploaded). One was reclassified: authorization is not notebook- or lock-aware,
+which is a defect against the frozen T00 requirement rather than a future
+improvement, and it blocked the merge until resolved. Round 2 additionally
+found that `categoricalCode` trusted arbitrary error text (`03ebb32`) and that
+the operator vocabulary header contradicted its own constant; the shape check
+from round 1 was also found evadable and was made un-evadable (`2f9b66b`).
+Round 3 closed the remaining authorization gap (`e3581b4`, `bab7818`), the
+raw-id leak on create (`b3ed43d`), and the bare apply-undo lock bypass
+(`3454e74`); the PR merged at `beaff27` with the full fix chain (`a41a4c6`
+through `a4028c7`) squashed in.
+
+### Documentation reconciliation — 2026-09-28
+
+A read-only audit (source-only; no VM, live, or production checks) confirmed
+this section's four named defects — the `pendingSync` upload gap, the
+hardcoded `peerCredentials: "unknown"` audit field, the locked-note proof's
+generic-code collapse on non-`not_found` path-resolution failures, and the
+`NOOKBRIDGE_STATE_DIR` fallback that lets the read-only sync proof pass
+against an empty store — remain **open and untouched** by any commit merged
+since 2026-09-21 (operator-notes follow-ups #126/#136, release/CI hardening
+#127–#159, and native block-markdown parity #160 do not touch any of the four
+affected files). This section was not stale; it is confirmed current as of
+2026-09-28.
 
 ## Reading status claims safely
 

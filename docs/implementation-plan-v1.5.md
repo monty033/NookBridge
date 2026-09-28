@@ -2730,6 +2730,43 @@ The amendment's intent is preserved; its specific contract decisions are governe
 
 The §13.19 amendment is governed by T00 and not by §13.18 of the v2 file. The shared document model, the editor interchange grammar, the native serializer, and the CLI UX are all tasks T01–T03 + T07 + T09. The amendment does not stand alone; the T00 frozen contract and the T01–T14 task graph are the source of truth.
 
+## 13.20 Documentation reconciliation — §13.14 P1/P2 status against current `main`
+
+**Status date:** 2026-09-28 (America/New_York)
+**Mode:** documentation-only reconciliation via a read-only source audit (`git log`/`git show` against `upstream/main`). No source, test, VM, or deployment mutation in this section. No live-account or production check was performed; items requiring that are called out explicitly below and remain open.
+**Purpose:** §13.14 (status date 2026-09-14) and §13.13/§13.15/§13.18/§13.19 predate roughly 35 merged PRs (#125–#160) and the beta release track. This section reconciles §13.14's P1/P2 blocker list and the Stage 9 evidence files against the current state of `main` without re-litigating already-closed sections.
+
+### §13.14 P1 items — reconciled
+
+- **P1-1 cross-connection mutation serialization — CLOSED at source, VM/production evidence still incomplete.** `withMutex()` (via `notesnook-database-mutex.ts`) is wired into `notesnook-write-composition.ts`; unchanged since baseline. §13.14's own "source-fixed, VM/production evidence incomplete" framing still applies.
+- **P1-2 authoritative Vault-lock failure handling — PARTIALLY CLOSED, not independently re-verified end-to-end this pass.**
+- **P1-3 multi-step mutation atomicity — STILL OPEN.** No commit since 2026-09-14 touches `notesnook-write-composition.ts`'s sequencing.
+- **P1-4 retry classification / cross-request throttling — STILL OPEN.** No commit since 2026-09-14 touches `notesnook-sync-coordinator.ts`.
+- **P1-5 runtime ownership after disconnect/timeout — STILL OPEN.** The only post-baseline touch to `nookd-server.ts` (`e10e7ef`) fixes an unrelated dead-option bug, not transport/runtime ownership.
+- **P1-5a source-level query bounds — STILL OPEN.** No limit-pushdown change found in `notesnook-readonly-projection.ts` history since baseline.
+- **P1-6 complete semantic error propagation — PARTIALLY CLOSED, exact seam-by-seam closure not independently confirmed this pass.**
+- **P1-7 replacement fidelity — PARTIALLY CLOSED / NARROWED.** `f31e017` and `f119808` (merged in PR #125) tightened inline-attribute and list-class fidelity; `81c5201` (PR #160, native structured block-markdown parity) further expands construct coverage. Not proven closed against the full construct set.
+- **P1-8 fully non-mutating operator reads — CLOSED, pre-baseline.** `9c2f1db` (2026-09-07) routes operator notes through daemon credentials; `tests/stage-9-notes-production-runtime.test.ts` regression-tests that `createProductionLiveLoginRuntime`/`@notesnook/core`/any encrypted-database opener is never invoked from that path.
+- **P1-9 production-bundle recovery — STILL OPEN.** No commit since baseline touches `src/operator/recover-local-state.ts`; `docs/engineering/stages/stage-9-recovery.md` is unchanged and still states the VM drill and production recovery gates are open.
+- **P1-10 fetch-rejection bookkeeping — CLOSED at source per §13.14's own framing; not independently re-verified this pass.**
+
+### §13.14 P2 items — reconciled
+
+P2-1 (pagination cursors), P2-2 (undo durability/bounds), P2-3 (whole-operation socket deadlines), P2-4 (`socketGroup`/ancestor ownership), and P2-5 (contract/doc consolidation) show no commits since 2026-09-14 touching their respective owning files (`operator-socket-client.ts`, `service-config.ts`) and are treated as still open pending a dedicated audit. P2-6 (dependency inventory against the *shipped artifact*, not the lockfile) cannot be determined from source alone; it requires an actual release build and is unchanged as an open gate.
+
+### §13.14 "new current-source findings" — reconciled
+
+- **Revision advancement on content-only update — CLOSED.** `999b7ba` (2026-09-15, the day after the Astra baseline) adds the missing parent-note timestamp touch after content replacement, with deterministic regression coverage in `stage-4-write-adapter.test.ts` for both content-only and same-millisecond updates. §13.14's text still frames this as an open "new finding"; it is closed and the wording there is stale.
+- **Scoped discovery authorization (`notes.search` / `notes.list_notebooks` authorizing with empty context) — STILL OPEN.** No commit isolates or closes this specific gap; discovery-handler authorization has not been made notebook- or policy-aware.
+
+### Stage 9 evidence files — confirmed current, not stale
+
+`docs/engineering/stages/stage-9-recovery.md`, `stage-9-red-team.md`, `stage-9-dependencies.md`, `stage-9-canary.md`, and `stage-9-source-evidence.md` are all dated 2026-09-05–07 and explicitly self-describe as historical baselines with the VM drill, production recovery gate, and privileged red-team scans still open. No later file, receipt, or plan section anywhere in `docs/`, `.hermes/plans/`, or `README.md` supersedes them. This is real open work, not a documentation-staleness problem: all Stage 9 VM-drill and production-gate items (privileged RT-6/RT-8/RT-9 scans, outsider socket denial, cross-connection races under real load, long-duration mixed-load stress, and exact shipped-artifact dependency/license evidence) require a disposable VM and a live daemon that a read-only source audit cannot substitute for, and remain the real path to closing the Stage 9 / production-MVP gate.
+
+### What this reconciliation does not do
+
+It does not close any Stage 9 gate, run any VM or live check, or resolve P1-2/P1-6/P1-7/P2-1–P2-5 to a final verdict; those need either a dedicated live/VM pass or a deeper line-by-line seam audit than a documentation reconciliation budget allows. The next actionable, source-only ticket is closing **scoped discovery authorization**; the next actionable, VM-dependent ticket is the **Stage 9 production recovery drill**, since it is the oldest fully-open gate with the clearest reproduction path (`docs/engineering/stages/stage-9-recovery.md`).
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
