@@ -1038,6 +1038,21 @@ command_tag() {
   valid_version "$version" || fail "invalid version: $version"
   tag="v$version"
 
+  # Only a stable version is tagged for publication. The v* tag path of the
+  # publishing workflow creates a candidate GitHub release the moment the tag
+  # lands on the canonical remote, before any further operator confirmation of
+  # channel intent, so a beta must be refused here rather than at promotion
+  # time: promotion already refuses a beta, but that check runs only after the
+  # immutable tag has already published a candidate. A beta is validated on
+  # its beta/** branch and reaches GitHub Releases only by merging to main and
+  # tagging the next stable version. This runs before any remote read (the
+  # main-preflight lookup and the tag-absence checks), so a beta version is
+  # refused without reserving the tag or touching the network.
+  channel=$(release_channel "$version") \
+    || fail "refusing to tag a version outside the release channels: $version"
+  [ "$channel" = stable ] \
+    || fail "refusing to tag a $channel pre-release for publication; a beta reaches GitHub Releases only by merging to main and tagging the next stable version"
+
   require_version_sync "$release_commit" "$version"
   require_tag_absent "$tag"
   require_tag_absent "promote-$tag"

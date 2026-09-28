@@ -1793,6 +1793,102 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     }
   });
 
+  it("refuses to prepare a beta candidate's release assets before any token-bearing step", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const buildSteps = (
+      parseYaml(raw) as {
+        jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }>;
+      }
+    ).jobs["linux-artifact"]!.steps;
+    const assetsStep = buildSteps.find((step) => step.name === "Prepare GitHub release assets");
+
+    // The candidate-preparation step is token-free and runs before the upload
+    // decision and the publishing step, so a beta must be refused here: a tag
+    // pushed by hand reaches this workflow without passing through
+    // scripts/release.sh, whose `tag` command already refuses a beta before
+    // creating the tag at all.
+    expect(assetsStep?.run).toContain('bash scripts/release-channel.sh "$VERSION"');
+    expect(assetsStep?.run).toContain('test "$channel" = stable');
+    expect(assetsStep?.run).toContain("refusing to publish a");
+    expect(assetsStep?.run).toContain("if [ -f scripts/release-channel.sh ]; then");
+
+    const assetsIndex = buildSteps.findIndex(
+      (step) => step.name === "Prepare GitHub release assets",
+    );
+    const uploadIndex = buildSteps.findIndex(
+      (step) => step.name === "Prepare the GitHub release upload",
+    );
+    const publishIndex = buildSteps.findIndex((step) => step.name === "Publish release assets");
+    expect(assetsIndex).toBeGreaterThanOrEqual(0);
+    expect(assetsIndex).toBeLessThan(uploadIndex);
+    expect(uploadIndex).toBeLessThan(publishIndex);
+  });
+
+  /**
+   * Executable regression: extracts the candidate-preparation guard from the
+   * workflow text itself (not a reimplementation) and runs it against a real
+   * checkout containing scripts/check-release-version.sh and
+   * scripts/release-channel.sh, so the assertion exercises the shipped script
+   * rather than a copy of its logic.
+   */
+  it("executes the candidate-preparation channel guard and refuses a beta version", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const guardStart = raw.indexOf(
+      '          bash scripts/check-release-version.sh "$VERSION" \\\n            || { printf \'malformed release version: %s\\n\' "$VERSION" >&2; exit 1; }\n          # Candidate gate:',
+    );
+    const guardEnd = raw.indexOf('          RELEASE_DIR="$PWD/github-release"', guardStart);
+    expect(guardStart).toBeGreaterThanOrEqual(0);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guardScript = raw
+      .slice(guardStart, guardEnd)
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+
+    const runGuard = (version: string, includeReleaseChannelScript: boolean) => {
+      const root = mkdtempSync(join(tmpdir(), "nookbridge-candidate-gate-"));
+      fixtureRoots.push(root);
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      copyFileSync(
+        join(repositoryRoot, "scripts", "check-release-version.sh"),
+        join(root, "scripts", "check-release-version.sh"),
+      );
+      if (includeReleaseChannelScript) {
+        copyFileSync(
+          join(repositoryRoot, "scripts", "release-channel.sh"),
+          join(root, "scripts", "release-channel.sh"),
+        );
+      }
+      return spawnSync("bash", ["-eu", "-c", guardScript], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, VERSION: version },
+      });
+    };
+
+    // GREEN: a stable version passes the gate with release-channel.sh present.
+    const stable = runGuard("1.2.3", true);
+    expect(stable.status, stable.stderr).toBe(0);
+
+    // GREEN: this is the fix under test. A manually pushed v*-beta tag must be
+    // refused here, before any release directory, payload, or upload decision
+    // is prepared, and long before the token-bearing publish step.
+    const beta = runGuard("1.2.3-beta.0", true);
+    expect(beta.status).not.toBe(0);
+    expect(beta.stderr).toContain("refusing to publish a");
+    expect(beta.stderr).toContain("beta");
+
+    // The fallback (a tag whose checked-out revision predates
+    // scripts/release-channel.sh) must classify identically: stable passes,
+    // beta is refused.
+    const oldTagStable = runGuard("1.2.3", false);
+    expect(oldTagStable.status, oldTagStable.stderr).toBe(0);
+
+    const oldTagBeta = runGuard("1.2.3-beta.0", false);
+    expect(oldTagBeta.status).not.toBe(0);
+    expect(oldTagBeta.stderr).toContain("refusing to publish a");
+  });
+
   it("refuses to promote a non-stable release channel", () => {
     const raw = readFileSync(linuxArtifactWorkflow, "utf8");
     const promoteSteps = (

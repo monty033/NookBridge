@@ -38,10 +38,12 @@ test a beta against the production `/var/lib/nookbridge` deployment.
 A beta is not promoted in place. After acceptance, merge the beta work to `main`
 and release the next stable version: synchronize the stable version surfaces,
 wait for the terminal-success `main` preflight, and tag `v<next-stable>`.
-`release.sh promote` and the promotion workflow reject any non-stable channel
-before any token-bearing mutation, because clearing a prerelease flag in place
-would publish a preview build as the general install without a fresh stable
-build behind it.
+`release.sh tag` refuses non-stable versions before creating a tag or reading
+remote state; the tag workflow checks the channel again before preparing GitHub
+release assets, including when a tag was pushed by hand. `release.sh promote` and
+the promotion workflow also reject non-stable channels before any token-bearing
+mutation. A preview build must never reach the general install path without a
+fresh stable build behind it.
 
 ## Version meanings before 1.0
 
