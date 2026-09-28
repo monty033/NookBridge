@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1817,5 +1818,79 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     expect(
       promoteSteps.findIndex((step) => step.name === "Verify the candidate artifact"),
     ).toBeLessThan(tokenStep);
+  });
+
+  /**
+   * Regression for the workflow_dispatch promotion path checking out a
+   * historical release tag: `scripts/release-channel.sh` was added alongside
+   * the beta release channel, so a stable tag cut before that addition does
+   * not carry it at its own checked-out revision. The verification step must
+   * fall back to `scripts/check-release-version.sh`, which is guaranteed
+   * present at every promotable tag, and still refuse a beta candidate.
+   */
+  it("promotes an old tag lacking scripts/release-channel.sh and still refuses a beta candidate", () => {
+    const raw = readFileSync(linuxArtifactWorkflow, "utf8");
+    const verifyStart = raw.indexOf("          # The version must satisfy the release policy.");
+    const verifyEnd = raw.indexOf(
+      'beta candidates are released by merging to main and tagging the next stable version\\n\' "$channel" >&2; exit 1; }\n',
+      verifyStart,
+    );
+    expect(verifyStart).toBeGreaterThanOrEqual(0);
+    expect(verifyEnd).toBeGreaterThan(verifyStart);
+    const guardScript = raw
+      .slice(
+        verifyStart,
+        verifyEnd +
+          'beta candidates are released by merging to main and tagging the next stable version\\n\' "$channel" >&2; exit 1; }\n'
+            .length,
+      )
+      .split("\n")
+      .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+      .join("\n");
+
+    // The fallback must be conditional on the script's absence, not replace it
+    // outright: a current tag still classifies through release-channel.sh.
+    expect(guardScript).toContain("if [ -f scripts/release-channel.sh ]; then");
+
+    const runGuard = (version: string, includeReleaseChannelScript: boolean) => {
+      const root = mkdtempSync(join(tmpdir(), "nookbridge-old-tag-promotion-"));
+      fixtureRoots.push(root);
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      copyFileSync(
+        join(repositoryRoot, "scripts", "check-release-version.sh"),
+        join(root, "scripts", "check-release-version.sh"),
+      );
+      if (includeReleaseChannelScript) {
+        copyFileSync(
+          join(repositoryRoot, "scripts", "release-channel.sh"),
+          join(root, "scripts", "release-channel.sh"),
+        );
+      }
+      return spawnSync("bash", ["-eu", "-c", guardScript], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, VERSION: version },
+      });
+    };
+
+    // RED (pre-fix) behavior reproduced here as a control: an old tag missing
+    // the script fails closed with "unknown promotion channel" even for a
+    // stable version — that is the bug this guard fixes. The assertions below
+    // pin the fixed (GREEN) behavior.
+    const oldTagStable = runGuard("1.2.3", false);
+    expect(oldTagStable.status, oldTagStable.stderr).toBe(0);
+
+    const oldTagBeta = runGuard("1.2.3-beta.0", false);
+    expect(oldTagBeta.status).not.toBe(0);
+    expect(oldTagBeta.stderr).toContain("refusing to promote a");
+
+    // A current tag, which still ships release-channel.sh, must classify and
+    // refuse a beta candidate exactly as before.
+    const newTagStable = runGuard("1.2.3", true);
+    expect(newTagStable.status, newTagStable.stderr).toBe(0);
+
+    const newTagBeta = runGuard("1.2.3-beta.0", true);
+    expect(newTagBeta.status).not.toBe(0);
+    expect(newTagBeta.stderr).toContain("refusing to promote a beta pre-release");
   });
 });

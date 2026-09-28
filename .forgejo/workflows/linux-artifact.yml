@@ -884,8 +884,26 @@ jobs:
           # line by merging to main and releasing the next stable version, so the
           # token-free verification step refuses every non-stable channel before
           # the token-bearing write step can clear a prerelease flag.
-          channel="$(bash scripts/release-channel.sh "$VERSION")" \
-            || { printf 'unknown promotion channel for version: %s\n' "$VERSION" >&2; exit 1; }
+          #
+          # This step runs scripts checked out from the tagged revision above, and
+          # scripts/release-channel.sh was only added alongside the beta release
+          # channel: a stable tag cut before that addition does not carry it, so
+          # promoting it here would otherwise fail on a missing script rather than
+          # on the release policy. scripts/check-release-version.sh predates it and
+          # is guaranteed present at every promotable tag (this step already ran it
+          # against $VERSION above), so a tag lacking release-channel.sh falls back
+          # to the same SemVer rule that script encodes: a bare `major.minor.patch`
+          # is the only stable form, and any `-prerelease` suffix is refused here,
+          # matching this step's existing stable-only behavior.
+          if [ -f scripts/release-channel.sh ]; then
+            channel="$(bash scripts/release-channel.sh "$VERSION")" \
+              || { printf 'unknown promotion channel for version: %s\n' "$VERSION" >&2; exit 1; }
+          else
+            case "$VERSION" in
+              *-*) channel=prerelease ;;
+              *) channel=stable ;;
+            esac
+          fi
           test "$channel" = stable \
             || { printf 'refusing to promote a %s pre-release; beta candidates are released by merging to main and tagging the next stable version\n' "$channel" >&2; exit 1; }
 
