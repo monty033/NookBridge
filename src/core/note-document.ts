@@ -35,6 +35,8 @@
  */
 
 import { Buffer } from "node:buffer";
+import { URL } from "node:url";
+import { types as utilTypes } from "node:util";
 
 import {
   DEFAULT_NOTESNOOK_LIST_KIND,
@@ -71,7 +73,8 @@ export type NoteDocumentErrorCode =
   | "unsupported_callout_variant"
   | "opaque_payload_forbidden"
   | "malformed_link"
-  | "table_column_mismatch";
+  | "table_column_mismatch"
+  | "invalid_reference_url";
 
 /**
  * Categorical, chain-free T01 validator error.
@@ -138,6 +141,7 @@ const NOTE_DOCUMENT_ERROR_MESSAGES: { readonly [K in NoteDocumentErrorCode]: str
     opaque_payload_forbidden: "NoteDocumentV1: opaque payload forbidden on the editor document",
     malformed_link: "NoteDocumentV1: malformed link mark",
     table_column_mismatch: "NoteDocumentV1: table row column count mismatch",
+    invalid_reference_url: "NoteDocumentV1: reference URL rejected by URL policy",
   });
 
 /** Identity predicate for {@link NoteDocumentError}. */
@@ -217,6 +221,16 @@ export const MAX_NOTE_DOCUMENT_DEPTH = 16;
 export const MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES = 128;
 export const MAX_NOTE_DOCUMENT_OPAQUE_PAYLOAD_BYTES = 0;
 export const MAX_NOTE_DOCUMENT_TEXT_BYTES = MAX_NOTE_DOCUMENT_INLINE_BYTES;
+
+/**
+ * Byte caps for the structured reference nodes (`image`, `attachment`,
+ * `embed`).  These are deliberately small compared to
+ * `MAX_NOTE_DOCUMENT_INLINE_BYTES`: a reference URL/label is metadata,
+ * never a body, so a generous cap only invites abuse (URL-smuggled
+ * payloads, oversized data: URLs disguised as long strings, etc.).
+ */
+export const MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES = 2048;
+export const MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES = 256;
 
 // ---------------------------------------------------------------------------
 // AST type definitions.
@@ -326,6 +340,47 @@ export interface NoteCalloutBlock {
   readonly blocks: readonly NoteBlock[];
 }
 
+/** Horizontal rule block.  No attributes — a plain structural divider. */
+export interface NoteHorizontalRuleBlock {
+  readonly type: "horizontal-rule";
+}
+
+/**
+ * Structured image reference.  This is NOT a native render and NOT an
+ * asset upload: it is a closed-shape pointer at a remote `https`/`http`
+ * URL, exactly the "structured preservation" tier from plan §2.  `alt`
+ * is optional bounded alt text; there is no `data`, `path`, or `bytes`
+ * field, so the AST can never smuggle a local file or inline payload.
+ */
+export interface NoteImageBlock {
+  readonly type: "image";
+  readonly url: string;
+  readonly alt?: string;
+}
+
+/**
+ * Structured attachment reference.  Same safety envelope as
+ * {@link NoteImageBlock}: a bounded remote URL plus optional bounded
+ * `name` / `mime` labels.  Binary asset transport (plan Task 3.3) is
+ * explicitly out of scope here — this node only carries a reference.
+ */
+export interface NoteAttachmentBlock {
+  readonly type: "attachment";
+  readonly url: string;
+  readonly name?: string;
+  readonly mime?: string;
+}
+
+/**
+ * Structured embed reference. Bounded remote URL only, with no
+ * provider claim until a runtime-backed provider policy is proven.
+ * No arbitrary iframe/HTML is ever admitted.
+ */
+export interface NoteEmbedBlock {
+  readonly type: "embed";
+  readonly url: string;
+}
+
 /**
  * Closed set of opaque-reference sentinel sources.  The source tag is
  * the daemon's surface that produced the sentinel (e.g. native-html
@@ -368,6 +423,10 @@ export type NoteBlock =
   | NoteCodeBlock
   | NoteTableBlock
   | NoteCalloutBlock
+  | NoteHorizontalRuleBlock
+  | NoteImageBlock
+  | NoteAttachmentBlock
+  | NoteEmbedBlock
   | NoteOpaqueBlock;
 
 /** The versioned document. */
@@ -426,6 +485,79 @@ const CALLOUT_VARIANTS: ReadonlySet<string> = new Set(["info", "warning", "succe
 
 const INLINE_MARK_STRINGS: ReadonlySet<string> = new Set(NOTE_DOCUMENT_INLINE_MARKS);
 
+// ---------------------------------------------------------------------------
+// Reference-node closed key sets (horizontal-rule / image / attachment /
+// embed).  Each set is the EXACT admitted attribute vocabulary for its
+// node; any other own key is a categorical refusal.
+// ---------------------------------------------------------------------------
+
+const HORIZONTAL_RULE_KEYS: ReadonlySet<string> = new Set(["type"]);
+const IMAGE_KEYS: ReadonlySet<string> = new Set(["type", "url", "alt"]);
+const ATTACHMENT_KEYS: ReadonlySet<string> = new Set(["type", "url", "name", "mime"]);
+const EMBED_KEYS: ReadonlySet<string> = new Set(["type", "url"]);
+
+/**
+ * Only `https:`/`http:` are admitted.  This categorically rejects
+ * `file:` (local filesystem paths), `javascript:` and `data:` (inline
+ * executable/payload smuggling), `mailto:`, and any other scheme —
+ * per plan §4 ("No remote URL fetching ... URLs are validated and
+ * stored as references only") and §3.2 ("reject credentials, control
+ * bytes, javascript/data URLs").  The URL is never dereferenced here;
+ * `new URL()` only parses the string, it never performs I/O.
+ */
+const ALLOWED_REFERENCE_URL_SCHEMES: ReadonlySet<string> = new Set(["https:", "http:"]);
+
+/** Reject any own key not in `allowed` — closed attribute-set enforcement. */
+function rejectUnknownKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): void {
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) fail("invalid_shape");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) fail("invalid_shape");
+  }
+  for (const key of allowed) {
+    if (Object.hasOwn(value, key)) continue;
+    if (key === "type" || key === "url") fail("invalid_shape");
+  }
+}
+
+/**
+ * Validate a structured reference URL (`image`/`attachment`/`embed`).
+ * Refuses non-string, empty, oversized, control-byte-bearing,
+ * unparsable, non-http(s)-scheme, or credential-bearing URLs.  Never
+ * performs network I/O — `new URL()` is a pure parser.
+ */
+function validateReferenceUrl(value: unknown): void {
+  if (typeof value !== "string") fail("invalid_reference_url");
+  if (value.length === 0) fail("invalid_reference_url");
+  if (Buffer.byteLength(value, "utf8") > MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES) {
+    fail("invalid_reference_url");
+  }
+  // Reject C0 control bytes and DEL: these can be used to smuggle
+  // scheme confusion or bypass naive string-based scheme checks in
+  // downstream renderers.
+  // eslint-disable-next-line no-control-regex -- deliberate control-byte scan
+  if (/[\u0000-\u001f\u007f]/.test(value)) fail("invalid_reference_url");
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    fail("invalid_reference_url");
+  }
+  if (!ALLOWED_REFERENCE_URL_SCHEMES.has(parsed.protocol)) fail("invalid_reference_url");
+  if (parsed.username.length > 0 || parsed.password.length > 0) fail("invalid_reference_url");
+  if (parsed.hostname.length === 0) fail("invalid_reference_url");
+}
+
+/** Validate an optional bounded reference label (alt/name/mime/provider). */
+function validateOptionalReferenceLabel(value: unknown): void {
+  if (value === undefined) return;
+  if (typeof value !== "string") fail("invalid_shape");
+  if (Buffer.byteLength(value, "utf8") > MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES) {
+    fail("oversize_inline");
+  }
+}
+
 function validateBlockArray(blocks: readonly unknown[], depth: number): void {
   if (depth > MAX_NOTE_DOCUMENT_DEPTH) fail("depth_exceeded");
   for (const block of blocks) {
@@ -435,14 +567,13 @@ function validateBlockArray(blocks: readonly unknown[], depth: number): void {
 
 function validateBlock(value: unknown, depth: number): void {
   if (!isPlainRecord(value)) fail("invalid_shape");
-  if (typeof value.type !== "string") fail("invalid_shape");
+  const typeDescriptor = Object.getOwnPropertyDescriptor(value, "type");
+  if (!typeDescriptor || typeof typeDescriptor.value !== "string") fail("invalid_shape");
+  const type = typeDescriptor.value as string;
 
-  // A `Record<string, unknown>` view of the block for hostile-object
-  // rejection: this strips prototype-chain keys from the check while
-  // still admitting plain objects with unknown fields (which we
-  // explicitly reject when they would carry a payload in the
-  // forbidden positions, e.g. `opaque`).
-  const type = value.type as string;
+  // Read the discriminator from an own data descriptor before touching
+  // any caller-controlled property. New reference blocks additionally
+  // validate every attribute descriptor before reading its value.
   switch (type) {
     case "paragraph":
       validateParagraph(value);
@@ -470,6 +601,18 @@ function validateBlock(value: unknown, depth: number): void {
       return;
     case "callout":
       validateCallout(value, depth);
+      return;
+    case "horizontal-rule":
+      validateHorizontalRule(value);
+      return;
+    case "image":
+      validateImage(value);
+      return;
+    case "attachment":
+      validateAttachment(value);
+      return;
+    case "embed":
+      validateEmbed(value);
       return;
     case "opaque":
       validateOpaqueBlock(value);
@@ -601,6 +744,35 @@ function validateCallout(value: Record<string, unknown>, depth: number): void {
   serialiseAndCapBlockBytes(value, "callout");
 }
 
+function validateHorizontalRule(value: Record<string, unknown>): void {
+  // No payload fields at all — reject anything beyond `type` so a
+  // caller cannot smuggle unrelated data through an otherwise-inert
+  // divider node.
+  rejectUnknownKeys(value, HORIZONTAL_RULE_KEYS);
+  serialiseAndCapBlockBytes(value, "horizontal-rule");
+}
+
+function validateImage(value: Record<string, unknown>): void {
+  rejectUnknownKeys(value, IMAGE_KEYS);
+  validateReferenceUrl(value.url);
+  validateOptionalReferenceLabel(value.alt);
+  serialiseAndCapBlockBytes(value, "image");
+}
+
+function validateAttachment(value: Record<string, unknown>): void {
+  rejectUnknownKeys(value, ATTACHMENT_KEYS);
+  validateReferenceUrl(value.url);
+  validateOptionalReferenceLabel(value.name);
+  validateOptionalReferenceLabel(value.mime);
+  serialiseAndCapBlockBytes(value, "attachment");
+}
+
+function validateEmbed(value: Record<string, unknown>): void {
+  rejectUnknownKeys(value, EMBED_KEYS);
+  validateReferenceUrl(value.url);
+  serialiseAndCapBlockBytes(value, "embed");
+}
+
 function validateOpaqueBlock(value: Record<string, unknown>): void {
   if (typeof value.nodeType !== "string") fail("invalid_shape");
   if (value.nodeType.length === 0) fail("invalid_shape");
@@ -715,7 +887,7 @@ function serialiseAndCapBlockBytes(value: Record<string, unknown>, blockType: st
  * hostile caller-supplied object.
  */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
+  if (value === null || typeof value !== "object" || utilTypes.isProxy(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
