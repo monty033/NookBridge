@@ -10,9 +10,10 @@
  *
  * Hard rules (Stage 6 slice):
  *
- *   - Exactly seven tools are registered: the four bounded read-only search,
- *     status, notebook-listing, and note-metadata tools plus create, append,
- *     and update. No delete tool exists.
+ *   - Exactly nine tools are registered: four bounded read-only tools
+ *     (search, status, notebook-listing, and note-metadata), three bounded
+ *     write tools (create, append, and update), a bounded delete tool that
+ *     moves one note to trash with an expected-revision check, and a sync tool.
  *   - The search tool input schema is a fixed JSON Schema for
  *     `{ query: string, limit?: number }`. `limit` is optional
  *     and is documented as currently ignored because the
