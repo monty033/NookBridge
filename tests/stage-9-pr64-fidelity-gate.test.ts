@@ -28,6 +28,7 @@ import {
   parseNoteDocumentMarkdown,
   serializeNoteDocumentMarkdown,
 } from "../src/core/note-document-markdown.js";
+import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
 
 const MAX_BYTES = STAGE4_WRITE_LIMITS.maxContentBytes;
 
@@ -185,19 +186,31 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(() => assertSupportedConstructs("----", MAX_BYTES)).not.toThrow();
     });
 
-    it("refuses a nested unordered list instead of silently flattening it", () => {
-      // Finding 1: the legacy write codec has no nesting model.  Without this
-      // gate, `- parent\n  - child` classifies as a bare "paragraph" (the
-      // indented child line fails the flat `/^[-*] +/` list check) and
-      // renders as a single literal paragraph containing the child's raw
-      // `  - child` text — the list structure and the child's bullet nature
-      // are both lost with no error and no signal that anything downgraded.
+    it("accepts a nested unordered list now that the codec has a nesting model", () => {
+      // Finding 1 (superseded): the legacy write codec had no nesting model,
+      // so `- parent\n  - child` was refused to stop it silently flattening
+      // into a literal paragraph that kept the child's raw `  - child` text.
+      // The codec now renders the nesting (renderNestedBulletListBlock), so
+      // the construct is supported — and the downgrade the gate guarded
+      // against is unreachable because renderBlock has a nested branch.
       expect(detectMarkdownConstructs("- parent\n  - child", MAX_BYTES)).toEqual(
         new Set(["nested-unordered-list"]),
       );
-      expect(() => assertSupportedConstructs("- parent\n  - child", MAX_BYTES)).toThrow();
-      expect(UNSUPPORTED_MARKDOWN_CONSTRUCTS).toContain("nested-unordered-list");
-      expect(SUPPORTED_MARKDOWN_CONSTRUCTS.has("nested-unordered-list" as never)).toBe(false);
+      expect(() => assertSupportedConstructs("- parent\n  - child", MAX_BYTES)).not.toThrow();
+      expect(SUPPORTED_MARKDOWN_CONSTRUCTS.has("nested-unordered-list")).toBe(true);
+      expect(UNSUPPORTED_MARKDOWN_CONSTRUCTS).not.toContain("nested-unordered-list");
+    });
+
+    it("splits a plain bullet from an adjacent task marker instead of merging them", () => {
+      // splitBlocks breaks a block on a change of line shape, so a plain
+      // bullet and a `- [ ]` item never share one block: each is classified
+      // and rendered on its own terms.  That invariant is what keeps the
+      // ordinary bullet tree from ever having to express checkbox
+      // semantics — this test pins it, because the nested-branch routing
+      // above relies on it.
+      expect(detectMarkdownConstructs("- parent\n  - [ ] child", MAX_BYTES)).toEqual(
+        new Set(["unordered-list", "task-list"]),
+      );
     });
 
     it("still accepts a flat unordered list with no indentation", () => {
@@ -852,6 +865,61 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("a **`code`** b").data).toBe(
         wrap("<p>a <strong><code>code</code></strong> b</p>"),
       );
+    });
+  });
+
+  describe("nested ordinary-list codec fidelity", () => {
+    const wrap = (inner: string) => `<div data-type="document">${inner}</div>`;
+    const binding = { noteId: "fixture-note", revision: "fixture-revision" };
+    const NESTED = "- parent\n  - child";
+
+    it("accepts a nested unordered list instead of refusing the block", () => {
+      expect(detectMarkdownConstructs(NESTED, MAX_BYTES)).toEqual(
+        new Set(["nested-unordered-list"]),
+      );
+      expect(() => assertSupportedConstructs(NESTED, MAX_BYTES)).not.toThrow();
+      expect(SUPPORTED_MARKDOWN_CONSTRUCTS.has("nested-unordered-list")).toBe(true);
+    });
+
+    it("encodes a nested unordered list as a nested tree with <p> item payloads", () => {
+      // The <p> payload is load-bearing: the native decoder only descends into
+      // an item's nested blocks when the first child is a <p>.  A bare-label
+      // nested item decodes through the legacy inline path, which cannot
+      // represent the child list at all.
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(NESTED).data).toBe(
+        wrap("<ul><li><p>parent</p><ul><li><p>child</p></li></ul></li></ul>"),
+      );
+    });
+
+    it("keeps a flat unordered list on the existing bare-label stored shape", () => {
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- one\n- two").data).toBe(
+        wrap("<ul><li>one</li><li>two</li></ul>"),
+      );
+    });
+
+    it("encodes three nesting levels", () => {
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- a\n  - b\n    - c").data).toBe(
+        wrap("<ul><li><p>a</p><ul><li><p>b</p><ul><li><p>c</p></li></ul></li></ul></li></ul>"),
+      );
+    });
+
+    it("round-trips a nested unordered list through the canonical document grammar", () => {
+      const markdown = `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n${NESTED}\n`;
+      expect(serializeNoteDocumentMarkdown(parseNoteDocumentMarkdown(markdown))).toBe(markdown);
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(NESTED);
+      const decoded = decodeNoteDocumentNative({ type: encoded.type, data: encoded.data }, binding);
+      expect(serializeNoteDocumentMarkdown(decoded.document)).toBe(markdown);
+    });
+
+    it("leaves ordered markers out of scope (known gap, pre-existing)", () => {
+      // This codec has no ordered-list construct at all: `1. child` is not a
+      // loose bullet, so it never reaches the nested branch and the block
+      // stays a plain paragraph — the line keeps its literal text but loses
+      // its structure.  Pre-existing behaviour, unchanged by this work;
+      // recorded here rather than silently absorbed, because fixing it means
+      // ordered-list support end to end (decode, render, serialize), not a
+      // gate change.
+      expect(() => assertSupportedConstructs("- parent\n  1. child", MAX_BYTES)).not.toThrow();
     });
   });
 });

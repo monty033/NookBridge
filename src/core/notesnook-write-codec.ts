@@ -206,6 +206,7 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
     "heading-2",
     "heading-3",
     "unordered-list",
+    "nested-unordered-list",
     "task-list",
     "paragraph",
     "inline-bold",
@@ -257,7 +258,6 @@ export const UNSUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlyArray<string> = Object.fre
   "link-or-image",
   "inline-html",
   "nookbridge-directive",
-  "nested-unordered-list",
 ]);
 
 /** A line consisting of exactly three `-` and nothing else (a horizontal rule). */
@@ -397,12 +397,14 @@ const FLAT_BULLET_LINE = /^[-*] +/;
  * A block that looks like an unordered list — every line is bullet-shaped
  * once leading indentation is ignored — but is NOT the flat, un-indented
  * shape {@link renderBlock}'s `isList` branch can render (`FLAT_BULLET_LINE`
- * on every line).  The renderer has no nesting model: without this check,
- * `- parent\n  - child` fails the flat-list test (the indented child line)
- * and falls through to the generic paragraph renderer, which prints the
- * child's raw `  - child` text verbatim inside a `<p>` — silently losing
- * both the nesting AND the child's own bullet/list semantics, with no
- * error and no signal that anything was downgraded.
+ * on every line).  A nested bullet block is now rendered by
+ * {@link renderNestedBulletListBlock}; this predicate keeps the routing
+ * honest by matching exactly the blocks that branch can express.  Without
+ * it, the indented child line fails the flat-list test and the block falls
+ * through to the generic paragraph renderer, which prints the child's raw
+ * `  - child` text verbatim inside a `<p>` — silently losing both the
+ * nesting AND the child's own bullet/list semantics, with no error and no
+ * signal that anything was downgraded.
  */
 function isNestedUnorderedListBlock(lines: readonly string[]): boolean {
   return (
@@ -832,6 +834,73 @@ function renderInline(text: string): string {
     .replace(CODE_SPAN_RESTORE, (_match, index: string) => codeSpans[Number(index)] ?? "");
 }
 
+type BulletListItem = {
+  readonly text: string;
+  readonly children: BulletListItem[];
+};
+
+/** Structural depth bound for a rendered nested bullet tree. */
+const MAX_BULLET_LIST_DEPTH = 16;
+
+/**
+ * Build the nested bullet tree from an all-bullet block.
+ *
+ * Indentation is measured the same way {@link parseTaskListLines} measures
+ * it ({@link taskListIndentUnit}/{@link taskListIndent}) so both list kinds
+ * agree on what one level deeper means.  Lines that are not loose bullets
+ * cannot occur in a block routed here — {@link isNestedUnorderedListBlock}
+ * requires every line to be one — but they are skipped rather than trusted.
+ */
+function parseBulletListLines(lines: readonly string[]): readonly BulletListItem[] {
+  const rootChildren: BulletListItem[] = [];
+  const indentUnit = taskListIndentUnit(lines);
+  const stack: { readonly indent: number; readonly bucket: BulletListItem[] }[] = [
+    { indent: -1, bucket: rootChildren },
+  ];
+  for (const line of lines) {
+    const indent = taskListIndent(line, indentUnit);
+    const match = LOOSE_BULLET_LINE.exec(line);
+    if (match === null) continue;
+    while (stack.length > 1 && (stack[stack.length - 1] as { indent: number }).indent >= indent) {
+      stack.pop();
+    }
+    // Refuse a tree deeper than the bound instead of silently flattening
+    // the overflow into the level above it.
+    if (stack.length > MAX_BULLET_LIST_DEPTH) refuse();
+    const item: BulletListItem = { text: line.slice(match[0].length), children: [] };
+    (stack[stack.length - 1] as { bucket: BulletListItem[] }).bucket.push(item);
+    stack.push({ indent, bucket: item.children });
+  }
+  return rootChildren;
+}
+
+/**
+ * Render a nested ordinary bullet list as a Notesnook bullet tree.
+ *
+ * Item text is wrapped in `<p>` because the native decoder only descends
+ * into an item's nested blocks when the item's first child is a `<p>`; a
+ * bare-label nested item decodes through the legacy inline path, which has
+ * no representation for the child list at all.  Flat lists keep the
+ * existing bare `<li>text</li>` shape, so no already-stored document
+ * changes shape.
+ */
+function renderBulletListItems(items: readonly BulletListItem[], depth: number): string {
+  if (depth > MAX_BULLET_LIST_DEPTH) refuse();
+  let out = "";
+  for (const item of items) {
+    out += `<li><p>${renderInline(item.text)}</p>`;
+    if (item.children.length > 0) {
+      out += `<ul>${renderBulletListItems(item.children, depth + 1)}</ul>`;
+    }
+    out += "</li>";
+  }
+  return out;
+}
+
+function renderNestedBulletListBlock(lines: readonly string[]): string {
+  return `<ul>${renderBulletListItems(parseBulletListLines(lines), 1)}</ul>`;
+}
+
 function renderTaskListItems(items: readonly TaskListItem[], listKind: NotesnookListKind): string {
   // The simple-checklist shape uses `<ul class="simple-checklist">` with
   // `simple-checklist--item` rows; the rich task-list shape uses
@@ -1024,6 +1093,10 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   const isTaskList = lines.every((line) => TASK_LIST_LINE.test(line));
   if (isTaskList) {
     return renderTaskListBlock(lines, listKind);
+  }
+
+  if (isNestedUnorderedListBlock(lines)) {
+    return renderNestedBulletListBlock(lines);
   }
 
   const isList = lines.every((line) => FLAT_BULLET_LINE.test(line));
