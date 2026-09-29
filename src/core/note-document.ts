@@ -298,6 +298,8 @@ export interface NoteBulletListBlock {
 /** Ordered list block. */
 export interface NoteOrderedListBlock {
   readonly type: "ordered-list";
+  /** First rendered number; omitted means the canonical default of 1. */
+  readonly start?: number;
   readonly items: readonly NoteListItem[];
 }
 
@@ -583,7 +585,7 @@ const BLOCK_SHAPES: Readonly<
   paragraph: { keys: new Set(["type", "inlines"]), required: ["type", "inlines"] },
   heading: { keys: new Set(["type", "level", "inlines"]), required: ["type", "level", "inlines"] },
   "bullet-list": { keys: new Set(["type", "items"]), required: ["type", "items"] },
-  "ordered-list": { keys: new Set(["type", "items"]), required: ["type", "items"] },
+  "ordered-list": { keys: new Set(["type", "start", "items"]), required: ["type", "items"] },
   "task-list": { keys: new Set(["type", "kind", "items"]), required: ["type", "items"] },
   blockquote: { keys: new Set(["type", "blocks"]), required: ["type", "blocks"] },
   "code-block": { keys: new Set(["type", "text", "language"]), required: ["type", "text"] },
@@ -766,6 +768,11 @@ function validateBulletList(value: Record<string, unknown>, depth: number): void
 }
 
 function validateOrderedList(value: Record<string, unknown>, depth: number): void {
+  if (
+    value.start !== undefined &&
+    (typeof value.start !== "number" || !Number.isSafeInteger(value.start) || value.start < 0)
+  )
+    fail("invalid_shape");
   validateListItems(value.items, "ordered-list", depth);
   serialiseAndCapBlockBytes(value, "ordered-list");
 }

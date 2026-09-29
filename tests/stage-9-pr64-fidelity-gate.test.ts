@@ -53,6 +53,7 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       // Task-list moved out of the unsupported list because the codec now
       // round-trips checked/unchecked task-list items as structural markup.
       expect(UNSUPPORTED_MARKDOWN_CONSTRUCTS).not.toContain("task-list");
+      expect(UNSUPPORTED_MARKDOWN_CONSTRUCTS).not.toContain("link-or-image");
     });
   });
 
@@ -115,7 +116,10 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
 
     it("detects links and images", () => {
       expect(detectMarkdownConstructs("[label](https://example.com)", MAX_BYTES)).toContain(
-        "link-or-image",
+        "inline-link",
+      );
+      expect(detectMarkdownConstructs("![alt](file.png)", MAX_BYTES)).toContain(
+        "attachment-reference",
       );
     });
 
@@ -224,8 +228,123 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(() => assertSupportedConstructs("![[photo.png]]", MAX_BYTES)).toThrow();
     });
 
-    it("refuses a link", () => {
-      expect(() => assertSupportedConstructs("[label](https://example.com)", MAX_BYTES)).toThrow();
+    it("round-trips a safe HTTPS inline link through the native projection", () => {
+      const markdown = "Read [Notesnook](https://example.com) and **[docs](https://example.org)**.";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain('<a href="https://example.com">Notesnook</a>');
+      expect(encoded.data).toContain('<strong><a href="https://example.org">docs</a></strong>');
+      expect(encoded.data).not.toContain("](https://");
+      const decoded = decodeNoteDocumentNative(
+        { type: encoded.type, data: encoded.data },
+        {
+          noteId: "fixture-note",
+          revision: "fixture-revision",
+        },
+      );
+      expect(serializeNoteDocumentMarkdown(decoded.document)).toBe(
+        `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n${markdown}\n`,
+      );
+    });
+
+    it("keeps link-looking syntax inside code spans literal", () => {
+      const markdown = "`[label](https://example.com)`";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain("<code>[label](https://example.com)</code>");
+      expect(encoded.data).not.toContain('<a href="https://example.com">');
+    });
+
+    it("does not treat literal link-token-shaped text as a generated link placeholder", () => {
+      const tokenShapedText = "\uE001L0\uE001";
+      const markdown = `${tokenShapedText} [docs](https://example.com)`;
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain(tokenShapedText);
+      expect(encoded.data).toContain('<a href="https://example.com">docs</a>');
+    });
+
+    it("continues root numbering after a nested child", () => {
+      const markdown = "1. first root\n  1. child\n2. second root";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown).data).toBe(
+        '<div data-type="document"><ol>' +
+          "<li><p>first root</p><ol><li><p>child</p></li></ol></li>" +
+          "<li><p>second root</p></li>" +
+          "</ol></div>",
+      );
+    });
+
+    it("composes emphasis around links", () => {
+      const markdown = "*[italic docs](https://example.com/italic)*";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain(
+        '<em><a href="https://example.com/italic">italic docs</a></em>',
+      );
+    });
+
+    it("renders supported inline marks inside link labels", () => {
+      const markdown =
+        "[**bold**](https://example.com/bold) [*italic*](https://example.com/italic) [`code`](https://example.com/code)";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain(
+        '<a href="https://example.com/bold"><strong>bold</strong></a>',
+      );
+      expect(encoded.data).toContain('<a href="https://example.com/italic"><em>italic</em></a>');
+      expect(encoded.data).toContain('<a href="https://example.com/code"><code>code</code></a>');
+    });
+
+    it("refuses balanced parentheses inside an HTTPS destination", () => {
+      const markdown = "[x](https://example.com/path(foo))";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+    });
+
+    it("keeps a safe link separate from JavaScript-looking trailing prose", () => {
+      const markdown = "[x](https://example.com)javascript:alert(1))";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain('<a href="https://example.com">x</a>javascript:alert(1))');
+    });
+
+    it("keeps a valid link followed by ordinary parenthetical prose", () => {
+      const markdown = "Read [Notesnook](https://example.com) (see notes).";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown).data).toContain(
+        '<a href="https://example.com">Notesnook</a> (see notes).',
+      );
+    });
+
+    it("keeps ordinary bracket prose with an unrelated parenthesis literal", () => {
+      const markdown = "Use [square brackets] in prose (not a link).";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown).data).toContain(
+        "Use [square brackets] in prose (not a link).",
+      );
+    });
+
+    it.each([
+      "[broken](https://example.com",
+      "unmatched [ prose https://example.com",
+      "[label] trailing (https://example.com)",
+      "[unsafe](javascript:alert(1))",
+      "[relative](//example.com)",
+      "[credentialed](https://user:pass@example.com)",
+      "[safe](https://example.com) [unsafe](javascript:alert(1))",
+      "[safe](https://example.com) [broken](https://example.org",
+      "[parenthesized](https://example.com(foo))",
+      "[outer [inner]](https://example.com)",
+      "[outer [inner](https://example.com)](https://example.org)",
+    ])("refuses malformed or unsafe inline links before mutation: %s", (markdown) => {
+      // The production adapter invokes this fidelity gate before the codec;
+      // direct codec encoding intentionally remains a lower-level primitive.
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+    });
+
+    it("keeps link-like text inside a code span literal", () => {
+      const markdown = "`[literal](https://example.com)`";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown).data).toBe(
+        '<div data-type="document"><p><code>[literal](https://example.com)</code></p></div>',
+      );
     });
 
     it("refuses inline HTML", () => {
@@ -891,13 +1010,90 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       );
     });
 
-    it("keeps a flat unordered list on the existing bare-label stored shape", () => {
-      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- one\n- two").data).toBe(
-        wrap("<ul><li>one</li><li>two</li></ul>"),
+    it("keeps a flat ordered list as a native <ol> tree", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("1. one\n2. two");
+      expect(encoded.data).toBe(
+        '<div data-type="document"><ol><li><p>one</p></li><li><p>two</p></li></ol></div>',
       );
     });
 
-    it("encodes three nesting levels", () => {
+    it("supports the common three-space indentation for nested ordered lists", () => {
+      const markdown = "1. parent\n   1. child";
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown).data).toBe(
+        '<div data-type="document"><ol><li><p>parent</p><ol><li><p>child</p></li></ol></li></ol></div>',
+      );
+    });
+
+    it("renders nested ordered lists structurally and escapes item text", () => {
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(
+        "1. parent\n  1. <child>\n  2. sibling\n2. final",
+      );
+      expect(encoded.data).toBe(
+        '<div data-type="document"><ol><li><p>parent</p><ol><li><p>&lt;child&gt;</p></li><li><p>sibling</p></li></ol></li><li><p>final</p></li></ol></div>',
+      );
+    });
+
+    it("refuses mixed ordered and unordered list blocks rather than downgrading", () => {
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("1. ordered\n- bullet")).toThrow();
+      expect(() => assertSupportedConstructs("1. ordered\n- bullet", MAX_BYTES)).toThrow();
+    });
+
+    it.each(["- parent\n  1. child", "1. parent\n  - child"])(
+      "refuses mixed nested list blocks before mutation: %s",
+      (markdown) => {
+        expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+        expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      },
+    );
+
+    it("refuses an inconsistent nested marker without a deeper-list boundary", () => {
+      const markdown = "1. parent\n  3. first child\n  7. second child";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+    });
+
+    it("refuses a repeated root marker without a nested-list boundary", () => {
+      const markdown = "1. first\n2. second\n1. restarted";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+    });
+
+    it.each(["1. root\n  1. child\n   2. mixed", "1. root\n   1. child\n     2. mixed"])(
+      "refuses mixed ordered-list indentation: %s",
+      (markdown) => {
+        expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+        expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+      },
+    );
+
+    it("preserves existing flat unordered-list and task-list rendering", () => {
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- one\n- two").data).toContain(
+        "<ul><li>one</li><li>two</li></ul>",
+      );
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [x] done").data).toContain(
+        '<ul class="simple-checklist"><li class="checked simple-checklist--item"><p>done</p></li></ul>',
+      );
+    });
+
+    it("renders nested ordered lists through the native decoder", () => {
+      const markdown = "1. parent\n  1. child";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      const decoded = decodeNoteDocumentNative({ type: encoded.type, data: encoded.data }, binding);
+      expect(decoded.document.blocks).toEqual([
+        {
+          type: "ordered-list",
+          items: [
+            {
+              inlines: [{ text: "parent" }],
+              blocks: [{ type: "ordered-list", items: [{ inlines: [{ text: "child" }] }] }],
+            },
+          ],
+        },
+      ]);
+      expect(serializeNoteDocumentMarkdown(decoded.document)).toContain("1. parent\n  1. child");
+    });
+
+    it("encodes three unordered nesting levels", () => {
       expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- a\n  - b\n    - c").data).toBe(
         wrap("<ul><li><p>a</p><ul><li><p>b</p><ul><li><p>c</p></li></ul></li></ul></li></ul>"),
       );
@@ -911,15 +1107,94 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(serializeNoteDocumentMarkdown(decoded.document)).toBe(markdown);
     });
 
-    it("leaves ordered markers out of scope (known gap, pre-existing)", () => {
-      // This codec has no ordered-list construct at all: `1. child` is not a
-      // loose bullet, so it never reaches the nested branch and the block
-      // stays a plain paragraph — the line keeps its literal text but loses
-      // its structure.  Pre-existing behaviour, unchanged by this work;
-      // recorded here rather than silently absorbed, because fixing it means
-      // ordered-list support end to end (decode, render, serialize), not a
-      // gate change.
-      expect(() => assertSupportedConstructs("- parent\n  1. child", MAX_BYTES)).not.toThrow();
+    it("detects flat and nested ordered lists as supported constructs", () => {
+      expect(detectMarkdownConstructs("1. first\n2. second", MAX_BYTES)).toEqual(
+        new Set(["ordered-list"]),
+      );
+      expect(detectMarkdownConstructs("1. parent\n  1. child", MAX_BYTES)).toEqual(
+        new Set(["nested-ordered-list"]),
+      );
+      expect(() => assertSupportedConstructs("1. first\n2. second", MAX_BYTES)).not.toThrow();
+      expect(() => assertSupportedConstructs("1. parent\n  1. child", MAX_BYTES)).not.toThrow();
+    });
+
+    it("refuses a root marker restart after a nested list", () => {
+      const markdown = "1. first root\n  1. first child\n1. second root\n  1. second child";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
+    });
+
+    it("preserves independent nested starts for separate parent items", () => {
+      const markdown = "1. first root\n  1. first child\n2. second root\n  3. second child";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain(
+        "<li><p>first root</p><ol><li><p>first child</p></li></ol></li>",
+      );
+      expect(encoded.data).toContain(
+        '<li><p>second root</p><ol start="3"><li><p>second child</p></li></ol></li>',
+      );
+    });
+
+    it("preserves a separate nested ordered-list boundary after a deeper child", () => {
+      const markdown = "1. parent\n  1. first child\n    1. grandchild\n  3. second nested list";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain('<ol start="3"><li><p>second nested list</p></li></ol>');
+    });
+
+    it("preserves arbitrary ordered-list starts through native HTML and Markdown projection", () => {
+      const markdown = "3. starts at three\n4. continues\n  7. nested starts at seven";
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).not.toThrow();
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown);
+      expect(encoded.data).toContain('<ol start="3">');
+      expect(encoded.data).toContain('<ol start="7">');
+      const decoded = decodeNoteDocumentNative(encoded, binding);
+      expect(decoded.document.blocks).toEqual([
+        {
+          type: "ordered-list",
+          start: 3,
+          items: [
+            { inlines: [{ text: "starts at three" }] },
+            {
+              inlines: [{ text: "continues" }],
+              blocks: [
+                {
+                  type: "ordered-list",
+                  start: 7,
+                  items: [{ inlines: [{ text: "nested starts at seven" }] }],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+      expect(serializeNoteDocumentMarkdown(decoded.document)).toContain(
+        "3. starts at three\n4. continues\n  7. nested starts at seven",
+      );
+    });
+
+    it("refuses an ordered-list sequence that overflows safe integer markers", () => {
+      expect(() =>
+        serializeNoteDocumentMarkdown({
+          version: 1,
+          blocks: [
+            {
+              type: "ordered-list",
+              start: Number.MAX_SAFE_INTEGER,
+              items: [{ inlines: [{ text: "last safe" }] }, { inlines: [{ text: "overflow" }] }],
+            },
+          ],
+        }),
+      ).toThrow();
+    });
+
+    it.each([
+      "1. parent\n   1. child\n  2. mixed indentation",
+      "1. parent\n     1. partial indentation",
+      "  1. indented root",
+      "1. parent\n      1. skipped nesting level",
+    ])("refuses malformed ordered-list indentation instead of guessing: %s", (markdown) => {
+      expect(() => assertSupportedConstructs(markdown, MAX_BYTES)).toThrow();
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(markdown)).toThrow();
     });
   });
 });

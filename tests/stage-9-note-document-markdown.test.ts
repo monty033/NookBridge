@@ -71,6 +71,23 @@ describe("T02 deterministic Markdown interchange", () => {
     expect(serialize(doc)).toBe(input);
     expect(serialize(JSON.parse(JSON.stringify(doc)))).toBe(input);
   });
+  it("refuses inconsistent ordered markers instead of normalizing them", () => {
+    rejects(() => parse(md("3. first\n9. second")), "invalid_shape");
+    rejects(() => parse(md("1. parent\n  3. child\n  7. not-sequential")), "invalid_shape");
+  });
+
+  it("preserves separate nested ordered-list boundaries after a deeper child", () => {
+    const document = parse(
+      md("1. parent\n  1. first child\n    1. grandchild\n  3. second nested list"),
+    );
+    const list = document.blocks[0];
+    expect(list?.type).toBe("ordered-list");
+    if (list?.type !== "ordered-list") return;
+    const blocks = list.items[0]?.blocks ?? [];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toMatchObject({ type: "ordered-list", start: 3 });
+  });
+
   it("maps nesting, marks, tables and list intent structurally", () => {
     expect(parse(md("- [ ] a\n  - [x] b")).blocks).toEqual([
       {

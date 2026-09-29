@@ -284,13 +284,39 @@ describe("T03 native HTML adapter", () => {
       expect(String(error)).not.toContain("secret-canary");
     }
   });
-  it("preserves unsupported heading, table formatting, list start and inline attributes whole", () => {
+  it("preserves unsupported blocks while carrying ordered-list start metadata", () => {
     const html =
       '<h4>Four</h4><ol start="3"><li>third</li></ol><table><tr><th><b>marked</b></th></tr></table><p><strong title="keep">bold</strong></p><ul class="checklist"><li class="checklist--item"><p>parent</p><ul class="simple-checklist"><li class="simple-checklist--item"><p>child</p></li></ul></li></ul>';
     const result = roundTrip(html);
-    expect(result.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+    expect(result.document.blocks.map((block) => block.type)).toEqual([
+      "opaque",
+      "ordered-list",
+      "opaque",
+      "opaque",
+      "opaque",
+    ]);
+    expect(result.document.blocks[1]).toMatchObject({ type: "ordered-list", start: 3 });
     expect(result.stored).toEqual(wrap(html));
   });
+  it("does not model negative ordered-list starts as editable AST", () => {
+    const html = '<ol start="-2"><li><p>item</p></li></ol>';
+    const decoded = decodeNoteDocumentNative(wrap(html), binding);
+    expect(decoded.document.blocks[0]?.type).toBe("opaque");
+    expect(roundTrip(html).stored).toEqual(wrap(html));
+    expect(() =>
+      serializeNoteDocumentMarkdown({
+        version: 1,
+        blocks: [
+          {
+            type: "ordered-list",
+            start: -2,
+            items: [{ inlines: [{ text: "item" }] }],
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("decodes plain paragraph table cells and refuses browser-repaired nesting", () => {
     const decoded = decodeNoteDocumentNative(
       wrap("<table><tbody><tr><th><p>A</p></th></tr><tr><td><p>B</p></td></tr></tbody></table>"),
@@ -496,18 +522,23 @@ describe("T13 document container tolerance", () => {
     });
   });
 
-  it("still enforces the attribute values it actually reads", () => {
-    // Guard: tolerance covers attribute NAMES the decoder does not read, not
-    // the values it interprets.  Two cases matter:
-    //   - `start` cannot be expressed in the canonical model, so a list that
-    //     carries it is preserved rather than silently renumbered;
-    //   - a checklist item whose class is not the expected item class is not
-    //     silently accepted as one.
+  it("preserves ordered-list starts while still enforcing checklist attributes", () => {
+    // The canonical model carries an ordered-list start value, so a native
+    // `<ol start="N">` is editable and round-trips instead of becoming opaque.
     const startList = decodeNoteDocumentNative(
       wrap('<ol start="3"><li><p>Item</p></li></ol>'),
       binding,
     );
-    expect(startList.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+    expect(startList.document.blocks).toEqual([
+      {
+        type: "ordered-list",
+        start: 3,
+        items: [{ inlines: [{ text: "Item" }] }],
+      },
+    ]);
+    expect(
+      serializeNoteDocumentNative(startList.document, { context: startList.context, binding }).data,
+    ).toContain('<ol start="3">');
     const wrongItemClass = decodeNoteDocumentNative(
       wrap('<ul class="checklist"><li class="nonsense"><p>Item</p></li></ul>'),
       binding,

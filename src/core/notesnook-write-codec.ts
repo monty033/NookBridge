@@ -176,16 +176,19 @@ export type MarkdownConstruct =
   | "heading-3"
   | "unordered-list"
   | "nested-unordered-list"
+  | "ordered-list"
+  | "nested-ordered-list"
+  | "malformed-ordered-list"
   | "task-list"
   | "paragraph"
   | "inline-bold"
   | "inline-italic"
   | "inline-code"
+  | "inline-link"
   | "markdown-table"
   | "horizontal-rule"
   | "fenced-code-block"
   | "blockquote"
-  | "link-or-image"
   | "attachment-reference"
   | "inline-html"
   | "nookbridge-directive";
@@ -207,11 +210,14 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
     "heading-3",
     "unordered-list",
     "nested-unordered-list",
+    "ordered-list",
+    "nested-ordered-list",
     "task-list",
     "paragraph",
     "inline-bold",
     "inline-italic",
     "inline-code",
+    "inline-link",
     "markdown-table",
     "horizontal-rule",
     "fenced-code-block",
@@ -240,13 +246,117 @@ const BOLD_MARK_RENDER = new RegExp(BOLD_MARK_SOURCE, "g");
 const ITALIC_MARK_RENDER = new RegExp(ITALIC_MARK_SOURCE, "g");
 const CODE_MARK_RENDER = new RegExp(CODE_MARK_SOURCE, "g");
 
+type InlineLink = {
+  readonly start: number;
+  readonly end: number;
+  readonly label: string;
+  readonly href: string;
+};
+
+type TextRange = {
+  readonly start: number;
+  readonly end: number;
+};
+
+function codeSpanRanges(text: string): readonly TextRange[] {
+  const ranges: TextRange[] = [];
+  const matcher = new RegExp(CODE_MARK_SOURCE, "g");
+  for (const match of text.matchAll(matcher)) {
+    const start = match.index ?? 0;
+    ranges.push({ start, end: start + match[0].length });
+  }
+  return ranges;
+}
+
+function isInsideTextRange(index: number, ranges: readonly TextRange[]): boolean {
+  return ranges.some((range) => index >= range.start && index < range.end);
+}
+
+function requireSafeHttpsHref(href: string): string {
+  if (/[\s<>()[\]\\]/.test(href)) refuse();
+  let parsed: {
+    readonly protocol: string;
+    readonly hostname: string;
+    readonly username: string;
+    readonly password: string;
+  };
+  try {
+    parsed = new globalThis.URL(href);
+  } catch {
+    refuse();
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname.length === 0) refuse();
+  if (parsed.username.length > 0 || parsed.password.length > 0) refuse();
+  return href;
+}
+
+/**
+ * Parse every non-image Markdown link outside code spans.  The same strict
+ * parser is used by the fidelity gate and renderer so malformed, mixed, or
+ * unsafe links cannot be admitted by one path and downgraded by the other.
+ */
+function parseInlineLinks(text: string): readonly InlineLink[] {
+  const codeRanges = codeSpanRanges(text);
+  const links: InlineLink[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "[" || text[start - 1] === "!" || isInsideTextRange(start, codeRanges))
+      continue;
+
+    let nesting = 0;
+    let nestedLabel = false;
+    let sawClosingBracket = false;
+    let labelEnd = -1;
+    for (let index = start + 1; index < text.length; index += 1) {
+      const character = text[index];
+      if (character === "\n") break;
+      if (character === "[") {
+        nesting += 1;
+        nestedLabel = true;
+      } else if (character === "]") {
+        if (nesting > 0) nesting -= 1;
+        else {
+          sawClosingBracket = true;
+          labelEnd = index;
+          break;
+        }
+      }
+    }
+    if (labelEnd < 0) {
+      const remainder = text.slice(start + 1);
+      if (remainder.includes("(") || remainder.includes("]") || /https?:\/\//i.test(remainder))
+        refuse();
+      continue;
+    }
+    if (text[labelEnd + 1] !== "(") {
+      if (sawClosingBracket && /https?:\/\//i.test(text.slice(labelEnd + 1))) refuse();
+      continue;
+    }
+    if (nestedLabel || labelEnd === start + 1) refuse();
+
+    const openEnd = labelEnd + 2;
+    const close = text.indexOf(")", openEnd);
+    if (close < 0) refuse();
+    const label = text.slice(start + 1, labelEnd);
+    const href = requireSafeHttpsHref(text.slice(openEnd, close));
+    links.push({ start, end: close + 1, label, href });
+    start = close;
+  }
+  return links;
+}
+
 /**
  * A placeholder for a lifted-out code span.  Escape has already run, so the
  * text cannot contain markup; the private-use sentinel is not whitespace and
  * not an asterisk, so emphasis may wrap a span without matching inside it.
  */
 const CODE_SPAN_SENTINEL = "\uE000";
-const CODE_SPAN_RESTORE = new RegExp(`${CODE_SPAN_SENTINEL}(\\d+)${CODE_SPAN_SENTINEL}`, "g");
+// U+0001 is forbidden by requireBoundedMarkdown, so generated placeholders
+// cannot collide with user text the production codec accepts.
+const INLINE_TOKEN_SENTINEL = "\u0001";
+const INLINE_TOKEN_RESTORE = new RegExp(
+  `${INLINE_TOKEN_SENTINEL}([A-Z])([0-9]+)${INLINE_TOKEN_SENTINEL}`,
+  "g",
+);
 
 /**
  * Human-readable names for the Markdown constructs the deterministic
@@ -255,7 +365,6 @@ const CODE_SPAN_RESTORE = new RegExp(`${CODE_SPAN_SENTINEL}(\\d+)${CODE_SPAN_SEN
  */
 export const UNSUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlyArray<string> = Object.freeze([
   "attachment-reference",
-  "link-or-image",
   "inline-html",
   "nookbridge-directive",
 ]);
@@ -392,6 +501,23 @@ const LOOSE_BULLET_LINE = /^\s*[-*] +/;
 
 /** A flat, un-indented unordered-list item line (the shape the renderer can express). */
 const FLAT_BULLET_LINE = /^[-*] +/;
+const LOOSE_ORDERED_LINE = /^\s*\d+\. +/;
+const FLAT_ORDERED_LINE = /^\d+\. +/;
+
+function isNestedOrderedListBlock(lines: readonly string[]): boolean {
+  const nested =
+    lines.length > 1 &&
+    lines.every((line) => LOOSE_ORDERED_LINE.test(line)) &&
+    !lines.every((line) => FLAT_ORDERED_LINE.test(line));
+  if (nested) parseOrderedListLines(lines);
+  return nested;
+}
+
+function isOrderedListBlock(lines: readonly string[]): boolean {
+  const flat = lines.length > 0 && lines.every((line) => FLAT_ORDERED_LINE.test(line));
+  if (flat) parseOrderedListLines(lines);
+  return flat;
+}
 
 /**
  * A block that looks like an unordered list — every line is bullet-shaped
@@ -472,6 +598,9 @@ function classifyBlockConstruct(lines: readonly string[]): MarkdownConstruct {
     return level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3";
   }
   if (lines.every((line) => TASK_LIST_LINE.test(line))) return "task-list";
+  if (isNestedOrderedListBlock(lines)) return "nested-ordered-list";
+  if (isOrderedListBlock(lines)) return "ordered-list";
+  if (lines.some((line) => /^\s*\d+\. /.test(line))) return "malformed-ordered-list";
   if (isNestedUnorderedListBlock(lines)) return "nested-unordered-list";
   if (lines.every((line) => FLAT_BULLET_LINE.test(line))) return "unordered-list";
   return "paragraph";
@@ -511,10 +640,10 @@ export function detectMarkdownConstructs(
     for (const line of lines) {
       if (/!\[[^\]\n]*\]\([^)\n]*\)/.test(line)) observed.add("attachment-reference");
       if (/!\[\[[^\]\n]*\]\]/.test(line)) observed.add("attachment-reference");
-      if (/\[[^\]\n]+\]\([^)\n]+\)/.test(line)) observed.add("link-or-image");
       if (BOLD_MARK_DETECT.test(line)) observed.add("inline-bold");
       if (ITALIC_MARK_DETECT.test(line)) observed.add("inline-italic");
       if (CODE_MARK_DETECT.test(line)) observed.add("inline-code");
+      if (parseInlineLinks(line).length > 0) observed.add("inline-link");
       if (/<[a-zA-Z][^>\n]*>/.test(line)) observed.add("inline-html");
     }
   }
@@ -753,7 +882,7 @@ function taskListIndentUnit(lines: readonly string[]): number {
     .filter((indent) => indent > 0);
   const smallest = Math.min(...positiveIndents);
   // Two spaces is the compact Markdown form; four columns also covers both
-  // literal four-space indentation and one leading tab.  Other partial runs
+  // literal four-space indentation and one leading tab. Other partial runs
   // remain deliberately ambiguous and therefore stay at the top level.
   return smallest === 2 ? 2 : 4;
 }
@@ -821,17 +950,37 @@ function parseTaskListLines(lines: readonly string[]): readonly TaskListItem[] {
  * silently deleted or swapped for an unrelated code span — a private,
  * user-supplied character corrupting content it never targeted.
  */
+function renderInlineMarks(source: string, codeSpans: readonly string[]): string {
+  const escaped = escapeHtml(source).split(CODE_SPAN_SENTINEL).join("&#xE000;");
+  const marked = escaped
+    .replace(BOLD_MARK_RENDER, "<strong>$1</strong>")
+    .replace(ITALIC_MARK_RENDER, "$1<em>$2</em>");
+  return marked.replace(INLINE_TOKEN_RESTORE, (match, kind: string, index: string) =>
+    kind === "C" ? (codeSpans[Number(index)] ?? "") : match,
+  );
+}
+
 function renderInline(text: string): string {
   const codeSpans: string[] = [];
-  const escaped = escapeHtml(text).split(CODE_SPAN_SENTINEL).join("&#xE000;");
-  const masked = escaped.replace(CODE_MARK_RENDER, (_match, inner: string) => {
-    codeSpans.push(`<code>${inner}</code>`);
-    return `${CODE_SPAN_SENTINEL}${codeSpans.length - 1}${CODE_SPAN_SENTINEL}`;
+  let source = text.replace(CODE_MARK_RENDER, (match) => {
+    codeSpans.push(`<code>${escapeHtml(match.slice(1, -1))}</code>`);
+    return `${INLINE_TOKEN_SENTINEL}C${codeSpans.length - 1}${INLINE_TOKEN_SENTINEL}`;
   });
-  return masked
-    .replace(BOLD_MARK_RENDER, "<strong>$1</strong>")
-    .replace(ITALIC_MARK_RENDER, "$1<em>$2</em>")
-    .replace(CODE_SPAN_RESTORE, (_match, index: string) => codeSpans[Number(index)] ?? "");
+  const links = parseInlineLinks(source).map(
+    ({ label, href }) => `<a href="${escapeHtml(href)}">${renderInlineMarks(label, codeSpans)}</a>`,
+  );
+  const linkMatches = parseInlineLinks(source);
+  for (let index = linkMatches.length - 1; index >= 0; index -= 1) {
+    const match = linkMatches[index] as InlineLink;
+    source =
+      source.slice(0, match.start) +
+      `${INLINE_TOKEN_SENTINEL}L${index}${INLINE_TOKEN_SENTINEL}` +
+      source.slice(match.end);
+  }
+  return renderInlineMarks(source, codeSpans).replace(
+    INLINE_TOKEN_RESTORE,
+    (_match, kind: string, index: string) => (kind === "L" ? (links[Number(index)] ?? "") : _match),
+  );
 }
 
 type BulletListItem = {
@@ -1054,6 +1203,127 @@ function renderTableBlock(rows: readonly (readonly string[])[]): string {
  * must agree on what a block is, or the fidelity gate's promise (a
  * supported construct always renders as that construct) breaks again.
  */
+type OrderedListItem = {
+  readonly text: string;
+  readonly children: OrderedList[];
+};
+
+type OrderedList = {
+  readonly start: number;
+  readonly items: OrderedListItem[];
+};
+
+function orderedListIndentUnit(lines: readonly string[]): number {
+  const positiveIndents = lines
+    .map((line) => taskListIndentColumns(line))
+    .filter((indent) => indent > 0);
+  const smallest = Math.min(...positiveIndents);
+  // Ordered Markdown commonly uses three spaces; retain the existing two-
+  // space and four-column (including tab) forms. Unsupported partial widths
+  // default to four so task/bullet indentation policy is unchanged.
+  return smallest === 2 || smallest === 3 ? smallest : 4;
+}
+
+function validateOrderedListIndentation(lines: readonly string[]): number {
+  const indentUnit = orderedListIndentUnit(lines);
+  let previousLevel = 0;
+  for (const [index, line] of lines.entries()) {
+    const columns = taskListIndentColumns(line);
+    const level = columns === 0 ? 0 : columns / indentUnit;
+    orderedListMarkerNumber(line);
+    if (columns === 0) {
+      previousLevel = 0;
+      continue;
+    }
+    if (index === 0 || columns % indentUnit !== 0) refuse();
+    // A child may deepen the tree by one level only.  Otherwise the parser
+    // would silently attach a skipped-depth item to the wrong parent.
+    if (level > previousLevel + 1) refuse();
+    previousLevel = level;
+  }
+  return indentUnit;
+}
+
+function orderedListMarkerNumber(line: string): number {
+  const marker = /^\s*(\d+)\. +/.exec(line);
+  if (marker === null) refuse();
+  const number = Number(marker[1]);
+  if (!Number.isSafeInteger(number)) refuse();
+  return number;
+}
+
+function parseOrderedListLines(lines: readonly string[]): OrderedList {
+  const indentUnit = validateOrderedListIndentation(lines);
+  const root: OrderedList = { start: orderedListMarkerNumber(lines[0] as string), items: [] };
+  const stack: {
+    readonly indent: number;
+    readonly list: OrderedList;
+    readonly owner?: OrderedListItem;
+  }[] = [{ indent: 0, list: root }];
+  for (const line of lines) {
+    const indent = taskListIndent(line, indentUnit);
+    const match = LOOSE_ORDERED_LINE.exec(line);
+    if (match === null) refuse();
+    const marker = orderedListMarkerNumber(line);
+    let returnedFromDeeperList = false;
+    while (stack.length > 1) {
+      const top = stack[stack.length - 1] as { indent: number };
+      if (top.indent < indent) break;
+      stack.pop();
+      if (top.indent > indent) returnedFromDeeperList = true;
+    }
+    let current = stack[stack.length - 1] as {
+      indent: number;
+      list: OrderedList;
+      owner?: OrderedListItem;
+    };
+    if (indent > current.indent) {
+      if (indent !== current.indent + 1) refuse();
+      const parent = current.list.items.at(-1);
+      if (parent === undefined) refuse();
+      const child = parent.children.at(-1) ?? { start: marker, items: [] };
+      if (parent.children.length === 0) parent.children.push(child);
+      current = { indent, list: child, owner: parent };
+      stack.push(current);
+    }
+    if (stack.length > MAX_BULLET_LIST_DEPTH) refuse();
+    let list = stack[stack.length - 1] as {
+      indent: number;
+      list: OrderedList;
+      owner?: OrderedListItem;
+    };
+    if (list.indent !== indent) refuse();
+    let expectedMarker = list.list.start + list.list.items.length;
+    if (marker !== expectedMarker) {
+      if (!returnedFromDeeperList || list.list === root || list.owner === undefined) refuse();
+      const child = { start: marker, items: [] };
+      list.owner.children.push(child);
+      stack.pop();
+      list = { indent, list: child, owner: list.owner };
+      stack.push(list);
+      expectedMarker = marker;
+    }
+    if (!Number.isSafeInteger(expectedMarker) || marker !== expectedMarker) refuse();
+    list.list.items.push({ text: line.slice(match[0].length), children: [] });
+  }
+  return root;
+}
+
+function renderOrderedList(list: OrderedList, depth: number): string {
+  if (depth > MAX_BULLET_LIST_DEPTH) refuse();
+  const start = list.start === 1 ? "" : ` start="${list.start}"`;
+  return `<ol${start}>${list.items
+    .map(
+      (item) =>
+        `<li><p>${renderInline(item.text)}</p>${item.children.map((child) => renderOrderedList(child, depth + 1)).join("")}</li>`,
+    )
+    .join("")}</ol>`;
+}
+
+function renderOrderedListBlock(lines: readonly string[]): string {
+  return renderOrderedList(parseOrderedListLines(lines), 1);
+}
+
 function renderBlock(block: string, listKind: NotesnookListKind): string {
   const lines = block.split("\n");
   const first = lines[0] ?? "";
@@ -1094,6 +1364,11 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   if (isTaskList) {
     return renderTaskListBlock(lines, listKind);
   }
+
+  if (isNestedOrderedListBlock(lines) || isOrderedListBlock(lines)) {
+    return renderOrderedListBlock(lines);
+  }
+  if (lines.some((line) => /^\s*\d+\. /.test(line))) refuse();
 
   if (isNestedUnorderedListBlock(lines)) {
     return renderNestedBulletListBlock(lines);

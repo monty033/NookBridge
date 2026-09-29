@@ -360,17 +360,23 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
           break;
         case "bullet-list":
         case "ordered-list": {
-          keys(block, ["type", "items"]);
+          keys(
+            block,
+            block.type === "ordered-list" ? ["type", "start", "items"] : ["type", "items"],
+          );
           if (!block.items.length) fail("unsupported_node");
           const list = (current: typeof block, indent: number, level: number): string => {
             if (level > MAX_NOTE_DOCUMENT_DEPTH) fail("depth_exceeded");
+            const start = current.type === "ordered-list" ? (current.start ?? 1) : 1;
             return current.items
               .map((item, i) => {
                 keys(item, ["inlines", "blocks"]);
                 const contents = renderInlines(item.inlines);
                 if (!contents) fail("unsupported_node");
+                const marker = start + i;
+                if (!Number.isSafeInteger(marker)) fail("invalid_shape");
                 const prefix = " ".repeat(indent);
-                const marker = current.type === "bullet-list" ? "- " : `${i + 1}. `;
+                const markerText = current.type === "bullet-list" ? "- " : `${marker}. `;
                 const nested = item.blocks ?? [];
                 if (
                   nested.some(
@@ -380,7 +386,7 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
                   fail("unsupported_node");
                 return (
                   prefix +
-                  marker +
+                  markerText +
                   contents +
                   (nested.length
                     ? "\n" +
@@ -591,6 +597,8 @@ class Parser {
         if (first !== indent) fail();
         const ordered = /^\s*\d+\. /.test(this.lines[this.pos]!);
         const items: { inlines: NoteInline[]; blocks?: NoteBlock[] }[] = [];
+        let start: number | undefined;
+        let returnedFromDeeperList = false;
         while (this.pos < this.lines.length) {
           const current = this.lines[this.pos]!;
           const spaces = /^( *)/.exec(current)![1]!.length;
@@ -602,15 +610,40 @@ class Parser {
             const nested = list(indent + 2, depth + 1);
             const last = items.at(-1)!;
             (last.blocks ??= []).push(nested);
+            returnedFromDeeperList = true;
             continue;
           }
-          const match = (ordered ? /^( *)\d+\. (.*)$/ : /^( *)- (.*)$/).exec(current);
+          const match = (ordered ? /^( *)(\d+)\. (.*)$/ : /^( *)- (.*)$/).exec(current);
           if (!match) break;
           if (items.length >= MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
-          items.push({ inlines: parseInlines(match[2]!) });
+          const text = ordered ? match[3]! : match[2]!;
+          if (ordered && items.length === 0) {
+            const marker = Number(match[2]);
+            if (!Number.isSafeInteger(marker)) fail("invalid_shape");
+            start = marker;
+          } else if (ordered) {
+            const marker = Number(match[2]);
+            const expected = (start as number) + items.length;
+            if (
+              !Number.isSafeInteger(marker) ||
+              !Number.isSafeInteger(expected) ||
+              marker !== expected
+            ) {
+              if (returnedFromDeeperList && indent > 0) break;
+              fail("invalid_shape");
+            }
+          }
+          items.push({ inlines: parseInlines(text) });
           this.pos++;
+          returnedFromDeeperList = false;
         }
-        return { type: ordered ? "ordered-list" : "bullet-list", items };
+        return ordered
+          ? {
+              type: "ordered-list",
+              ...(start === undefined || start === 1 ? {} : { start }),
+              items,
+            }
+          : { type: "bullet-list", items };
       };
       const indent = /^( *)/.exec(line)![1]!.length;
       if (indent !== 0) fail();

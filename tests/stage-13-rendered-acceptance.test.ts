@@ -224,13 +224,26 @@ describe("T13 rendered acceptance — the tree a created note renders from", () 
     expect(data).not.toContain("- [x]");
     expect(data).not.toContain("- plain item");
   });
+  it("renders a safe HTTPS link as a native anchor and stores no Markdown delimiters", async () => {
+    const captured: CapturedCreate[] = [];
+    const adapter = adapterOver(captured);
+    await adapter.createNote({
+      title: "Link note",
+      content: "See [the docs](https://example.com/docs) for details.\n",
+    });
+    const data = captured[0]?.content.data ?? "";
+    expect(data).toContain('<a href="https://example.com/docs">the docs</a>');
+    expect(data).not.toContain("](https://example.com/docs)");
+  });
 });
 
 describe("T13 rendered acceptance — constructs the surface refuses", () => {
   const refused: ReadonlyArray<readonly [string, string]> = [
-    ["a link", "see [the docs](https://example.com/docs)\n"],
     ["an image", "![alt text](https://example.com/x.png)\n"],
     ["inline HTML", "<div>raw</div>\n"],
+    ["mixed unordered parent with ordered child", "- parent\n  1. child\n"],
+    ["mixed ordered parent with unordered child", "1. parent\n  - child\n"],
+    ["mixed ordered-list indentation", "1. root\n  1. child\n   2. mixed\n"],
   ];
 
   for (const [name, content] of refused) {
