@@ -537,7 +537,11 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
       case "unchanged":
         return "nookctl notes: unchanged\n";
       case "created":
-        return "nookctl notes: created\n";
+        return [
+          "nookctl notes: created",
+          "  Stored locally only; a future full sync uploads this with all changes pending at that time.",
+          "",
+        ].join("\n");
       case "operations": {
         if (
           !Array.isArray(result.handles) ||
