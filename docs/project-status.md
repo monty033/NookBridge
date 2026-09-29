@@ -12,13 +12,65 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
-| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; under review as source PR #125. The dedicated lock proof and the read-only sync proof remain open — see below. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Source PR #125 merged to `main` on 2026-09-21. The dedicated lock proof and the read-only sync proof remain separate evidence gates — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
 | macOS and Windows | Explicit non-goals. | No support commitment. |
 
-## Current deployed rollout — 2026-09-16
+## Current pause point — beta Markdown fidelity slice — 2026-09-29
+
+This is the current handoff point. The source work is merged to the dedicated
+Forgejo `beta` branch, but it is **not** a production release or deployment.
+
+### Closed in the beta branch
+
+- PR #165, `feat: add native block Markdown parity`, merged at
+  `b813243a286789d641ea049a8e32b23498902f99`.
+- PR #166, `feat: render nested ordinary lists as native bullet trees`, merged
+  at `9d9e9af413defe3407f445d593b5516532ca3315`.
+- PR #167, `feat: preserve ordered list starts and support HTTPS links`, merged
+  at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+- The current `upstream/beta` tip is `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+- The final source gate passed at **109 test files / 2,787 tests**, with
+  typecheck, lint, formatting, build, and diff checks passing.
+- The final independent review found no blocking security or logic findings.
+
+The merged slice covers native Markdown block parity, nested ordinary lists,
+arbitrary nonnegative ordered-list starts, and strict HTTPS inline links. The
+link path rejects malformed, unsafe, credential-bearing, and unsupported
+destinations before mutation; the ordered-list path refuses boundaries it
+cannot preserve faithfully.
+
+### Explicitly not done
+
+- No promotion from `beta` to `main` has been requested or performed.
+- No new production artifact release, NixOS repin, service restart, or
+  production deployment was performed for PRs #165–#167.
+- No new global Notesnook sync was performed as part of this closeout.
+- The beta source gate does not close the broader production-MVP gates below.
+
+### Resume checklist
+
+When this work resumes, continue in this order:
+
+1. Re-read `upstream/beta` at merge commit `192c9cdf…` and decide whether the
+   beta behavior is ready for a promotion PR to `main`.
+2. If promotion is authorized, build and verify the artifact from the exact
+   beta merge commit, then run the isolated beta canary/read-back checks.
+3. Submit a separate promotion/deployment change only after the source target
+   and artifact evidence are accepted; do not infer deployment permission from
+   the merged beta PR.
+4. Keep the broader production-MVP blockers open until their own evidence exists:
+   production-shaped mutation/recovery acceptance, privileged and outsider
+   boundary checks, clean recovery/resync, long-duration mixed-load stress, and
+   exact shipped-artifact dependency/license evidence.
+
+The detailed roadmap and historical evidence remain in
+[implementation-plan-v1.5.md](implementation-plan-v1.5.md), with the current
+closeout recorded in §13.20.
+
+## Reference deployment rollout — 2026-09-16 (historical snapshot)
 
 The update-compensation rollout is deployed and reconciled on the reference
 NixOS host:
@@ -39,7 +91,12 @@ production-shaped atomicity, recovery, privileged-scan, outsider-boundary,
 long-duration stress, and dependency/license sign-off work is tracked in the
 [implementation plan](implementation-plan-v1.5.md#1314-fresh-astra-re-baseline--current-production-mvp-blockers).
 
-## Operator notes surface — 2026-09-21
+## Historical operator notes surface receipt — 2026-09-21
+
+This section records the review and live evidence from that implementation
+slice. PR #125 subsequently merged to `main`; the current source/release
+position is recorded in the beta pause-point section above. The historical
+“blocks the merge” language below must not be read as the current PR state.
 
 The operator `notes` surface is implemented on the sole daemon and live-validated
 on the reference Debian host:
