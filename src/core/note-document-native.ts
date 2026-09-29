@@ -525,7 +525,8 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
     // A class naming a checklist kind but not exactly one cannot be represented
     // faithfully: the recorded item states would be dropped and the list would
     // read back as ordinary bullets.  Preserve rather than guess.  `start` and
-    // `reversed` are likewise unrepresentable.  Any other class is decoration
+    // `reversed` remains unrepresentable.  Ordered-list `start` is part of the
+    // canonical AST, so validate and preserve it; any other class is decoration
     // and stays tolerated, so a decorated list still round-trips.
     // A checklist class must be an exact whitespace-separated token: a substring
     // match would also preserve an ordinary list whose decorative class merely
@@ -535,7 +536,16 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
     // Presence is what matters, not the value: these are boolean or numeric
     // attributes with no canonical representation, and a valueless `reversed`
     // arrives as an empty string.
-    if (n.attrs.start !== undefined || n.attrs.reversed !== undefined) preserve();
+    if (n.attrs.reversed !== undefined) preserve();
+    let orderedStart: number | undefined;
+    if (n.tag === "ol" && n.attrs.start !== undefined) {
+      attrs(n, { start: /^-?[0-9]+$/ });
+      orderedStart = Number(n.attrs.start);
+      if (!Number.isSafeInteger(orderedStart) || orderedStart < 0) preserve();
+      if (orderedStart === 1) orderedStart = undefined;
+    } else if (n.attrs.start !== undefined) {
+      preserve();
+    }
     const items = elements(n.children).map((li) => {
       if (li.tag !== "li") preserve();
       attrs(li);
@@ -548,7 +558,13 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
       // Legacy writer emits bare inline list labels.
       return { inlines: inline(li.children) };
     });
-    return { type: n.tag === "ul" ? "bullet-list" : "ordered-list", items };
+    return n.tag === "ul"
+      ? { type: "bullet-list", items }
+      : {
+          type: "ordered-list",
+          ...(orderedStart === undefined ? {} : { start: orderedStart }),
+          items,
+        };
   }
   if (n.tag === "blockquote") {
     attrs(n);
@@ -685,7 +701,11 @@ function renderBlocks(
         case "bullet-list":
         case "ordered-list": {
           const tag = b.type === "bullet-list" ? "ul" : "ol";
-          return `<${tag}>${b.items.map((item) => `<li><p>${renderInline(item.inlines)}</p>${render(item.blocks ?? [])}</li>`).join("")}</${tag}>`;
+          const start =
+            b.type === "ordered-list" && b.start !== undefined && b.start !== 1
+              ? ` start="${b.start}"`
+              : "";
+          return `<${tag}${start}>${b.items.map((item) => `<li><p>${renderInline(item.inlines)}</p>${render(item.blocks ?? [])}</li>`).join("")}</${tag}>`;
         }
         case "task-list":
           return renderTasks(b.items, b.kind ?? kind);
@@ -739,7 +759,7 @@ function closedDocument(doc: NoteDocumentV1): void {
         paragraph: ["type", "inlines"],
         heading: ["type", "level", "inlines"],
         "bullet-list": ["type", "items"],
-        "ordered-list": ["type", "items"],
+        "ordered-list": ["type", "start", "items"],
         "task-list": ["type", "kind", "items"],
         blockquote: ["type", "blocks"],
         "code-block": ["type", "text", "language"],
