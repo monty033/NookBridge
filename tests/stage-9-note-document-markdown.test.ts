@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { NoteDocumentError, type NoteDocumentV1 } from "../src/core/note-document.js";
+import {
+  NoteDocumentError,
+  type NoteBlock,
+  type NoteDocumentV1,
+} from "../src/core/note-document.js";
 import {
   parseNoteDocumentMarkdown as parse,
   serializeNoteDocumentMarkdown as serialize,
@@ -50,6 +54,17 @@ describe("T02 deterministic Markdown interchange", () => {
     ':::nookbridge table\n{"columns":["Owner","Status"],"rows":[["二","a|b"],["x","line\\nnext"]]}\n:::',
     ":::nookbridge callout warning\nCheck **this**.\n\n:::nookbridge callout info\nNested.\n:::\n:::",
     "\\-\\-\\-\nnookbridge-format: 1\n\\-\\-\\-",
+    "---",
+    "----",
+    "before\n\n---\n\nafter",
+    "> ---",
+    ":::nookbridge callout info\n---\n:::",
+    ':::nookbridge table\n{"columns":["a"],"rows":[["1"]]}\n:::\n\n---\n\n:::nookbridge table\n{"columns":["b"],"rows":[["2"]]}\n:::',
+    ':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::',
+    ':::nookbridge image 1\n{"url":"https://example.test/a.png","alt":"A diagram"}\n:::',
+    ':::nookbridge attachment 1\n{"url":"https://example.test/report.pdf"}\n:::',
+    ':::nookbridge attachment 1\n{"url":"https://example.test/report.pdf","name":"report.pdf","mime":"application/pdf"}\n:::',
+    ':::nookbridge embed 1\n{"url":"https://example.test/video"}\n:::',
   ])("round-trips supported bytes: %s", (body) => {
     const input = md(body);
     const doc = parse(input);
@@ -91,6 +106,25 @@ describe("T02 deterministic Markdown interchange", () => {
     md(":::nookbridge table\n{bad CANARY}\n:::"),
     md(':::nookbridge table\n{"columns":[],"columns":[],"rows":[]}\n:::'),
     md(':::nookbridge table\n{"columns":[],"rows":[],"__proto__":{}}\n:::'),
+    md("---\ntext"),
+    md('<img src="https://example.test/a.png" alt="CANARY">'),
+    md(":::nookbridge image 1\n{bad CANARY}\n:::"),
+    md(':::nookbridge image 2\n{"url":"https://example.test/a.png"}\n:::'),
+    md(
+      ':::nookbridge image 1\n{"url":"https://example.test/a.png","url":"https://example.test/b.png"}\n:::',
+    ),
+    md(':::nookbridge image 1\n{"url":"https://example.test/a.png","junk":"CANARY"}\n:::'),
+    md(':::nookbridge image 1\n{"url":"https://example.test/a.png","__proto__":{}}\n:::'),
+    md(':::nookbridge image 1\n{"url":"javascript:CANARY"}\n:::'),
+    md(':::nookbridge image 1\n{"alt":"CANARY"}\n:::'),
+    md(":::nookbridge image 1\n{}\n:::"),
+    md(':::nookbridge image 1\n{"url":"https://example.test/a.png"}'),
+    md(":::nookbridge image 1\n"),
+    md(':::nookbridge attachment 1\n{"url":"file:///etc/CANARY"}\n:::'),
+    md(':::nookbridge attachment 1\n{"url":"https://example.test/report.pdf","sizeBytes":12}\n:::'),
+    md(':::nookbridge embed 1\n{"url":"https://example.test/video","provider":"CANARY"}\n:::'),
+    md(':::nookbridge embed 1\n{"url":"javascript:alert(document.CANARY)"}\n:::'),
+    md(":::nookbridge embed 1\n{}\n:::"),
     md("- [X] upper"),
     md("- [ ] a\n   - [x] bad"),
     md("- [ ] a\n    - [x] jump"),
@@ -271,6 +305,165 @@ describe("T02 semantic and hostile-structure regressions", () => {
   });
 });
 
+describe("T02 horizontal-rule / image / attachment / embed directives (Task 1.2)", () => {
+  it("maps a standalone --- line to a bare horizontal-rule block", () => {
+    expect(parse(md("---")).blocks).toEqual([{ type: "horizontal-rule" }]);
+  });
+  it("maps the versioned image/attachment/embed directives structurally", () => {
+    expect(
+      parse(md(':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::')).blocks,
+    ).toEqual([{ type: "image", url: "https://example.test/a.png" }]);
+    expect(
+      parse(
+        md(':::nookbridge attachment 1\n{"url":"https://example.test/r.pdf","name":"r.pdf"}\n:::'),
+      ).blocks,
+    ).toEqual([{ type: "attachment", url: "https://example.test/r.pdf", name: "r.pdf" }]);
+    expect(
+      parse(md(':::nookbridge embed 1\n{"url":"https://example.test/v"}\n:::')).blocks,
+    ).toEqual([{ type: "embed", url: "https://example.test/v" }]);
+  });
+  it("disambiguates a horizontal rule from adjacent table-directive block boundaries", () => {
+    const input = md(
+      ':::nookbridge table\n{"columns":["a"],"rows":[["1"]]}\n:::\n\n---\n\n:::nookbridge table\n{"columns":["b"],"rows":[["2"]]}\n:::',
+    );
+    const doc = parse(input);
+    expect(doc.blocks.map((b) => b.type)).toEqual(["table", "horizontal-rule", "table"]);
+    expect(serialize(doc)).toBe(input);
+  });
+  it("does not treat a longer dash run as an ambiguous horizontal rule", () => {
+    expect(parse(md("----")).blocks).toEqual([{ type: "paragraph", inlines: [{ text: "----" }] }]);
+  });
+  it("still distinguishes an escaped literal '---' paragraph line from the real directive", () => {
+    const literal = parse(md("\\-\\-\\-"));
+    expect(literal.blocks).toEqual([{ type: "paragraph", inlines: [{ text: "---" }] }]);
+    const rule = parse(md("---"));
+    expect(rule.blocks).toEqual([{ type: "horizontal-rule" }]);
+    expect(serialize(literal)).not.toBe(serialize(rule));
+  });
+  it("rejects an unsupported directive version categorically", () => {
+    rejects(
+      () => parse(md(':::nookbridge image 2\n{"url":"https://example.test/a.png"}\n:::')),
+      "invalid_shape",
+    );
+  });
+  it("rejects a missing required url field categorically", () => {
+    // The directive JSON simply omits `url` (never an explicit `"url":null`
+    // placeholder), so the T01 validator's own required-field check fires:
+    // `invalid_shape`, the same categorical code every other "required key
+    // absent" AST shape uses (see `tests/stage-9-note-document.test.ts`).
+    rejects(() => parse(md(':::nookbridge image 1\n{"alt":"x"}\n:::')), "invalid_shape");
+    rejects(() => parse(md(":::nookbridge embed 1\n{}\n:::")), "invalid_shape");
+  });
+  it("rejects a hostile URL scheme inside every reference directive", () => {
+    rejects(
+      () => parse(md(':::nookbridge image 1\n{"url":"javascript:CANARY"}\n:::')),
+      "invalid_reference_url",
+    );
+    rejects(
+      () => parse(md(':::nookbridge attachment 1\n{"url":"file:///etc/CANARY"}\n:::')),
+      "invalid_reference_url",
+    );
+    rejects(
+      () => parse(md(':::nookbridge embed 1\n{"url":"javascript:CANARY"}\n:::')),
+      "invalid_reference_url",
+    );
+  });
+  it("rejects control bytes and lone surrogates in reference labels", () => {
+    rejects(() =>
+      parse(
+        md(
+          ':::nookbridge image 1\n{"url":"https://example.test/a.png","alt":"bad\\u0000label"}\n:::',
+        ),
+      ),
+    );
+    rejects(() =>
+      parse(
+        md(
+          ':::nookbridge attachment 1\n{"url":"https://example.test/a.pdf","name":"bad\\u007flabel"}\n:::',
+        ),
+      ),
+    );
+    rejects(() =>
+      parse(
+        md(
+          ':::nookbridge attachment 1\n{"url":"https://example.test/a.pdf","mime":"bad\\ud800label"}\n:::',
+        ),
+      ),
+    );
+  });
+  it("rejects raw HTML image/embed markup instead of accepting it as a fallback", () => {
+    rejects(() => parse(md('<img src="https://example.test/a.png">')));
+    rejects(() => parse(md('<iframe src="https://example.test/v"></iframe>')));
+  });
+  it("rejects an unknown attribute smuggled through the reference directive JSON", () => {
+    rejects(() =>
+      parse(md(':::nookbridge embed 1\n{"url":"https://example.test/v","provider":"CANARY"}\n:::')),
+    );
+    rejects(() =>
+      parse(
+        md(':::nookbridge attachment 1\n{"url":"https://example.test/r.pdf","sizeBytes":12}\n:::'),
+      ),
+    );
+  });
+  it("still refuses an explicit math directive/discriminator (unimplemented by design)", () => {
+    rejects(() => parse(md(":::nookbridge math 1\ntex\n:::")));
+    rejects(
+      () =>
+        serialize({
+          version: 1,
+          blocks: [{ type: "math", tex: "E=mc^2" } as unknown as NoteBlock],
+        } as unknown as NoteDocumentV1),
+      "unsupported_node",
+    );
+  });
+});
+
+describe("ordinary-list continuation blocks", () => {
+  it("round-trips nested bullet and ordered blocks without changing semantics", () => {
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: [
+        {
+          type: "bullet-list",
+          items: [
+            {
+              inlines: [{ text: "parent" }],
+              blocks: [
+                { type: "bullet-list", items: [{ inlines: [{ text: "child" }] }] },
+                { type: "ordered-list", items: [{ inlines: [{ text: "step" }] }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const markdown = serialize(document);
+    expect(parse(markdown)).toEqual(document);
+    expect(serialize(parse(markdown))).toBe(markdown);
+  });
+
+  it("rejects adjacent nested lists of the same kind that Markdown would merge", () => {
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: [
+        {
+          type: "bullet-list",
+          items: [
+            {
+              inlines: [{ text: "parent" }],
+              blocks: [
+                { type: "bullet-list", items: [{ inlines: [{ text: "first" }] }] },
+                { type: "bullet-list", items: [{ inlines: [{ text: "second" }] }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    rejects(() => serialize(document), "invalid_shape");
+  });
+});
+
 describe("T02 standalone inline forms", () => {
   it.each([
     "~~strike~~",
@@ -282,5 +475,87 @@ describe("T02 standalone inline forms", () => {
     "[link](mailto:user@example.test)",
   ])("round-trips %s", (body) => {
     expect(serialize(parse(md(body)))).toBe(md(body));
+  });
+});
+
+describe("T02 empty structural-block representability", () => {
+  it.each([
+    {
+      label: "empty paragraph",
+      document: { version: 1, blocks: [{ type: "paragraph", inlines: [] }] },
+    },
+    {
+      label: "empty heading",
+      document: { version: 1, blocks: [{ type: "heading", level: 1, inlines: [] }] },
+    },
+    {
+      label: "empty bullet list",
+      document: { version: 1, blocks: [{ type: "bullet-list", items: [] }] },
+    },
+    {
+      label: "empty ordered list",
+      document: { version: 1, blocks: [{ type: "ordered-list", items: [] }] },
+    },
+    {
+      label: "empty kindless task list",
+      document: { version: 1, blocks: [{ type: "task-list", items: [] }] },
+    },
+    {
+      label: "empty explicit task list",
+      document: { version: 1, blocks: [{ type: "task-list", kind: "task-list", items: [] }] },
+    },
+    {
+      label: "empty blockquote",
+      document: { version: 1, blocks: [{ type: "blockquote", blocks: [] }] },
+    },
+    {
+      label: "empty callout",
+      document: { version: 1, blocks: [{ type: "callout", variant: "info", blocks: [] }] },
+    },
+  ])("categorically refuses $label instead of emitting ambiguous syntax", ({ document }) => {
+    rejects(() => serialize(document as NoteDocumentV1), "unsupported_node");
+  });
+
+  it.each([
+    {
+      label: "blockquote",
+      document: {
+        version: 1,
+        blocks: [
+          { type: "blockquote", blocks: [{ type: "paragraph", inlines: [{ text: "quoted" }] }] },
+        ],
+      },
+    },
+    {
+      label: "callout",
+      document: {
+        version: 1,
+        blocks: [
+          {
+            type: "callout",
+            variant: "info",
+            blocks: [{ type: "paragraph", inlines: [{ text: "note" }] }],
+          },
+        ],
+      },
+    },
+    {
+      label: "explicit task-list kind",
+      document: {
+        version: 1,
+        blocks: [
+          {
+            type: "task-list",
+            kind: "task-list",
+            items: [{ checked: false, inlines: [{ text: "todo" }], children: [] }],
+          },
+        ],
+      },
+    },
+  ])("round-trips non-empty $label with exact AST semantics", ({ document }) => {
+    const ast = document as NoteDocumentV1;
+    const markdown = serialize(ast);
+    expect(parse(markdown)).toEqual(ast);
+    expect(serialize(parse(markdown))).toBe(markdown);
   });
 });

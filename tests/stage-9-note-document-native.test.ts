@@ -8,6 +8,7 @@ import {
   parseNoteDocumentMarkdown,
   serializeNoteDocumentMarkdown,
 } from "../src/core/note-document-markdown.js";
+import { DETERMINISTIC_MARKDOWN_CODEC } from "../src/core/notesnook-write-codec.js";
 import type { NoteDocumentV1 } from "../src/core/note-document.js";
 
 const binding = { noteId: "fixture-note", revision: "fixture-revision" };
@@ -41,6 +42,81 @@ describe("T03 native HTML adapter", () => {
       serializeNoteDocumentNative({ version: 1, blocks: [] }, { writer: "json" }),
     ).toThrow();
   });
+  it("reads the legacy writer's horizontal rule as an opaque, whole-subtree reference", () => {
+    // Finding 2: `NoteBlock`/`renderBlocks` (note-document-markdown.ts,
+    // note-document.ts) have no native ENCODE support for a bare
+    // `horizontal-rule` AST node yet (that requires pinned-runtime proof
+    // this candidate does not have).  Promoting native DECODE to produce
+    // `{ type: "horizontal-rule" }` therefore created an asymmetric,
+    // one-way capability: any note containing an HR could be read but
+    // never re-written, even to edit unrelated text elsewhere.  Falling
+    // through to the opaque whole-subtree reference (the SAME safe
+    // fallback every other syntactically-valid-but-unmodelled native
+    // shape gets) keeps the HR itself unmodified and round-trippable, and
+    // lets everything ELSE in the note stay editable.
+    const stored = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("above\n\n---\n\nbelow");
+    const decoded = decodeNoteDocumentNative(stored, binding);
+    expect(decoded.document.blocks.map((block) => block.type)).toEqual([
+      "paragraph",
+      "opaque",
+      "paragraph",
+    ]);
+    expect((decoded.document.blocks[1] as { nodeType: string }).nodeType).toBe("hr");
+  });
+  it("edits text next to a horizontal rule without disturbing the rule", () => {
+    // Finding 2's concrete repro: decode a document containing an HR, edit
+    // ONLY the neighbouring paragraph text, and re-serialize.  Before the
+    // fix this always threw (any document containing an HR could never be
+    // written back, even unchanged) because native decode promoted the HR
+    // into a bare `{ type: "horizontal-rule" }` node that
+    // `serializeNoteDocumentNative` categorically refuses to encode.
+    const HR_STYLE =
+      "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+    const original = `<p>before</p><hr style="${HR_STYLE}" /><p>after</p>`;
+    const decoded = decodeNoteDocumentNative(wrap(original), binding);
+    const edited: NoteDocumentV1 = {
+      ...decoded.document,
+      blocks: decoded.document.blocks.map((block) =>
+        block.type === "paragraph" && block.inlines[0]?.text === "before"
+          ? { type: "paragraph" as const, inlines: [{ text: "changed" }] }
+          : block,
+      ),
+    };
+    const stored = serializeNoteDocumentNative(edited, {
+      context: decoded.context,
+      binding,
+    });
+    expect(stored.data).toContain("<p>changed</p>");
+    expect(stored.data).toContain(`<hr style="${HR_STYLE}" />`);
+    expect(stored.data).toContain("<p>after</p>");
+  });
+  it("reads an empty native paragraph as an opaque reference instead of an unrenderable AST node", () => {
+    // Finding 3: `note-document-markdown.ts` refuses to serialize a
+    // paragraph/heading with zero inlines (`unsupported_node`) because an
+    // empty line has no unambiguous Markdown block form in this grammar.
+    // Native decode used to produce exactly that shape for `<p></p>`, so an
+    // operator's preimage/edit for any note containing one always failed —
+    // even though the empty paragraph itself was never touched.  Decoding
+    // it as an opaque whole-subtree reference keeps it losslessly
+    // round-trippable and lets the rest of the note stay editable.
+    const decoded = decodeNoteDocumentNative(wrap("<p></p><p>hi</p>"), binding);
+    expect(decoded.document.blocks.map((block) => block.type)).toEqual(["opaque", "paragraph"]);
+    expect((decoded.document.blocks[0] as { nodeType: string }).nodeType).toBe("p");
+  });
+  it("edits text next to an empty paragraph without disturbing it", () => {
+    const decoded = decodeNoteDocumentNative(wrap("<p></p><p>before</p>"), binding);
+    const edited: NoteDocumentV1 = {
+      ...decoded.document,
+      blocks: decoded.document.blocks.map((block) =>
+        block.type === "paragraph"
+          ? { type: "paragraph" as const, inlines: [{ text: "after" }] }
+          : block,
+      ),
+    };
+    const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+    expect(stored.data).toContain("<p></p>");
+    expect(stored.data).toContain("<p>after</p>");
+  });
   it("preserves headings, marks, code, ordinary lists, table and callout directives", () => {
     const html =
       '<h1>Title</h1><h2>Two</h2><h3>Three</h3><p><strong>bold</strong><em>italic</em><u>under</u><s>strike</s><code>code</code><a href="https://example.com">link</a><br>tail</p><ul><li><p>bullet</p></li></ul><ol><li><p>ordered</p></li></ol><pre><code class="language-ts">a &lt; b\n</code></pre><table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>x</td><td>y</td></tr></tbody></table><div data-type="callout" data-variant="warning"><p>Careful</p></div>';
@@ -61,6 +137,26 @@ describe("T03 native HTML adapter", () => {
     expect(result.stored).toEqual(wrap(html));
     const fresh = serializeNoteDocumentNative(result.document);
     expect(decodeNoteDocumentNative(fresh, binding).document).toEqual(result.document);
+  });
+  it("round-trips nested ordinary list continuation blocks through native HTML and Markdown", () => {
+    const html =
+      "<ul><li><p>parent</p><ul><li><p>child</p></li></ul><ol><li><p>step</p></li></ol></li></ul>";
+    const result = roundTrip(html);
+    expect(result.document.blocks).toEqual([
+      {
+        type: "bullet-list",
+        items: [
+          {
+            inlines: [{ text: "parent" }],
+            blocks: [
+              { type: "bullet-list", items: [{ inlines: [{ text: "child" }] }] },
+              { type: "ordered-list", items: [{ inlines: [{ text: "step" }] }] },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(result.stored).toEqual(wrap(html));
   });
   it("round-trips nested marks regardless of native nesting and coalesces equivalent runs", () => {
     for (const html of [

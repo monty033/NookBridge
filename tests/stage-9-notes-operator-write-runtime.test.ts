@@ -198,6 +198,51 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(1);
   });
 
+  it("captures a preimage and applies an edit on a note carrying a horizontal rule", async () => {
+    // Finding 2, production operator runtime regression: before the fix, a
+    // note containing a legacy-writer horizontal rule could be previewed
+    // but never edited — `applyEdit` always failed, even for an edit that
+    // never touched the rule, because native decode promoted the `<hr>`
+    // into an AST node the native writer categorically refuses to encode.
+    const hrStyle =
+      "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+    const f = await fixture({
+      native: `<p>before</p><hr style="${hrStyle}" />`,
+    });
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    expect(preimage.markdown).toContain("nookbridge opaque");
+    const result = await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    expect(result.kind).toBe("edit");
+    expect(f.state.writes).toBe(1);
+    expect(f.state.content.data).toContain(`<hr style="${hrStyle}" />`);
+  });
+
+  it("captures a preimage and applies an edit on a note carrying an empty paragraph", async () => {
+    // Finding 3, production operator runtime regression: before the fix,
+    // `editPreimage` threw `service_unavailable` for any note containing an
+    // empty native paragraph, because the canonical Markdown serializer
+    // refuses a zero-inline paragraph and native decode used to produce
+    // exactly that shape for `<p></p>`.
+    const f = await fixture({ native: "<p></p><p>before</p>" });
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE });
+    expect(preimage.markdown).toContain("nookbridge opaque");
+    const result = await rt.applyEdit({
+      id: HANDLE,
+      expectedRevision: REVISION_1,
+      markdown: preimage.markdown.replace("before", "after"),
+    });
+    expect(result.kind).toBe("edit");
+    expect(f.state.writes).toBe(1);
+    expect(f.state.content.data).toContain("<p></p>");
+    expect(f.state.content.data).toContain("<p>after</p>");
+  });
+
   it("marks an uncertain write unresolved instead of claiming success", async () => {
     const f = await fixture();
     const failing: OperatorWriteSource = {
@@ -396,6 +441,30 @@ describe("daemon operator write runtime", () => {
       rt.applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: forged }),
     ).rejects.toMatchObject({ code: "invalid_request" });
     expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
+  });
+
+  it("refuses a reserved NookBridge directive in create content before any journal mutation", async () => {
+    const f = await fixture();
+    let createCalls = 0;
+    const source = {
+      ...f.source,
+      create: async () => {
+        createCalls += 1;
+        return { id: NOTE_ID, titleBytes: 5, contentBytes: 7 };
+      },
+    };
+    const rt = runtime(f, { source, mintHandle: () => HANDLE }) as typeof runtime extends (
+      ...args: never[]
+    ) => infer R
+      ? R & {
+          create: (params: { title: string; content: string }) => Promise<unknown>;
+        }
+      : never;
+    await expect(
+      rt.create({ title: "Title", content: ":::nookbridge opaque paragraph\nref:1\n:::\n" }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(createCalls).toBe(0);
     expect(await f.store.list()).toEqual([]);
   });
 

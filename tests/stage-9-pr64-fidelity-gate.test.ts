@@ -23,6 +23,11 @@ import {
   detectMarkdownConstructs,
 } from "../src/core/notesnook-write-codec.js";
 import { STAGE4_WRITE_LIMITS } from "../src/core/notesnook-write-contract.js";
+import {
+  NOTE_DOCUMENT_MARKDOWN_HEADER,
+  parseNoteDocumentMarkdown,
+  serializeNoteDocumentMarkdown,
+} from "../src/core/note-document-markdown.js";
 
 const MAX_BYTES = STAGE4_WRITE_LIMITS.maxContentBytes;
 
@@ -151,6 +156,55 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
     it("accepts a task list", () => {
       expect(() => assertSupportedConstructs("- [ ] todo", MAX_BYTES)).not.toThrow();
       expect(() => assertSupportedConstructs("- [x] done", MAX_BYTES)).not.toThrow();
+    });
+
+    it.each([
+      ':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::',
+      ':::nookbridge attachment 1\n{"url":"https://example.test/a.pdf"}\n:::',
+      ':::nookbridge embed 1\n{"url":"https://example.test/video"}\n:::',
+      ":::nookbridge math 1\nE = mc^2\n:::",
+    ])("refuses reserved NookBridge structured directives before they flatten: %s", (input) => {
+      expect(() => assertSupportedConstructs(input, MAX_BYTES)).toThrow();
+    });
+
+    it("keeps a four-dash paragraph distinct from the canonical three-dash rule", () => {
+      expect(detectMarkdownConstructs("----", MAX_BYTES)).toEqual(new Set(["paragraph"]));
+      expect(DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("----").data).toContain("<p>----</p>");
+    });
+
+    it("treats a four-dash line consistently with the canonical Markdown parser/writer", () => {
+      // Finding 5: the legacy codec's exact-three-dash rule must not just be
+      // internally self-consistent — it must agree with the canonical
+      // interchange grammar (`note-document-markdown.ts`) that a Markdown
+      // preimage/apply round trip also has to tolerate.  Both sides treat a
+      // longer dash run as ordinary literal paragraph text.
+      const doc = parseNoteDocumentMarkdown(`${NOTE_DOCUMENT_MARKDOWN_HEADER}\n----\n`);
+      expect(doc.blocks).toEqual([{ type: "paragraph", inlines: [{ text: "----" }] }]);
+      expect(serializeNoteDocumentMarkdown(doc)).toBe(`${NOTE_DOCUMENT_MARKDOWN_HEADER}\n----\n`);
+      expect(detectMarkdownConstructs("----", MAX_BYTES)).toEqual(new Set(["paragraph"]));
+      expect(() => assertSupportedConstructs("----", MAX_BYTES)).not.toThrow();
+    });
+
+    it("refuses a nested unordered list instead of silently flattening it", () => {
+      // Finding 1: the legacy write codec has no nesting model.  Without this
+      // gate, `- parent\n  - child` classifies as a bare "paragraph" (the
+      // indented child line fails the flat `/^[-*] +/` list check) and
+      // renders as a single literal paragraph containing the child's raw
+      // `  - child` text — the list structure and the child's bullet nature
+      // are both lost with no error and no signal that anything downgraded.
+      expect(detectMarkdownConstructs("- parent\n  - child", MAX_BYTES)).toEqual(
+        new Set(["nested-unordered-list"]),
+      );
+      expect(() => assertSupportedConstructs("- parent\n  - child", MAX_BYTES)).toThrow();
+      expect(UNSUPPORTED_MARKDOWN_CONSTRUCTS).toContain("nested-unordered-list");
+      expect(SUPPORTED_MARKDOWN_CONSTRUCTS.has("nested-unordered-list" as never)).toBe(false);
+    });
+
+    it("still accepts a flat unordered list with no indentation", () => {
+      expect(detectMarkdownConstructs("- one\n- two", MAX_BYTES)).toEqual(
+        new Set(["unordered-list"]),
+      );
+      expect(() => assertSupportedConstructs("- one\n- two", MAX_BYTES)).not.toThrow();
     });
 
     it("refuses an attachment reference", () => {

@@ -439,6 +439,82 @@ export interface NoteDocumentV1 {
 // Validation entry points.
 // ---------------------------------------------------------------------------
 
+function snapshotHostileObjectGraph(value: unknown): unknown {
+  const active = new Set<object>();
+  let nodes = 0;
+  let byteLength = 0;
+  const maxNodes = 200_000;
+  const maxBytes = MAX_NOTE_DOCUMENT_BLOCKS * MAX_NOTE_DOCUMENT_BLOCK_BYTES;
+  const maxDepth = MAX_NOTE_DOCUMENT_DEPTH * 4 + 8;
+
+  function visit(current: unknown, depth: number): unknown {
+    if (++nodes > maxNodes) fail("oversize_document");
+    if (typeof current === "string") {
+      byteLength += Buffer.byteLength(current, "utf8");
+      if (byteLength > maxBytes) fail("oversize_document");
+      return current;
+    }
+    if (
+      current === null ||
+      typeof current === "number" ||
+      typeof current === "boolean" ||
+      current === undefined
+    ) {
+      return current;
+    }
+    if (typeof current !== "object" || utilTypes.isProxy(current) || active.has(current)) {
+      fail("invalid_shape");
+    }
+    if (depth > maxDepth) fail("depth_exceeded");
+
+    const array = Array.isArray(current);
+    const prototype = Object.getPrototypeOf(current);
+    if (
+      array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null
+    ) {
+      fail("invalid_shape");
+    }
+    active.add(current);
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(current);
+      const ownKeys = Reflect.ownKeys(descriptors);
+      if (ownKeys.length > maxNodes) fail("oversize_document");
+      if (array) {
+        const length = descriptors.length?.value;
+        if (typeof length !== "number" || length > maxNodes || ownKeys.length !== length + 1) {
+          fail("invalid_shape");
+        }
+        const copy: unknown[] = new Array(length);
+        for (const key of ownKeys) {
+          if (key === "length") continue;
+          if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) fail("invalid_shape");
+          const index = Number(key);
+          if (index >= length) fail("invalid_shape");
+          const descriptor = descriptors[key]!;
+          if (!descriptor.enumerable || !("value" in descriptor)) fail("invalid_shape");
+          copy[index] = visit(descriptor.value, depth + 1);
+        }
+        return copy;
+      }
+
+      const copy = Object.create(null) as Record<string, unknown>;
+      for (const key of ownKeys) {
+        if (typeof key !== "string" || ["__proto__", "constructor", "prototype"].includes(key)) {
+          fail("invalid_shape");
+        }
+        const descriptor = descriptors[key]!;
+        if (!descriptor.enumerable || !("value" in descriptor)) fail("invalid_shape");
+        copy[key] = visit(descriptor.value, depth + 1);
+      }
+      return copy;
+    } finally {
+      active.delete(current);
+    }
+  }
+
+  return visit(value, 0);
+}
+
 /**
  * Validate a `NoteDocumentV1`.  Throws a categorical
  * {@link NoteDocumentError} on the first refusal path; otherwise
@@ -454,24 +530,24 @@ export interface NoteDocumentV1 {
  *   - any `callout` carries a variant outside the closed set;
  *   - any `task-list` carries a `kind` outside the closed set;
  *   - any table row's column count differs from `columns.length`;
- *   - any link mark carries a non-string `href`.
+ *   - any link mark carries a non-string `href`;
+ *   - any reference label contains a forbidden control byte or lone surrogate.
  *
  * The validator never echoes the offending value in the message.
  */
 export function validateNoteDocument(value: unknown): asserts value is NoteDocumentV1 {
-  if (!isPlainRecord(value)) fail("invalid_shape");
-  rejectProtoPollutionKeys(value);
-  if (value.version !== NOTE_DOCUMENT_VERSION) fail("invalid_shape");
-  if (!Array.isArray(value.blocks)) fail("invalid_shape");
-  if (value.blocks.length > MAX_NOTE_DOCUMENT_BLOCKS) fail("oversize_document");
+  const safeValue = snapshotHostileObjectGraph(value);
+  if (!isPlainRecord(safeValue)) fail("invalid_shape");
+  rejectUnknownKeys(safeValue, NOTE_DOCUMENT_KEYS, ["version", "blocks"]);
+  if (safeValue.version !== NOTE_DOCUMENT_VERSION) fail("invalid_shape");
+  if (!isNonProxyArray(safeValue.blocks)) fail("invalid_shape");
+  if (safeValue.blocks.length > MAX_NOTE_DOCUMENT_BLOCKS) fail("oversize_document");
 
-  validateBlockArray(value.blocks, 1);
+  validateBlockArray(safeValue.blocks, 1);
 
   // Block byte cap is enforced inside `validateBlockArray` via
-  // `serialisedBlockBytes`; we re-check the document as a whole to
-  // catch a hostile single-block payload that is itself small but
-  // whose header overhead crosses the cap.
-  const totalBytes = serialisedDocumentBytes(value.blocks);
+  // `serialisedBlockBytes`; the document cap also counts each sanitized block.
+  const totalBytes = serialisedDocumentBytes(safeValue.blocks);
   if (totalBytes > MAX_NOTE_DOCUMENT_BLOCKS * MAX_NOTE_DOCUMENT_BLOCK_BYTES) {
     fail("oversize_document");
   }
@@ -495,6 +571,36 @@ const HORIZONTAL_RULE_KEYS: ReadonlySet<string> = new Set(["type"]);
 const IMAGE_KEYS: ReadonlySet<string> = new Set(["type", "url", "alt"]);
 const ATTACHMENT_KEYS: ReadonlySet<string> = new Set(["type", "url", "name", "mime"]);
 const EMBED_KEYS: ReadonlySet<string> = new Set(["type", "url"]);
+const NOTE_DOCUMENT_KEYS = new Set(["version", "blocks"]);
+const LINK_MARK_KEYS = new Set(["type", "href"]);
+const OPAQUE_SENTINEL_KEYS = new Set(["version", "source", "token"]);
+const LIST_ITEM_KEYS = new Set(["inlines", "blocks"]);
+const TASK_ITEM_KEYS = new Set(["checked", "inlines", "children"]);
+const INLINE_KEYS = new Set(["text", "marks"]);
+const BLOCK_SHAPES: Readonly<
+  Record<string, { readonly keys: ReadonlySet<string>; readonly required: readonly string[] }>
+> = Object.freeze({
+  paragraph: { keys: new Set(["type", "inlines"]), required: ["type", "inlines"] },
+  heading: { keys: new Set(["type", "level", "inlines"]), required: ["type", "level", "inlines"] },
+  "bullet-list": { keys: new Set(["type", "items"]), required: ["type", "items"] },
+  "ordered-list": { keys: new Set(["type", "items"]), required: ["type", "items"] },
+  "task-list": { keys: new Set(["type", "kind", "items"]), required: ["type", "items"] },
+  blockquote: { keys: new Set(["type", "blocks"]), required: ["type", "blocks"] },
+  "code-block": { keys: new Set(["type", "text", "language"]), required: ["type", "text"] },
+  table: { keys: new Set(["type", "columns", "rows"]), required: ["type", "columns", "rows"] },
+  callout: {
+    keys: new Set(["type", "variant", "blocks"]),
+    required: ["type", "variant", "blocks"],
+  },
+  "horizontal-rule": { keys: HORIZONTAL_RULE_KEYS, required: ["type"] },
+  image: { keys: IMAGE_KEYS, required: ["type", "url"] },
+  attachment: { keys: ATTACHMENT_KEYS, required: ["type", "url"] },
+  embed: { keys: EMBED_KEYS, required: ["type", "url"] },
+  opaque: {
+    keys: new Set(["type", "nodeType", "sentinel"]),
+    required: ["type", "nodeType", "sentinel"],
+  },
+});
 
 /**
  * Only `https:`/`http:` are admitted.  This categorically rejects
@@ -508,23 +614,43 @@ const EMBED_KEYS: ReadonlySet<string> = new Set(["type", "url"]);
 const ALLOWED_REFERENCE_URL_SCHEMES: ReadonlySet<string> = new Set(["https:", "http:"]);
 
 /** Reject any own key not in `allowed` — closed attribute-set enforcement. */
-function rejectUnknownKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): void {
+function rejectUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  required: readonly string[] = [],
+): void {
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string" || !allowed.has(key)) fail("invalid_shape");
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor || !Object.hasOwn(descriptor, "value")) fail("invalid_shape");
   }
-  for (const key of allowed) {
-    if (Object.hasOwn(value, key)) continue;
-    if (key === "type" || key === "url") fail("invalid_shape");
+  for (const key of required) {
+    if (!Object.hasOwn(value, key)) fail("invalid_shape");
+  }
+}
+
+function validateNoForbiddenTextCodePoints(
+  value: string,
+  errorCode: NoteDocumentErrorCode,
+  allowTabAndLineFeed: boolean,
+): void {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      (codePoint < 32 && !(allowTabAndLineFeed && (codePoint === 9 || codePoint === 10))) ||
+      codePoint === 127 ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ) {
+      fail(errorCode);
+    }
   }
 }
 
 /**
  * Validate a structured reference URL (`image`/`attachment`/`embed`).
  * Refuses non-string, empty, oversized, control-byte-bearing,
- * unparsable, non-http(s)-scheme, or credential-bearing URLs.  Never
- * performs network I/O — `new URL()` is a pure parser.
+ * lone-surrogate-bearing, unparsable, non-http(s)-scheme, or credential-bearing URLs.
+ * Never performs network I/O — `new URL()` is a pure parser.
  */
 function validateReferenceUrl(value: unknown): void {
   if (typeof value !== "string") fail("invalid_reference_url");
@@ -532,11 +658,7 @@ function validateReferenceUrl(value: unknown): void {
   if (Buffer.byteLength(value, "utf8") > MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES) {
     fail("invalid_reference_url");
   }
-  // Reject C0 control bytes and DEL: these can be used to smuggle
-  // scheme confusion or bypass naive string-based scheme checks in
-  // downstream renderers.
-  // eslint-disable-next-line no-control-regex -- deliberate control-byte scan
-  if (/[\u0000-\u001f\u007f]/.test(value)) fail("invalid_reference_url");
+  validateNoForbiddenTextCodePoints(value, "invalid_reference_url", false);
 
   let parsed: URL;
   try {
@@ -556,6 +678,7 @@ function validateOptionalReferenceLabel(value: unknown): void {
   if (Buffer.byteLength(value, "utf8") > MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES) {
     fail("oversize_inline");
   }
+  validateNoForbiddenTextCodePoints(value, "invalid_shape", true);
 }
 
 function validateBlockArray(blocks: readonly unknown[], depth: number): void {
@@ -570,6 +693,9 @@ function validateBlock(value: unknown, depth: number): void {
   const typeDescriptor = Object.getOwnPropertyDescriptor(value, "type");
   if (!typeDescriptor || typeof typeDescriptor.value !== "string") fail("invalid_shape");
   const type = typeDescriptor.value as string;
+  const shape = Object.hasOwn(BLOCK_SHAPES, type) ? BLOCK_SHAPES[type] : undefined;
+  if (!shape) fail("unsupported_node");
+  rejectUnknownKeys(value, shape.keys, shape.required);
 
   // Read the discriminator from an own data descriptor before touching
   // any caller-controlled property. New reference blocks additionally
@@ -649,7 +775,7 @@ function validateListItems(
   containerType: "bullet-list" | "ordered-list",
   depth: number,
 ): void {
-  if (!Array.isArray(items)) fail("invalid_shape");
+  if (!isNonProxyArray(items)) fail("invalid_shape");
   if (items.length > MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
   for (const item of items) {
     validateListItem(item, depth, containerType);
@@ -662,11 +788,12 @@ function validateListItem(
   containerType: "bullet-list" | "ordered-list",
 ): void {
   if (!isPlainRecord(value)) fail("invalid_shape");
+  rejectUnknownKeys(value, LIST_ITEM_KEYS, ["inlines"]);
   validateInlines(value.inlines);
   // Block-capable list items (T01 brief): optional `blocks` array
   // that may carry continuation paragraphs, sub-lists, callouts, etc.
   if (value.blocks !== undefined) {
-    if (!Array.isArray(value.blocks)) fail("invalid_shape");
+    if (!isNonProxyArray(value.blocks)) fail("invalid_shape");
     validateBlockArray(value.blocks, depth + 1);
   }
   // The serialised item bytes include its inlines + nested blocks;
@@ -684,7 +811,7 @@ function validateTaskList(value: Record<string, unknown>, depth: number): void {
       fail("unsupported_list_kind");
     }
   }
-  if (!Array.isArray(value.items)) fail("invalid_shape");
+  if (!isNonProxyArray(value.items)) fail("invalid_shape");
   if (value.items.length > MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
   for (const item of value.items) {
     validateTaskItem(item, depth);
@@ -694,9 +821,10 @@ function validateTaskList(value: Record<string, unknown>, depth: number): void {
 
 function validateTaskItem(value: unknown, depth: number): void {
   if (!isPlainRecord(value)) fail("invalid_shape");
+  rejectUnknownKeys(value, TASK_ITEM_KEYS, ["checked", "inlines", "children"]);
   if (typeof value.checked !== "boolean") fail("invalid_shape");
   validateInlines(value.inlines);
-  if (!Array.isArray(value.children)) fail("invalid_shape");
+  if (!isNonProxyArray(value.children)) fail("invalid_shape");
   if (value.children.length > MAX_NOTE_DOCUMENT_TASK_CHILDREN) fail("oversize_document");
   if (depth + 1 > MAX_NOTE_DOCUMENT_DEPTH) fail("depth_exceeded");
   for (const child of value.children) {
@@ -705,7 +833,7 @@ function validateTaskItem(value: unknown, depth: number): void {
 }
 
 function validateBlockquote(value: Record<string, unknown>, depth: number): void {
-  if (!Array.isArray(value.blocks)) fail("invalid_shape");
+  if (!isNonProxyArray(value.blocks)) fail("invalid_shape");
   validateBlockArray(value.blocks, depth + 1);
   serialiseAndCapBlockBytes(value, "blockquote");
 }
@@ -720,14 +848,14 @@ function validateCodeBlock(value: Record<string, unknown>): void {
 }
 
 function validateTable(value: Record<string, unknown>): void {
-  if (!Array.isArray(value.columns)) fail("invalid_shape");
-  if (!Array.isArray(value.rows)) fail("invalid_shape");
+  if (!isNonProxyArray(value.columns)) fail("invalid_shape");
+  if (!isNonProxyArray(value.rows)) fail("invalid_shape");
   for (const column of value.columns) {
     if (typeof column !== "string") fail("invalid_shape");
   }
   const columnCount = value.columns.length;
   for (const row of value.rows) {
-    if (!Array.isArray(row)) fail("invalid_shape");
+    if (!isNonProxyArray(row)) fail("invalid_shape");
     if (row.length !== columnCount) fail("table_column_mismatch");
     for (const cell of row) {
       if (typeof cell !== "string") fail("invalid_shape");
@@ -739,7 +867,7 @@ function validateTable(value: Record<string, unknown>): void {
 function validateCallout(value: Record<string, unknown>, depth: number): void {
   if (typeof value.variant !== "string") fail("invalid_shape");
   if (!CALLOUT_VARIANTS.has(value.variant)) fail("unsupported_callout_variant");
-  if (!Array.isArray(value.blocks)) fail("invalid_shape");
+  if (!isNonProxyArray(value.blocks)) fail("invalid_shape");
   validateBlockArray(value.blocks, depth + 1);
   serialiseAndCapBlockBytes(value, "callout");
 }
@@ -781,6 +909,7 @@ function validateOpaqueBlock(value: Record<string, unknown>): void {
   }
   const sentinel = value.sentinel;
   if (!isPlainRecord(sentinel)) fail("invalid_shape");
+  rejectUnknownKeys(sentinel, OPAQUE_SENTINEL_KEYS, ["version", "source", "token"]);
   if (sentinel.version !== 1) fail("invalid_shape");
   if (typeof sentinel.token !== "string") fail("invalid_shape");
   if (sentinel.token.length === 0) fail("invalid_shape");
@@ -806,7 +935,7 @@ function validateOpaqueBlock(value: Record<string, unknown>): void {
 // ---------------------------------------------------------------------------
 
 function validateInlines(value: unknown): readonly NoteInline[] {
-  if (!Array.isArray(value)) fail("invalid_shape");
+  if (!isNonProxyArray(value)) fail("invalid_shape");
   if (value.length > MAX_NOTE_DOCUMENT_INLINES_PER_BLOCK) fail("oversize_inline");
   for (const inline of value) {
     validateInline(inline);
@@ -816,12 +945,13 @@ function validateInlines(value: unknown): readonly NoteInline[] {
 
 function validateInline(value: unknown): void {
   if (!isPlainRecord(value)) fail("invalid_shape");
+  rejectUnknownKeys(value, INLINE_KEYS, ["text"]);
   if (typeof value.text !== "string") fail("invalid_shape");
   if (Buffer.byteLength(value.text, "utf8") > MAX_NOTE_DOCUMENT_INLINE_BYTES) {
     fail("oversize_inline");
   }
   if (value.marks === undefined) return;
-  if (!Array.isArray(value.marks)) fail("invalid_shape");
+  if (!isNonProxyArray(value.marks)) fail("invalid_shape");
   for (const mark of value.marks) {
     validateInlineMark(mark);
   }
@@ -833,6 +963,7 @@ function validateInlineMark(mark: unknown): void {
     return;
   }
   if (isPlainRecord(mark) && (mark as Record<string, unknown>).type === "link") {
+    rejectUnknownKeys(mark, LINK_MARK_KEYS, ["type", "href"]);
     if (typeof mark.href !== "string") fail("malformed_link");
     if (mark.href.length === 0) fail("malformed_link");
     if (Buffer.byteLength(mark.href, "utf8") > MAX_NOTE_DOCUMENT_INLINE_BYTES) {
@@ -886,24 +1017,14 @@ function serialiseAndCapBlockBytes(value: Record<string, unknown>, blockType: st
  * carry extra behaviour, so the validator cannot be tricked by a
  * hostile caller-supplied object.
  */
+function isNonProxyArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && !utilTypes.isProxy(value);
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || utilTypes.isProxy(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
-}
-
-/**
- * Refuse own keys that an attacker can use to subvert prototype-based
- * property lookups downstream.  `JSON.parse` of `{"__proto__":{…}}`
- * creates an own property whose key is `__proto__`; even though the
- * parsed object's prototype is still `Object.prototype`, leaving the
- * own key in place lets a later merge or `Object.assign` mutate the
- * real prototype chain.  T01 refuses these keys categorically.
- */
-function rejectProtoPollutionKeys(value: Record<string, unknown>): void {
-  if (Object.prototype.hasOwnProperty.call(value, "__proto__")) fail("invalid_shape");
-  if (Object.prototype.hasOwnProperty.call(value, "constructor")) fail("invalid_shape");
-  if (Object.prototype.hasOwnProperty.call(value, "prototype")) fail("invalid_shape");
 }
 
 /**
@@ -919,7 +1040,7 @@ function rejectProtoPollutionKeys(value: Record<string, unknown>): void {
  * The result is only used for byte-length comparison; it is never
  * re-parsed, so it does not need to be round-trippable.
  */
-function stableStringify(value: unknown): string {
+function stableStringify(value: unknown, active = new Set<object>()): string {
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number") {
@@ -927,26 +1048,39 @@ function stableStringify(value: unknown): string {
     return JSON.stringify(value);
   }
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) {
-    let out = "[";
-    for (let i = 0; i < value.length; i += 1) {
-      if (i > 0) out += ",";
-      out += stableStringify(value[i]);
+  if (typeof value === "object" && value !== null) {
+    if (utilTypes.isProxy(value) || active.has(value)) fail("invalid_shape");
+    if (Array.isArray(value)) {
+      active.add(value);
+      let out = "[";
+      try {
+        for (let i = 0; i < value.length; i += 1) {
+          if (i > 0) out += ",";
+          out += stableStringify(value[i], active);
+        }
+      } finally {
+        active.delete(value);
+      }
+      return out + "]";
     }
-    return out + "]";
-  }
-  if (isPlainRecord(value)) {
-    const keys = Object.keys(value).sort();
-    let out = "{";
-    let first = true;
-    for (const key of keys) {
-      const entry = (value as Record<string, unknown>)[key];
-      if (entry === undefined) continue;
-      if (!first) out += ",";
-      first = false;
-      out += JSON.stringify(key) + ":" + stableStringify(entry);
+    if (isPlainRecord(value)) {
+      active.add(value);
+      const keys = Object.keys(value).sort();
+      let out = "{";
+      let first = true;
+      try {
+        for (const key of keys) {
+          const entry = (value as Record<string, unknown>)[key];
+          if (entry === undefined) continue;
+          if (!first) out += ",";
+          first = false;
+          out += JSON.stringify(key) + ":" + stableStringify(entry, active);
+        }
+      } finally {
+        active.delete(value);
+      }
+      return out + "}";
     }
-    return out + "}";
   }
   return "null";
 }

@@ -6,8 +6,26 @@
  * wrapper preserves explicit per-list intent. Tables contain one canonical JSON
  * object; callouts contain blocks. Directives close with `:::` and nest.
  * Links allow only http, https and mailto, without embedded credentials.
- * Raw HTML, images and list continuation blocks are outside this subset;
+ * A horizontal rule is a COMPLETE standalone `---` block (exactly three
+ * dashes, nothing else on the line): it is recognised only when it forms an
+ * entire block by itself, never mid-paragraph, and never as a table
+ * horizontal rule (the grammar requires blank-line block separators); an
+ * unescaped `---` embedded in paragraph text is rejected as ambiguous.
+ * Escape a literal `---` paragraph line as `\\-\\-\\-` so it cannot collide
+ * with the structural form. This grammar has no pipe-table syntax, so no
+ * table-delimiter collision is possible.
+ * Image, attachment and embed are closed, versioned directives —
+ * `:::nookbridge image 1`, `:::nookbridge attachment 1`, and
+ * `:::nookbridge embed 1` — each carrying exactly one canonical JSON object
+ * with the node's closed key set (see `note-document.ts`). They are
+ * structured references only (bounded http(s) URL plus optional bounded
+ * labels), never binary payloads, local paths, or raw HTML; an unrecognised
+ * version token or any extra/duplicate JSON key is a categorical refusal.
+ * Ordinary bullet/ordered list continuation blocks are represented by two-space-indented nested list lines; other continuation block types remain outside this subset.
  * unsupported/ambiguous syntax uses the existing categorical AST errors.
+ * `math` has no interchange form yet (native-block-parity plan Task 3.1
+ * is an unmet prerequisite) — it is refused the same as any other unknown
+ * discriminator, never guessed.
  * Opaque bodies are `ref:1:SOURCE:TOKEN`, never native data or JSON.
  *
  * Parsing refuses noncanonical spellings rather than silently normalizing an
@@ -117,6 +135,25 @@ function snapshot(value: unknown): unknown {
 }
 function keys(value: object, allowed: readonly string[]): void {
   if (Object.keys(value).some((k) => !allowed.includes(k))) fail();
+}
+/**
+ * Canonical JSON body for the `image` / `attachment` / `embed` reference
+ * directives. `undefined`-valued fields are dropped (never emitted as an
+ * explicit `"key":null`-shaped placeholder), so the SAME helper produces the
+ * canonical text on both the encode side (from a validated AST block, where
+ * every field is either a real string or absent) and the decode side (used
+ * to reject any raw JSON that does not literally match this canonical
+ * shape — duplicate keys, alternate key order, or an extra field all fail
+ * the byte comparison before the value is ever trusted). Field order is
+ * always the caller's insertion order, so callers must list `url` before
+ * any optional label to stay byte-stable across releases.
+ */
+function refBody(fields: Record<string, unknown>): string {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(fields)) {
+    if (fields[key] !== undefined) out[key] = fields[key];
+  }
+  return JSON.stringify(out);
 }
 function safeDocument(value: unknown): NoteDocumentV1 {
   const doc = snapshot(value);
@@ -288,6 +325,7 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
             block,
             block.type === "heading" ? ["type", "level", "inlines"] : ["type", "inlines"],
           );
+          if (!block.inlines.length) fail("unsupported_node");
           out =
             (block.type === "heading" ? "#".repeat(block.level) + " " : "") +
             renderInlines(block.inlines);
@@ -309,38 +347,71 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
           break;
         case "callout":
           keys(block, ["type", "variant", "blocks"]);
+          if (!block.blocks.length) fail("unsupported_node");
           out = `:::nookbridge callout ${block.variant}\n${renderBlocks(block.blocks, depth + 1)}\n:::`;
           break;
         case "blockquote":
           keys(block, ["type", "blocks"]);
+          if (!block.blocks.length) fail("unsupported_node");
           out = renderBlocks(block.blocks, depth + 1)
             .split("\n")
             .map((line) => (line ? "> " + line : ">"))
             .join("\n");
           break;
         case "bullet-list":
-        case "ordered-list":
+        case "ordered-list": {
           keys(block, ["type", "items"]);
-          out = block.items
-            .map((item, i) => {
-              keys(item, ["inlines", "blocks"]);
-              if (item.blocks?.length) fail("unsupported_node");
-              return (
-                (block.type === "bullet-list" ? "- " : `${i + 1}. `) + renderInlines(item.inlines)
-              );
-            })
-            .join("\n");
+          if (!block.items.length) fail("unsupported_node");
+          const list = (current: typeof block, indent: number, level: number): string => {
+            if (level > MAX_NOTE_DOCUMENT_DEPTH) fail("depth_exceeded");
+            return current.items
+              .map((item, i) => {
+                keys(item, ["inlines", "blocks"]);
+                const contents = renderInlines(item.inlines);
+                if (!contents) fail("unsupported_node");
+                const prefix = " ".repeat(indent);
+                const marker = current.type === "bullet-list" ? "- " : `${i + 1}. `;
+                const nested = item.blocks ?? [];
+                if (
+                  nested.some(
+                    (child) => child.type !== "bullet-list" && child.type !== "ordered-list",
+                  )
+                )
+                  fail("unsupported_node");
+                return (
+                  prefix +
+                  marker +
+                  contents +
+                  (nested.length
+                    ? "\n" +
+                      nested
+                        .map((child) => {
+                          if (child.type !== "bullet-list" && child.type !== "ordered-list")
+                            fail("unsupported_node");
+                          return list(child, indent + 2, level + 1);
+                        })
+                        .join("\n")
+                    : "")
+                );
+              })
+              .join("\n");
+          };
+          out = list(block, 0, depth);
           break;
+        }
         case "task-list": {
           keys(block, ["type", "kind", "items"]);
+          if (!block.items.length) fail("unsupported_node");
           const tasks = (items: readonly NoteTaskItem[], level: number): string =>
             items
               .map((item) => {
                 keys(item, ["checked", "inlines", "children"]);
+                const contents = renderInlines(item.inlines);
+                if (!contents) fail("unsupported_node");
                 return (
                   "  ".repeat(level) +
                   `- [${item.checked ? "x" : " "}] ` +
-                  renderInlines(item.inlines) +
+                  contents +
                   (item.children.length ? "\n" + tasks(item.children, level + 1) : "")
                 );
               })
@@ -364,16 +435,29 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
           );
           out = `:::nookbridge opaque ${block.nodeType}\nref:1:${block.sentinel.source}:${block.sentinel.token}\n:::`;
           break;
+        case "horizontal-rule":
+          keys(block, ["type"]);
+          out = "---";
+          break;
+        case "image":
+          keys(block, ["type", "url", "alt"]);
+          out = `:::nookbridge image 1\n${refBody({ url: block.url, alt: block.alt })}\n:::`;
+          break;
+        case "attachment":
+          keys(block, ["type", "url", "name", "mime"]);
+          out = `:::nookbridge attachment 1\n${refBody({ url: block.url, name: block.name, mime: block.mime })}\n:::`;
+          break;
+        case "embed":
+          keys(block, ["type", "url"]);
+          out = `:::nookbridge embed 1\n${refBody({ url: block.url })}\n:::`;
+          break;
         default:
-          // T01 (note-document.ts) added `horizontal-rule` / `image` /
-          // `attachment` / `embed` to the closed `NoteBlock` union
-          // (native-block-parity plan, Task 1.1). This grammar's
-          // Markdown interchange forms for those node types are Task
-          // 1.2 and are explicitly out of scope for T01 — until that
-          // work lands, any attempt to serialize one through this path
-          // fails categorically rather than being silently dropped or
-          // downgraded to a paragraph, satisfying the plan's
-          // non-negotiable invariant (plan §4).
+          // Every `NoteBlock` discriminator has an explicit case above
+          // (native-block-parity plan, Task 1.2). This branch is a
+          // defensive fallback only — a future AST addition (e.g. a
+          // pinned-runtime `math` node, plan Task 3.1) must land its own
+          // explicit case here rather than fall through silently to a
+          // paragraph or any other downgrade.
           fail("unsupported_node");
       }
       bounded(out, MAX_NOTE_DOCUMENT_BLOCK_BYTES, "oversize_block");
@@ -469,8 +553,23 @@ class Parser {
           },
         };
       }
+      const image = /^:::nookbridge image (\S+)$/.exec(line);
+      if (image) return this.reference(image[1]!, "image", ["url", "alt"]);
+      const attachment = /^:::nookbridge attachment (\S+)$/.exec(line);
+      if (attachment) return this.reference(attachment[1]!, "attachment", ["url", "name", "mime"]);
+      const embed = /^:::nookbridge embed (\S+)$/.exec(line);
+      if (embed) return this.reference(embed[1]!, "embed", ["url"]);
       fail();
     }
+    // A complete standalone `---` line (exactly three dashes, nothing else)
+    // is the horizontal-rule block. It is only reachable here — after every
+    // `:::` directive, before the code-fence/list/quote/heading checks —
+    // so it can never be swallowed into a multi-line paragraph or confused
+    // with a directive; this grammar has no pipe-table syntax, so there is
+    // no table-delimiter row to disambiguate against either. Any other run
+    // of dashes (`----`, `--`, `--- text`, …) falls through unchanged as
+    // ordinary paragraph text.
+    if (line === "---") return { type: "horizontal-rule" };
     const code = /^(`{3,})([A-Za-z0-9_+-]*)$/.exec(line);
     if (code) {
       const start = this.pos;
@@ -486,16 +585,36 @@ class Parser {
     }
     if (/^(?:- |\d+\. )/.test(line)) {
       this.pos--;
-      const ordered = /^\d/.test(line);
-      const items: { inlines: NoteInline[] }[] = [];
-      while (this.pos < this.lines.length) {
-        const m = (ordered ? /^\d+\. (.*)$/ : /^- (.*)$/).exec(this.lines[this.pos]!);
-        if (!m) break;
-        if (items.length >= MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
-        items.push({ inlines: parseInlines(m[1]!) });
-        this.pos++;
-      }
-      return { type: ordered ? "ordered-list" : "bullet-list", items };
+      const list = (indent: number, depth: number): NoteBlock => {
+        if (depth > MAX_NOTE_DOCUMENT_DEPTH) fail("depth_exceeded");
+        const first = /^( *)/.exec(this.lines[this.pos]!)![1]!.length;
+        if (first !== indent) fail();
+        const ordered = /^\s*\d+\. /.test(this.lines[this.pos]!);
+        const items: { inlines: NoteInline[]; blocks?: NoteBlock[] }[] = [];
+        while (this.pos < this.lines.length) {
+          const current = this.lines[this.pos]!;
+          const spaces = /^( *)/.exec(current)![1]!.length;
+          if (spaces < indent) break;
+          if (spaces > indent) {
+            if (spaces !== indent + 2 || items.length === 0) fail();
+            const nestedMatch = /^(?:- |\d+\. )/.test(current.slice(spaces));
+            if (!nestedMatch) fail();
+            const nested = list(indent + 2, depth + 1);
+            const last = items.at(-1)!;
+            (last.blocks ??= []).push(nested);
+            continue;
+          }
+          const match = (ordered ? /^( *)\d+\. (.*)$/ : /^( *)- (.*)$/).exec(current);
+          if (!match) break;
+          if (items.length >= MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
+          items.push({ inlines: parseInlines(match[2]!) });
+          this.pos++;
+        }
+        return { type: ordered ? "ordered-list" : "bullet-list", items };
+      };
+      const indent = /^( *)/.exec(line)![1]!.length;
+      if (indent !== 0) fail();
+      return list(indent, depth);
     }
     if (line === ">" || line.startsWith("> ")) {
       const quote = [line.slice(2)];
@@ -535,6 +654,44 @@ class Parser {
       items.push({ checked: m[2] === "x", inlines, children });
     }
     return items;
+  }
+  /**
+   * Shared decoder for the `image` / `attachment` / `embed` versioned
+   * reference directives. `version` must be the exact literal `"1"` — any
+   * other spelling (`"01"`, `"2"`, …) is a categorical refusal, not a
+   * silent fallback, so a future format bump can add a new literal case
+   * without reinterpreting old documents. The JSON body must canonicalize
+   * byte-for-byte back to itself via {@link refBody} (rejecting duplicate
+   * keys, extra fields, and alternate encodings exactly like the `table`
+   * directive), and the resulting block is re-validated through the T01
+   * validator so the closed key set, URL scheme policy, and byte caps are
+   * enforced from a single source of truth.
+   */
+  private reference(
+    version: string,
+    type: "image" | "attachment" | "embed",
+    allowed: readonly string[],
+  ): NoteBlock {
+    if (version !== "1") fail();
+    const json = this.lines[this.pos++] ?? fail();
+    bounded(json, MAX_NOTE_DOCUMENT_BLOCK_BYTES, "oversize_block");
+    let data: unknown;
+    try {
+      data = JSON.parse(json);
+    } catch {
+      fail();
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) fail();
+    const d = data as Record<string, unknown>;
+    keys(d, allowed);
+    const fields: Record<string, unknown> = {};
+    for (const key of allowed) fields[key] = d[key];
+    if (refBody(fields) !== json) fail();
+    const block: Record<string, unknown> = { type };
+    for (const key of allowed) if (d[key] !== undefined) block[key] = d[key];
+    if (this.lines[this.pos++] !== ":::") fail();
+    validateNoteDocument({ version: 1, blocks: [block] });
+    return block as unknown as NoteBlock;
   }
 }
 function references(doc: NoteDocumentV1): string[] {

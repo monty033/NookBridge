@@ -241,7 +241,14 @@ function parseHtml(html: string): HtmlNode[] {
       const value = entities(attr[2] ?? attr[3] ?? attr[4]!);
       if (Object.hasOwn(attrs, key)) fail();
       // Closed inert attributes. Preserve unfamiliar data/aria attributes opaquely.
+      // `style` on `hr` specifically is tolerated here (not added to the
+      // general allow-list below) so the legacy write codec's visible
+      // horizontal rule — the only place this parser ever sees a `style`
+      // attribute — parses into an Element and falls through to the
+      // generic `preserve()` opaque path in `decodeBlock` instead of
+      // failing this whole document outright.
       if (
+        !(key === "style" && tag === "hr") &&
         !/^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) &&
         ![
           "class",
@@ -490,9 +497,24 @@ function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlo
   });
 }
 function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
+  // `horizontal-rule` has no native ENCODE support yet (Task 2.x/3.x,
+  // pinned-runtime proof pending — see `renderBlocks` below), so decode
+  // must not promote a native `<hr>` into that AST node either: doing so
+  // would make any note containing one permanently un-writable, even to
+  // edit unrelated text elsewhere.  `hr` is a recognised void tag with no
+  // decode case, so it falls through to the generic `preserve()` opaque
+  // reference below — the same safe, no-data-loss whole-subtree fallback
+  // every other syntactically-valid-but-unmodelled shape gets.
   if (n.tag === "p" || /^h[1-3]$/.test(n.tag)) {
     attrs(n);
     const inlines = inline(n.children);
+    // An empty paragraph/heading has no unambiguous Markdown block form
+    // (note-document-markdown.ts's `renderBlocks` refuses zero inlines), so
+    // decoding it into that shape made the operator's Markdown preimage
+    // fail for any note carrying one, even though the empty block itself
+    // was never touched.  Preserve it opaquely instead: losslessly
+    // round-trippable, and the rest of the note stays editable.
+    if (inlines.length === 0) preserve();
     return n.tag === "p"
       ? { type: "paragraph", inlines }
       : { type: "heading", level: Number(n.tag[1]) as 1 | 2 | 3, inlines };

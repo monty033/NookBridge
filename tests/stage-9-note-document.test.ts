@@ -166,6 +166,26 @@ describe("NoteDocumentV1 — image block", () => {
     expectRejected({ type: "image", url: "https://example.com/a\u0000.png" });
   });
 
+  it("rejects a URL containing a lone surrogate before URL normalisation", () => {
+    expectRejected({ type: "image", url: "https://example.com/\ud800.png" });
+  });
+
+  it.each([
+    { type: "image", url: "https://example.com/a.png", alt: "bad\u0000label" },
+    {
+      type: "attachment",
+      url: "https://example.com/report.pdf",
+      name: "bad\u007flabel",
+    },
+    {
+      type: "attachment",
+      url: "https://example.com/report.pdf",
+      mime: "bad\ud800label",
+    },
+  ])("rejects control bytes and lone surrogates in reference labels: %o", (block) => {
+    expectRejected(block);
+  });
+
   it("rejects an oversized url beyond the reference URL byte cap", () => {
     const url = "https://example.com/" + "a".repeat(MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES);
     expectRejected({ type: "image", url });
@@ -331,13 +351,81 @@ describe("NoteDocumentV1 — embed block", () => {
 // math — explicitly NOT implemented (documented refusal, not a guess).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// math — explicitly NOT implemented (documented refusal, not a guess).
+// ---------------------------------------------------------------------------
+
 describe("NoteDocumentV1 — math block (unimplemented by design)", () => {
   it("has no native `math` discriminator: an attempted math block is unsupported_node", () => {
     // This asserts the current, honest state: Task 0.2 (pinned-runtime
     // schema discovery) has not happened, so no math shape has been
-    // added.  A `math` block is refused the same way any other unknown
+    // added. A `math` block is refused the same way any other unknown
     // discriminator is refused — it does NOT silently downgrade to a
     // paragraph, and it is NOT accepted with a guessed shape.
     expectRejected({ type: "math", tex: "E = mc^2", displayMode: true });
+  });
+});
+
+describe("NoteDocumentV1 — hostile direct validator inputs", () => {
+  it("does not invoke an inherited prototype accessor when a required field is absent", () => {
+    let called = false;
+    Object.defineProperty(Object.prototype, "version", {
+      configurable: true,
+      get() {
+        called = true;
+        throw new Error("CANARY");
+      },
+    });
+    try {
+      expect(() => validateNoteDocument({ blocks: [] })).toThrow(NoteDocumentError);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "version");
+    }
+    expect(called).toBe(false);
+  });
+
+  it("rejects prototype-named discriminators without leaking raw lookup errors", () => {
+    expectRejected({ type: "constructor", inlines: [] });
+    expectRejected(JSON.parse('{"type":"__proto__","inlines":[]}'));
+  });
+
+  it("rejects unknown fields at both block and inline levels", () => {
+    expectRejected({ type: "paragraph", inlines: [], extra: "CANARY" });
+    expectRejected({ type: "paragraph", inlines: [{ text: "hello", extra: "CANARY" }] });
+  });
+
+  it("refuses accessor properties without invoking them", () => {
+    let called = false;
+    const paragraph = { type: "paragraph" };
+    Object.defineProperty(paragraph, "inlines", {
+      enumerable: true,
+      get() {
+        called = true;
+        throw new Error("CANARY");
+      },
+    });
+    expectRejected(paragraph);
+    expect(called).toBe(false);
+  });
+
+  it("refuses a proxied blocks array with a categorical error before reading it", () => {
+    const blocks = new Proxy([], {
+      get(target, property, receiver) {
+        if (property === "length") throw new Error("CANARY");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => validateNoteDocument({ version: NOTE_DOCUMENT_VERSION, blocks })).toThrow(
+      NoteDocumentError,
+    );
+  });
+
+  it("refuses a cyclic unknown block field with a categorical error", () => {
+    const paragraph: Record<string, unknown> = {
+      type: "paragraph",
+      inlines: [{ text: "hello" }],
+    };
+    paragraph.selfRef = paragraph;
+    expectRejected(paragraph);
   });
 });

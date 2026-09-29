@@ -175,6 +175,7 @@ export type MarkdownConstruct =
   | "heading-2"
   | "heading-3"
   | "unordered-list"
+  | "nested-unordered-list"
   | "task-list"
   | "paragraph"
   | "inline-bold"
@@ -186,7 +187,8 @@ export type MarkdownConstruct =
   | "blockquote"
   | "link-or-image"
   | "attachment-reference"
-  | "inline-html";
+  | "inline-html"
+  | "nookbridge-directive";
 
 /**
  * The closed list of Markdown constructs the codec supports.  Anything
@@ -254,10 +256,12 @@ export const UNSUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlyArray<string> = Object.fre
   "attachment-reference",
   "link-or-image",
   "inline-html",
+  "nookbridge-directive",
+  "nested-unordered-list",
 ]);
 
-/** A line consisting of three or more `-` and nothing else (a horizontal rule). */
-const HORIZONTAL_RULE_LINE = /^-{3,}$/;
+/** A line consisting of exactly three `-` and nothing else (a horizontal rule). */
+const HORIZONTAL_RULE_LINE = /^---$/;
 
 /** A fenced code block's opening line: three backticks and an optional bounded language token. */
 const CODE_FENCE_OPEN = /^```([A-Za-z0-9_+-]*)$/;
@@ -383,6 +387,31 @@ function isHorizontalRuleBlock(lines: readonly string[]): boolean {
   return lines.length === 1 && HORIZONTAL_RULE_LINE.test(lines[0] as string);
 }
 
+/** Any line that looks like an unordered-list item, indentation included. */
+const LOOSE_BULLET_LINE = /^\s*[-*] +/;
+
+/** A flat, un-indented unordered-list item line (the shape the renderer can express). */
+const FLAT_BULLET_LINE = /^[-*] +/;
+
+/**
+ * A block that looks like an unordered list — every line is bullet-shaped
+ * once leading indentation is ignored — but is NOT the flat, un-indented
+ * shape {@link renderBlock}'s `isList` branch can render (`FLAT_BULLET_LINE`
+ * on every line).  The renderer has no nesting model: without this check,
+ * `- parent\n  - child` fails the flat-list test (the indented child line)
+ * and falls through to the generic paragraph renderer, which prints the
+ * child's raw `  - child` text verbatim inside a `<p>` — silently losing
+ * both the nesting AND the child's own bullet/list semantics, with no
+ * error and no signal that anything was downgraded.
+ */
+function isNestedUnorderedListBlock(lines: readonly string[]): boolean {
+  return (
+    lines.length > 1 &&
+    lines.every((line) => LOOSE_BULLET_LINE.test(line)) &&
+    !lines.every((line) => FLAT_BULLET_LINE.test(line))
+  );
+}
+
 /** A block whose first line opens a fence and whose last line is a bare closing fence. */
 function isFencedCodeBlock(lines: readonly string[]): boolean {
   return (
@@ -425,10 +454,14 @@ function parseTableBlockRows(lines: readonly string[]): readonly (readonly strin
  * the construct {@link renderBlock} will render it as.  Order matters
  * and must match `renderBlock`'s dispatch order exactly.
  */
+const NOTESNOOK_VISIBLE_HR_STYLE =
+  "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+
 function classifyBlockConstruct(lines: readonly string[]): MarkdownConstruct {
   const first = lines[0] ?? "";
-  if (isHorizontalRuleBlock(lines)) return "horizontal-rule";
   if (isFencedCodeBlock(lines)) return "fenced-code-block";
+  if (lines.some((line) => /^:::nookbridge(?:\s|$)/.test(line))) return "nookbridge-directive";
+  if (isHorizontalRuleBlock(lines)) return "horizontal-rule";
   if (isBlockquoteBlock(lines)) return "blockquote";
   if (parseTableBlockRows(lines) !== null) return "markdown-table";
   const heading = /^(#{1,3}) +/.exec(first);
@@ -437,7 +470,8 @@ function classifyBlockConstruct(lines: readonly string[]): MarkdownConstruct {
     return level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3";
   }
   if (lines.every((line) => TASK_LIST_LINE.test(line))) return "task-list";
-  if (lines.every((line) => /^[-*] +/.test(line))) return "unordered-list";
+  if (isNestedUnorderedListBlock(lines)) return "nested-unordered-list";
+  if (lines.every((line) => FLAT_BULLET_LINE.test(line))) return "unordered-list";
   return "paragraph";
 }
 
@@ -959,7 +993,7 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
     // Notesnook's dark-mode editor reset can leave a bare `<hr>` visually
     // collapsed.  Keep the native horizontal-rule node, but provide an
     // explicit, theme-neutral border so the rule is visible in every client.
-    return '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />';
+    return `<hr style="${NOTESNOOK_VISIBLE_HR_STYLE}" />`;
   }
 
   if (isFencedCodeBlock(lines)) {
@@ -992,10 +1026,10 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
     return renderTaskListBlock(lines, listKind);
   }
 
-  const isList = lines.every((line) => /^[-*] +/.test(line));
+  const isList = lines.every((line) => FLAT_BULLET_LINE.test(line));
   if (isList) {
     const items = lines
-      .map((line) => `<li>${renderInline(line.replace(/^[-*] +/, ""))}</li>`)
+      .map((line) => `<li>${renderInline(line.replace(FLAT_BULLET_LINE, ""))}</li>`)
       .join("");
     return `<ul>${items}</ul>`;
   }
