@@ -2748,7 +2748,8 @@ definition of done.
   `9d9e9af413defe3407f445d593b5516532ca3315`.
 - PR #167 — arbitrary ordered-list starts and strict HTTPS inline links — merged
   to `beta` at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
-- Current canonical beta tip: `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+- PR #168 — docs-only closeout — is the most recent merge; current canonical
+  beta tip: `bb5d76fdb9253c56e30a4c1d12187cf014359e67`.
 
 ### Verified evidence
 
@@ -2794,7 +2795,7 @@ separate and open:
 Start from the refreshed canonical `beta` tip, not the old feature branch:
 
 ```text
-192c9cdf17ef630befd9c181112f92224c6df0f4
+bb5d76fdb9253c56e30a4c1d12187cf014359e67
 ```
 
 First decide whether to promote the source slice. If yes, create a new branch
