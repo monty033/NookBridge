@@ -31,7 +31,8 @@ Forgejo `beta` branch, but it is **not** a production release or deployment.
   at `9d9e9af413defe3407f445d593b5516532ca3315`.
 - PR #167, `feat: preserve ordered list starts and support HTTPS links`, merged
   at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
-- The current `upstream/beta` tip is `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+- PR #168, the docs-only closeout, is the most recent merge; the current
+  `upstream/beta` tip is `bb5d76fdb9253c56e30a4c1d12187cf014359e67`.
 - The final source gate passed at **109 test files / 2,787 tests**, with
   typecheck, lint, formatting, build, and diff checks passing.
 - The final independent review found no blocking security or logic findings.
@@ -54,8 +55,9 @@ cannot preserve faithfully.
 
 When this work resumes, continue in this order:
 
-1. Re-read `upstream/beta` at merge commit `192c9cdf…` and decide whether the
-   beta behavior is ready for a promotion PR to `main`.
+1. Re-read `upstream/beta` at the current tip `bb5d76f…` (PR #168, the
+   docs-only closeout) and decide whether the beta behavior is ready for a
+   promotion PR to `main`.
 2. If promotion is authorized, build and verify the artifact from the exact
    beta merge commit, then run the isolated beta canary/read-back checks.
 3. Submit a separate promotion/deployment change only after the source target
