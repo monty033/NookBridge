@@ -567,24 +567,30 @@ describe("Stage 4 write adapter — createNote", () => {
     expect(codec.encodeCalls).toEqual([]);
   });
 
-  it("refuses a nested unordered list before any create mutator", async () => {
-    // Finding 1: `- parent\n  - child` has no flat-list or paragraph shape
-    // the codec can express without losing the child's bullet/indentation
-    // structure.  The fidelity gate must refuse it up front, exactly like
-    // any other unsupported construct, instead of letting it silently
-    // become a literal paragraph containing the raw indented text.
+  it("creates a note from a nested unordered list now that the codec renders nesting", async () => {
+    // Finding 1 (superseded): `- parent\n  - child` was refused because the
+    // codec had no nesting model and would have flattened it into a literal
+    // paragraph holding the raw indented child line.  The codec now renders
+    // a nested bullet tree, so the fidelity gate admits the block and the
+    // create mutator runs.  The fail-closed contract itself is unchanged —
+    // it still fires before any mutator for constructs with no native shape
+    // (see the structured-directive refusal above).
     const database = createFakeDatabase();
     const codec = htmlCodec();
     const adapter = createNotesnookWriteAdapter({ source: database, codec });
-    const code = await codeOfAsync(() =>
-      adapter.createNote({
-        title: "Nested list refusal",
-        content: "- parent\n  - child",
-      }),
-    );
-    expect(code).toBe("unsupported_content");
-    expect(database.calls.add).toHaveLength(0);
-    expect(codec.encodeCalls).toEqual([]);
+
+    const result = await adapter.createNote({
+      title: "Nested list",
+      content: "- parent\n  - child",
+    });
+
+    expect(result.operation).toBe("create");
+    expect(database.calls.add).toHaveLength(1);
+    // The gate admitted it, so the codec was actually driven — the exact
+    // opposite of the refusal path, where encodeCalls stayed empty.  The
+    // stored bytes themselves belong to the codec under test in the
+    // fidelity-gate suite; `htmlCodec` here is a stub.
+    expect(codec.encodeCalls).toEqual(["- parent\n  - child"]);
   });
 
   it("creates a note from a CreateNoteCommand and returns a bounded local outcome", async () => {
