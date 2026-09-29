@@ -735,6 +735,7 @@ describe("end-to-end SDK smoke test", () => {
         status: "synced",
         pendingSync: false,
         attempts: 1,
+        uploadScope: "all-pending-local-changes",
       });
 
       const invalid = await client.callTool({

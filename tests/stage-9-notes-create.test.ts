@@ -207,7 +207,9 @@ describe("notes create — runner", () => {
   });
 
   it("formats the created result", () => {
-    expect(formatNotesResult({ kind: "created" })).toBe("nookctl notes: created\n");
+    expect(formatNotesResult({ kind: "created" })).toBe(
+      "nookctl notes: created\n  Stored locally only; a future full sync uploads this with all changes pending at that time.\n",
+    );
   });
 
   it("documents create in the help text", () => {
