@@ -10,7 +10,7 @@
 | Recommended implementation | TypeScript / Node.js                           |
 | Project license            | GPL-3.0-or-later                               |
 | Research cutoff            | August 26, 2026                                |
-| Document status            | Design plan / implementation roadmap, v1.6     |
+| Document status            | Design plan / implementation roadmap, v1.6; current beta closeout in §13.20 |
 
 > Purpose: define a low-risk, testable path from a small feasibility probe to a reliable headless Notesnook client for Linux that can read, search, create, update, and eventually access attachments on behalf of Hermes without materially weakening Notesnook's desktop-client security model. NixOS is the reference and first production deployment; generic Linux and Docker are supported portability targets. The plan deliberately separates development proofs from the first deployable MVP so the project can stop early if Notesnook core behavior on the reference NixOS host proves unsuitable.
 
@@ -2729,6 +2729,79 @@ The amendment's intent is preserved; its specific contract decisions are governe
 ### Supersession note
 
 The §13.19 amendment is governed by T00 and not by §13.18 of the v2 file. The shared document model, the editor interchange grammar, the native serializer, and the CLI UX are all tasks T01–T03 + T07 + T09. The amendment does not stand alone; the T00 frozen contract and the T01–T14 task graph are the source of truth.
+
+## 13.20 Current pause point — beta Markdown fidelity slice
+
+**Status date:** 2026-09-29 (America/New_York)
+
+**Status: SOURCE SLICE CLOSED ON `beta`; PROMOTION AND PRODUCTION GATES OPEN.**
+This is the current handoff for the ordered-list and inline-link work. It
+supersedes stale current-state wording elsewhere in the document without
+rewriting the historical receipts or changing the broader production-MVP
+definition of done.
+
+### Merged source scope
+
+- PR #165 — native block Markdown parity — merged to `beta` at
+  `b813243a286789d641ea049a8e32b23498902f99`.
+- PR #166 — nested ordinary lists as native bullet trees — merged to `beta` at
+  `9d9e9af413defe3407f445d593b5516532ca3315`.
+- PR #167 — arbitrary ordered-list starts and strict HTTPS inline links — merged
+  to `beta` at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+- Current canonical beta tip: `192c9cdf17ef630befd9c181112f92224c6df0f4`.
+
+### Verified evidence
+
+- Source gates: **109 test files / 2,787 tests passed**.
+- Typecheck, ESLint, Prettier, build, and `git diff --check` passed.
+- The final independent read-only review passed the exact staged snapshot
+  `62903329a5a59c6a56c1fc2290fcca1480321ab71cebd29ea55f8ca6b653590d` with no
+  blocking security or logic findings.
+- The candidate was submitted and read back as PR #167 against `beta`; the
+  merged result is verified at the beta tip above.
+
+### What this slice establishes
+
+The beta branch now carries native Markdown block parity, nested ordinary
+lists, arbitrary nonnegative ordered-list starts, and strict HTTPS inline-link
+support. Unsafe, malformed, credential-bearing, or unsupported link forms are
+refused before the write mutator. Ordered-list boundaries that the current
+model cannot represent faithfully are refused rather than silently normalized.
+
+### What remains open
+
+This source slice is not a production release. The following gates remain
+separate and open:
+
+1. **Promotion decision:** review the beta behavior and, only if authorized,
+   prepare a separate promotion PR to `main`.
+2. **Artifact evidence:** build from the exact beta merge commit and verify the
+   artifact, manifest, checksum, and runtime closure before any deployment.
+3. **Isolated acceptance:** rerun the bounded beta canary/read-back checks from
+   the merged artifact; do not treat source tests as deployment evidence.
+4. **Production rollout:** NixOS repin, service restart, production canary, and
+   any live Notesnook sync require their own explicit authorization and
+   read-after-write evidence.
+5. **Broader production-MVP gates:** production-shaped mutation atomicity and
+   durable sync intent, authoritative lock/authorization behavior, runtime
+   ownership after timeout or disconnect, retry/throttling and query bounds,
+   production-bundle recovery with post-recovery resync, privileged and
+   outsider boundary checks, long-duration mixed-load stress, and exact shipped
+   artifact dependency/license evidence.
+
+### Resume procedure
+
+Start from the refreshed canonical `beta` tip, not the old feature branch:
+
+```text
+192c9cdf17ef630befd9c181112f92224c6df0f4
+```
+
+First decide whether to promote the source slice. If yes, create a new branch
+from the current canonical target, keep the promotion/deployment scope
+separate from this source closeout, and rerun the applicable source, artifact,
+review, and live-acceptance gates. Do not merge, deploy, restart, or sync merely
+because PR #167 is merged.
 
 # Appendix A. Research Sources
 
