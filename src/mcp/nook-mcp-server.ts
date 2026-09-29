@@ -250,7 +250,8 @@ const GET_NOTE_TOOL_DEFINITION = Object.freeze({
 const CREATE_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_CREATE_NOTE_TOOL_NAME,
   description:
-    "Create a note with bounded title, content, optional notebook identifier, and optional explicit Notesnook list intent (simple-checklist or task-list).",
+    "Create a note with bounded title, content, optional notebook identifier, and optional explicit Notesnook list intent (simple-checklist or task-list). " +
+    "New notes stay local and are not uploaded automatically; a future explicit sync includes them with all local changes pending then.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
@@ -431,7 +432,8 @@ const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
 
 const SYNC_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_SYNC_TOOL_NAME,
-  description: "Explicitly request the approval-gated outbound sync coordinator.",
+  description:
+    "Explicitly request the approval-gated outbound sync coordinator. This sends ALL pending local changes, including notes created earlier, not just work associated with a particular request.",
   inputSchema: EMPTY_INPUT_SCHEMA,
   annotations: Object.freeze({
     title: "Sync notes",
@@ -678,7 +680,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       NOOK_MCP_CREATE_NOTE_TOOL_NAME,
       {
         title: "Create note",
-        description: "Create a bounded note.",
+        description:
+          "Create a bounded note. New notes stay local and are not uploaded automatically; a future explicit sync includes them with all local changes pending then.",
         inputSchema: createNoteInputSchema,
         annotations: CREATE_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
       },
@@ -730,7 +733,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       NOOK_MCP_SYNC_TOOL_NAME,
       {
         title: "Sync notes",
-        description: "Explicitly request the approval-gated outbound sync coordinator.",
+        description:
+          "Explicitly request the approval-gated outbound sync coordinator. This sends ALL pending local changes, including notes created earlier, not just work associated with a particular request.",
         inputSchema: emptyInputSchema,
         annotations: SYNC_TOOL_DEFINITION.annotations as ToolAnnotations,
       },
@@ -1300,6 +1304,7 @@ async function invokeRequestSync(
       status: value.status,
       pendingSync: value.pendingSync,
       attempts: value.attempts,
+      uploadScope: "all-pending-local-changes",
     });
   } catch {
     return toMcpErrorResult("service_unavailable");

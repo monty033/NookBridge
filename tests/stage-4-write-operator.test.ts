@@ -919,6 +919,7 @@ describe("nookctl write — categorical formatting and non-leakage", () => {
     const text = formatWriteCommandResult(result);
     expect(text).toContain("local:   committed");
     expect(text).toContain("remote:  pending");
+    expect(text).toContain("all local changes pending at that time");
     expect(text).toContain("pending: 1");
     for (const forbidden of [
       "CANARY-TITLE",

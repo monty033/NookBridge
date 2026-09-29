@@ -1228,6 +1228,13 @@ describe("formatNotesResult — closed output boundary", () => {
     expect(formatNotesResult({ kind: "empty" })).toBe("nookctl notes: empty\n");
   });
 
+  it("warns that a created note remains local until a later full sync", () => {
+    const output = formatNotesResult({ kind: "created" });
+    expect(output).toContain("Stored locally only");
+    expect(output).toContain("future full sync");
+    expect(output).toContain("all changes pending at that time");
+  });
+
   it("collapses malformed runtime metadata to a fixed error", () => {
     const output = formatNotesResult({
       kind: "page",

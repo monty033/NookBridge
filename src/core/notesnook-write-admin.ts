@@ -942,13 +942,15 @@ export function formatWriteCommandResult(result: RunWriteCommandResult): string 
         `nookctl write ${result.report.operation}: local-committed`,
         "  local:   committed",
         "  remote:  pending (explicit synchronization required)",
+        "  sync:    uploads all local changes pending at that time, not only this note",
         `  pending: ${result.report.pendingCount}`,
       ].join("\n");
     case "sync-report":
       return [
         `nookctl write sync: ${result.report.status}`,
         `  remote:  ${result.report.status}`,
-        `  pending: ${result.report.pendingSync ? "yes" : "no"}`,
+        "  scope:    all pending local changes, not one note",
+        `  remaining: ${result.report.pendingSync ? "yes" : "no"}`,
         `  attempts: ${result.report.attempts}`,
       ].join("\n");
   }

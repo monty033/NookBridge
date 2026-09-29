@@ -118,7 +118,11 @@ notes are never uploaded. **That was wrong.** Operator creates are recorded with
 `pendingSync: true`, and the remote executor invokes upstream `{ type: "full" }`,
 which includes a send phase — so a later daemon-side full sync would drain that
 queue. The accurate position is "not automatically uploaded", not "may never be
-uploaded". This is tracked as an open defect, not a closed boundary.
+uploaded". This remains a known, accepted behavior rather than a closed sync
+boundary. As the accepted UX mitigation, operator-facing warnings now explain at
+create time that the note remains local until a future full sync, and at explicit
+sync time that all pending local changes are included. This does not alter sync
+semantics or prevent a later full sync from uploading pending notes.
 
 Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
 categorical `vault_locked` for a locked note and `permission_denied` for the

@@ -299,6 +299,7 @@ describe("notesnook_sync — approval-gated outbound path", () => {
       status: "synced",
       pendingSync: false,
       attempts: 1,
+      uploadScope: "all-pending-local-changes",
     });
   });
 });
