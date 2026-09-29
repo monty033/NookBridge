@@ -552,6 +552,41 @@ async function codeOfAsync(fn: () => Promise<unknown>): Promise<NotesnookWriteEr
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — createNote", () => {
+  it("refuses a structured NookBridge directive before any create mutator", async () => {
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+    const code = await codeOfAsync(() =>
+      adapter.createNote({
+        title: "Directive refusal",
+        content: ':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::',
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.add).toHaveLength(0);
+    expect(codec.encodeCalls).toEqual([]);
+  });
+
+  it("refuses a nested unordered list before any create mutator", async () => {
+    // Finding 1: `- parent\n  - child` has no flat-list or paragraph shape
+    // the codec can express without losing the child's bullet/indentation
+    // structure.  The fidelity gate must refuse it up front, exactly like
+    // any other unsupported construct, instead of letting it silently
+    // become a literal paragraph containing the raw indented text.
+    const database = createFakeDatabase();
+    const codec = htmlCodec();
+    const adapter = createNotesnookWriteAdapter({ source: database, codec });
+    const code = await codeOfAsync(() =>
+      adapter.createNote({
+        title: "Nested list refusal",
+        content: "- parent\n  - child",
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.add).toHaveLength(0);
+    expect(codec.encodeCalls).toEqual([]);
+  });
+
   it("creates a note from a CreateNoteCommand and returns a bounded local outcome", async () => {
     const database = createFakeDatabase();
     const codec = htmlCodec();
@@ -886,6 +921,22 @@ describe("Stage 4 write adapter — appendNote", () => {
     });
     return { adapter, database, codec, note, content: stored };
   }
+
+  it("refuses a structured NookBridge directive before any append mutator", async () => {
+    const { adapter, database, codec, content } = setupAppendable();
+    const code = await codeOfAsync(() =>
+      adapter.appendNote({
+        id: NOTE_ID,
+        markdownFragment: ':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::',
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(database.calls.update).toHaveLength(0);
+    expect(codec.appendCalls).toBe(0);
+    expect(content.data).toBe("<p>existing paragraph</p>");
+  });
 
   it("appends exactly one Markdown fragment while preserving the stored representation", async () => {
     const { adapter, database, codec, content } = setupAppendable();
@@ -1273,6 +1324,24 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(code).toBe("invalid_input");
     expect(database.calls.update).toHaveLength(0);
     expect(database.calls.relationAdd).toHaveLength(0);
+  });
+
+  it("refuses a structured NookBridge directive before any update mutator", async () => {
+    const { adapter, database, codec } = setupUpdatable();
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: {
+          content: ':::nookbridge image 1\n{"url":"https://example.test/a.png"}\n:::',
+        },
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.touch).toHaveLength(0);
+    expect(codec.encodeCalls).toEqual([]);
   });
 
   it("applies only the allowed patch fields and preserves fields outside the patch", async () => {

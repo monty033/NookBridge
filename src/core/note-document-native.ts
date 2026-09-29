@@ -241,7 +241,14 @@ function parseHtml(html: string): HtmlNode[] {
       const value = entities(attr[2] ?? attr[3] ?? attr[4]!);
       if (Object.hasOwn(attrs, key)) fail();
       // Closed inert attributes. Preserve unfamiliar data/aria attributes opaquely.
+      // `style` on `hr` specifically is tolerated here (not added to the
+      // general allow-list below) so the legacy write codec's visible
+      // horizontal rule — the only place this parser ever sees a `style`
+      // attribute — parses into an Element and falls through to the
+      // generic `preserve()` opaque path in `decodeBlock` instead of
+      // failing this whole document outright.
       if (
+        !(key === "style" && tag === "hr") &&
         !/^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) &&
         ![
           "class",
@@ -490,9 +497,24 @@ function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlo
   });
 }
 function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
+  // `horizontal-rule` has no native ENCODE support yet (Task 2.x/3.x,
+  // pinned-runtime proof pending — see `renderBlocks` below), so decode
+  // must not promote a native `<hr>` into that AST node either: doing so
+  // would make any note containing one permanently un-writable, even to
+  // edit unrelated text elsewhere.  `hr` is a recognised void tag with no
+  // decode case, so it falls through to the generic `preserve()` opaque
+  // reference below — the same safe, no-data-loss whole-subtree fallback
+  // every other syntactically-valid-but-unmodelled shape gets.
   if (n.tag === "p" || /^h[1-3]$/.test(n.tag)) {
     attrs(n);
     const inlines = inline(n.children);
+    // An empty paragraph/heading has no unambiguous Markdown block form
+    // (note-document-markdown.ts's `renderBlocks` refuses zero inlines), so
+    // decoding it into that shape made the operator's Markdown preimage
+    // fail for any note carrying one, even though the empty block itself
+    // was never touched.  Preserve it opaquely instead: losslessly
+    // round-trippable, and the rest of the note stays editable.
+    if (inlines.length === 0) preserve();
     return n.tag === "p"
       ? { type: "paragraph", inlines }
       : { type: "heading", level: Number(n.tag[1]) as 1 | 2 | 3, inlines };
@@ -677,6 +699,17 @@ function renderBlocks(
           return `<table><thead><tr>${b.columns.map((c) => `<th>${escape(c)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((row) => `<tr>${row.map((c) => `<td>${escape(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
         case "callout":
           return `<div data-type="callout" data-variant="${b.variant}">${render(b.blocks)}</div>`;
+        case "horizontal-rule":
+        case "image":
+        case "attachment":
+        case "embed":
+          // T01 (native-block-parity plan, Task 1.1) added these as
+          // closed structured-reference AST nodes only. Native HTML
+          // encoding is Task 2.x/3.x and requires a pinned-runtime
+          // schema proof that has not happened yet, so this renderer
+          // refuses categorically rather than guessing a native shape
+          // or silently dropping the block.
+          return fail();
         case "opaque":
           return payloads?.get(b.sentinel.token) ?? fail();
       }
@@ -712,6 +745,10 @@ function closedDocument(doc: NoteDocumentV1): void {
         "code-block": ["type", "text", "language"],
         table: ["type", "columns", "rows"],
         callout: ["type", "variant", "blocks"],
+        "horizontal-rule": ["type"],
+        image: ["type", "url", "alt"],
+        attachment: ["type", "url", "name", "mime"],
+        embed: ["type", "url"],
         opaque: ["type", "nodeType", "sentinel"],
       };
       record(b, fields[b.type]);

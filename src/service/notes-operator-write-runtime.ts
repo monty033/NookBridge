@@ -221,6 +221,18 @@ function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
+/**
+ * The `:::nookbridge` directive prefix is reserved for opaque-reference
+ * sentinels and other codec-internal markers; a create request whose
+ * content contains it can never be accepted downstream, so it must be
+ * rejected before the operation journal records anything, not after.
+ */
+const RESERVED_DIRECTIVE_LINE = /^:::nookbridge(?:\s|$)/m;
+
+function hasReservedDirective(content: string): boolean {
+  return RESERVED_DIRECTIVE_LINE.test(content);
+}
+
 export function createOperatorWriteRuntime(
   options: OperatorWriteRuntimeOptions,
 ): OperatorWriteRuntime {
@@ -301,6 +313,7 @@ export function createOperatorWriteRuntime(
           }>,
           peer?: OperatorPeer,
         ): Promise<OperatorCreateApplied> => {
+          if (hasReservedDirective(params.content)) return fail("invalid_request");
           const owner = ownerKey(peer);
           let record: OperationRecord;
           try {
