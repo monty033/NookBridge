@@ -188,54 +188,14 @@ is started again on both success and failure; if it was initially inactive, the
 wrapper leaves it inactive. The wrapper preserves the sync command's exit
 status; a sync failure surfaces to the operator unchanged.
 
-## Building an artifact
+## Release artifact engineering
 
-Artifact assembly is package-manager-neutral at the target, but release builds
-must run where the builder's requirements hold. The release workflow selects the
-runner registered under the `nixos` label rather than pinning a container or entering
-the repository's flake, so the compiler, glibc, and utility versions are properties of
-that machine; the builder checks for the tools it needs and refuses a tree it cannot
-build. The builder requires:
-
-- a clean Git source tree;
-- a completed `dist/` and production `node_modules/` tree;
-- the pinned Node 22.23.2 runtime;
-- explicit measured glibc and libstdc++ baseline values; and
-- a deterministic `SOURCE_DATE_EPOCH`.
-
-The canonical local command shape is:
-
-```bash
-npm ci
-npm run build
-npm prune --omit=dev
-export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
-npm run artifact:linux -- \
-    --source-dir "$PWD" \
-    --node-runtime "$(command -v node)" \
-    --output-dir ./artifacts \
-    --version 1.2.3 \
-    --source-date-epoch "$SOURCE_DATE_EPOCH" \
-    --min-glibc 2.36 \
-    --min-libstdcxx GLIBCXX_3.4.29 \
-    --operator-peercred-helper /tmp/nookbridge-operator-peercred-helper
-```
-
-`--operator-peercred-helper` is required: the artifact packages the helper binary
-at `app/operator-peercred-helper`. Build it the way the release workflow does, so
-the packaged binary is the freestanding static one the artifact expects:
-
-```bash
-STATIC_GLIBC="$(nix build --no-link --print-out-paths 'nixpkgs#glibc.static')"
-cc -O2 -std=c11 -Wall -Wextra -Werror -ffreestanding -fno-builtin \
-  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables \
-  -fno-pie -no-pie -nostdlib -static -Wl,-e,_start -Wl,--build-id=none \
-  -L"$STATIC_GLIBC/lib" -o /tmp/nookbridge-operator-peercred-helper \
-  native/operator-peercred.c
-```
-
-The builder invokes the verifier before reporting success. Release signing,
-SBOM publication, and additional architectures are separate release gates.
+Artifact assembly and native helper compilation are maintainer/release-runner
+work, not end-user installation steps. The package-manager-neutral release
+recipe and its constraints are documented in the
+[release engineering guide](release-engineering.md). End users should obtain a
+reviewed artifact and its matching checksum; they do not need Nix, npm, or a
+compiler on the target host.
 
 ## GitHub one-command installer
 

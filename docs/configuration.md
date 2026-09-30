@@ -34,3 +34,56 @@ the service configuration as CLI-managed. The root operator can inspect,
 validate, edit, or reset that file through `nookctl settings`; ordinary users
 must not be granted access to it. See `nookctl settings help` for the installed
 binary's exact behavior.
+
+### Settings JSON schema (version 1)
+
+The settings file requires top-level `version`, `defaults`, and `overrides`;
+`version` must be integer `1`. The loader reads these fields but does not reject
+additional top-level properties. `defaults` must contain exactly the four
+operation keys in this order: `read`, `edit`, `create`, `delete`; each value
+must be a JSON boolean. `overrides` must be an array and may be empty. If the
+CLI creates defaults (including `reset`), they are `read: true`, `edit: false`,
+`create: false`, and `delete: false`.
+
+Each override may contain `notebooks` or `notes`, but not both; either list,
+when present, must contain non-empty printable-ASCII patterns with no `//`.
+An override must also contain at least one operation boolean (`read`, `edit`,
+`create`, `delete`); unknown override keys and non-boolean operation values
+are rejected. A scope-less override with an operation boolean passes loading
+but cannot match a notebook or note. `create` matches notebook scope only;
+other operations can match a note path or notebook path. Patterns are
+slash-separated segments; `*` and `?` match within a segment, matching is
+ASCII case-insensitive, and segment counts must match. Notebook rules cascade
+to descendants at `/` boundaries. The most specific matching pattern wins;
+equal-length ties go to the later override.
+
+```json
+{
+  "version": 1,
+  "defaults": { "read": true, "edit": false, "create": false, "delete": false },
+  "overrides": [
+    { "notebooks": ["Personal"], "edit": true, "create": true }
+  ]
+}
+```
+
+The JSON schema itself has no environment-variable overrides. CLI location
+and backend selection can be influenced by `NOOKBRIDGE_SERVICE_CONFIG`
+(service config path), `NOOKBRIDGE_SETTINGS_BACKEND` (`nix` or `cli`, default
+`cli` when no service config specifies a backend), `NOOKBRIDGE_SETTINGS_PATH`
+(settings path, subject to installed-path restrictions), and
+`XDG_CONFIG_HOME`/`HOME` (user settings path fallback). `NOOKBRIDGE_NIX_SETTINGS_SOURCE`
+selects the displayed Nix source path, defaulting to
+`nix-config/modules/nookbridge/settings.json`. In production wrappers, service
+configuration may supply `settingsBackend`; when omitted, the CLI uses `cli`.
+`NOOKBRIDGE_SERVICE_UNIT` selects the unit restarted and verified after a CLI
+settings edit/reset (default `nookd.service`); `VISUAL` then `EDITOR` select the
+editor for CLI-managed edits (default `vi`). These affect CLI behavior, not the
+settings JSON schema. Nix-managed `edit` and `reset` are refused; change the
+deployment source.
+
+Validate without editing or restarting:
+
+```text
+nookctl settings validate
+```
