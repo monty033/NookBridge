@@ -4,16 +4,18 @@ NookBridge is a pre-alpha Linux bridge between authorized local MCP clients and
 Notesnook. Its security model deliberately separates the MCP-facing process
 from the credential-bearing Notesnook client.
 
-## Choose a path
+## Find the current guidance
 
 | If you are… | Start here |
 | --- | --- |
+| Using the operator command line | [Operator CLI reference](reference/cli.md) |
+| Calling MCP tools | [MCP tool reference](reference/mcp-tools.md), then [usage](usage.md) |
 | Understanding the motivation and design | [Background and intent](background.md) and [architecture](architecture.md) |
 | Evaluating whether NookBridge is appropriate | [Getting started](getting-started.md), [project status](project-status.md), and [security and privacy](security-and-privacy.md) |
 | Installing on NixOS | [NixOS installation](installation-nixos.md), then [setup and provisioning](setup-and-provisioning.md) |
 | Installing on another systemd Linux distribution | [Generic systemd installation](installation-systemd.md), then [setup and provisioning](setup-and-provisioning.md) |
-| Connecting an authorized local MCP client | [Usage](usage.md) and the [MCP proxy contract](engineering/stages/stage-6-mcp-proxy.md) |
 | Maintaining the service or deployment | [Configuration](configuration.md), [troubleshooting](troubleshooting.md), and [development](development.md) |
+| Extending or reviewing the MCP proxy | [MCP proxy contract](engineering/stages/stage-6-mcp-proxy.md) |
 
 ## Support boundary
 
