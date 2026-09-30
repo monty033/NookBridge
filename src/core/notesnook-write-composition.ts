@@ -110,6 +110,8 @@ import type {
   SyncLocalCommitResult,
   SyncOperation,
   SyncPendingMarker,
+  SyncWriteIntent,
+  SyncWriteIntentResult,
 } from "./notesnook-sync-coordinator.js";
 import { withMutex } from "./notesnook-database-mutex.js";
 
@@ -168,6 +170,8 @@ export interface NotesnookLocalWriteHandle {
 /** The only pending-synchronization capability the composition may consume. */
 export interface NotesnookPendingSyncHandle {
   readonly recordLocalCommit: (receipt: SyncLocalCommit) => SyncLocalCommitResult;
+  /** Required by production for append/update/delete; absent only on legacy create-only seams. */
+  readonly recordSyncIntent?: (intent: SyncWriteIntent) => SyncWriteIntentResult;
   readonly requestSync: () => Promise<SyncCoordinatorResult>;
   readonly snapshot: () => SyncCoordinatorState;
   /** Optional on legacy test seams; production coordinators provide it. */
@@ -210,6 +214,7 @@ const COMPOSITION_ERROR_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.f
   "conflict",
   "vault_locked",
   "sync_failed",
+  "local_sync_marker_failed",
 ]);
 
 /**
@@ -707,6 +712,7 @@ interface CompositionState {
   readonly deleteNote: UnknownFunction | undefined;
   readonly coordinatorTarget: object;
   readonly recordLocalCommit: UnknownFunction;
+  readonly recordSyncIntent: UnknownFunction | undefined;
   readonly requestSync: UnknownFunction;
   readonly snapshot: UnknownFunction;
   readonly checkCapacity: UnknownFunction | undefined;
@@ -730,11 +736,11 @@ function buildState(options: unknown): CompositionState {
     ["createNote", "appendNote", "updateNote"],
     ["deleteNote"],
   );
-  const coordinator = requireHandle(readProperty(record, "coordinator"), [
-    "recordLocalCommit",
-    "requestSync",
-    "snapshot",
-  ]);
+  const coordinator = requireHandle(
+    readProperty(record, "coordinator"),
+    ["recordLocalCommit", "requestSync", "snapshot"],
+    ["recordSyncIntent"],
+  );
   if (adapter.target === coordinator.target) {
     // A single object satisfying both roles would fuse the local-write
     // and remote-sync boundaries this slice exists to keep apart.
@@ -755,6 +761,7 @@ function buildState(options: unknown): CompositionState {
     deleteNote: adapter.methods["deleteNote"],
     coordinatorTarget: coordinator.target,
     recordLocalCommit: capturedMethod(coordinator.methods, "recordLocalCommit"),
+    recordSyncIntent: coordinator.methods["recordSyncIntent"],
     requestSync: capturedMethod(coordinator.methods, "requestSync"),
     snapshot: capturedMethod(coordinator.methods, "snapshot"),
     checkCapacity: hasProperty(coordinator.target, "checkCapacity")
@@ -915,6 +922,64 @@ function copyAppliedFields(value: unknown): readonly NotesnookUpdatePatchField[]
 // persist.
 // ---------------------------------------------------------------------------
 
+function freezeIntent(operation: SyncWriteIntent["operation"], id: string): SyncWriteIntent {
+  return freezeSealed({ operation, id }) as unknown as SyncWriteIntent;
+}
+
+/**
+ * Persist a write-ahead intent for an existing note before invoking its
+ * mutator. The marker contains only operation/id metadata.
+ *
+ * This function runs strictly BEFORE the adapter mutation, so the local
+ * note has not changed yet: every failure path here — missing coordinator
+ * support, a thrown persistence error of any code, or a coordinator that
+ * acknowledges the wrong operation/id — is normalized to `sync_failed`
+ * ("rejected: local write failed"), never `local_sync_marker_failed`
+ * ("local change committed; ..."). `local_sync_marker_failed` is reserved
+ * for {@link recordPending}, which runs strictly AFTER a successful
+ * mutation and can therefore honestly report that the local change
+ * committed. Collapsing any coordinator throw here to `sync_failed`
+ * guarantees the two codes can never describe the same event: at the
+ * point this function runs, the mutation has definitionally not started,
+ * so the local change cannot yet be "committed."
+ */
+function recordIntent(
+  state: CompositionState,
+  operation: SyncWriteIntent["operation"],
+  id: string,
+): void {
+  if (state.recordSyncIntent === undefined) fail("sync_failed");
+  const intent = freezeIntent(operation, id);
+  let acknowledgement: unknown;
+  try {
+    acknowledgement = Reflect.apply(state.recordSyncIntent, state.coordinatorTarget, [intent]);
+  } catch {
+    fail("sync_failed");
+  }
+  if (!acknowledgesIntent(acknowledgement, operation, id)) fail("sync_failed");
+}
+
+function acknowledgesIntent(
+  acknowledgement: unknown,
+  operation: SyncWriteIntent["operation"],
+  id: string,
+): boolean {
+  try {
+    if (isThenable(acknowledgement)) return false;
+    const record = requireRecord(acknowledgement);
+    if (!hasOwnProperty(record, "operation")) return false;
+    if (!hasOwnProperty(record, "id")) return false;
+    if (!hasOwnProperty(record, "pendingSync")) return false;
+    return (
+      readOwnProperty(record, "operation") === operation &&
+      readOwnProperty(record, "id") === id &&
+      readOwnProperty(record, "pendingSync") === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 function freezeReceipt(operation: SyncOperation, id: string): SyncLocalCommit {
   return freezeSealed({
     operation,
@@ -926,27 +991,29 @@ function freezeReceipt(operation: SyncOperation, id: string): SyncLocalCommit {
 }
 
 /**
- * Record the pending marker, or fail closed.
- *
- * A queue-recording failure is surfaced categorically — the
- * coordinator's own code is preserved when it is one of the published
- * codes (a full queue reports `invalid_input`, a persistence failure
- * reports `sync_failed`), and anything else becomes `sync_failed`.  The
- * composition never swallows the failure and never reports the write as
- * remotely synchronized.
+ * Record a create marker after the local mutation, when its Notesnook ID first
+ * exists. This function runs strictly AFTER a successful adapter mutation, so
+ * every failure path here is an honest "local write done, marker not proven"
+ * outcome and must report `local_sync_marker_failed`
+ * ("local change committed; sync intent could not be persisted"), never
+ * `sync_failed` ("rejected: ...") — the caller's command already committed
+ * locally, so a "rejected" message would misleadingly imply nothing
+ * happened. This applies uniformly to a thrown persistence error of any
+ * code AND to a malformed/incomplete acknowledgement; startup inventory
+ * reconciliation is the recovery fallback for this case.
  */
 function recordPending(state: CompositionState, operation: SyncOperation, id: string): void {
   const receipt = freezeReceipt(operation, id);
   let acknowledgement: unknown;
   try {
     acknowledgement = Reflect.apply(state.recordLocalCommit, state.coordinatorTarget, [receipt]);
-  } catch (error) {
-    throw normaliseThrow(error);
+  } catch {
+    fail("local_sync_marker_failed");
   }
   // Every acknowledgement problem is a queue-recording failure, not an
   // input problem: the caller's command was already committed locally,
   // so the only honest report is "local write done, queue not proven".
-  if (!acknowledgesPending(acknowledgement, operation, id)) fail("sync_failed");
+  if (!acknowledgesPending(acknowledgement, operation, id)) fail("local_sync_marker_failed");
 }
 
 /**
@@ -1199,7 +1266,7 @@ export class NotesnookLocalWriteComposition {
   }
 
   /**
-   * Create a note locally, then record it as pending synchronization.
+   * Create a note locally, then record its sync marker.
    *
    * Remote synchronization is NOT started: the returned result reports
    * `localCommitted: true`, `remoteSynced: false`, `pendingSync: true`.
@@ -1217,7 +1284,7 @@ export class NotesnookLocalWriteComposition {
     );
   }
 
-  /** Append one Markdown fragment locally, then record it as pending. */
+  /** Persist a sync intent, then append one Markdown fragment locally. */
   async appendNote(command: AppendNoteCommand): Promise<AppendNoteResult> {
     const state = requireState(this);
     return gate(state, "local:append", () =>
@@ -1225,7 +1292,7 @@ export class NotesnookLocalWriteComposition {
     );
   }
 
-  /** Apply an allowlisted patch locally, then record it as pending. */
+  /** Persist a sync intent, then apply an allowlisted patch locally. */
   async updateNote(command: UpdateNoteCommand): Promise<UpdateNoteResult> {
     const state = requireState(this);
     return gate(state, "local:update", () =>
@@ -1233,7 +1300,7 @@ export class NotesnookLocalWriteComposition {
     );
   }
 
-  /** Soft-delete exactly one note locally, then record it as pending. */
+  /** Persist a sync intent, then soft-delete exactly one note locally. */
   async deleteNote(command: DeleteNoteCommand): Promise<DeleteNoteResult> {
     const state = requireState(this);
     if (state.deleteNote === undefined) fail("invalid_input");
@@ -1368,6 +1435,11 @@ async function runLocalOperation<T>(
   state.localDepth += 1;
   try {
     checkMutationCapacity(state);
+    let intentId: string | undefined;
+    if (operation !== "create") {
+      intentId = requireNoteId(requireRecord(command), "id");
+      recordIntent(state, operation, intentId);
+    }
     const fn = invoker();
     let raw: unknown;
     try {
@@ -1376,7 +1448,13 @@ async function runLocalOperation<T>(
       throw normaliseThrow(error);
     }
     const result = copy(raw);
-    recordPending(state, operation, (result as { readonly id: string }).id);
+    if (intentId === undefined) {
+      // Create IDs are minted by Notesnook during the mutation, so only this
+      // path needs post-commit marker persistence plus startup reconciliation.
+      recordPending(state, operation, (result as { readonly id: string }).id);
+    } else if ((result as { readonly id: string }).id !== intentId) {
+      fail("sync_failed");
+    }
     return result;
   } finally {
     state.localDepth -= 1;

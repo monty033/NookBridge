@@ -39,7 +39,10 @@ import {
   projectLiveDatabaseToWriteCapability,
 } from "../src/core/notesnook-live-write-capability.js";
 import { DETERMINISTIC_MARKDOWN_CODEC } from "../src/core/notesnook-write-codec.js";
-import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
+import {
+  createRevisionToken,
+  NotesnookWriteContractError,
+} from "../src/core/notesnook-write-contract.js";
 
 // ---------------------------------------------------------------------------
 // Pinned-API in-memory database fake.
@@ -932,6 +935,26 @@ describe("nookctl write — categorical formatting and non-leakage", () => {
     ]) {
       expect(text, forbidden).not.toContain(forbidden);
     }
+  });
+
+  it("tells the operator when a local change committed but its sync intent did not", async () => {
+    const fake = createFakeDatabase();
+    const honest = capabilityFor(fake);
+    const capability: NotesnookLiveWriteCapability = Object.freeze({
+      ...honest,
+      createNote: async () => {
+        throw new NotesnookWriteContractError("local_sync_marker_failed");
+      },
+    });
+    const result = await runWriteCommand({
+      argv: ["create", "--title", "Acceptance"],
+      env: ENABLED_ENV,
+      createWriteRuntime: () => ({ capability }),
+    });
+
+    const text = formatWriteCommandResult(result);
+    expect(text).toContain("local change committed; sync intent could not be persisted");
+    expect(text).not.toContain("rejected:");
   });
 
   it("keeps every failure message free of ids, tokens, bodies, and causes", async () => {

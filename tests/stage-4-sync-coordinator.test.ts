@@ -68,6 +68,108 @@ function deferred<T>(): {
 }
 
 describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
+  it("durably records an existing-note sync intent before its local mutation starts", () => {
+    const saved: SyncCoordinatorState[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: [NOTE_ID] }),
+        save: (state) => saved.push(state),
+      },
+    });
+
+    expect(coordinator.recordSyncIntent({ operation: "update", id: NOTE_ID })).toEqual({
+      operation: "update",
+      id: NOTE_ID,
+      pendingSync: true,
+    });
+    expect(saved).toEqual([
+      {
+        pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+        knownNoteIds: [NOTE_ID],
+      },
+    ]);
+    expect(coordinator.snapshot()).toEqual(saved[0]);
+  });
+
+  it("refuses a write-ahead intent when persistence fails and leaves coordinator state unchanged", () => {
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: [NOTE_ID] }),
+        save: () => {
+          throw new Error(SECRET);
+        },
+      },
+    });
+
+    expect(codeOf(() => coordinator.recordSyncIntent({ operation: "append", id: NOTE_ID }))).toBe(
+      "sync_failed",
+    );
+    expect(coordinator.snapshot()).toEqual({ pending: [], knownNoteIds: [NOTE_ID] });
+  });
+
+  it("keeps previously known IDs after the orphan queue reaches capacity", () => {
+    const initiallyKnown = ["z-known-note", "zz-known-note"];
+    const backlog = [
+      ...Array.from({ length: 70 }, (_, i) => `a-orphan-${String(i).padStart(3, "0")}`),
+      ...initiallyKnown,
+    ];
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: initiallyKnown }),
+        save: () => undefined,
+      },
+    });
+
+    coordinator.reconcilePendingFromSnapshot(backlog);
+
+    expect(coordinator.snapshot().pending).toHaveLength(64);
+    expect(coordinator.snapshot().knownNoteIds).toContain("z-known-note");
+    expect(coordinator.snapshot().knownNoteIds).toContain("zz-known-note");
+  });
+
+  it("bounds knownNoteIds at the persisted-state limit so a saved snapshot always reloads", () => {
+    const saved: { state?: unknown } = {};
+    // Seed exactly at the 100_000 cap so the very next committed mutation
+    // would otherwise push the persisted set over the limit that
+    // `validateState` enforces on the next load.
+    const nearCap = Array.from({ length: 100_000 }, (_, i) => `n-${String(i).padStart(6, "0")}`);
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: nearCap }),
+        save: (state) => {
+          saved.state = state;
+        },
+      },
+    });
+
+    coordinator.recordSyncIntent({ operation: "append", id: NOTE_ID });
+
+    const persisted = saved.state as { knownNoteIds: readonly string[] };
+    // Eviction order is arbitrary (lexicographic) and unrelated to recency;
+    // losing any individual id from `knownNoteIds` is a documented, safe,
+    // bounded false negative (see boundedKnownNoteIds) because the actual
+    // write-ahead guarantee lives in the `pending` marker, not this
+    // bookkeeping set. The requirement under test is purely that the
+    // persisted set never exceeds the limit `validateState` enforces on
+    // load, so a coordinator can always reload its own saved state.
+    expect(persisted.knownNoteIds.length).toBeLessThanOrEqual(100_000);
+
+    // The persisted state must be reloadable: constructing a fresh
+    // coordinator from exactly what was just saved must not throw.
+    const reloaded = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => saved.state,
+        save: () => undefined,
+      },
+    });
+    expect(reloaded.snapshot().knownNoteIds.length).toBeLessThanOrEqual(100_000);
+  });
+
   it("keeps a successful local mutation pending until remote confirmation", async () => {
     const requests: unknown[] = [];
     const executor: SyncExecutor = async (request) => {
@@ -87,6 +189,7 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
     expect(Object.isFrozen(local)).toBe(true);
     expect(coordinator.snapshot()).toEqual({
       pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [NOTE_ID],
     });
 
     const synced = await coordinator.requestSync();
@@ -98,7 +201,7 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
       attempts: 1,
       startedAt: 1000,
     });
-    expect(coordinator.snapshot()).toEqual({ pending: [] });
+    expect(coordinator.snapshot()).toEqual({ pending: [], knownNoteIds: [NOTE_ID] });
     expect(requests).toEqual([
       {
         pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1 }],
@@ -123,7 +226,7 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
       startedAt: 1000,
     });
     expect(requests).toEqual([{ pending: [] }]);
-    expect(coordinator.snapshot()).toEqual({ pending: [] });
+    expect(coordinator.snapshot()).toEqual({ pending: [], knownNoteIds: [] });
   });
 
   it("reports a local write that arrives during remote-only sync as still pending", async () => {
@@ -285,6 +388,90 @@ describe("Stage 4 SyncCoordinator — bounded retry policy", () => {
 });
 
 describe("Stage 4 SyncCoordinator — restart-safe metadata state", () => {
+  it("re-queues an untracked local note found during startup reconciliation", () => {
+    const saved: SyncCoordinatorState[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: ["known"] }),
+        save: (state) => saved.push(state),
+      },
+    });
+
+    coordinator.reconcilePendingFromSnapshot(["known", "orphan"]);
+
+    expect(coordinator.snapshot().pending).toEqual([
+      { operation: "update", noteId: "orphan", sequence: 1 },
+    ]);
+    expect(saved.at(-1)).toMatchObject({ knownNoteIds: ["known", "orphan"] });
+  });
+
+  it("does not save when startup reconciliation snapshot already matches", () => {
+    let saves = 0;
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: ["known"] }),
+        save: () => {
+          saves++;
+        },
+      },
+    });
+    coordinator.reconcilePendingFromSnapshot(["known"]);
+    expect(saves).toBe(0);
+  });
+
+  it("does not duplicate an orphan already in the pending queue", () => {
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({
+          pending: [{ operation: "append", noteId: "orphan", sequence: 3 }],
+          knownNoteIds: [],
+        }),
+        save: () => undefined,
+      },
+    });
+    coordinator.reconcilePendingFromSnapshot(["orphan"]);
+    expect(coordinator.snapshot().pending).toEqual([
+      { operation: "append", noteId: "orphan", sequence: 3 },
+    ]);
+  });
+
+  it("makes bounded forward progress on an orphan backlog larger than the pending-queue bound, instead of failing the whole pass and losing the overflow forever", () => {
+    // Regression: reconciling a backlog bigger than MAX_PENDING_MARKERS (64)
+    // must not throw and discard the pass entirely -- that would mean a
+    // vault with more than 64 unreconciled notes deadlocks reconciliation
+    // on every single startup, forever. It also must not mark the
+    // ids that didn't fit this pass as "known": doing so would permanently
+    // and silently drop them from recovery instead of picking them up on
+    // the next pass once the queue drains.
+    const backlog = Array.from({ length: 80 }, (_, i) => `orphan-${String(i).padStart(3, "0")}`);
+    const saved: SyncCoordinatorState[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore: {
+        load: () => ({ pending: [], knownNoteIds: [] }),
+        save: (state) => saved.push(state),
+      },
+    });
+
+    expect(() => coordinator.reconcilePendingFromSnapshot(backlog)).not.toThrow();
+
+    const afterFirstPass = coordinator.snapshot();
+    expect(afterFirstPass.pending).toHaveLength(64);
+    expect(afterFirstPass.knownNoteIds).toHaveLength(64);
+    const queuedIds = new Set(afterFirstPass.pending.map((marker) => marker.noteId));
+    const overflowIds = backlog.filter((id) => !queuedIds.has(id));
+    expect(overflowIds).toHaveLength(16);
+    // The overflow ids must NOT have been marked known, so they remain
+    // eligible for the next pass.
+    for (const id of overflowIds) {
+      expect(afterFirstPass.knownNoteIds).not.toContain(id);
+    }
+    expect(saved.at(-1)).toEqual(afterFirstPass);
+  });
+
   it("reloads only bounded pending markers and resumes after restart", async () => {
     let persisted: SyncCoordinatorState | undefined;
     const store = {
@@ -301,6 +488,7 @@ describe("Stage 4 SyncCoordinator — restart-safe metadata state", () => {
 
     expect(persisted).toEqual({
       pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [NOTE_ID],
     });
 
     let calls = 0;
@@ -314,10 +502,39 @@ describe("Stage 4 SyncCoordinator — restart-safe metadata state", () => {
     });
     expect(restarted.snapshot()).toEqual({
       pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [NOTE_ID],
     });
     await expect(restarted.requestSync()).resolves.toMatchObject({ status: "synced" });
     expect(calls).toBe(1);
-    expect(restarted.snapshot()).toEqual({ pending: [] });
+    expect(restarted.snapshot()).toEqual({ pending: [], knownNoteIds: [NOTE_ID] });
+  });
+
+  it("reports local_sync_marker_failed, not a generic failure, when the durable marker cannot be persisted after a successful local mutation", () => {
+    // Regression: previously a persistence failure here (e.g. disk I/O error,
+    // permission revoked) was indistinguishable from any other coordinator
+    // failure to the caller, even though the local mutation this call is
+    // recording had already succeeded before recordLocalCommit was invoked.
+    // The distinct code lets callers detect "mutation landed, marker did
+    // not" instead of reporting the whole operation as failed.
+    const store = {
+      load: () => undefined,
+      save: () => {
+        throw new Error("disk full");
+      },
+    };
+    const coordinator = new SyncCoordinator({
+      executor: async () => ({ status: "confirmed" }),
+      stateStore: store,
+    });
+
+    const code = codeOf(() => coordinator.recordLocalCommit(commit("create")));
+    expect(code).toBe("local_sync_marker_failed");
+
+    // The coordinator's own in-memory pending queue must not have advanced
+    // past the failed persist either, so a caller that retries the record
+    // (e.g. after fixing the disk) does not silently double-count sequence
+    // numbers or knownNoteIds.
+    expect(coordinator.snapshot()).toEqual({ pending: [], knownNoteIds: [] });
   });
 
   it("persists no bodies, credentials, raw records, or upstream errors", async () => {

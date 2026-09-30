@@ -181,6 +181,13 @@ export async function createProductionRuntimeCore(
       // bounded queue metadata through the already-open encrypted store.
       syncStateStore: new PersistentSyncMetadataStateStore(storage),
       recoveryJournal: new PersistentNotesnookRecoveryJournal(storage),
+      ...(options.logger === undefined
+        ? {}
+        : {
+            onReconciliationFailure: (reason) => {
+              options.logger?.warn("startup sync reconciliation failed", { reason });
+            },
+          }),
       ...(options.injectedModule === undefined ? {} : { injectedModule: options.injectedModule }),
     });
     hardenLiveSqliteDatabases(sqliteDatabases);

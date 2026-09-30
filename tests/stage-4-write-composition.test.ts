@@ -192,6 +192,7 @@ function realAdapter(): { adapter: NotesnookWriteAdapter; calls: string[] } {
 /** A recording coordinator stand-in that satisfies the pending-sync handle. */
 interface StubCoordinator extends NotesnookPendingSyncHandle {
   readonly receipts: unknown[];
+  readonly intents: unknown[];
   readonly syncCalls: number[];
   readonly snapshotCalls: number[];
 }
@@ -199,15 +200,18 @@ interface StubCoordinator extends NotesnookPendingSyncHandle {
 function stubCoordinator(
   overrides: {
     readonly onRecord?: (receipt: unknown) => unknown;
+    readonly onIntent?: (intent: unknown) => unknown;
     readonly onSync?: () => unknown;
     readonly onSnapshot?: () => unknown;
   } = {},
 ): StubCoordinator {
   const receipts: unknown[] = [];
+  const intents: unknown[] = [];
   const syncCalls: number[] = [];
   const snapshotCalls: number[] = [];
   const handle = {
     receipts,
+    intents,
     syncCalls,
     snapshotCalls,
     recordLocalCommit(receipt: unknown) {
@@ -219,6 +223,16 @@ function stubCoordinator(
         id: record.id,
         localCommitted: true,
         remoteSynced: false,
+        pendingSync: true,
+      }) as never;
+    },
+    recordSyncIntent(intent: unknown) {
+      intents.push(intent);
+      if (overrides.onIntent !== undefined) return overrides.onIntent(intent) as never;
+      const record = intent as { readonly operation: string; readonly id: string };
+      return Object.freeze({
+        operation: record.operation,
+        id: record.id,
         pendingSync: true,
       }) as never;
     },
@@ -816,7 +830,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
   });
@@ -839,12 +853,188 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       observed = error;
     }
     expect(isNotesnookWriteCompositionError(observed)).toBe(true);
-    expect((observed as NotesnookWriteContractError).code).toBe("sync_failed");
+    expect((observed as NotesnookWriteContractError).code).toBe("local_sync_marker_failed");
     expect(JSON.stringify(String((observed as Error).message))).not.toContain(SECRET);
     expect((observed as Error).cause).toBeUndefined();
   });
 
-  it("preserves the coordinator's own categorical code for a bounded-queue refusal", async () => {
+  it("persists a write-ahead sync intent before mutating an existing note", async () => {
+    const events: string[] = [];
+    const adapter = {
+      createNote: async () => goodCreateResult(),
+      appendNote: async () => ({
+        operation: "append",
+        id: NOTE_ID,
+        contentBytes: 1,
+        localCommitted: true,
+        remoteSynced: false,
+        pendingSync: true,
+      }),
+      updateNote: async () => {
+        events.push("mutate");
+        return {
+          operation: "update",
+          id: NOTE_ID,
+          appliedFields: ["title"],
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        };
+      },
+      deleteNote: async () => ({
+        operation: "delete",
+        id: NOTE_ID,
+        localCommitted: true,
+        remoteSynced: false,
+        pendingSync: true,
+      }),
+    } as unknown as NotesnookLocalWriteHandle;
+    const coordinator = {
+      recordSyncIntent: (intent: { readonly operation: string; readonly id: string }) => {
+        events.push(`intent:${intent.operation}:${intent.id}`);
+        return { operation: intent.operation, id: intent.id, pendingSync: true };
+      },
+      recordLocalCommit: () => {
+        events.push("post-commit-marker");
+        return {
+          operation: "update",
+          id: NOTE_ID,
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        };
+      },
+      requestSync: async () => ({
+        status: "idle",
+        localCommitted: false,
+        remoteSynced: false,
+        pendingSync: false,
+        attempts: 0,
+        startedAt: 0,
+      }),
+      snapshot: () => ({ pending: [], knownNoteIds: [] }),
+      checkCapacity: () => ({ kind: "accept" }),
+    } as unknown as NotesnookPendingSyncHandle;
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    await composition.updateNote({
+      id: NOTE_ID,
+      patch: { title: "updated" },
+      expectedRevision: revision(),
+    });
+
+    expect(events).toEqual([`intent:update:${NOTE_ID}`, "mutate"]);
+  });
+
+  it("does not invoke a local mutator when persisting its write-ahead sync intent fails", async () => {
+    let mutationCalls = 0;
+    const adapter = stubAdapter({
+      update: () => {
+        mutationCalls += 1;
+        return {
+          operation: "update",
+          id: NOTE_ID,
+          appliedFields: ["title"],
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        };
+      },
+    });
+    const coordinator = {
+      recordSyncIntent: () => {
+        throw new NotesnookWriteContractError("sync_failed");
+      },
+      recordLocalCommit: () => ({
+        operation: "update",
+        id: NOTE_ID,
+        localCommitted: true,
+        remoteSynced: false,
+        pendingSync: true,
+      }),
+      requestSync: async () => ({
+        status: "idle",
+        localCommitted: false,
+        remoteSynced: false,
+        pendingSync: false,
+        attempts: 0,
+        startedAt: 0,
+      }),
+      snapshot: () => ({ pending: [], knownNoteIds: [] }),
+    } as unknown as NotesnookPendingSyncHandle;
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(
+      await codeOf(() =>
+        composition.updateNote({
+          id: NOTE_ID,
+          patch: { title: "updated" },
+          expectedRevision: revision(),
+        }),
+      ),
+    ).toBe("sync_failed");
+    expect(mutationCalls).toBe(0);
+  });
+
+  it("keeps an existing-note intent durable across restart even when inventory IDs are unchanged", async () => {
+    let persisted: SyncCoordinatorState = { pending: [], knownNoteIds: [NOTE_ID] };
+    const events: string[] = [];
+    const stateStore = {
+      load: () => persisted,
+      save: (next: SyncCoordinatorState) => {
+        persisted = next;
+        events.push("persist-intent");
+      },
+    };
+    const coordinator = new SyncCoordinator({
+      executor: () => ({ status: "failed" }),
+      stateStore,
+    });
+    const adapter = stubAdapter({
+      update: () => {
+        events.push("mutate-existing-note");
+        return {
+          operation: "update",
+          id: NOTE_ID,
+          appliedFields: ["title"],
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        };
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    await composition.updateNote({
+      id: NOTE_ID,
+      patch: { title: "updated" },
+      expectedRevision: revision(),
+    });
+    expect(events).toEqual(["persist-intent", "mutate-existing-note"]);
+
+    const restarted = new SyncCoordinator({ executor: () => ({ status: "failed" }), stateStore });
+    restarted.reconcilePendingFromSnapshot([NOTE_ID]);
+    expect(restarted.snapshot()).toEqual({
+      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [NOTE_ID],
+    });
+  });
+
+  it("preserves local_sync_marker_failed when create succeeds but its post-create marker cannot be saved", async () => {
+    const adapter = stubAdapter({ create: () => goodCreateResult() });
+    const coordinator = stubCoordinator({
+      onRecord: () => {
+        throw new NotesnookWriteContractError("local_sync_marker_failed");
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
+      "local_sync_marker_failed",
+    );
+  });
+
+  it("reports local_sync_marker_failed for a post-commit bounded-queue refusal", async () => {
     const adapter = stubAdapter({ create: () => goodCreateResult() });
     const coordinator = stubCoordinator({
       onRecord: () => {
@@ -853,8 +1043,13 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     });
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
+    // The create's local mutation has already succeeded by the time
+    // recordPending() runs, so even a coordinator-internal refusal code
+    // (e.g. a defense-in-depth queue-bound check) must be reported as
+    // "local change committed; marker not persisted", never as a generic
+    // rejection that would misleadingly imply nothing happened.
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "invalid_input",
+      "local_sync_marker_failed",
     );
   });
 
@@ -893,20 +1088,14 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       }),
     });
     expect(await codeOf(() => syncedAck.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
 
     // An acknowledgement for a different note id must not be accepted.
     const wrongId = createNotesnookLocalWriteComposition({
       adapter,
       coordinator: stubCoordinator({
-        onRecord: () => ({
-          operation: "append",
-          id: OTHER_NOTE_ID,
-          localCommitted: true,
-          remoteSynced: false,
-          pendingSync: true,
-        }),
+        onIntent: () => ({ operation: "append", id: OTHER_NOTE_ID, pendingSync: true }),
       }),
     });
     expect(
@@ -923,14 +1112,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const asyncAck = createNotesnookLocalWriteComposition({
       adapter,
       coordinator: stubCoordinator({
-        onRecord: () =>
-          Promise.resolve({
-            operation: "update",
-            id: NOTE_ID,
-            localCommitted: true,
-            remoteSynced: false,
-            pendingSync: true,
-          }),
+        onIntent: () => Promise.resolve({ operation: "update", id: NOTE_ID, pendingSync: true }),
       }),
     });
     expect(
@@ -949,7 +1131,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       coordinator: stubCoordinator({ onRecord: () => "queued" }),
     });
     expect(await codeOf(() => primitiveAck.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
   });
 
@@ -969,7 +1151,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
   });
 });
@@ -1022,6 +1204,10 @@ describe("Stage 4 write composition — receiver-safe seam invocation", () => {
           pendingSync: true,
         };
       }
+      recordSyncIntent(intent: { readonly operation: string; readonly id: string }): unknown {
+        seen.push(this.#marker);
+        return { operation: intent.operation, id: intent.id, pendingSync: true };
+      }
       async requestSync(): Promise<unknown> {
         seen.push(this.#marker);
         return {
@@ -1063,10 +1249,10 @@ describe("Stage 4 write composition — receiver-safe seam invocation", () => {
     expect(seen).toEqual([
       "adapter",
       "coordinator",
-      "adapter",
       "coordinator",
       "adapter",
       "coordinator",
+      "adapter",
       "coordinator",
       "coordinator",
     ]);
@@ -1518,7 +1704,7 @@ function updateResultWith(overrides: Record<string, unknown>): unknown {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write composition — adapter error codes survive without leakage", () => {
-  it("preserves stale_revision from the real adapter without mutating the queue", async () => {
+  it("preserves stale_revision from the real adapter while retaining the durable write-ahead intent", async () => {
     const { adapter } = realAdapter();
     const coordinator = new SyncCoordinator({ executor: async () => ({ status: "confirmed" }) });
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
@@ -1532,7 +1718,9 @@ describe("Stage 4 write composition — adapter error codes survive without leak
         }),
       ),
     ).toBe("stale_revision");
-    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
+      pending: [{ operation: "append", noteId: NOTE_ID, sequence: 1 }],
+    });
   });
 
   it("preserves invalid_input, unsupported_content, and unsupported_patch_field", async () => {
@@ -1569,7 +1757,12 @@ describe("Stage 4 write composition — adapter error codes survive without leak
       ),
     ).toBe("unsupported_patch_field");
 
-    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
+      pending: [
+        { operation: "append", noteId: OTHER_NOTE_ID, sequence: 1 },
+        { operation: "update", noteId: NOTE_ID, sequence: 2 },
+      ],
+    });
   });
 
   it("preserves conflict and vault_locked from the real adapter", async () => {
@@ -1810,7 +2003,7 @@ describe("Stage 4 write composition — hardened boundary regressions", () => {
     });
     expect(
       await codeOf(() => acknowledgementComposition.createNote({ title: "t", content: "c" })),
-    ).toBe("sync_failed");
+    ).toBe("local_sync_marker_failed");
 
     const inheritedSnapshot = Object.create({
       pending: Object.freeze([]),
@@ -1907,7 +2100,8 @@ describe("Stage 4 write composition — hardened boundary regressions", () => {
     await composition.createNote({ title: "outer", content: "body" });
     expect(executorCalls).toBe(0);
     expect(coordinator.syncCalls).toHaveLength(0);
-    expect(coordinator.receipts).toHaveLength(2);
+    expect(coordinator.receipts).toHaveLength(1);
+    expect(coordinator.intents).toEqual([{ operation: "append", id: NOTE_ID }]);
   });
 
   it("uses null-prototype frozen containers for every published nested output", async () => {
