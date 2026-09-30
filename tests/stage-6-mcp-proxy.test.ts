@@ -43,6 +43,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   FORBIDDEN_TOOL_NAMES,
   NOOK_MCP_ALLOWED_TOOL_NAME,
+  NOOK_MCP_APPEND_NOTE_TOOL_NAME,
   buildNookMcpServer,
 } from "../src/mcp/nook-mcp-server.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
@@ -640,6 +641,7 @@ describe("end-to-end SDK smoke test", () => {
   it("drives the proxy through the MCP SDK client over a child stdio pipe", async () => {
     const dir = makeTempDir();
     const socketPath = join(dir, "fake-nookd.sock");
+    const seenMethods: string[] = [];
     const server = createServer((socket) => {
       let buffer = Buffer.alloc(0);
       socket.on("data", (chunk: Buffer) => {
@@ -651,15 +653,27 @@ describe("end-to-end SDK smoke test", () => {
           id: string;
           method: string;
         };
+        seenMethods.push(payload.method);
         const result =
           payload.method === "notes.sync"
             ? { kind: "sync", status: "synced", pendingSync: false, attempts: 1 }
             : { kind: "search", notes: [{ title: "First hit" }] };
-        const envelope = {
-          id: payload.id,
-          ok: true,
-          result,
-        };
+        const unsupportedAppend = payload.method === "notes.append";
+        const unsupportedSearch =
+          payload.method === "notes.search" &&
+          seenMethods.filter((method) => method === "notes.search").length > 1;
+        const envelope =
+          unsupportedAppend || unsupportedSearch
+            ? {
+                id: payload.id,
+                ok: false,
+                error: { code: "unsupported_content", message: "Unsupported content" },
+              }
+            : {
+                id: payload.id,
+                ok: true,
+                result,
+              };
         const response = Buffer.from(JSON.stringify(envelope), "utf8");
         const frame = Buffer.alloc(4 + response.length);
         frame.writeUInt32BE(response.length, 0);
@@ -736,6 +750,40 @@ describe("end-to-end SDK smoke test", () => {
         pendingSync: false,
         attempts: 1,
         uploadScope: "all-pending-local-changes",
+      });
+
+      const unsupportedAppend = await client.callTool({
+        name: NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+        arguments: {
+          id: "note-1",
+          markdownFragment: "<div>unsupported</div>",
+          expectedRevision: "rev_00000000000000000000000000000001",
+        },
+      });
+      expect(unsupportedAppend.isError).toBe(true);
+      const unsupportedBlock = (
+        unsupportedAppend.content as Array<{ type: string; text: string }>
+      )[0];
+      if (unsupportedBlock === undefined)
+        throw new Error("missing unsupported-content result block");
+      expect(JSON.parse(unsupportedBlock.text)).toEqual({
+        code: "unsupported_content",
+        message: "Unsupported content",
+      });
+
+      const unsupportedSearch = await client.callTool({
+        name: "notesnook_search_notes",
+        arguments: { query: "needle" },
+      });
+      expect(unsupportedSearch.isError).toBe(true);
+      const unsupportedSearchBlock = (
+        unsupportedSearch.content as Array<{ type: string; text: string }>
+      )[0];
+      if (unsupportedSearchBlock === undefined)
+        throw new Error("missing unsupported-search result block");
+      expect(JSON.parse(unsupportedSearchBlock.text)).toEqual({
+        code: "service_unavailable",
+        message: "Service unavailable",
       });
 
       const invalid = await client.callTool({

@@ -191,17 +191,24 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const OPERATION_HANDLE = /^op_[a-f0-9]{64}$/;
 const REVISION_TOKEN = /^rev_[0-9a-f]{32}$/;
 
+type OperatorWriteErrorCode = Exclude<RpcErrorCode, "unsupported_content">;
+
 /**
- * Categorical operator write failure; `code` is from the closed RPC vocabulary.
+ * Categorical operator write failure; `code` is from the operator subset of
+ * the closed RPC vocabulary. Append-only `unsupported_content` refusals belong
+ * to the regular `notes.append` path, not operator edit or undo.
  *
  * Exported so consumers can identify a failure we raised rather than trusting a
  * `code` field on an arbitrary thrown object.
  */
 export class OperatorWriteError extends Error {
-  public readonly code: RpcErrorCode;
+  public readonly code: OperatorWriteErrorCode;
   public readonly operationHandle?: string;
 
-  constructor(code: RpcErrorCode, operationHandle?: string) {
+  constructor(code: OperatorWriteErrorCode, operationHandle?: string) {
+    if ((code as RpcErrorCode) === "unsupported_content") {
+      throw new TypeError("Invalid operator write error code");
+    }
     super(code);
     this.code = code;
     if (operationHandle !== undefined) this.operationHandle = operationHandle;
@@ -213,7 +220,7 @@ function ownerKey(peer?: OperatorPeer): string {
   return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
 }
 
-function fail(code: RpcErrorCode, operationHandle?: string): never {
+function fail(code: OperatorWriteErrorCode, operationHandle?: string): never {
   throw new OperatorWriteError(code, operationHandle);
 }
 

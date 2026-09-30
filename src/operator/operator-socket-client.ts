@@ -18,12 +18,11 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 /**
  * Failure categories the operator client can report.
  *
- * This is deliberately the daemon's full closed error vocabulary rather
- * than a hand-picked subset: a subset silently reclassifies every
- * category it omits, so a `conflict` or `stale_revision` reply would
- * reach the operator as "service unavailable".
+ * This excludes `unsupported_content`, which belongs only to the regular
+ * `notes.append` request path. Other categories stay synchronized with the
+ * daemon vocabulary so conflicts and lock refusals remain visible.
  */
-export type OperatorSocketErrorCode = RpcErrorCode;
+export type OperatorSocketErrorCode = Exclude<RpcErrorCode, "unsupported_content">;
 
 export type OperatorSocketResult =
   | Readonly<{ ok: true; result: RpcResult }>
@@ -160,7 +159,7 @@ function decodeResponse(frame: Buffer, expectedId: string): OperatorSocketResult
     if (error !== null && typeof error === "object" && !Array.isArray(error)) {
       const code = (error as { code?: unknown }).code;
       const operationHandle = (error as { operationHandle?: unknown }).operationHandle;
-      if (typeof code === "string" && isRpcErrorCode(code)) {
+      if (typeof code === "string" && isRpcErrorCode(code) && code !== "unsupported_content") {
         return {
           ok: false,
           code,

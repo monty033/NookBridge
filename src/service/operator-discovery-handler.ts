@@ -169,7 +169,17 @@ function categoricalCode(error: unknown): RpcErrorCode {
   // object whose `code` matched the vocabulary let an unrelated upstream error
   // carrying `code: "vault_locked"` (or any other category) be reported to the
   // operator as that category.
-  if (error instanceof OperatorWriteError) return error.code;
+  if (error instanceof OperatorWriteError) {
+    const code: unknown = error.code;
+    if (
+      typeof code === "string" &&
+      code !== "unsupported_content" &&
+      Object.hasOwn(RPC_ERROR_MESSAGES, code)
+    ) {
+      return code as RpcErrorCode;
+    }
+    return "service_unavailable";
+  }
   if (error !== null && typeof error === "object") {
     // A projection refusal carries the vocabulary name as its MESSAGE rather
     // than as a `code` property.  Only a class-identity-checked projection error
@@ -178,7 +188,11 @@ function categoricalCode(error: unknown): RpcErrorCode {
     // the operator as `not_found` or `permission_denied`.
     if (isNotesnookReadOnlyProjectionError(error)) {
       const message = (error as { readonly message?: unknown }).message;
-      if (typeof message === "string" && Object.hasOwn(RPC_ERROR_MESSAGES, message)) {
+      if (
+        typeof message === "string" &&
+        message !== "unsupported_content" &&
+        Object.hasOwn(RPC_ERROR_MESSAGES, message)
+      ) {
         return message as RpcErrorCode;
       }
     }

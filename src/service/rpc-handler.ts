@@ -59,11 +59,12 @@ import {
   type RpcSyncResult,
   type RpcSuccessEnvelope,
 } from "./rpc-protocol.js";
-import type {
-  CreateNoteCommand,
-  AppendNoteCommand,
-  DeleteNoteCommand,
-  UpdateNoteCommand,
+import {
+  isNotesnookWriteContractError,
+  type CreateNoteCommand,
+  type AppendNoteCommand,
+  type DeleteNoteCommand,
+  type UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
 import type {
   CreateNoteResult,
@@ -716,6 +717,7 @@ const APPEND_UPDATE_ERROR_CODES = [
   "stale_revision",
   "conflict",
   "vault_locked",
+  "unsupported_content",
   "sync_failed",
 ] as const;
 type AppendUpdateErrorCode = (typeof APPEND_UPDATE_ERROR_CODES)[number];
@@ -776,12 +778,22 @@ function normaliseRpcTags(value: unknown): readonly string[] | undefined {
   }
 }
 
-function mapRuntimeError(error: unknown, id: string): RpcAnyResponseEnvelope | undefined {
+function mapRuntimeError(
+  error: unknown,
+  id: string,
+  allowUnsupportedContent = false,
+): RpcAnyResponseEnvelope | undefined {
   if (error === null || (typeof error !== "object" && typeof error !== "function")) {
     return undefined;
   }
   const code = readOwnStringField(error as Record<string, unknown>, "code");
   if (code === undefined || !(APPEND_UPDATE_ERROR_CODES as readonly string[]).includes(code)) {
+    return undefined;
+  }
+  if (
+    code === "unsupported_content" &&
+    (!allowUnsupportedContent || !isNotesnookWriteContractError(error))
+  ) {
     return undefined;
   }
   return buildErrorEnvelope(id, code as AppendUpdateErrorCode);
@@ -1067,7 +1079,7 @@ async function runNotesAppend(
   try {
     raw = await reflectApply(fn, runtime, [command]);
   } catch (error) {
-    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
+    return mapRuntimeError(error, id, true) ?? buildErrorEnvelope(id, "service_unavailable");
   }
   const result = normaliseAppendedNoteResult(raw);
   if (result === undefined) return buildErrorEnvelope(id, "service_unavailable");
@@ -1995,7 +2007,8 @@ function buildErrorEnvelope(
     | "conflict"
     | "sync_failed"
     | "vault_locked"
-    | "not_found",
+    | "not_found"
+    | "unsupported_content",
 ): RpcAnyResponseEnvelope {
   const messages = {
     invalid_request: "Invalid request",
@@ -2006,6 +2019,7 @@ function buildErrorEnvelope(
     sync_failed: "Sync failed",
     vault_locked: "Vault locked",
     not_found: "Not found",
+    unsupported_content: "Unsupported content",
   } as const;
   const message = messages[code];
 

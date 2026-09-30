@@ -98,6 +98,7 @@ import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createProductionServiceRuntime } from "../src/service/service-runtime.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 
+import { NotesnookWriteContractError } from "../src/core/notesnook-write-contract.js";
 import type { AppendNoteCommand, UpdateNoteCommand } from "../src/core/notesnook-write-contract.js";
 import type { AppendNoteResult, UpdateNoteResult } from "../src/core/notesnook-write-adapter.js";
 
@@ -757,6 +758,95 @@ describe("rpc handler — notes.append dispatch", () => {
     expect(response.ok).toBe(false);
     if (!response.ok) {
       expect(response.error.code).toBe("sync_failed");
+    }
+  });
+
+  it("preserves unsupported_content for a refused append fragment", async () => {
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const runtime = {
+      ...makeReadOnlyRuntime(),
+      appendNote: async () => {
+        throw new NotesnookWriteContractError("unsupported_content");
+      },
+    };
+    const request: RpcRequest = {
+      id: "append-unsupported-content",
+      method: "notes.append",
+      params: {
+        id: "note-1",
+        markdownFragment: "tag-shaped placeholder",
+        expectedRevision: REVISION_A,
+      },
+    };
+
+    const response = await handleRpcRequest(request, runtime, policy);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) {
+      expect(response.error).toEqual({
+        code: "unsupported_content",
+        message: "Unsupported content",
+      });
+    }
+  });
+
+  it("keeps unsupported_content generic on notes.update despite branded adapter errors", async () => {
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const runtime = {
+      ...makeReadOnlyRuntime(),
+      updateNote: async () => {
+        throw new NotesnookWriteContractError("unsupported_content");
+      },
+    };
+    const request: RpcRequest = {
+      id: "update-unsupported-content",
+      method: "notes.update",
+      params: {
+        id: "note-1",
+        patch: { content: "unsupported" },
+        expectedRevision: REVISION_A,
+      },
+    };
+
+    const response = await handleRpcRequest(request, runtime, policy);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) {
+      expect(response.error).toEqual({
+        code: "service_unavailable",
+        message: "Service unavailable",
+      });
+    }
+  });
+
+  it("does not trust an unbranded error that spoofs unsupported_content", async () => {
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const runtime = {
+      ...makeReadOnlyRuntime(),
+      appendNote: async () => {
+        const error = new Error("upstream failure");
+        Object.defineProperty(error, "code", { value: "unsupported_content" });
+        throw error;
+      },
+    };
+    const request: RpcRequest = {
+      id: "append-forged-unsupported-content",
+      method: "notes.append",
+      params: {
+        id: "note-1",
+        markdownFragment: "tag-shaped placeholder",
+        expectedRevision: REVISION_A,
+      },
+    };
+
+    const response = await handleRpcRequest(request, runtime, policy);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) {
+      expect(response.error).toEqual({
+        code: "service_unavailable",
+        message: "Service unavailable",
+      });
     }
   });
 

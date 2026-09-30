@@ -78,7 +78,8 @@ export type NookdSocketFailure =
   | "stale_revision"
   | "conflict"
   | "vault_locked"
-  | "not_found";
+  | "not_found"
+  | "unsupported_content";
 
 /**
  * Map a Stage 5 RPC error envelope code to the closed
@@ -104,6 +105,8 @@ function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure 
       return "vault_locked";
     case "not_found":
       return "not_found";
+    case "unsupported_content":
+      return "unsupported_content";
     default:
       return "service_unavailable";
   }
@@ -288,7 +291,7 @@ export class NookdSocketClient {
       } catch {
         return { ok: false, code: "service_unavailable" };
       }
-      return mapResponseEnvelope(response, id);
+      return mapResponseEnvelope(response, id, method);
     } catch {
       return { ok: false, code: "service_unavailable" };
     } finally {
@@ -1252,13 +1255,26 @@ function isRpcErrorCode(value: unknown): value is RpcErrorCode {
     value === "conflict" ||
     value === "sync_failed" ||
     value === "vault_locked" ||
-    value === "not_found"
+    value === "not_found" ||
+    value === "unsupported_content"
   );
 }
 
 function mapResponseEnvelope(
   response: RpcAnyResponseEnvelope,
   expectedId: string,
+  method:
+    | "notes.search"
+    | "notes.status"
+    | "notes.list_notebooks"
+    | "notes.get"
+    | "notes.create"
+    | "notes.append"
+    | "notes.update"
+    | "notes.delete"
+    | "notes.locked_note_proof"
+    | "notes.path_diagnostic"
+    | "notes.sync",
 ): NookdSocketResult {
   if (response.id !== expectedId) {
     return { ok: false, code: "service_unavailable" };
@@ -1288,7 +1304,14 @@ function mapResponseEnvelope(
     }
     return { ok: true, envelope };
   }
-  return { ok: false, code: mapRpcErrorCodeToSocketFailure(response.error.code) };
+  const failure = mapRpcErrorCodeToSocketFailure(response.error.code);
+  return {
+    ok: false,
+    code:
+      failure === "unsupported_content" && method !== "notes.append"
+        ? "service_unavailable"
+        : failure,
+  };
 }
 
 function isSafeIdentifier(value: string): boolean {

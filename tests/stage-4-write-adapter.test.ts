@@ -33,7 +33,10 @@ import {
   type NotesnookWriteNoteMetadata,
   type NotesnookWriteStoredContent,
 } from "../src/core/notesnook-write-adapter.js";
-import type { NotesnookListKind } from "../src/core/notesnook-write-codec.js";
+import {
+  DETERMINISTIC_MARKDOWN_CODEC,
+  type NotesnookListKind,
+} from "../src/core/notesnook-write-codec.js";
 import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
@@ -2439,6 +2442,48 @@ describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
     );
     expect(code).toBe("unsupported_content");
     expect(database.calls.add).toHaveLength(0);
+  });
+
+  it("refuses an append whose fragment contains inline HTML before database mutation", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Existing note",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: '<div data-type="document"><p>old</p></div>',
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    const code = await codeOfAsync(() =>
+      adapter.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "<div>unsupported</div>",
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      }),
+    );
+
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.add).toHaveLength(0);
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.touch).toHaveLength(0);
+    expect(database.calls.contentAdd).toHaveLength(0);
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(database.calls.delete).toHaveLength(0);
   });
 
   it("accepts an append whose fragment contains a task list", async () => {

@@ -50,6 +50,7 @@ export type NookMcpErrorCode =
   | "stale_revision"
   | "conflict"
   | "not_found"
+  | "unsupported_content"
   | "unknown_tool";
 
 /**
@@ -66,6 +67,7 @@ const NOOK_MCP_ERROR_MESSAGES: Readonly<Record<NookMcpErrorCode, string>> = Obje
   stale_revision: "Stale revision",
   conflict: "Conflict",
   not_found: "Not found",
+  unsupported_content: "Unsupported content",
   unknown_tool: "Unknown tool",
 });
 

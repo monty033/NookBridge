@@ -30,7 +30,9 @@ paths, credentials, revisions, or note content.
 Write operations use optimistic revision checks. A stale revision, conflict,
 locked Vault, unavailable service, or failed synchronization is an outcome to
 handle explicitly; the proxy does not automatically resolve conflicts or retry
-an unsafe operation.
+an unsafe operation. Unsupported content is reported specifically for
+`notes.append` when the adapter refuses a fragment it cannot preserve; other
+methods do not expose that append-only error category.
 
 The historical Stage 6 read-only contract is recorded in
 [the MCP proxy record](../engineering/stages/stage-6-mcp-proxy.md). This reference describes the
