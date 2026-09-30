@@ -29,7 +29,8 @@ nix develop --offline --command just stage3-test
 
 ## Documentation source of truth
 
-- `docs/implementation-plan-v1.5.md` is the roadmap and acceptance-gate source of truth.
-- `docs/stage-3-live.md` records the Stage 3 proof and operator reproduction path.
-- `README.md` is the concise project status and orientation document.
+- `docs/project-status.md` is the current implementation, validation, and support status source of truth.
+- `docs/implementation-plan-v1.5.md` is the design roadmap and acceptance-gate source of truth; dated receipts and superseded decisions are historical evidence, not current status.
+- `docs/engineering/stages/stage-3-live.md` records the Stage 3 proof and operator reproduction path. Stage receipts are historical, scope-bounded evidence; consult `docs/project-status.md` for current status.
+- `README.md` is concise project orientation; do not use it to override the status or roadmap sources above.
 - Use Forgejo issues for discrete follow-up work; do not create a duplicate `TODO.md` roadmap.

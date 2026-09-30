@@ -10,11 +10,19 @@
 | Recommended implementation | TypeScript / Node.js                           |
 | Project license            | GPL-3.0-or-later                               |
 | Research cutoff            | August 26, 2026                                |
-| Document status            | Design plan / implementation roadmap, v1.6; current beta closeout in §13.20 |
+| Document status              | Design plan and roadmap; current beta status summarized below; historical dated receipts are in Appendix B |
 
 > Purpose: define a low-risk, testable path from a small feasibility probe to a reliable headless Notesnook client for Linux that can read, search, create, update, and eventually access attachments on behalf of Hermes without materially weakening Notesnook's desktop-client security model. NixOS is the reference and first production deployment; generic Linux and Docker are supported portability targets. The plan deliberately separates development proofs from the first deployable MVP so the project can stop early if Notesnook core behavior on the reference NixOS host proves unsuitable.
 
 *Prepared for implementation on a backed-up existing Notesnook account.*
+
+## Current roadmap and status — 2026-09-30
+
+- **Current status authority:** [`docs/project-status.md`](project-status.md) is the concise source for current implementation, validation, and support status. Dated receipts and superseded decisions remain historical evidence and must not be read as current status.
+- **Beta source:** the latest recorded beta closeout is the Markdown-fidelity slice plus ACTION-1 write-ahead sync-intent fix (§§13.20–13.21). ACTION-1 is closed at source level only; it does not close production acceptance.
+- **Next decision:** promotion of the beta source slice remains undecided. Artifact verification, isolated acceptance, and deployment require their own authorized gates.
+- **Production MVP:** remains open. The plan records unresolved production-shaped mutation/recovery, deleted-note propagation, lock/authorization, runtime ownership and retry/resource bounds, recovery/resync, privileged and outsider checks, long-duration stress, and exact shipped-artifact dependency/license evidence. Each gate remains open until its own evidence exists.
+
 
 # Contents
 
@@ -32,6 +40,7 @@
 - 12\. Recommended Repository Structure
 - 13\. Definition of Done and Handoff
 - Appendix A. Research Sources
+- Appendix B. Historical implementation status and receipts
 
 # 1. Goals
 
@@ -1510,6 +1519,67 @@ Maintain `docs/threat-model.md` plus a rolling `docs/security-status.md` contain
 
 Maintain `docs/licensing.md` separately with upstream license inventory and the public-distribution compliance status.
 
+# Appendix A. Research Sources
+
+Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
+
+**R1. Notesnook monorepo README — @notesnook/core shared across platforms; @notesnook/sodium supports Node/browser.** [https://github.com/streetwriters/notesnook/blob/master/README.md](https://github.com/streetwriters/notesnook/blob/master/README.md)
+
+**R2. Notesnook Web README — platform-specific storage/encryption interfaces are supplied to @notesnook/core.** [https://github.com/streetwriters/notesnook/blob/master/apps/web/README.md](https://github.com/streetwriters/notesnook/blob/master/apps/web/README.md)
+
+**R3. Current @notesnook/core package.json (v8.1.3 at research cutoff).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/package.json](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/package.json)
+
+**R4. Notesnook community discussion: “Server side” / headless instance; maintainer recommends @notesnook/core and E2E tests.** [https://www.reddit.com/r/Notesnook/comments/1fec1ec](https://www.reddit.com/r/Notesnook/comments/1fec1ec)
+
+**R5. Notesnook core test utility: Node Database setup with encrypted SQLite and search extensions.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_tests\_\_/utils/index.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__tests__/utils/index.ts)
+
+**R6. Notesnook Help — How sync works; client-side encryption and conflict behavior.** [https://notesnook.com/help/sync/how-sync-works](https://notesnook.com/help/sync/how-sync-works)
+
+**R7. Notesnook core E2E login helper.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/utils.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/utils.js)
+
+**R8. Notesnook core sync E2E test suite.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/sync.test.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/sync.test.js)
+
+**R9. Notesnook core token manager E2E tests.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/token-manager.test.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/token-manager.test.js)
+
+**R10. Notesnook Node IStorage mock.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_mocks\_\_/node-storage.mock.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__mocks__/node-storage.mock.ts)
+
+**R11. Notesnook core platform interfaces (IStorage/IFileStorage).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/interfaces.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/interfaces.ts)
+
+**R12. johnfire/openclaw-notesnook-mcp — existing export/import MCP implementation.** [https://github.com/johnfire/openclaw-notesnook-mcp](https://github.com/johnfire/openclaw-notesnook-mcp)
+
+**R13. Hermes Agent — MCP Config Reference (stdio/HTTP, trust, tool filtering, and `untrusted` approval behavior via `readOnlyHint`).** [https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference](https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference)
+
+**R14. Hermes Agent — MCP feature documentation.** [https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/)
+
+**R15. Notesnook v3 announcement — encrypted SQLite at rest and platform KeyStore/KeyChain model.** [https://notesnook.com/blog/introducing-notesnook-v3](https://notesnook.com/blog/introducing-notesnook-v3)
+
+**R16. Notesnook core Tiptap content helper (HTML/TXT/Markdown conversion/search).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/content-types/tiptap.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/content-types/tiptap.ts)
+
+**R17. Notesnook Help — Search and navigation.** [https://notesnook.com/help/search-and-navigation](https://notesnook.com/help/search-and-navigation)
+
+**R18. Notesnook GitHub issue \#10242 — recent Markdown/export fidelity report.** [https://github.com/streetwriters/notesnook/issues/10242](https://github.com/streetwriters/notesnook/issues/10242)
+
+**R19. NixOS Manual 26.05.** [https://nixos.org/manual/nixos/stable/](https://nixos.org/manual/nixos/stable/)
+
+**R20. Nixpkgs manual / current Node packaging guidance.** [https://nixos.org/manual/nixpkgs/stable/](https://nixos.org/manual/nixpkgs/stable/)
+
+**R21. Notesnook GitHub Actions — active @notesnook/core test workflow.** [https://github.com/streetwriters/notesnook/actions](https://github.com/streetwriters/notesnook/actions)
+
+**R22. Notesnook Help — attachments are encrypted on-device before upload.** [https://notesnook.com/help/attachments-and-files](https://notesnook.com/help/attachments-and-files)
+
+**R23. Notesnook Help — Search and navigation / Private Vault behavior: locked-note content is excluded from search; locked notes can be found by title.** [https://notesnook.com/help/search-and-navigation](https://notesnook.com/help/search-and-navigation) and [https://notesnook.com/help/lock-notes-with-private-vault](https://notesnook.com/help/lock-notes-with-private-vault)
+
+**R24. Notesnook Sync Server releases — endpoint rate limiting introduced in the open-source sync server; exact hosted-service limits are not assumed.** [https://github.com/streetwriters/notesnook-sync-server/releases](https://github.com/streetwriters/notesnook-sync-server/releases)
+
+**R25. Notesnook repository license and sync-server licensing context.** Client monorepo: [https://github.com/streetwriters/notesnook](https://github.com/streetwriters/notesnook); sync server: [https://github.com/streetwriters/notesnook-sync-server](https://github.com/streetwriters/notesnook-sync-server)
+
+**Implementation note:** The first three tickets intentionally avoid Hermes and MCP. Stage -1 is the cheapest native-runtime stop signal; Stages 0–2 establish a pinned, persistent, authenticated client baseline. If the native/runtime or persistent core client cannot be made reliable, the project should stop before investing in agent-facing polish. Conversely, once persistent auth + native sync pass on the NixOS reference host, the MCP layer remains a relatively conventional adapter around a proven local client, and later Linux/Docker support should be packaging/runtime-isolation work rather than a Notesnook-client rewrite.
+
+
+# Appendix B. Historical implementation status and receipts
+
+This appendix preserves the dated implementation status, review, and operational receipts verbatim as historical evidence. They are not current status; see the current roadmap/status summary above and docs/project-status.md.
+
 ## 13.7 Current implementation status and Codex handoff
 
 **Status date:** 2026-08-30 (America/New_York)
@@ -2805,59 +2875,3 @@ because PR #167 is merged.
 PR #173 merged into `beta` at `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`. Existing-note append, update, and delete now persist a durable write-ahead sync intent through the coordinator before the adapter mutation, in `src/core/notesnook-sync-coordinator.ts` and `src/core/notesnook-write-composition.ts`. Create intentionally retains post-mutation, ID-only startup reconciliation in `src/core/notesnook-live-factory.ts`, because the Notesnook note ID does not exist until the adapter call succeeds.
 
 This closes ACTION-1's source-level mutation/sync-intent recovery gap only. It does not establish production-shaped kill/restart recovery acceptance, nor settle deleted-note upstream-propagation semantics; both remain OPEN, alongside the broader production-MVP gates.
-
-# Appendix A. Research Sources
-
-Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
-
-**R1. Notesnook monorepo README — @notesnook/core shared across platforms; @notesnook/sodium supports Node/browser.** [https://github.com/streetwriters/notesnook/blob/master/README.md](https://github.com/streetwriters/notesnook/blob/master/README.md)
-
-**R2. Notesnook Web README — platform-specific storage/encryption interfaces are supplied to @notesnook/core.** [https://github.com/streetwriters/notesnook/blob/master/apps/web/README.md](https://github.com/streetwriters/notesnook/blob/master/apps/web/README.md)
-
-**R3. Current @notesnook/core package.json (v8.1.3 at research cutoff).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/package.json](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/package.json)
-
-**R4. Notesnook community discussion: “Server side” / headless instance; maintainer recommends @notesnook/core and E2E tests.** [https://www.reddit.com/r/Notesnook/comments/1fec1ec](https://www.reddit.com/r/Notesnook/comments/1fec1ec)
-
-**R5. Notesnook core test utility: Node Database setup with encrypted SQLite and search extensions.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_tests\_\_/utils/index.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__tests__/utils/index.ts)
-
-**R6. Notesnook Help — How sync works; client-side encryption and conflict behavior.** [https://notesnook.com/help/sync/how-sync-works](https://notesnook.com/help/sync/how-sync-works)
-
-**R7. Notesnook core E2E login helper.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/utils.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/utils.js)
-
-**R8. Notesnook core sync E2E test suite.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/sync.test.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/sync.test.js)
-
-**R9. Notesnook core token manager E2E tests.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_e2e\_\_/token-manager.test.js](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__e2e__/token-manager.test.js)
-
-**R10. Notesnook Node IStorage mock.** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/\_\_mocks\_\_/node-storage.mock.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/__mocks__/node-storage.mock.ts)
-
-**R11. Notesnook core platform interfaces (IStorage/IFileStorage).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/interfaces.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/interfaces.ts)
-
-**R12. johnfire/openclaw-notesnook-mcp — existing export/import MCP implementation.** [https://github.com/johnfire/openclaw-notesnook-mcp](https://github.com/johnfire/openclaw-notesnook-mcp)
-
-**R13. Hermes Agent — MCP Config Reference (stdio/HTTP, trust, tool filtering, and `untrusted` approval behavior via `readOnlyHint`).** [https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference](https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference)
-
-**R14. Hermes Agent — MCP feature documentation.** [https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/)
-
-**R15. Notesnook v3 announcement — encrypted SQLite at rest and platform KeyStore/KeyChain model.** [https://notesnook.com/blog/introducing-notesnook-v3](https://notesnook.com/blog/introducing-notesnook-v3)
-
-**R16. Notesnook core Tiptap content helper (HTML/TXT/Markdown conversion/search).** [https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/content-types/tiptap.ts](https://raw.githubusercontent.com/streetwriters/notesnook/master/packages/core/src/content-types/tiptap.ts)
-
-**R17. Notesnook Help — Search and navigation.** [https://notesnook.com/help/search-and-navigation](https://notesnook.com/help/search-and-navigation)
-
-**R18. Notesnook GitHub issue \#10242 — recent Markdown/export fidelity report.** [https://github.com/streetwriters/notesnook/issues/10242](https://github.com/streetwriters/notesnook/issues/10242)
-
-**R19. NixOS Manual 26.05.** [https://nixos.org/manual/nixos/stable/](https://nixos.org/manual/nixos/stable/)
-
-**R20. Nixpkgs manual / current Node packaging guidance.** [https://nixos.org/manual/nixpkgs/stable/](https://nixos.org/manual/nixpkgs/stable/)
-
-**R21. Notesnook GitHub Actions — active @notesnook/core test workflow.** [https://github.com/streetwriters/notesnook/actions](https://github.com/streetwriters/notesnook/actions)
-
-**R22. Notesnook Help — attachments are encrypted on-device before upload.** [https://notesnook.com/help/attachments-and-files](https://notesnook.com/help/attachments-and-files)
-
-**R23. Notesnook Help — Search and navigation / Private Vault behavior: locked-note content is excluded from search; locked notes can be found by title.** [https://notesnook.com/help/search-and-navigation](https://notesnook.com/help/search-and-navigation) and [https://notesnook.com/help/lock-notes-with-private-vault](https://notesnook.com/help/lock-notes-with-private-vault)
-
-**R24. Notesnook Sync Server releases — endpoint rate limiting introduced in the open-source sync server; exact hosted-service limits are not assumed.** [https://github.com/streetwriters/notesnook-sync-server/releases](https://github.com/streetwriters/notesnook-sync-server/releases)
-
-**R25. Notesnook repository license and sync-server licensing context.** Client monorepo: [https://github.com/streetwriters/notesnook](https://github.com/streetwriters/notesnook); sync server: [https://github.com/streetwriters/notesnook-sync-server](https://github.com/streetwriters/notesnook-sync-server)
-
-**Implementation note:** The first three tickets intentionally avoid Hermes and MCP. Stage -1 is the cheapest native-runtime stop signal; Stages 0–2 establish a pinned, persistent, authenticated client baseline. If the native/runtime or persistent core client cannot be made reliable, the project should stop before investing in agent-facing polish. Conversely, once persistent auth + native sync pass on the NixOS reference host, the MCP layer remains a relatively conventional adapter around a proven local client, and later Linux/Docker support should be packaging/runtime-isolation work rather than a Notesnook-client rewrite.

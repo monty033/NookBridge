@@ -1,4 +1,19 @@
-# NookBridge — security reviews (Stage 1)
+# NookBridge — security reviews
+
+## Current status — 2026-09-30
+
+This ledger preserves historical review receipts. The status below is limited to what the latest in-repository evidence establishes; it does not turn source tests or historical deployment receipts into current production approval.
+
+| Finding / gate | Status as of 2026-09-30 | Latest in-repository evidence |
+|---|---|---|
+| S1 encrypted SQLite main-file permissions | **Closed for the recorded Stage 1 fix**; SQLite sidecars, negative-path chmod, service-user/symlink hardening, and the open-before-chmod window remain follow-ups. | [S1 fix and follow-ups](#s1-fix-exact), [follow-up list](#findings-and-follow-ups) |
+| S2 credential hygiene | **Offline checkpoint passed; live-account gate unperformed.** No live-auth security conclusion is claimed. | [S2 checkpoint](#offline-s2-checkpoint-measured-2026-08-27) |
+| Stage 9 production-MVP security/release gate | **Open / not closed.** Source, VM, and bounded operational receipts cover named scopes only; privileged/outsider checks, recovery acceptance, stress, and release evidence remain outstanding in the latest plan/status receipts. | [Current rollout reconciliation](#stage-9-current-rollout-reconciliation-2026-09-16), [current plan gate](implementation-plan-v1.5.md#1320-current-pause-point--beta-markdown-fidelity-slice) |
+| ACTION-1 write-ahead sync-intent gap | **Closed at source level only.** Production-shaped kill/restart recovery acceptance and deleted-note upstream-propagation semantics remain open. | [ACTION-1 closeout](implementation-plan-v1.5.md#1321-action-1-write-ahead-sync-intent-closeout), [current status](project-status.md) |
+
+Historical entries below are an audit archive: their dates, snapshots, review scopes, and dispositions remain attached to those receipts. A later receipt may supersede an earlier status without erasing the earlier evidence. Consult [project status](project-status.md) for the concise current repository status.
+
+## Historical S1 checkpoint — Stage 1
 
 This document records the Stage 1 S1 security checkpoint for NookBridge:
 the initial finding, the applied fix, the deterministic and independent
@@ -67,7 +82,7 @@ used, so this entry makes no claim of successful live-account authentication.
 | Staged files | `docs/security-reviews.md`, `src/storage/sqlite-storage.ts`, `tests/stage-1-gate-1.test.ts` |
 | Staged diff SHA-256 | Final combined hash is recorded in the PR verification receipt; it is not embedded here because this file is part of that hash. |
 
-## Chronological ledger
+## Historical archive — chronological ledger
 
 1. **Stage 1 merge lands (historical context).** `upstream/main` advances
    to `26fb7bc`, which merges the Stage 1 persistent-storage foundation
