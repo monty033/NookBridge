@@ -1,5 +1,9 @@
 # Stage 2B-live — offline Notesnook authentication provider
 
+> **Historical snapshot:** Date not specified. Scope: offline provider seam
+> only; it does not establish live-authentication or current status. See
+> [project status](../../project-status.md).
+
 This document describes the Stage 2B-live **offline provider slice**. It does
 not enable live Notesnook authentication. The implementation uses an injected
 structural fake of the pinned Notesnook core boundary and a local `IStorage`

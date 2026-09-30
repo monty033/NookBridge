@@ -1,5 +1,9 @@
 # Stage 6: read-only MCP proxy
 
+> **Historical record:** The baseline and addendum describe distinct
+> snapshots; the earlier read-only scope is not current interface evidence.
+> See [project status](../../project-status.md).
+
 > **Historical Stage 6 record.** This document records the original
 > read-only baseline and Stage 7 write addendum. The current proxy also has
 > later, separately gated single-note delete and explicit outbound-sync tools;

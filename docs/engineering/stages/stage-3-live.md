@@ -1,6 +1,10 @@
 # Stage 3 — Read-only native sync
 
-## Current status
+> **Historical snapshot:** Date not specified. Scope: Stage 3 read-only POC
+> receipts and bounded proof seam; not current-status evidence. See
+> [project status](../../project-status.md).
+
+## Status at this receipt
 
 The Stage 3 read-only native-sync POC and the conflict/locked-note proof seam are **merged**. The pinned `@notesnook/core@8.1.3` runtime is projected into a flattened read-only handle, the operator command is separately gated by `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`, and the fetch-only boundary remains enforced.
 
@@ -53,7 +57,7 @@ Recorded Gate 3 scenario status:
 - Vault-locked note handling without body exposure — passed;
 - clean teardown and restart from the same disposable state — passed.
 
-A live pass must include the requested state directory, categorical command outcomes, and evidence that no plaintext corpus sidecar was created. Remote logout/revoke remains a separate unproven boundary unless explicitly tested. Gate 3 is now closed for this read-only scope; Stage 4 planning may proceed, but no write-capable operation is permitted yet.
+At the time of this receipt, Gate 3 was closed for this read-only scope and Stage 4 planning could proceed. The current implementation and support status, including later write-capable work, is recorded in [project status](../../project-status.md) and the [implementation plan](../../implementation-plan-v1.5.md). This Stage 3 scope did not permit write-capable operations.
 
 ## Offline validation
 

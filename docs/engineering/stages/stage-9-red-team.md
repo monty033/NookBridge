@@ -1,5 +1,9 @@
 # Stage 9 red-team evidence
 
+> **Historical evidence archive:** Initial run 2026-09-05; later addenda are
+> separate, bounded runs and do not broaden the evidence beyond their stated
+> scope. See [project status](../../project-status.md) for current status.
+
 Run timestamp: 2026-09-05T21:15:10Z
 Bridge revision under review: `94ad5c0a`
 Working remediation branch: `stage9-source-hardening`

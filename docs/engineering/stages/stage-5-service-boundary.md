@@ -1,5 +1,9 @@
 # Stage 5 — Service Boundary Decision Record
 
+> **Historical snapshot:** Date not specified. Scope: service-boundary
+> decisions; implementation and Gate 5 status are limited to the statements
+> recorded here. See [project status](../../project-status.md).
+
 > **Status: implementation in progress; Gate 5 is not passed.**
 > This record defines the contract for the daemon and its deployment. Nix
 > configuration and live credential/state wiring remain deferred to Task 7.

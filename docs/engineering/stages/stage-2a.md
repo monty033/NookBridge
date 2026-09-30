@@ -1,5 +1,9 @@
 # Stage 2A — offline authentication and core adapter seam
 
+> **Historical snapshot:** Date not specified. Scope: bounded offline
+> authentication/core-adapter slice; evidence below does not establish current
+> status. See [project status](../../project-status.md).
+
 Stage 2A is a bounded, offline-only vertical slice. It adds the plumbing
 needed to exercise authentication state and the Notesnook core initialization
 boundary without an account, credentials, network transport, or a runtime

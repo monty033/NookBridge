@@ -8,10 +8,12 @@ NookBridge is licensed under **GPL-3.0-or-later**. The root `LICENSE`
 file is the canonical text. The `package.json` `license` field and
 `SPDX-License-Identifier` carry the same metadata.
 
-The choice is deliberate: `@notesnook/core` and every other Notesnook
-package NookBridge directly imports are GPL-3.0-or-later, so a permissive
-NookBridge license would create a copyleft conflict downstream. Aligning
-licenses removes that conflict and matches upstream's posture.
+The project license is a project-level choice, not a substitute for checking
+each dependency or obtaining legal advice. The pinned `@notesnook/core` and
+listed Notesnook monorepo packages carry GPL-3.0-or-later metadata in their
+recorded package sources. Choosing the same project license aligns the stated
+project posture with those pinned packages, but does not by itself resolve all
+licensing or distribution questions.
 
 ## Upstream Notesnook packages (Stage 0 / Stage 1 inventory)
 

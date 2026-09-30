@@ -1,5 +1,9 @@
 # Stage 9 dependency and licensing evidence
 
+> **Historical snapshot:** 2026-09-05; scope is the source candidate and
+> lockfile evidence identified below, not a current distribution inventory.
+> See [project status](../../project-status.md).
+
 Date: 2026-09-05
 Source candidate under review: `94ad5c0a`
 
