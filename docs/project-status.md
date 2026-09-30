@@ -1,29 +1,44 @@
 # Project status
 
+> **Status as of 2026-09-30; source baseline `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`.**
+> This is a source-branch snapshot, not a production release or deployment
+> assertion. Receipts below are scoped to their recorded scenarios.
+
 NookBridge is pre-alpha. The table below separates repository implementation
 from operational support; a feature being present in source does not by itself
 make it safe or supported in every deployment.
 
 | Area | Current position | Evidence / next boundary |
 | --- | --- | --- |
-| Notesnook client core and encrypted local state | Implemented around the pinned upstream dependency. | [Upstream contract](upstream-contract.md) and implementation tests. |
-| Authentication and session persistence | Implemented with gated live-login and interactive credential input. | [Stage 2 live record](engineering/stages/stage-2b-live.md); credentials remain TTY-only. |
+| Notesnook client core and encrypted local state | Implemented around the pinned upstream dependency. | [Upstream contract](upstream-contract.md); release/deployment support is not inferred from source alone. |
+| Authentication and session persistence | Interactive provisioning is the production path; CLI live-login remains gated. | [Setup and provisioning](setup-and-provisioning.md), [Stage 2 live record](engineering/stages/stage-2b-live.md). |
 | Fetch-only native sync and bounded reads | Implemented and live-validated for the recorded scope. | [Stage 3 receipt](engineering/stages/stage-3-live.md). |
-| Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
+| Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md); latest source receipt is merge PR #173, commit `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`. |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
-| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Source PR #125 merged to `main` on 2026-09-21. The dedicated lock proof and the read-only sync proof remain separate evidence gates — see below. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated only for the recorded create → read round trip. | Historical source PR #125 merged to `main` on 2026-09-21; dedicated lock and read-only sync proofs remain separate gates — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
-| Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
+| Conventional Linux | Experimental generic systemd installer and Nix package exist; cross-distro live/security validation remains open. | [Systemd install guide](installation-systemd.md); do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
 | macOS and Windows | Explicit non-goals. | No support commitment. |
 
-## Current pause point — beta Markdown fidelity slice — 2026-09-29
+## Current source position — 2026-09-30
 
-This is the current handoff point. The source work is merged to the dedicated
-Forgejo `beta` branch, but it is **not** a production release or deployment.
+This baseline includes subsequent beta source merges beyond the Markdown
+fidelity closeout below; it is **not** a production release or deployment.
 
-### Closed in the beta branch
+- Baseline commit `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f` is merge PR #173.
+- PR #173 (`fix: persist sync intent before existing-note mutation, retain ID
+  reconciliation for create`) is the latest source receipt in this checkout
+  (merge commit `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`).
+- The previous documented Markdown fidelity slice (PRs #165–#168) remains a
+  historical receipt; its old `bb5d76f…` tip is not this snapshot's current tip.
+
+No source-gate totals or independent-review outcome for the complete baseline
+are asserted here; the prior numbers below describe only the recorded PR #168
+slice.
+
+### Historical beta Markdown fidelity receipt — 2026-09-29
 
 - PR #165, `feat: add native block Markdown parity`, merged at
   `b813243a286789d641ea049a8e32b23498902f99`.
@@ -31,8 +46,8 @@ Forgejo `beta` branch, but it is **not** a production release or deployment.
   at `9d9e9af413defe3407f445d593b5516532ca3315`.
 - PR #167, `feat: preserve ordered list starts and support HTTPS links`, merged
   at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
-- PR #168, the docs-only closeout, is the most recent merge; the current
-  `upstream/beta` tip is `bb5d76fdb9253c56e30a4c1d12187cf014359e67`.
+- PR #168 was the docs-only closeout at that time, at tip
+  `bb5d76fdb9253c56e30a4c1d12187cf014359e67`; it is not the current baseline.
 - The final source gate passed at **109 test files / 2,787 tests**, with
   typecheck, lint, formatting, build, and diff checks passing.
 - The final independent review found no blocking security or logic findings.
@@ -51,9 +66,10 @@ cannot preserve faithfully.
 - No new global Notesnook sync was performed as part of this closeout.
 - The beta source gate does not close the broader production-MVP gates below.
 
-### Resume checklist
+### Historical resume checklist (superseded by the baseline above)
 
-When this work resumes, continue in this order:
+The following checklist described the 2026-09-29 handoff only. It is retained
+as historical context, not as the current branch position:
 
 1. Re-read `upstream/beta` at the current tip `bb5d76f…` (PR #168, the
    docs-only closeout) and decide whether the beta behavior is ready for a
@@ -97,7 +113,7 @@ long-duration stress, and dependency/license sign-off work is tracked in the
 
 This section records the review and live evidence from that implementation
 slice. PR #125 subsequently merged to `main`; the current source/release
-position is recorded in the beta pause-point section above. The historical
+position is recorded in the current source position section above. The historical
 “blocks the merge” language below must not be read as the current PR state.
 
 The operator `notes` surface is implemented on the sole daemon and live-validated

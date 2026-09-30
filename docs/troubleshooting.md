@@ -23,6 +23,20 @@ raw upstream failures. Record only their categorical outcome when seeking help.
 | Authentication needs renewal | Re-run root-operated interactive provisioning from a real TTY; never provide credentials through MCP. |
 | State appears damaged | Stop the service, preserve the directory and metadata, then investigate through an approved root-operator procedure. |
 
+## Symptom-specific checks
+
+| Symptom | Safe diagnostic | Supported next step |
+| --- | --- | --- |
+| Socket permission denied | Check `systemctl is-active nookd.service`, the configured socket path, and whether the client account belongs to the intended client/operator group. Do not inspect or expose state files. | Have the administrator correct deployment group/policy configuration and restart through the host's normal change process. Do not broaden socket permissions as a workaround. |
+| Settings validation fails | Run `nookctl settings validate`; inspect the root-owned settings file against the [version 1 schema](configuration.md#settings-json-schema-version-1). | Correct the schema error using the deployment's authorized configuration process. Nix-managed installs must edit deployment source, not use CLI `edit`/`reset`. |
+| Provisioning fails | Check service status with `systemctl status nookd.service --no-pager` and validate its configured absolute service-config path with `nookd --check-config <absolute-config-path>`; note only categorical outcomes. | Use the root-operated `notesbridge provision` wrapper from a real host TTY after configuration/credential delivery is corrected. Never pass credentials in argv, environment, or configuration. |
+| Fetch-only sync fails | Check daemon state with `systemctl is-active nookd.service`; capture the wrapper's exit status and categorical output. | Resolve the reported service/configuration issue, then let an authorized operator decide whether to retry `notesbridge sync`. It is fetch-only; do not substitute generic/full sync or repeat uncertain mutations. |
+| Recovery asks for approval or rollback fails | Start with `nookctl recover-local-state inspect` (read-only). Review [recovery readiness](engineering/stages/stage-9-recovery.md) before any mutation. | Reinitialization requires the exact `--approve-reinitialize` flag; rollback requires `--approve-rollback <opaque-id>`. Both are deliberate operator mutations, not routine repair. Rollback refuses an occupied destination; do not remove or replace state to bypass that refusal. |
+
+The settings validator command is read-only. Recovery commands preserve state
+by quarantine and refuse clobbering; they are not a substitute for a reviewed
+recovery procedure.
+
 ## Local-state recovery
 
 `nookctl recover-local-state inspect` provides bounded, non-destructive

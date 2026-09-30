@@ -1,5 +1,19 @@
 # Usage
 
+## End-to-end operator workflow
+
+1. Install a reviewed release and complete the root-operated setup in
+   [setup and provisioning](setup-and-provisioning.md).
+2. From a real host TTY, provision with `notesbridge provision`, then run the
+   separate fetch-only `notesbridge sync` wrapper. Do not substitute
+   `nookctl auth` or generic sync for these production wrappers.
+3. Connect only an approved local MCP client to the configured Unix socket;
+   use the deployed policy to grant only the needed methods.
+4. Use the bounded operator CLI for approved local tasks. Consult the
+   [operator CLI reference](reference/cli.md) and
+   [MCP tool reference](reference/mcp-tools.md) for exact surfaces and safety
+   constraints.
+
 ## MCP client connection
 
 The approved local MCP client launches the thin proxy over stdio and supplies
@@ -17,8 +31,8 @@ The service policy, owned by the deployment administrator, controls which
 bounded operations are available. The MCP proxy registers a closed set of
 read, write, single-note delete, and explicitly requested synchronization
 tools; an unavailable tool must be denied by the service policy rather than
-silently widened. The [MCP tool reference](reference/mcp-tools.md) describes
-the currently compiled surface and its safety constraints.
+silently widened. The [MCP tool reference](reference/mcp-tools.md) describes the currently
+compiled surface and its safety constraints.
 
 ## Operator CLI
 
