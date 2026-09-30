@@ -16,6 +16,7 @@ export const SYNC_COORDINATOR_STATE_KEY = "nookbridge:sync-coordinator-state:v1"
 
 const MAX_PENDING_MARKERS = 64;
 const MAX_NOTE_ID_LENGTH = 128;
+const MAX_KNOWN_NOTE_IDS = 100_000;
 const NOTE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 type SynchronousStorage = Pick<PersistentStorage, "readSync" | "writeSync">;
@@ -41,14 +42,49 @@ function hasExactlyKeys(record: object, expected: readonly string[]): boolean {
   );
 }
 
+/**
+ * Accept exactly the pre-reconciliation v1 shape (`pending` only, from
+ * before `knownNoteIds` was introduced) or the current shape (`pending` +
+ * `knownNoteIds`), and reject anything else. Both shapes are persisted
+ * under the same versioned key; this keeps an older on-disk state file
+ * loadable across the upgrade instead of turning `load()` into a hard
+ * failure for every existing installation.
+ */
+function hasAcceptedStateKeys(record: object): boolean {
+  return hasExactlyKeys(record, ["pending"]) || hasExactlyKeys(record, ["pending", "knownNoteIds"]);
+}
+
 function normalizeState(value: unknown): SyncCoordinatorState {
-  if (!isRecord(value) || !hasExactlyKeys(value, ["pending"])) {
+  if (!isRecord(value) || !hasAcceptedStateKeys(value)) {
     throw new Error("invalid sync metadata");
   }
   const rawPending = readOwnData(value, "pending");
   if (!Array.isArray(rawPending) || rawPending.length > MAX_PENDING_MARKERS) {
     throw new Error("invalid sync metadata");
   }
+  // A pre-knownNoteIds v1 state omits the key entirely; treat that as an
+  // empty known-id set rather than rejecting the whole state. Losing the
+  // known-id memory on this one upgrade is a safe, bounded false negative
+  // (see boundedKnownNoteIds's docstring in notesnook-sync-coordinator.ts):
+  // the next startup reconciliation pass just treats every existing note as
+  // newly seen and re-queues it for a redundant confirmation sync.
+  const rawKnownNoteIds = hasExactlyKeys(value, ["pending", "knownNoteIds"])
+    ? readOwnData(value, "knownNoteIds")
+    : [];
+  if (!Array.isArray(rawKnownNoteIds) || rawKnownNoteIds.length > MAX_KNOWN_NOTE_IDS) {
+    throw new Error("invalid sync metadata");
+  }
+  const knownNoteIds = rawKnownNoteIds.map((rawId, index) => {
+    if (
+      typeof rawId !== "string" ||
+      rawId.length === 0 ||
+      rawId.length > MAX_NOTE_ID_LENGTH ||
+      !NOTE_ID_PATTERN.test(rawId)
+    ) {
+      throw new Error(`invalid sync metadata known note id ${index}`);
+    }
+    return rawId;
+  });
 
   const pending = rawPending.map((rawMarker, index) => {
     if (!isRecord(rawMarker) || !hasExactlyKeys(rawMarker, ["operation", "noteId", "sequence"])) {
@@ -75,7 +111,10 @@ function normalizeState(value: unknown): SyncCoordinatorState {
     return Object.freeze({ operation, noteId, sequence });
   });
 
-  return Object.freeze({ pending: Object.freeze(pending) });
+  return Object.freeze({
+    pending: Object.freeze(pending),
+    knownNoteIds: Object.freeze([...knownNoteIds]),
+  });
 }
 
 /** PersistentStorage-backed implementation of the coordinator's sync store. */

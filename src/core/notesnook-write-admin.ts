@@ -919,6 +919,8 @@ function categoricalFailureLabel(error: unknown): string {
         return "rejected: vault locked";
       case "sync_failed":
         return "rejected: local write failed";
+      case "local_sync_marker_failed":
+        return "local change committed; sync intent could not be persisted";
       default:
         return "rejected: local write failed";
     }

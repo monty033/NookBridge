@@ -21,6 +21,25 @@ import {
 export { NotesnookWriteContractError };
 
 const MAX_PENDING_MARKERS = 64;
+/** Shared bound with the startup reconciliation inventory cap (see notesnook-live-factory.ts). */
+const MAX_KNOWN_NOTE_IDS = 100_000;
+
+/**
+ * Merge a new id into the known-id set and enforce {@link MAX_KNOWN_NOTE_IDS}.
+ *
+ * If the bound would be exceeded, the lexicographically smallest ids are
+ * dropped first. Losing a "known" id is always a safe, bounded false
+ * negative: the next startup reconciliation pass simply treats that note as
+ * newly seen and re-queues it for a redundant confirmation sync. It can
+ * never cause a note to be silently skipped, because dropping only ever
+ * shrinks the known set, never removes a note's actual pending marker.
+ */
+function boundedKnownNoteIds(ids: Iterable<string>): string[] {
+  const sorted = [...new Set(ids)].sort();
+  return sorted.length > MAX_KNOWN_NOTE_IDS
+    ? sorted.slice(sorted.length - MAX_KNOWN_NOTE_IDS)
+    : sorted;
+}
 const MAX_NOTE_ID_LENGTH = 128;
 const MAX_DELAY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -42,6 +61,19 @@ export type SyncLocalCommit = Readonly<{
   readonly pendingSync: true;
 }>;
 
+/** Durable pre-mutation intent for an existing note. */
+export type SyncWriteIntent = Readonly<{
+  readonly operation: "append" | "update" | "delete";
+  readonly id: string;
+}>;
+
+/** Bounded acknowledgement that a write-ahead intent is durable. */
+export type SyncWriteIntentResult = Readonly<{
+  readonly operation: SyncWriteIntent["operation"];
+  readonly id: string;
+  readonly pendingSync: true;
+}>;
+
 /** Durable queue marker. It contains no body, record, credential, or path. */
 export type SyncPendingMarker = Readonly<{
   readonly operation: SyncOperation;
@@ -52,6 +84,8 @@ export type SyncPendingMarker = Readonly<{
 /** The complete metadata-only state accepted by an injected store. */
 export type SyncCoordinatorState = Readonly<{
   readonly pending: readonly SyncPendingMarker[];
+  /** Metadata-only inventory last durably observed/reconciled. */
+  readonly knownNoteIds: readonly string[];
 }>;
 
 /** Narrow restart-safe persistence seam. Implementations must be synchronous. */
@@ -176,6 +210,7 @@ export class SyncCoordinator {
   readonly #baseDelayMs: number;
   readonly #retryAfterCapMs: number;
   #pending: SyncPendingMarker[];
+  #knownNoteIds: string[];
   #nextSequence: number;
   #inFlight: Promise<SyncCoordinatorResult> | undefined;
 
@@ -227,6 +262,7 @@ export class SyncCoordinator {
     this.#baseDelayMs = baseDelayMs;
     this.#retryAfterCapMs = retryAfterCapMs;
     this.#pending = state.pending.map(copyMarker);
+    this.#knownNoteIds = [...state.knownNoteIds];
     this.#nextSequence = nextSequence(this.#pending);
     Object.freeze(this);
   }
@@ -266,9 +302,11 @@ export class SyncCoordinator {
       fail("invalid_input");
     }
 
-    const nextState = freezeState(nextPending);
-    persist(this.#store, nextState);
+    const knownNoteIds = boundedKnownNoteIds([...this.#knownNoteIds, id]);
+    const nextState = freezeState(nextPending, knownNoteIds);
+    persistLocalCommit(this.#store, nextState);
     this.#pending = [...nextPending];
+    this.#knownNoteIds = knownNoteIds;
     this.#nextSequence++;
 
     return Object.freeze({
@@ -278,6 +316,49 @@ export class SyncCoordinator {
       remoteSynced: false as const,
       pendingSync: true as const,
     });
+  }
+
+  /**
+   * Persist a sync intent before mutating an existing note. If storage fails,
+   * this method throws `sync_failed` and the caller must not invoke the local
+   * mutator. A durable intent left behind by a later failed mutation is a safe
+   * false positive: explicit full sync may do redundant work, but cannot lose
+   * a successful mutation from the queue.
+   */
+  recordSyncIntent(intent: SyncWriteIntent): SyncWriteIntentResult {
+    const record = requireRecord(intent, "sync intent");
+    const operation = readProperty(record, "operation");
+    const id = readProperty(record, "id");
+    if (
+      (operation !== "append" && operation !== "update" && operation !== "delete") ||
+      typeof id !== "string" ||
+      !validNoteId(id)
+    ) {
+      fail("invalid_input");
+    }
+
+    const marker = freezeMarker({ operation, noteId: id, sequence: this.#nextSequence });
+    const nextPending = [
+      ...this.#pending.filter(
+        (existing) => existing.operation !== operation || existing.noteId !== id,
+      ),
+      marker,
+    ];
+    if (nextPending.length > MAX_PENDING_MARKERS) fail("invalid_input");
+
+    const knownNoteIds = boundedKnownNoteIds([...this.#knownNoteIds, id]);
+    try {
+      persist(this.#store, freezeState(nextPending, knownNoteIds));
+    } catch {
+      // The local mutation has not started yet, so this is a normal
+      // fail-closed write refusal, not a post-commit missing-marker outcome.
+      throw new NotesnookWriteContractError("sync_failed");
+    }
+    this.#pending = nextPending;
+    this.#knownNoteIds = knownNoteIds;
+    this.#nextSequence++;
+
+    return Object.freeze({ operation, id, pendingSync: true as const });
   }
 
   /**
@@ -300,7 +381,47 @@ export class SyncCoordinator {
 
   /** Return a defensive, frozen copy of the bounded queue markers. */
   snapshot(): SyncCoordinatorState {
-    return freezeState(this.#pending);
+    return freezeState(this.#pending, this.#knownNoteIds);
+  }
+
+  /** Reconcile an enumerated metadata-only note inventory against the last durable snapshot. */
+  reconcilePendingFromSnapshot(noteIds: readonly string[]): void {
+    if (!Array.isArray(noteIds) || noteIds.length > 100_000) fail("invalid_input");
+    const current = new Set<string>();
+    for (const id of noteIds) {
+      if (typeof id !== "string" || !validNoteId(id)) fail("invalid_input");
+      current.add(id);
+    }
+    const known = new Set(this.#knownNoteIds);
+    const pendingIds = new Set(this.#pending.map((marker) => marker.noteId));
+    const nextPending = [...this.#pending];
+    let sequence = this.#nextSequence;
+    // The pending queue has a hard bound shared with every normal write.
+    // Queue as many orphans as fit, but keep scanning after capacity is
+    // reached so IDs already known or pending later in sort order remain in
+    // the durable snapshot. Unqueued new IDs stay absent from that snapshot
+    // and therefore remain eligible for the next reconciliation pass.
+    const reconciledThisPass = new Set<string>();
+    for (const id of [...current].sort()) {
+      if (known.has(id) || pendingIds.has(id)) {
+        reconciledThisPass.add(id);
+        continue;
+      }
+      if (nextPending.length >= MAX_PENDING_MARKERS) continue;
+      nextPending.push(freezeMarker({ operation: "update", noteId: id, sequence: sequence++ }));
+      reconciledThisPass.add(id);
+    }
+    const knownNoteIds = [...reconciledThisPass].sort();
+    if (
+      knownNoteIds.length === this.#knownNoteIds.length &&
+      knownNoteIds.every((id, i) => id === this.#knownNoteIds[i]) &&
+      nextPending.length === this.#pending.length
+    )
+      return;
+    persist(this.#store, freezeState(nextPending, knownNoteIds));
+    this.#pending = nextPending;
+    this.#knownNoteIds = knownNoteIds;
+    this.#nextSequence = sequence;
   }
 
   /**
@@ -391,7 +512,7 @@ export class SyncCoordinator {
   #removeBatch(batch: readonly SyncPendingMarker[]): void {
     const sequences = new Set(batch.map((marker) => marker.sequence));
     const nextPending = this.#pending.filter((marker) => !sequences.has(marker.sequence));
-    persist(this.#store, freezeState(nextPending));
+    persist(this.#store, freezeState(nextPending, this.#knownNoteIds));
     this.#pending = [...nextPending];
   }
 
@@ -489,6 +610,14 @@ function persist(store: SyncMetadataStateStore, state: SyncCoordinatorState): vo
 function validateState(value: unknown): SyncCoordinatorState {
   const record = requireRecord(value, "stored state");
   const rawPending = readProperty(record, "pending");
+  const rawKnownNoteIds = readProperty(record, "knownNoteIds");
+  const knownNoteIds = rawKnownNoteIds === undefined ? [] : rawKnownNoteIds;
+  if (
+    !Array.isArray(knownNoteIds) ||
+    knownNoteIds.length > 100_000 ||
+    knownNoteIds.some((id) => typeof id !== "string" || !validNoteId(id))
+  )
+    fail("invalid_input");
   let pendingLength: number;
   try {
     if (!Array.isArray(rawPending)) fail("invalid_input");
@@ -519,11 +648,11 @@ function validateState(value: unknown): SyncCoordinatorState {
     }
     pending.push(freezeMarker({ operation, noteId, sequence }));
   }
-  return freezeState(pending);
+  return freezeState(pending, [...new Set(knownNoteIds as string[])].sort());
 }
 
 function emptyState(): SyncCoordinatorState {
-  return freezeState([]);
+  return freezeState([], []);
 }
 
 function copyMarker(marker: SyncPendingMarker): SyncPendingMarker {
@@ -538,10 +667,22 @@ function freezeMarker(marker: SyncPendingMarker): SyncPendingMarker {
   return Object.freeze(marker);
 }
 
-function freezeState(pending: readonly SyncPendingMarker[]): SyncCoordinatorState {
+function freezeState(
+  pending: readonly SyncPendingMarker[],
+  knownNoteIds: readonly string[] = [],
+): SyncCoordinatorState {
   return Object.freeze({
     pending: Object.freeze(pending.map(copyMarker)),
+    knownNoteIds: Object.freeze([...knownNoteIds]),
   });
+}
+
+function persistLocalCommit(store: SyncMetadataStateStore, state: SyncCoordinatorState): void {
+  try {
+    persist(store, state);
+  } catch {
+    throw new NotesnookWriteContractError("local_sync_marker_failed");
+  }
 }
 
 function nextSequence(pending: readonly SyncPendingMarker[]): number {

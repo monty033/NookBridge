@@ -60,9 +60,12 @@ import {
   createLiveRemoteSyncExecutor,
   type NotesnookLiveRemoteSyncCapability,
 } from "./notesnook-live-remote-sync.js";
+import process from "node:process";
+import { createLogger } from "../logging/logger.js";
 import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
 import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
 import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
+import { readFilteredSelector, readFilteredSelectorIds } from "./notesnook-readonly-projection.js";
 
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 import {
@@ -183,6 +186,11 @@ export interface NotesnookLiveCoreHandle {
   readonly localConflictObserver?: NotesnookLocalConflictObserver;
 }
 
+export type NotesnookReconciliationFailure =
+  | "inventory_read_failed"
+  | "inventory_too_large"
+  | "state_reconciliation_failed";
+
 /**
  * Caller-supplied options for the live-core factory.  Callers MUST
  * supply the closed real-upstream setup options surface plus a
@@ -215,6 +223,8 @@ export type NotesnookLiveFactoryOptions = Readonly<{
   syncStateStore?: SyncMetadataStateStore;
   /** Encrypted journal for unrecoverable local-write compensation. */
   recoveryJournal?: NotesnookRecoveryJournal;
+  /** Optional bounded callback for startup reconciliation failures; raw errors are never passed. */
+  onReconciliationFailure?: (reason: NotesnookReconciliationFailure) => void;
 }>;
 
 /** Shared lifecycle across the runtime, narrow handle, and providers. */
@@ -331,6 +341,15 @@ export async function createNotesnookLiveCoreFactory(
             });
           })()
         : undefined;
+    if (sharedCoordinator !== undefined) {
+      await reconcileKnownNoteIds(db, sharedCoordinator, (reason) => {
+        if (options.onReconciliationFailure !== undefined) {
+          options.onReconciliationFailure(reason);
+        } else {
+          RECONCILIATION_FALLBACK_LOGGER.warn("startup sync reconciliation failed", { reason });
+        }
+      });
+    }
     const remoteSync =
       localWrite === undefined || sharedCoordinator === undefined
         ? undefined
@@ -827,7 +846,7 @@ function guardReadOnlyProjection(
  */
 function readDbObjectSlot(
   database: NotesnookLiveDatabase,
-  slot: "user" | "tokenManager",
+  slot: "user" | "tokenManager" | "notes",
   message: string,
 ): unknown {
   let value: unknown;
@@ -840,6 +859,70 @@ function readDbObjectSlot(
     throw factoryError(message);
   }
   return value;
+}
+
+/** Bound consistent with the coordinator's own `knownNoteIds` capacity. */
+const MAX_RECONCILE_NOTE_IDS = 100_000;
+const RECONCILIATION_FALLBACK_LOGGER = createLogger({
+  level: "warn",
+  sink: (line) => process.stderr.write(`${line}\n`),
+});
+
+/**
+ * Reconcile the coordinator's durable pending-sync bookkeeping against the
+ * live database's actual note inventory, once, at startup.
+ *
+ * This closes the create-specific recovery gap: a new note's id is only
+ * available after the local mutation succeeds, so a crash before its sync
+ * marker is durably recorded can otherwise leave an unqueued note. Mutations
+ * of existing notes persist a write-ahead sync intent before mutating. On the
+ * next startup, any newly present note id absent from both the last known
+ * inventory and current pending queue is re-queued for sync. Re-queuing an
+ * already-synced note is a harmless, redundant re-confirmation; silently
+ * losing a newly created note from sync forever is the failure this guards
+ * against.
+ *
+ * Fail-safe by design: any failure here (a malformed database shape, an
+ * oversized corpus, a coordinator refusal) is caught and reported through
+ * `onReconciliationFailure` rather than thrown, so a reconciliation problem
+ * can never block `nookd` from starting.
+ */
+async function reconcileKnownNoteIds(
+  database: NotesnookLiveDatabase,
+  coordinator: SyncCoordinator,
+  onReconcileFailure: (reason: NotesnookReconciliationFailure) => void,
+): Promise<void> {
+  const report = (reason: NotesnookReconciliationFailure): void => {
+    try {
+      onReconcileFailure(reason);
+    } catch {
+      // Diagnostics are best-effort and must never block startup.
+    }
+  };
+
+  let ids: readonly string[];
+  try {
+    const notes = readDbObjectSlot(
+      database,
+      "notes",
+      "Notesnook database handle is missing notes slot",
+    );
+    const notesAll = readFilteredSelector(notes, "notes.all", "Notes");
+    ids = await readFilteredSelectorIds(notesAll, "notes.all.ids");
+  } catch {
+    report("inventory_read_failed");
+    return;
+  }
+
+  if (ids.length > MAX_RECONCILE_NOTE_IDS) {
+    report("inventory_too_large");
+    return;
+  }
+  try {
+    coordinator.reconcilePendingFromSnapshot(ids);
+  } catch {
+    report("state_reconciliation_failed");
+  }
 }
 
 /**

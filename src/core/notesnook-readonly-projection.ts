@@ -963,7 +963,11 @@ function readMethod(
  * plain property); we therefore wrap the property access through a
  * `try` boundary so a hostile getter that throws does not leak.
  */
-function readFilteredSelector(manager: unknown, label: string, managerLabel: string): unknown {
+export function readFilteredSelector(
+  manager: unknown,
+  label: string,
+  managerLabel: string,
+): unknown {
   let value: unknown;
   try {
     value = (manager as Record<string, unknown>).all;
@@ -982,7 +986,7 @@ function readFilteredSelector(manager: unknown, label: string, managerLabel: str
 /**
  * Call `.ids()` on a `FilteredSelector<T>` and return the array of ids.
  */
-async function readFilteredSelectorIds(selector: unknown, label: string): Promise<string[]> {
+export async function readFilteredSelectorIds(selector: unknown, label: string): Promise<string[]> {
   let fn: unknown;
   try {
     fn = (selector as Record<string, unknown>).ids;

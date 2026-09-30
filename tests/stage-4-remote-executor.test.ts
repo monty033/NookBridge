@@ -311,7 +311,10 @@ describe("Stage 4 live remote executor", () => {
 
   it("round-trips through encrypted PersistentStorage and recovers after reopen", () => {
     const fixture = persistentStateStore();
-    const state = { pending: [{ operation: "create" as const, noteId: NOTE_ID, sequence: 1 }] };
+    const state = {
+      pending: [{ operation: "create" as const, noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [],
+    };
     try {
       fixture.store.save(state);
       expect(fixture.store.load()).toEqual(state);
@@ -339,7 +342,10 @@ describe("Stage 4 live remote executor", () => {
 
   it("round-trips a pending delete marker through encrypted storage", () => {
     const fixture = persistentStateStore();
-    const state = { pending: [{ operation: "delete" as const, noteId: NOTE_ID, sequence: 1 }] };
+    const state = {
+      pending: [{ operation: "delete" as const, noteId: NOTE_ID, sequence: 1 }],
+      knownNoteIds: [],
+    };
     try {
       fixture.store.save(state);
       expect(fixture.store.load()).toEqual(state);
@@ -360,6 +366,26 @@ describe("Stage 4 live remote executor", () => {
       writeSync: <T>(key: string, value: T) => values.set(key, value),
     });
     expect(() => store.load()).toThrow("invalid persisted sync metadata");
+  });
+
+  it("loads a pre-knownNoteIds v1 state (pending only) as an empty known-id set", () => {
+    // Simulates an on-disk state file written before knownNoteIds existed,
+    // under the same unversioned-in-name key SYNC_COORDINATOR_STATE_KEY. An
+    // upgrade must not brick a coordinator that already has real pending
+    // markers on disk from before this feature shipped.
+    const legacyEncoded = JSON.stringify({
+      pending: [{ operation: "append", noteId: "legacy-note-id", sequence: 1 }],
+    });
+    const values = new Map<string, unknown>([[SYNC_COORDINATOR_STATE_KEY, legacyEncoded]]);
+    const store = new PersistentSyncMetadataStateStore({
+      readSync: <T>(key: string) => values.get(key) as T | undefined,
+      writeSync: <T>(key: string, value: T) => values.set(key, value),
+    });
+
+    expect(store.load()).toEqual({
+      pending: [{ operation: "append", noteId: "legacy-note-id", sequence: 1 }],
+      knownNoteIds: [],
+    });
   });
 
   it("accepts only canonical metadata and normalizes hostile storage failures", () => {
@@ -414,7 +440,10 @@ describe("Stage 4 shared coordinator and write sync command", () => {
     gate.resolve(true);
     await expect(first).resolves.toMatchObject({ status: "synced", pendingSync: false });
     await expect(second).resolves.toMatchObject({ status: "synced", pendingSync: false });
-    expect(coordinator.snapshot()).toEqual({ pending: [] });
+    expect(coordinator.snapshot()).toEqual({
+      pending: [],
+      knownNoteIds: ["remote-executor-test-note"],
+    });
   });
 
   it("preserves pending state across coordinator restart", async () => {
