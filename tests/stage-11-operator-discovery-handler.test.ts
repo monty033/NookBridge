@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NotesnookReadOnlyProjectionError } from "../src/core/notesnook-readonly-projection.js";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
 import { OPERATOR_DISCOVERY_METHODS, OPERATOR_METHODS } from "../src/service/operator-methods.js";
 import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.js";
@@ -102,6 +103,46 @@ describe("operator discovery handler", () => {
       id: "4",
       ok: false,
       error: { code: "service_unavailable" },
+    });
+  });
+
+  it("keeps append-only unsupported_content out of operator projection failures", async () => {
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        throw new NotesnookReadOnlyProjectionError("unsupported_content");
+      },
+    });
+    const response = await handler(
+      { id: "append-only", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toMatchObject({
+      id: "append-only",
+      ok: false,
+      error: { code: "service_unavailable", message: "Service unavailable" },
+    });
+  });
+
+  it("collapses a redefined append-only OperatorWriteError code through the real handler route", async () => {
+    const handler = createOperatorDiscoveryHandler({
+      browse: async () => ({ notes: [], next: null }),
+      search: async () => ({ notes: [], next: null }),
+      view: async () => {
+        const error = new OperatorWriteError("conflict");
+        Object.defineProperty(error, "code", { value: "unsupported_content" });
+        throw error;
+      },
+    });
+    const response = await handler(
+      { id: "invalid-operator-code", method: "notes.get-view", params: { id: "h_one" } },
+      { uid: 1, gid: 2, groups: [] },
+    );
+    expect(response).toEqual({
+      id: "invalid-operator-code",
+      ok: false,
+      error: { code: "service_unavailable", message: "Service unavailable" },
     });
   });
 

@@ -724,7 +724,8 @@ export type RpcErrorCode =
   | "conflict"
   | "sync_failed"
   | "vault_locked"
-  | "not_found";
+  | "not_found"
+  | "unsupported_content";
 
 /** Fixed, non-sensitive messages for the categorical RPC error vocabulary. */
 const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
@@ -736,6 +737,7 @@ rpcErrorMessages.conflict = "Conflict";
 rpcErrorMessages.sync_failed = "Sync failed";
 rpcErrorMessages.vault_locked = "Vault locked";
 rpcErrorMessages.not_found = "Not found";
+rpcErrorMessages.unsupported_content = "Unsupported content";
 /**
  * The single source of truth for the categorical error vocabulary.
  *

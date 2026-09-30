@@ -279,7 +279,18 @@ describe("service audit records", () => {
       "rpc.connection.admission_rejected",
       "rpc.connection.closed",
     ]);
-    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(12);
+    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(13);
+    expect(SERVICE_AUDIT_OUTCOMES).toContain("unsupported_content");
+    expect(
+      buildServiceAuditRecord({
+        event: "rpc.request.dispatched",
+        outcome: "unsupported_content",
+        method: "notes.append",
+        requestIdEcho: false,
+        latencyMs: 0,
+        peerCredentials: "unknown",
+      }),
+    ).toMatchObject({ outcome: "unsupported_content", method: "notes.append" });
     for (const event of SERVICE_AUDIT_EVENTS) {
       const record = buildServiceAuditRecord({
         event,

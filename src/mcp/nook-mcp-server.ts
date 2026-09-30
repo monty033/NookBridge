@@ -1447,6 +1447,7 @@ function normaliseSearchInput(input: SearchInput): NormalisedSearchInput | Norma
  * agent receives the same closed semantics the daemon emits.
  */
 function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
+  if (reason === "unsupported_content") return "unsupported_content";
   switch (reason) {
     case "invalid_request":
       return "invalid_request";
