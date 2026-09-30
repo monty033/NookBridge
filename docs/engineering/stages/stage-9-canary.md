@@ -1,5 +1,9 @@
 # Stage 9 canary evidence
 
+> **Historical evidence archive:** Initial snapshot 2026-09-05; later
+> addenda are separately dated and scope-bounded. See
+> [project status](../../project-status.md) for current status.
+
 Status: **Historical baseline — superseded by current-pin evidence below**
 
 Date: 2026-09-05

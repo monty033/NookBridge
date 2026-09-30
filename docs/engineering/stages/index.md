@@ -1,5 +1,10 @@
 # Engineering stage records
 
+> **Historical archive:** Scope and evidence dates vary by record; some do not
+> specify a snapshot date. These records preserve only their stated scope and
+> are not current-status evidence. See [project status](../../project-status.md)
+> for the current repository status.
+
 These documents are the project's stage plans, decision records, validation
 receipts, canaries, and review artifacts. They preserve implementation history
 and release-gate evidence; they are not the primary onboarding or operating

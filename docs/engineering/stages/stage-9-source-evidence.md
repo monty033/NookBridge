@@ -1,5 +1,9 @@
 # Stage 9 source-evidence receipt
 
+> **Historical evidence archive:** Initial source receipt dated 2026-09-06;
+> later addenda have distinct source/deployment scopes. See
+> [project status](../../project-status.md) for current status.
+
 Status: **SOURCE PASS — VM and production gates remain open**
 
 Date: 2026-09-06

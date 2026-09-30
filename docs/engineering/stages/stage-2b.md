@@ -1,5 +1,9 @@
 # Stage 2B — offline credential boundary
 
+> **Historical snapshot:** Date not specified. Scope: offline credential-input
+> boundary only; evidence below is not current-status evidence. See
+> [project status](../../project-status.md).
+
 Stage 2B ships the interactive secret-input boundary and the
 `nookctl auth <subcommand>` plumbing on top of Stage 1 / Stage 2A.
 It is a **fully offline slice**: no live Notesnook network call, no

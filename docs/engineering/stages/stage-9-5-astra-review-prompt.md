@@ -1,3 +1,7 @@
+> **Historical snapshot:** The recorded commit is the scope boundary; no
+> evidence date is specified. This prompt artifact is not current-status
+> evidence. See [project status](../../project-status.md).
+
 Reproducible prompt for the Stage 9.5 Astra review recorded in
 `docs/implementation-plan-v1.5.md` §13.12.
 

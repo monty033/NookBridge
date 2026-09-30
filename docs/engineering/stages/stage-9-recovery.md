@@ -1,5 +1,9 @@
 # Stage 9 recovery readiness
 
+> **Historical evidence archive:** Initial snapshot 2026-09-05; the
+> 2026-09-07 and 2026-09-16 addenda have separate scopes. See
+> [project status](../../project-status.md) for current status.
+
 Status: **SOURCE WORKFLOW IMPLEMENTED — historical 2026-09-05 baseline; VM drill and production recovery gates open**
 
 Date: 2026-09-05

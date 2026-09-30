@@ -1,5 +1,9 @@
 # Stage 2-live — explicit live Notesnook auth POC
 
+> **Historical snapshot:** Date not specified. Scope: implementation slice;
+> the document explicitly records no live account/network exercise. See
+> [project status](../../project-status.md) for current status.
+
 This document describes the **Stage 2-live** proof-of-concept slice: the
 explicit live Notesnook authentication provider, the lazy narrow real-core
 factory that produces its handle, and the opt-in live auth runner that
