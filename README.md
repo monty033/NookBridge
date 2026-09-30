@@ -17,7 +17,7 @@ Read the
 [getting-started guide](docs/getting-started.md) before attempting a deployment.
 
 The current deployed rollout includes bounded compensation for partial note
-updates and has completed its authorized sync reconciliation. The broader
+updates and has completed its authorized sync reconciliation. The ACTION-1 source-level write-ahead-intent gap is also closed; production-shaped kill/restart acceptance and deleted-note upstream-propagation semantics remain open in the [implementation plan](docs/implementation-plan-v1.5.md#1321-action-1-write-ahead-sync-intent-closeout). The broader
 production-MVP release gates remain open; see [project status](docs/project-status.md)
 and the [implementation plan](docs/implementation-plan-v1.5.md#1315-current-rollout-closure--update-compensation-and-reconciliation)
 for the exact boundary.

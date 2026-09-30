@@ -1,11 +1,6 @@
 # NookBridge — licensing inventory (Stage 9 review baseline)
 
-This is the current license inventory for the implementation plan's release
-and distribution gates. It exists for two reasons:
-
-1. To make the license posture of every dependency NookBridge pulls in
-   visible at a glance.
-2. To be the release-gate checklist for any future public distribution.
+> **Distribution-blocking stale snapshot:** The inventory below is historical and incomplete. It was assembled from a temporary Stage 0/1 checkout before the current dependency set and shipped artifact were fully inventoried. Do not rely on it as the current license inventory or as evidence of compliance. Before any distribution, regenerate the complete license inventory from the current `package-lock.json` and the exact shipped artifact using a license-scanning tool, then review it against the release artifact. This documentation-only update does not perform that scan or assert a complete inventory.
 
 ## Project license
 

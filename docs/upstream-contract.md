@@ -1,5 +1,10 @@
 # NookBridge — upstream contract (Stage 0)
 
+> **Current pinned tuple:** NookBridge currently pins `@notesnook/core@8.1.3` from Notesnook monorepo commit `c9c4936d9e8222b86204781cd1c93cdf2a1738d3`. The package version is declared in `package.json` and `package-lock.json`; the source commit is recorded in `docs/pins.md`. These are separate identifiers: the repository pin names the source checkout and the package version names the installed package.
+>
+> **Superseded historical baseline:** Older sections below describe the Stage 0/Stage 2-live tuple as the active pin. Treat those claims as historical snapshots, superseded by the current tuple above; retain them only as historical context, not current pin authority.
+
+
 This document records what NookBridge assumes about its upstream dependency
 (the Notesnook monorepo and `@notesnook/core`) and what it does **not**
 assume. It exists so that anyone reading the code or considering a public
