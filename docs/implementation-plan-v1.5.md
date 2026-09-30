@@ -2605,15 +2605,7 @@ This closes the update-compensation implementation, deployment, and
 post-deployment reconciliation workstream. No further sync, rebuild, restart,
 or live mutation is required for this slice.
 
-This does **not** close the broader production-MVP release gate. The remaining
-work is the open acceptance and remediation work in §13.14: production-shaped
-mutation atomicity and durable sync intent, authoritative lock fail-closed
-behavior, runtime ownership after timeout/disconnect, retry/throttling and
-source-level query bounds, production-bundle recovery with post-recovery
-resync, non-mutating operator and socket/ancestor checks, privileged scans,
-outsider socket denial, long-duration mixed-load stress, and exact shipped
-artifact dependency/license evidence. These are separate future work and must
-not be inferred as defects in the shipped update-compensation slice.
+This does **not** close the broader production-MVP release gate. The remaining work is the open acceptance and remediation work in §13.14: production-shaped mutation atomicity and kill/restart recovery acceptance remain open; ACTION-1 (§13.21) closes only the source-level write-ahead sync-intent gap. Deleted-note upstream-propagation semantics, authoritative lock fail-closed behavior, runtime ownership after timeout/disconnect, retry/throttling and source-level query bounds, production-bundle recovery with post-recovery resync, non-mutating operator and socket/ancestor checks, privileged scans, outsider socket denial, long-duration mixed-load stress, and exact shipped artifact dependency/license evidence also remain open. These are separate future work and must not be inferred as defects in the shipped update-compensation slice.
 
 The earlier §13.14 “first implementation ticket” is superseded as an active
 instruction by PRs #99–#101: revision advancement and bounded create/update
@@ -2625,9 +2617,9 @@ update-compensation implementation.
 ## 13.18 Operator `notes` feature parity — frozen T00 contract and T01–T14 task graph
 
 **Status date:** 2026-09-19 (America/New_York)
-**Source plan:** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (T00 frozen contract at the top of the file).
+**Internal development artifact (not repository authority):** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` informed this historical roadmap entry but is not included in this repository and is not authoritative or normative for repository readers. This implementation plan and the source-of-truth files declared in `AGENTS.md` are the in-repository authority.
 **Mode:** documentation-only reconciliation; no source/test/deployment mutation in this section.
-**Supersedes for this scope:** §13.18 (v2 amendment) and §13.19 wording where they conflict with the T00 frozen contract. The v2 amendment file is no longer in force; see the v3 plan's T00.8 supersession markers.
+**Supersedes for this scope:** earlier §13.18 (v2 amendment) and §13.19 wording where they conflict with the in-repository roadmap here. The external v2/v3 working files are not normative for repository readers.
 
 ### Scope
 
@@ -2638,11 +2630,11 @@ Add the operator `notes` CLI capability set (`browse`, `search`, `get` with body
 - fetch-only sync boundary is preserved;
 - credential / key / body / title / ID / path / token bytes remain out of argv, env, logs, and chat.
 
-The T00 frozen contract at the top of the v3 plan is the **single executable specification**; this roadmap section exists to reference it and to record the task graph, gate language, and supersession markers as part of the project's documentation source-of-truth.
+The scope and concise decisions below are retained as a historical implementation roadmap summary; they are not a complete executable contract. The full project authority remains this implementation plan plus the source-of-truth files declared in `AGENTS.md`.
 
-### T00 frozen contract summary
+### T00 frozen contract summary (historical development notes)
 
-The frozen contract enumerates 14 decisions (D1–D14), a daemon-side operation state machine, a permissions / authorization boundary, and structured-note fidelity properties. Every dependent task T01–T14 must conform. The full text is in `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (sections T00.1–T00.8). The decisions resolve the Astra review blockers and supersede contradictory wording in §13.18/§13.19 of the v3 plan body.
+The T00 frozen contract is summarized here for historical implementation context, but the external `.hermes/plans/2026-09-18-notes-features-complete-v3.md` is an internal development artifact, not included in this repository and not authoritative or normative for repository readers. This implementation plan and the source-of-truth files declared in `AGENTS.md` are the actual in-repository authority. The summary below does not incorporate or reconstruct the inaccessible plan's full text.
 
 Highlights (full text wins on conflict):
 
@@ -2686,7 +2678,7 @@ Lane assignment (frozen): document lane (T01–T03, then T04), transport lane (T
 
 ### Frozen task gates
 
-The pass condition for each of T01–T14 is recorded at T00.6 of the v3 plan. Every gate requires failing behavioral tests before implementation, an exact-diff review, and no generated state or credentials in changes. Shared-file owners run sequentially.
+Older roadmap wording in this section may refer to the external v3 plan as governing particular development decisions. That plan was an internal working artifact, is not included in this repository, and is not authoritative or normative for repository readers. This implementation plan and the source-of-truth files declared in `AGENTS.md` are the actual in-repo authority; any contract summary retained here is historical context only.
 
 ### Suppression of contradictions and historical scope
 
@@ -2710,14 +2702,16 @@ The nix-config pin change should target that repository's `flake.nix` and `flake
 ## 13.19 Structured note items and native Notesnook construction (amendment, governed by T00)
 
 **Status date:** 2026-09-19 (America/New_York)
-**Source plan:** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` (the §13.19 amendment section, as governed by T00).
+**Source plan (historical internal artifact):** `.hermes/plans/2026-09-18-notes-features-complete-v3.md` was used during development but is not part of this repository and is not authoritative for repository readers. This implementation plan and the source-of-truth files declared in `AGENTS.md` are the in-repo authority.
 **Mode:** documentation-only; no source/test/deployment mutation in this section.
 
 The §13.19 amendment extends the operator tree to add editor-based `create`, structured document handling for nested task lists (both checklist kinds), inline marks, fenced code, tables, and callouts, while preserving the closed tool list, the no-delete invariant, and the daemon-owned encryption boundary.
 
-### Subordinate decisions frozen by T00
+> **Authority for repository readers:** This implementation plan and the source-of-truth files declared in `AGENTS.md` are the in-repository authority. The external `.hermes/plans/2026-09-18-notes-features-complete-v3.md` was an internal development working artifact; it is not included here and is not authoritative or normative for readers cloning this repository.
 
-The amendment's intent is preserved; its specific contract decisions are governed by T00:
+### Subordinate decisions recorded in this roadmap
+
+The following concise decisions are historical implementation notes, not a claim that the unavailable external plan governs repository readers:
 
 - **Document model** — `NoteDocumentV1` AST carries per-list intent (T00 D6); legacy request-level `listKind` is the default. The AST is defined and gated by T01.
 - **Markdown editor representation** — `- [ ]` / `- [x]` with indentation maps to nested `task-list` nodes; `#`–`###` map to headings; tables and callouts use `:::nookbridge` directives (preserved in v3 §13.19 §3, subject to T02 round-trip). Opaque unsupported nodes use `:::nookbridge opaque <node-type>` directives, **but the directive body is an opaque reference, not parsed JSON** (T00 D7).
@@ -2728,7 +2722,7 @@ The amendment's intent is preserved; its specific contract decisions are governe
 
 ### Supersession note
 
-The §13.19 amendment is governed by T00 and not by §13.18 of the v2 file. The shared document model, the editor interchange grammar, the native serializer, and the CLI UX are all tasks T01–T03 + T07 + T09. The amendment does not stand alone; the T00 frozen contract and the T01–T14 task graph are the source of truth.
+This §13.19 roadmap amendment is subordinate to this implementation plan and the source-of-truth files declared in `AGENTS.md`. References to T00 or the external v2/v3 plans describe historical development context only; none is an inaccessible source of authority for repository readers.
 
 ## 13.20 Current pause point — beta Markdown fidelity slice
 
@@ -2748,8 +2742,8 @@ definition of done.
   `9d9e9af413defe3407f445d593b5516532ca3315`.
 - PR #167 — arbitrary ordered-list starts and strict HTTPS inline links — merged
   to `beta` at `192c9cdf17ef630befd9c181112f92224c6df0f4`.
-- PR #168 — docs-only closeout — is the most recent merge; current canonical
-  beta tip: `bb5d76fdb9253c56e30a4c1d12187cf014359e67`.
+- PR #168 — docs-only closeout — merged to `beta` at `bb5d76fdb9253c56e30a4c1d12187cf014359e67` (historical beta tip at that closeout; not the current beta tip).
+- The current beta tip for this status document is `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`, after PR #173 (ACTION-1) merged.
 
 ### Verified evidence
 
@@ -2783,12 +2777,7 @@ separate and open:
 4. **Production rollout:** NixOS repin, service restart, production canary, and
    any live Notesnook sync require their own explicit authorization and
    read-after-write evidence.
-5. **Broader production-MVP gates:** production-shaped mutation atomicity and
-   durable sync intent, authoritative lock/authorization behavior, runtime
-   ownership after timeout or disconnect, retry/throttling and query bounds,
-   production-bundle recovery with post-recovery resync, privileged and
-   outsider boundary checks, long-duration mixed-load stress, and exact shipped
-   artifact dependency/license evidence.
+5. **Broader production-MVP gates:** production-shaped mutation atomicity, including kill/restart acceptance, and deleted-note upstream-propagation semantics remain OPEN; ACTION-1 closes only the source-level write-ahead-intent gap (§13.21). Authoritative lock/authorization behavior, runtime ownership after timeout or disconnect, retry/throttling and query bounds, production-bundle recovery with post-recovery resync, privileged and outsider boundary checks, long-duration mixed-load stress, and exact shipped artifact dependency/license evidence also remain open.
 
 ### Resume procedure
 
@@ -2803,6 +2792,19 @@ from the current canonical target, keep the promotion/deployment scope
 separate from this source closeout, and rerun the applicable source, artifact,
 review, and live-acceptance gates. Do not merge, deploy, restart, or sync merely
 because PR #167 is merged.
+
+
+## 13.21 ACTION-1 write-ahead sync-intent closeout
+
+**Status date:** 2026-09-29 (America/New_York)
+
+**Status: ACTION-1 SOURCE-LEVEL WRITE-AHEAD-INTENT GAP CLOSED; PRODUCTION ACCEPTANCE GATES REMAIN OPEN.**
+
+### Shipped scope
+
+PR #173 merged into `beta` at `0578da3fe6b4af9093e7c652cfe5f9469afa8e6f`. Existing-note append, update, and delete now persist a durable write-ahead sync intent through the coordinator before the adapter mutation, in `src/core/notesnook-sync-coordinator.ts` and `src/core/notesnook-write-composition.ts`. Create intentionally retains post-mutation, ID-only startup reconciliation in `src/core/notesnook-live-factory.ts`, because the Notesnook note ID does not exist until the adapter call succeeds.
+
+This closes ACTION-1's source-level mutation/sync-intent recovery gap only. It does not establish production-shaped kill/restart recovery acceptance, nor settle deleted-note upstream-propagation semantics; both remain OPEN, alongside the broader production-MVP gates.
 
 # Appendix A. Research Sources
 
