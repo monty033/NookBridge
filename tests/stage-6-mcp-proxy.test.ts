@@ -132,6 +132,7 @@ describe("nookd socket client — note revision projection", () => {
             title: "Title",
             revision: "rev_00000000000000000000000000000001",
           },
+          contentStatus: "unavailable",
         },
       }),
     );
@@ -179,6 +180,7 @@ describe("nookd socket client — note revision projection", () => {
         result: {
           kind: "note",
           note: { id: "note-1", title: "Title", revision: "REVISION_LEAK" },
+          contentStatus: "unavailable",
         },
       }),
     );

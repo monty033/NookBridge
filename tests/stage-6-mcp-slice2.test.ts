@@ -191,6 +191,7 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
             pinned: true,
             body: "secret-body",
           },
+          contentStatus: "unavailable",
         },
       };
     });
@@ -204,6 +205,7 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
     expect(textPayload(result)).toEqual({
       kind: "note",
       note: { id: "note-1", title: "A note", notebookId: "nb-1", pinned: true },
+      contentStatus: "unavailable",
     });
     expect(JSON.stringify(result)).not.toContain("secret-body");
   });

@@ -1261,7 +1261,12 @@ async function invokeGetNote(
   if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
   try {
     if (result.envelope.result.kind !== "note") return toMcpErrorResult("service_unavailable");
-    return textResult({ kind: "note", note: result.envelope.result.note });
+    const { note, contentStatus, markdown, markdownBytes } = result.envelope.result;
+    return textResult(
+      contentStatus === "ok"
+        ? { kind: "note", note, contentStatus, markdown, markdownBytes }
+        : { kind: "note", note, contentStatus },
+    );
   } catch {
     return toMcpErrorResult("service_unavailable");
   }

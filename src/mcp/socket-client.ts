@@ -865,11 +865,52 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       }) as unknown as RpcAnyResponseEnvelope;
     }
     if (resultRecord.kind === "note") {
-      if (!hasExactOwnKeys(resultRecord, ["kind", "note"])) throw new Error("invalid response");
+      const hasContent = hasExactOwnKeys(resultRecord, [
+        "kind",
+        "note",
+        "contentStatus",
+        "markdown",
+        "markdownBytes",
+      ]);
+      const hasNoContent = hasExactOwnKeys(resultRecord, ["kind", "note", "contentStatus"]);
+      if (!hasContent && !hasNoContent) throw new Error("invalid response");
+      if (
+        resultRecord.contentStatus !== "ok" &&
+        resultRecord.contentStatus !== "locked" &&
+        resultRecord.contentStatus !== "oversize" &&
+        resultRecord.contentStatus !== "unavailable"
+      )
+        throw new Error("invalid response");
+      if (hasContent !== (resultRecord.contentStatus === "ok")) throw new Error("invalid response");
+      const note = decodeNote(resultRecord.note);
+      if (!hasContent) {
+        return Object.freeze({
+          id: candidate.id,
+          ok: true,
+          result: Object.freeze({ kind: "note", note, contentStatus: resultRecord.contentStatus }),
+        }) as unknown as RpcAnyResponseEnvelope;
+      }
+      if (
+        typeof resultRecord.markdown !== "string" ||
+        resultRecord.markdown.length === 0 ||
+        Buffer.byteLength(resultRecord.markdown, "utf8") > STAGE5_RPC_LIMITS.maxResponseBytes ||
+        typeof resultRecord.markdownBytes !== "number" ||
+        !Number.isInteger(resultRecord.markdownBytes) ||
+        resultRecord.markdownBytes < 0 ||
+        resultRecord.markdownBytes > STAGE5_RPC_LIMITS.maxResponseBytes ||
+        resultRecord.markdownBytes !== Buffer.byteLength(resultRecord.markdown, "utf8")
+      )
+        throw new Error("invalid response");
       return Object.freeze({
         id: candidate.id,
         ok: true,
-        result: Object.freeze({ kind: "note", note: decodeNote(resultRecord.note) }),
+        result: Object.freeze({
+          kind: "note",
+          note,
+          contentStatus: "ok",
+          markdown: resultRecord.markdown,
+          markdownBytes: resultRecord.markdownBytes,
+        }),
       }) as unknown as RpcAnyResponseEnvelope;
     }
     if (resultRecord.kind === "create") {

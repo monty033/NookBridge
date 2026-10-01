@@ -513,6 +513,11 @@ export interface RpcNoteMetadata {
 export interface RpcGetNoteResult {
   readonly kind: "note";
   readonly note: RpcNoteMetadata;
+  /** Categorical outcome of the bounded content read; see notes.get docs. */
+  readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+  /** Present only when contentStatus === "ok". */
+  readonly markdown?: string;
+  readonly markdownBytes?: number;
 }
 
 /**
@@ -892,6 +897,27 @@ const PREFLIGHT_UTF16_WALK_CAP = STAGE5_RPC_LIMITS.maxResponseBytes * 6;
  * sufficient for the success envelope and the error envelope.
  */
 const PREFLIGHT_ENVELOPE_OVERHEAD_BYTES = 1024;
+
+/**
+ * Pure predicate mirroring the preflight response-size guard: would a
+ * success response carrying exactly these response-owned string fields
+ * pass `preflightResponseStringField` accounting?  Producers (e.g. the
+ * `notes.get` handler) use this to degrade categorically -- returning
+ * `contentStatus: "oversize"` -- instead of building an envelope the
+ * serializer would reject wholesale.  It shares the guard's constants
+ * so the two cannot drift apart.
+ */
+export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
+  let sum = 0;
+  for (const value of fields) {
+    if (value.length > PREFLIGHT_UTF16_WALK_CAP) return false;
+    const escapedUpperBound = value.length * 6;
+    if (escapedUpperBound > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
+    sum += escapedUpperBound;
+    if (sum + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
+  }
+  return true;
+}
 
 /**
  * Run the preflight response-size guard on a single response-owned
@@ -1793,16 +1819,64 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "note") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "note"],
+        ["kind", "note", "contentStatus", "markdown", "markdownBytes"],
         "rpc protocol: note result has unexpected fields",
       );
-      if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "note"])) {
+      const hasContent = resultKeys.length === 5;
+      if (
+        (resultKeys.length !== 3 && resultKeys.length !== 5) ||
+        !keysAreExactly(
+          resultKeys,
+          hasContent
+            ? ["kind", "note", "contentStatus", "markdown", "markdownBytes"]
+            : ["kind", "note", "contentStatus"],
+        )
+      ) {
         throw rpcProtocolError("rpc protocol: note result has unexpected fields");
       }
+      const contentStatus = resultRecord.contentStatus;
+      if (
+        contentStatus !== "ok" &&
+        contentStatus !== "locked" &&
+        contentStatus !== "oversize" &&
+        contentStatus !== "unavailable"
+      ) {
+        throw rpcProtocolError("rpc protocol: note result has an invalid contentStatus");
+      }
+      if (hasContent !== (contentStatus === "ok")) {
+        throw rpcProtocolError(
+          "rpc protocol: note result content fields do not match contentStatus",
+        );
+      }
       const cleanNote = normaliseNoteResult(resultRecord.note, rawSum);
-      const resultPayload = objectCreate(null) as { kind: "note"; note: Record<string, JsonValue> };
+      const resultPayload = objectCreate(null) as {
+        kind: "note";
+        note: Record<string, JsonValue>;
+        contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+        markdown?: string;
+        markdownBytes?: number;
+      };
       resultPayload.kind = "note";
       resultPayload.note = cleanNote;
+      resultPayload.contentStatus = contentStatus;
+      if (hasContent) {
+        assertBoundedMarkdown(
+          resultRecord.markdown,
+          STAGE5_RPC_LIMITS.maxResponseBytes,
+          "note content",
+        );
+        preflightResponseStringField(resultRecord.markdown as string, rawSum);
+        if (
+          !isNonNegativeFiniteNumber(resultRecord.markdownBytes) ||
+          !Number.isInteger(resultRecord.markdownBytes) ||
+          resultRecord.markdownBytes > STAGE5_RPC_LIMITS.maxResponseBytes ||
+          resultRecord.markdownBytes !== Buffer.byteLength(resultRecord.markdown as string, "utf8")
+        ) {
+          throw rpcProtocolError("rpc protocol: note result markdownBytes is invalid");
+        }
+        resultPayload.markdown = resultRecord.markdown as string;
+        resultPayload.markdownBytes = resultRecord.markdownBytes;
+      }
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 

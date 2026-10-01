@@ -24,7 +24,8 @@ nix develop --offline --command just stage3-test
 - Keep live authentication in the echo-disabled interactive TTY flow.
 - Do not inspect or commit generated `var/` state. `dist/` and `node_modules/` are generated dependencies.
 - The read-only sync boundary accepts only `{ type: "fetch" }`. Never add `full`, `send`, or `force` to that surface; upstream `full` includes a send phase.
-- Do not expose the raw Notesnook `Database`, generic transport, collection mutators, note bodies, or file-storage writes through the read-only projection.
+- Do not expose the raw Notesnook `Database`, generic transport, collection mutators, or file-storage writes through the read-only projection.
+- **Amendment (owner-authorized, see `docs/security-and-privacy.md`):** `notes.get` / `notesnook_get_note` MAY return a bounded, decoded Markdown projection of note content (`contentStatus: "ok"`, capped at `STAGE5_RPC_LIMITS.maxResponseBytes`). The prior categorical ban on note bodies covered the cloud-exfiltration risk of body content crossing an LLM boundary; the owner has accepted that risk for this local/self-hosted deployment and manages access instead via Notesnook's native per-note lock feature (which this surface still honors: a `locked` note's metadata flag suppresses the content read before the reader is ever called) and standard permission settings. Still forbidden: the raw `Database`, generic transport, collection mutators, and file-storage writes.
 - Normalize upstream failures to categorical errors without forwarding causes, paths, credentials, or note corpus data.
 
 ## Documentation source of truth

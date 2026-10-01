@@ -13,7 +13,7 @@ not automatically authorized for every deployed client.
 | `notesnook_search_notes` | Search local note titles. | Non-empty query; optional `limit` 1–64 is currently accepted but not applied by the service. Returns title-only hits. |
 | `notesnook_status` | Report bounded sync status. | No input; no credentials, paths, or note content. |
 | `notesnook_list_notebooks` | List local notebooks. | No input; returns bounded identifiers, titles, and selected metadata. |
-| `notesnook_get_note` | Retrieve bounded note metadata. | Requires an opaque note identifier; note body and attachments are excluded. |
+| `notesnook_get_note` | Retrieve bounded note metadata, plus a bounded decoded Markdown content view when available. | Requires an opaque note identifier. Response includes `contentStatus`: `"ok"` (content attached as `markdown`/`markdownBytes`), `"locked"` (note is Vault-locked; metadata returned, content withheld, reader never invoked), `"oversize"` (content exceeds the response size bound; withheld), or `"unavailable"` (no content reader, or content could not be decoded). Attachments remain excluded. |
 | `notesnook_create_note` | Create one bounded note. | Requires title and content; optional notebook identifier. Authorization required. |
 | `notesnook_append_note` | Append bounded Markdown. | Requires note identifier and expected revision. Authorization required. |
 | `notesnook_update_note` | Update selected note fields. | Requires note identifier, expected revision, and a non-empty closed patch. Authorization required. |
