@@ -497,14 +497,13 @@ function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlo
   });
 }
 function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
-  // `horizontal-rule` has no native ENCODE support yet (Task 2.x/3.x,
-  // pinned-runtime proof pending — see `renderBlocks` below), so decode
-  // must not promote a native `<hr>` into that AST node either: doing so
-  // would make any note containing one permanently un-writable, even to
-  // edit unrelated text elsewhere.  `hr` is a recognised void tag with no
-  // decode case, so it falls through to the generic `preserve()` opaque
-  // reference below — the same safe, no-data-loss whole-subtree fallback
-  // every other syntactically-valid-but-unmodelled shape gets.
+  if (n.tag === "hr") {
+    attrs(n, {
+      style: "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0",
+    });
+    if (n.children.length !== 0) preserve();
+    return { type: "horizontal-rule" };
+  }
   if (n.tag === "p" || /^h[1-3]$/.test(n.tag)) {
     attrs(n);
     const inlines = inline(n.children);
@@ -720,6 +719,7 @@ function renderBlocks(
         case "callout":
           return `<div data-type="callout" data-variant="${b.variant}">${render(b.blocks)}</div>`;
         case "horizontal-rule":
+          return '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />';
         case "image":
         case "attachment":
         case "embed":
