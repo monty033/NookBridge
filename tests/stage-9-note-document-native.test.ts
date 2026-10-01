@@ -29,6 +29,53 @@ function roundTrip(html: string) {
 }
 
 describe("T03 native HTML adapter", () => {
+  it("decodes unstyled and canonical styled horizontal rules as typed blocks", () => {
+    const plain = decodeNoteDocumentNative(wrap("<hr>"), binding);
+    expect(plain.document.blocks).toEqual([{ type: "horizontal-rule" }]);
+    const canonical = decodeNoteDocumentNative(
+      wrap(
+        '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" data-id="decor">',
+      ),
+      binding,
+    );
+    expect(canonical.document.blocks).toEqual([{ type: "horizontal-rule" }]);
+  });
+  it("preserves noncanonical horizontal-rule styles through Markdown edits", () => {
+    const original = '<hr style="display:none"><p>before</p>';
+    const decoded = decodeNoteDocumentNative(wrap(original), binding);
+    expect(decoded.document.blocks.map((block) => block.type)).toEqual(["opaque", "paragraph"]);
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+      preimage: decoded.document,
+    });
+    expect(serializeNoteDocumentNative(edited, { context: decoded.context, binding }).data).toBe(
+      `<div data-type="document">${'<hr style="display:none">'}<p>changed</p></div>`,
+    );
+  });
+  it("preserves horizontal rules through Markdown editing and refuses unsupported shapes", () => {
+    const decoded = decodeNoteDocumentNative(wrap("<p>before</p><hr><p>after</p>"), binding);
+    expect(decoded.document.blocks.map((block) => block.type)).toEqual([
+      "paragraph",
+      "horizontal-rule",
+      "paragraph",
+    ]);
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+      preimage: decoded.document,
+    });
+    expect(serializeNoteDocumentNative(edited, { context: decoded.context, binding }).data).toBe(
+      '<div data-type="document"><p>changed</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>after</p></div>',
+    );
+    // The native parser allows adjacent void rules, but the Markdown grammar
+    // rejects their ambiguous block shape. Unsupported AST arrangements remain refused.
+    const adjacent = decodeNoteDocumentNative(wrap("<hr><hr>"), binding);
+    expect(adjacent.document.blocks).toEqual([
+      { type: "horizontal-rule" },
+      { type: "horizontal-rule" },
+    ]);
+    expect(serializeNoteDocumentMarkdown(adjacent.document)).toContain("---");
+    expect(() => decodeNoteDocumentNative(wrap("<hr></hr>"), binding)).toThrow();
+  });
   it("reads tiptap as HTML, including literal leading JSON text; JSON writing stays off", () => {
     expect(NOTESNOOK_JSON_WRITER_ENABLED).toBe(false);
     expect(roundTrip('<p>{"type":"doc"}</p>').document.blocks[0]).toEqual({
@@ -42,34 +89,16 @@ describe("T03 native HTML adapter", () => {
       serializeNoteDocumentNative({ version: 1, blocks: [] }, { writer: "json" }),
     ).toThrow();
   });
-  it("reads the legacy writer's horizontal rule as an opaque, whole-subtree reference", () => {
-    // Finding 2: `NoteBlock`/`renderBlocks` (note-document-markdown.ts,
-    // note-document.ts) have no native ENCODE support for a bare
-    // `horizontal-rule` AST node yet (that requires pinned-runtime proof
-    // this candidate does not have).  Promoting native DECODE to produce
-    // `{ type: "horizontal-rule" }` therefore created an asymmetric,
-    // one-way capability: any note containing an HR could be read but
-    // never re-written, even to edit unrelated text elsewhere.  Falling
-    // through to the opaque whole-subtree reference (the SAME safe
-    // fallback every other syntactically-valid-but-unmodelled native
-    // shape gets) keeps the HR itself unmodified and round-trippable, and
-    // lets everything ELSE in the note stay editable.
+  it("decodes the legacy writer's horizontal rule into its native AST block", () => {
     const stored = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("above\n\n---\n\nbelow");
     const decoded = decodeNoteDocumentNative(stored, binding);
     expect(decoded.document.blocks.map((block) => block.type)).toEqual([
       "paragraph",
-      "opaque",
+      "horizontal-rule",
       "paragraph",
     ]);
-    expect((decoded.document.blocks[1] as { nodeType: string }).nodeType).toBe("hr");
   });
   it("edits text next to a horizontal rule without disturbing the rule", () => {
-    // Finding 2's concrete repro: decode a document containing an HR, edit
-    // ONLY the neighbouring paragraph text, and re-serialize.  Before the
-    // fix this always threw (any document containing an HR could never be
-    // written back, even unchanged) because native decode promoted the HR
-    // into a bare `{ type: "horizontal-rule" }` node that
-    // `serializeNoteDocumentNative` categorically refuses to encode.
     const HR_STYLE =
       "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
     const original = `<p>before</p><hr style="${HR_STYLE}" /><p>after</p>`;

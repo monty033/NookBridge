@@ -62,8 +62,8 @@ describe("NoteDocumentV1 — horizontal-rule block", () => {
     expectAccepted(block);
   });
 
-  it("refuses native serialization until the decoder and pinned runtime prove the node", () => {
-    expect(() => serializeNoteDocumentNative(doc([{ type: "horizontal-rule" }]))).toThrow();
+  it("serializes the standard horizontal-rule node as native HTML", () => {
+    expect(serializeNoteDocumentNative(doc([{ type: "horizontal-rule" }])).data).toContain("<hr ");
   });
 
   it("rejects an extra/unknown key", () => {

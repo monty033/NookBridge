@@ -211,7 +211,7 @@ describe("daemon operator write runtime", () => {
     });
     const rt = runtime(f);
     const preimage = await rt.editPreimage({ id: HANDLE });
-    expect(preimage.markdown).toContain("nookbridge opaque");
+    expect(preimage.markdown).toContain("---");
     const result = await rt.applyEdit({
       id: HANDLE,
       expectedRevision: REVISION_1,
