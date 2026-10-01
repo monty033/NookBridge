@@ -30,6 +30,7 @@
 import { Buffer } from "node:buffer";
 import {
   STAGE5_RPC_LIMITS,
+  fitsResponsePreflight,
   type RpcErrorEnvelope,
   type RpcNotesSearchRequest,
   type RpcNotesGetRequest,
@@ -78,6 +79,8 @@ import {
   type ExactNotePathInput,
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
+import { decodeNoteDocumentNative } from "../core/note-document-native.js";
+import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
@@ -101,6 +104,16 @@ const arrayIsArray = Array.isArray;
 const numberIsFinite = Number.isFinite;
 const mathFloor = Math.floor;
 const bufferByteLength = Buffer.byteLength;
+
+/**
+ * Bounded Markdown content size for `notes.get`. The wire protocol
+ * (rpc-protocol.ts) hard-caps the entire response frame at
+ * `STAGE5_RPC_LIMITS.maxResponseBytes`, so content is checked against
+ * that same bound here, before building the result -- an oversize
+ * note categorically withholds content ("oversize") rather than
+ * letting the protocol layer reject the whole envelope.
+ */
+const MAX_NOTES_GET_MARKDOWN_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
 
 // ---------------------------------------------------------------------------
 // Public runtime contract.
@@ -151,6 +164,17 @@ export interface RpcHandlerRuntimeLike {
   >;
   /** Optional trusted Stage 10 index for resolving notebook ids to titlePaths. */
   readonly notebookIndex?: NotebookIndex;
+  /**
+   * Optional bounded content-read capability, reusing the same
+   * read-only projection the operator `notes.get-view` route already
+   * uses. Deliberately narrow: only the one method `notes.get` needs
+   * is exposed here, not the full `readOnly` adapter surface.
+   */
+  readonly readOnly?: Readonly<{
+    readonly readOperatorNoteContent?: (
+      id: string,
+    ) => Promise<Readonly<{ type: "html" | "tiptap"; data: string }>>;
+  }>;
   /** Refresh resolver backed by the daemon's full notebook hierarchy projection. */
   readonly resolveNotebookPath?: (notebookId: string) => Promise<string | undefined>;
   readonly createNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
@@ -1479,13 +1503,103 @@ async function runNotesGet(
     note = normaliseNoteMetadata(raw);
     if (note === undefined) return buildErrorEnvelope(id, "service_unavailable");
   }
-  const result = objectFreeze(
-    objectCreate(null, {
-      kind: { value: "note", enumerable: true, configurable: false, writable: false },
-      note: { value: note, enumerable: true, configurable: false, writable: false },
-    }),
+  const { contentStatus, markdown, markdownBytes } = await readBoundedNoteContent(
+    runtime,
+    request.params.id,
+    note,
   );
+  const descriptors: PropertyDescriptorMap = {
+    kind: { value: "note", enumerable: true, configurable: false, writable: false },
+    note: { value: note, enumerable: true, configurable: false, writable: false },
+    contentStatus: {
+      value: contentStatus,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    },
+  };
+  if (contentStatus === "ok") {
+    descriptors.markdown = {
+      value: markdown,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    };
+    descriptors.markdownBytes = {
+      value: markdownBytes,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    };
+  }
+  const result = objectFreeze(objectCreate(null, descriptors));
   return buildResultSuccessEnvelope(id, result);
+}
+
+/**
+ * Bounded content read for `notes.get`, reusing the same read-only
+ * projection the operator `notes.get-view` route uses.
+ *
+ * Fails closed in every direction:
+ *   - no content reader wired                -> "unavailable"
+ *   - note metadata already says `locked`    -> "locked" (never calls
+ *     the reader; the already-proven metadata flag is the source of
+ *     truth, not exception introspection on the read call)
+ *   - decoded Markdown exceeds the bound      -> "oversize" (content
+ *     withheld, byte count never returned either)
+ *   - reader/decoder throws for any reason    -> "unavailable"
+ */
+async function readBoundedNoteContent(
+  runtime: RpcHandlerRuntimeLike,
+  noteId: string,
+  note: Record<string, unknown>,
+): Promise<{
+  readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+  readonly markdown?: string;
+  readonly markdownBytes?: number;
+}> {
+  if (readOwnBooleanField(note, "locked") === true) {
+    return { contentStatus: "locked" };
+  }
+  let reader: ((id: string) => Promise<unknown>) | undefined;
+  try {
+    const readOnly = runtime.readOnly;
+    reader =
+      readOnly !== undefined && typeof readOnly.readOperatorNoteContent === "function"
+        ? readOnly.readOperatorNoteContent
+        : undefined;
+  } catch {
+    reader = undefined;
+  }
+  if (reader === undefined) return { contentStatus: "unavailable" };
+  try {
+    const envelope = await reflectApply(reader, runtime.readOnly, [noteId]);
+    const revisionField = note.revision;
+    const revision = typeof revisionField === "string" ? revisionField : `rev_${"0".repeat(32)}`;
+    const decoded = decodeNoteDocumentNative(envelope, { noteId, revision });
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    const markdownBytes = bufferByteLength(markdown, "utf8");
+    if (markdownBytes > MAX_NOTES_GET_MARKDOWN_BYTES) {
+      return { contentStatus: "oversize" };
+    }
+    // Account for the WHOLE response, not just the markdown: mirror the
+    // serializer's preflight over every response-owned string field it
+    // will charge (see normaliseNoteResult in rpc-protocol.ts), so an
+    // over-budget note degrades to "oversize" instead of the serializer
+    // rejecting the entire envelope.
+    const charged: string[] = [];
+    for (const key of ["id", "title", "revision", "notebookId"] as const) {
+      const value = note[key];
+      if (typeof value === "string") charged.push(value);
+    }
+    charged.push(markdown);
+    if (!fitsResponsePreflight(charged)) {
+      return { contentStatus: "oversize" };
+    }
+    return { contentStatus: "ok", markdown, markdownBytes };
+  } catch {
+    return { contentStatus: "unavailable" };
+  }
 }
 
 function readRuntimeMethod(
@@ -1730,7 +1844,13 @@ function buildResultSuccessEnvelope(
   result:
     | RpcStatusResult
     | RpcListNotebooksResult
-    | { readonly kind: "note"; readonly note: Record<string, unknown> }
+    | {
+        readonly kind: "note";
+        readonly note: Record<string, unknown>;
+        readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+        readonly markdown?: string;
+        readonly markdownBytes?: number;
+      }
     | RpcCreatedNoteResult
     | RpcAppendNoteResult
     | RpcUpdateNoteResult

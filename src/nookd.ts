@@ -442,6 +442,15 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(pathDiagnostic === undefined ? {} : { pathDiagnostic }),
     ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
     ...(resolveNotebookPath === undefined ? {} : { resolveNotebookPath }),
+    // Bounded notes.get content read: expose ONLY the one content reader
+    // method, never the full read-only adapter surface.
+    ...(readOnly?.readOperatorNoteContent === undefined
+      ? {}
+      : {
+          readOnly: freeze({
+            readOperatorNoteContent: readOnly.readOperatorNoteContent.bind(readOnly),
+          }),
+        }),
     notebookIndex,
     cleanup,
   });

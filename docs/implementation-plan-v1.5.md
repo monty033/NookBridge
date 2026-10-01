@@ -755,7 +755,7 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 | `notesnook_sync` | Side effect | Requests synchronization through `SyncCoordinator`; scheduling/backoff/limits still apply. Treat as approval-worthy initially. |
 | `notesnook_list_notebooks` | Read | IDs, titles, hierarchy metadata as needed. |
 | `notesnook_search_notes` | Read | Query + optional notebook/tag filters + limit/cursor; bounded snippets rather than bulk bodies. Locked Vault notes are title/metadata-only. |
-| `notesnook_get_note` | Read | ID; returns metadata, revision, text/Markdown view. Raw canonical form is not default; locked Vault notes return `vault_locked`. |
+| `notesnook_get_note` | Read | ID; returns metadata, revision, and (when `contentStatus: "ok"`) a bounded decoded Markdown view. Raw canonical form is not default; locked Vault notes return `contentStatus: "locked"` with metadata only — content is never read for a note whose metadata already reports `locked`. SHIPPED. |
 | `notesnook_create_note` | Write | Title, Markdown/HTML, optional notebook/tags. |
 | `notesnook_append_note` | Write | ID, expectedRevision, Markdown fragment. |
 | `notesnook_update_note` | Write | ID, expectedRevision, patch fields; full replacement explicitly marked. |

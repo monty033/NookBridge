@@ -33,6 +33,15 @@ does not expose a TCP or HTTP listener.
 
 ## Privacy boundary for agents
 
+`notesnook_get_note` returns a bounded, decoded Markdown content view
+(`contentStatus: "ok"`) for unlocked notes within the response size bound;
+Vault-locked notes never have their content read (the reader is not called
+once metadata reports `locked`) and oversize content is withheld
+categorically. This is a deliberate, owner-authorized exposure for local/
+self-hosted deployments: access is managed via Notesnook's own per-note Vault
+lock and the deployment's permission settings, not by withholding content
+from every caller.
+
 If an MCP client sends retrieved note content to a cloud model or another
 external service, that disclosure is outside NookBridge's local encryption and
 Unix-socket protections. Configure the client and its model/provider according

@@ -7,6 +7,7 @@
  */
 
 import { TextDecoder } from "node:util";
+import { Buffer } from "node:buffer";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -1523,5 +1524,167 @@ describe("read-only revision RPC chain", () => {
     await expect(readOnly.noteMetadata(id)).rejects.toMatchObject({
       message: "Notesnook read-only projection: note revision token rejected",
     });
+  });
+});
+
+describe("notes.get bounded content read", () => {
+  it("returns bounded markdown when the note is unlocked and content decodes", async () => {
+    const live = createFakeLiveDatabase({
+      contentRecord: { type: "html", data: "<p>Hello world</p>" },
+    });
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const runtime = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+    };
+    const request: RpcNotesGetRequest = {
+      id: "rpc-get-content",
+      method: "notes.get",
+      params: { id: "note-1" },
+    };
+
+    const response = await handleRpcRequest(
+      request,
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.contentStatus).toBe("ok");
+    expect(response.result.markdown).toContain("Hello world");
+    expect(response.result.markdownBytes).toBe(
+      Buffer.byteLength(response.result.markdown as string, "utf8"),
+    );
+
+    const frame = serializeRpcResponse(response);
+    const wire = JSON.parse(new TextDecoder().decode(frame.subarray(4))) as {
+      result?: { contentStatus?: string; markdown?: string; markdownBytes?: number };
+    };
+    expect(wire.result?.contentStatus).toBe("ok");
+    expect(wire.result?.markdown).toContain("Hello world");
+    expect(wire.result?.markdownBytes).toBe(response.result.markdownBytes);
+  });
+
+  it("withholds content for a locked note without ever calling the content reader", async () => {
+    const live = createFakeLiveDatabase();
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const readSpy = vi.fn(adapter.readOperatorNoteContent.bind(adapter));
+    const runtime = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+      readOnly: { readOperatorNoteContent: readSpy },
+    };
+    const request: RpcNotesGetRequest = {
+      id: "rpc-get-locked",
+      method: "notes.get",
+      params: { id: "locked-note" },
+    };
+
+    const response = await handleRpcRequest(
+      request,
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.contentStatus).toBe("locked");
+    expect(response.result).not.toHaveProperty("markdown");
+    expect(response.result).not.toHaveProperty("markdownBytes");
+    expect(response.result.note.locked).toBe(true);
+    expect(readSpy).not.toHaveBeenCalled();
+
+    const frame = serializeRpcResponse(response);
+    const wire = JSON.parse(new TextDecoder().decode(frame.subarray(4))) as {
+      result?: Record<string, unknown>;
+    };
+    expect(JSON.stringify(wire)).not.toContain("locked note body");
+    expect(wire.result?.markdown).toBeUndefined();
+  });
+
+  it("degrades to oversize (and still serializes) when content is under the byte cap but the whole response would not fit", async () => {
+    // Three 5k-char paragraphs (~15k bytes): well under maxResponseBytes, so
+    // a markdown-only bound would call this "ok" -- but the serializer's
+    // preflight charges 6x per char for JSON escaping, which overflows.
+    // (Paragraphs, not one block: the native decoder rejects very long
+    // single text blocks, which would yield "unavailable" instead.)
+    const paragraph = `<p>${"a".repeat(5_000)}</p>`;
+    const live = createFakeLiveDatabase({
+      contentRecord: { type: "html", data: paragraph.repeat(3) },
+    });
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const runtime = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+    };
+    const response = await handleRpcRequest(
+      { id: "rpc-get-near-limit", method: "notes.get", params: { id: "note-1" } },
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.contentStatus).toBe("oversize");
+    expect(response.result).not.toHaveProperty("markdown");
+    expect(() => serializeRpcResponse(response)).not.toThrow();
+  });
+
+  it("wire serializer rejects a markdownBytes that disagrees with the markdown", () => {
+    const envelope = (markdownBytes: number) =>
+      ({
+        id: "rpc-get-bytes",
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "A note" },
+          contentStatus: "ok",
+          markdown: "héllo",
+          markdownBytes,
+        },
+      }) as unknown as Parameters<typeof serializeRpcResponse>[0];
+    // "héllo" is 6 UTF-8 bytes; the correct value serializes, wrong ones do not.
+    expect(() => serializeRpcResponse(envelope(6))).not.toThrow();
+    expect(() => serializeRpcResponse(envelope(5))).toThrow();
+    expect(() => serializeRpcResponse(envelope(6.5))).toThrow();
+  });
+
+  it("falls back to unavailable when content cannot be decoded, and omits content with no reader", async () => {
+    const live = createFakeLiveDatabase();
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const withReader = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+    };
+    const request: RpcNotesGetRequest = {
+      id: "rpc-get-unsupported",
+      method: "notes.get",
+      params: { id: "note-1" },
+    };
+    const withReaderResponse = await handleRpcRequest(
+      request,
+      withReader,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    if (!withReaderResponse.ok || withReaderResponse.result.kind !== "note")
+      throw new Error("expected note response");
+    expect(withReaderResponse.result.contentStatus).toBe("unavailable");
+
+    const noReader = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+    };
+    const noReaderResponse = await handleRpcRequest(
+      { ...request, id: "rpc-get-no-reader" },
+      noReader,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    if (!noReaderResponse.ok || noReaderResponse.result.kind !== "note")
+      throw new Error("expected note response");
+    expect(noReaderResponse.result.contentStatus).toBe("unavailable");
   });
 });

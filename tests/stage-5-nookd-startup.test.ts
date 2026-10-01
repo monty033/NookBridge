@@ -339,6 +339,42 @@ describe("bounded nookd startup composition", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it("wires only the bounded content reader into the server runtime for notes.get", async () => {
+    vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
+    const cleanup = vi.fn(async () => undefined);
+    const readOperatorNoteContent = vi.fn(async () => ({
+      type: "html" as const,
+      data: "<p>x</p>",
+    }));
+    const startServer = vi.fn(async (_options: StartNookdServerOptions) => fakeHandle());
+    const runtime = {
+      ...runtimeFixture(cleanup),
+      readOnly: {
+        readOperatorNoteContent,
+        listNotes: vi.fn(),
+        search: vi.fn(),
+        noteMetadata: vi.fn(),
+        sync: vi.fn(),
+      },
+    };
+    const factories = factoriesFixture({
+      createRuntime: vi.fn(async () => runtime as unknown as ReturnType<typeof runtimeFixture>),
+      startServer,
+    });
+    const handle = await startNookd({ configPath: CONFIG_PATH, factories });
+
+    const serverRuntime = startServer.mock.calls[0]?.[0].runtime as unknown as Record<
+      string,
+      unknown
+    >;
+    const exposed = serverRuntime.readOnly as Record<string, unknown> | undefined;
+    expect(exposed).toBeDefined();
+    expect(Object.keys(exposed!)).toEqual(["readOperatorNoteContent"]);
+    await (exposed!.readOperatorNoteContent as (id: string) => Promise<unknown>)("note-1");
+    expect(readOperatorNoteContent).toHaveBeenCalledWith("note-1");
+    await handle.shutdown();
+  });
+
   it("rejects a malformed server handle and cleans up the runtime", async () => {
     vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
     const cleanup = vi.fn(async () => undefined);
