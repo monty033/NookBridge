@@ -131,9 +131,10 @@ export type RpcNotesSyncParams = Record<string, never>;
 
 export type RpcNotesListNotebooksParams = Record<string, never>;
 
-export interface RpcNotesGetParams {
-  readonly id: string;
-}
+export type RpcNotesGetParams =
+  | { readonly id: string }
+  | RpcNotesPathParams
+  | RpcNotesExplicitPathParams;
 
 /**
  * Bounded `notes.create` params.  The closed surface is exactly
@@ -1106,22 +1107,61 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.query = query;
   } else if (method === "notes.get") {
-    if (paramKeys.length !== 1 || paramKeys[0] !== "id") {
-      throw rpcProtocolError("rpc protocol: get params must contain exactly one field: id");
+    if (keysAreExactly(paramKeys, ["id"])) {
+      const noteId = paramsRecord.id;
+      if (
+        typeof noteId !== "string" ||
+        noteId.length === 0 ||
+        noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(noteId)
+      )
+        throw rpcProtocolError("rpc protocol: request note id is invalid");
+      paramsObj = objectCreate(null) as Record<string, unknown>;
+      paramsObj.id = noteId;
+    } else {
+      const hasPath = keysAreExactly(paramKeys, ["path"]);
+      const hasExplicitTitle =
+        keysAreExactly(paramKeys, ["noteTitle"]) ||
+        keysAreExactly(paramKeys, ["notebookPath", "noteTitle"]);
+      if (!hasPath && !hasExplicitTitle)
+        throw rpcProtocolError("rpc protocol: get params have unexpected fields");
+      paramsObj = objectCreate(null) as Record<string, unknown>;
+      if (hasPath) {
+        const path = paramsRecord.path;
+        if (
+          typeof path !== "string" ||
+          path.length === 0 ||
+          path.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+          utf8ByteLength(path, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+          hasControlCharacter(path)
+        )
+          throw rpcProtocolError("rpc protocol: request path is invalid");
+        paramsObj.path = path;
+      } else {
+        const title = paramsRecord.noteTitle;
+        const notebookPath = paramsRecord.notebookPath;
+        if (
+          typeof title !== "string" ||
+          title.length === 0 ||
+          title.length > STAGE5_RPC_LIMITS.maxTitleBytes ||
+          utf8ByteLength(title, STAGE5_RPC_LIMITS.maxTitleBytes) >
+            STAGE5_RPC_LIMITS.maxTitleBytes ||
+          hasControlCharacter(title) ||
+          (paramKeys.length === 2 &&
+            (typeof notebookPath !== "string" ||
+              notebookPath.length === 0 ||
+              notebookPath.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
+              utf8ByteLength(notebookPath, STAGE5_RPC_LIMITS.maxQueryBytes) >
+                STAGE5_RPC_LIMITS.maxQueryBytes ||
+              hasControlCharacter(notebookPath)))
+        )
+          throw rpcProtocolError("rpc protocol: explicit path is invalid");
+        paramsObj.noteTitle = title;
+        if (paramKeys.length === 2) paramsObj.notebookPath = notebookPath;
+      }
     }
-    const noteId = paramsRecord.id;
-    if (
-      typeof noteId !== "string" ||
-      noteId.length === 0 ||
-      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
-        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(noteId)
-    ) {
-      throw rpcProtocolError("rpc protocol: request note id is invalid");
-    }
-    paramsObj = objectCreate(null) as Record<string, unknown>;
-    paramsObj.id = noteId;
   } else if (method === "notes.create") {
     // Closed surface params: exactly one of the three published
     // shapes.  Either { title, content }, { title, content,

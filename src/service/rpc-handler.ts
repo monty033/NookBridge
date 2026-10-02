@@ -34,6 +34,8 @@ import {
   type RpcErrorEnvelope,
   type RpcNotesSearchRequest,
   type RpcNotesGetRequest,
+  type RpcNotesGetParams,
+  type RpcErrorCode,
   type RpcNotesListNotebooksRequest,
   type RpcNotesStatusRequest,
   type RpcNotesCreateRequest,
@@ -280,18 +282,51 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       if (structural.request.method === "notes.get") {
-        const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
-        if (!resolved.ok)
-          return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
-        const authorization = authorizeServiceMethod(policy, "notes.get", resolved.context);
-        if (!authorization.allowed) {
-          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        if ("id" in structural.request.params) {
+          const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
+          if (!resolved.ok)
+            return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
+          const authorization = authorizeServiceMethod(policy, "notes.get", resolved.context);
+          if (!authorization.allowed) {
+            return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+          }
+          return (await runNotesGet(
+            structural.request,
+            runtime,
+            id,
+            resolved.note,
+          )) as unknown as RpcHandlerResponse<T>;
         }
+        const target = exactNotePathInput(structural.request.params);
+        const parsedPath = parseExactNotePath(target);
+        const context =
+          parsedPath.notebookPath === undefined
+            ? { noteTitle: parsedPath.noteTitle }
+            : { notebookPath: parsedPath.notebookPath, noteTitle: parsedPath.noteTitle };
+        const authorization = authorizeServiceMethod(policy, "notes.get", context);
+        if (!authorization.allowed)
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        const resolution = await resolveNotesGetPath(structural.request.params, runtime);
+        if (!resolution.ok)
+          return buildErrorEnvelope(id, resolution.code) as unknown as RpcHandlerResponse<T>;
+        // Authorizing the caller-supplied path is not enough on its own: the
+        // resolver may accept a candidate on search metadata alone. Re-derive
+        // the resolved note's ACTUAL notebook context (the same trusted lookup
+        // the id form uses) and authorize that too before any content read.
+        const actual = await resolveNoteSettingsContext(resolution.id, runtime);
+        if (!actual.ok)
+          return buildErrorEnvelope(id, actual.code) as unknown as RpcHandlerResponse<T>;
+        if (!authorizeServiceMethod(policy, "notes.get", actual.context).allowed)
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        const pathRequest = objectCreate(null) as Record<string, unknown>;
+        pathRequest.id = id;
+        pathRequest.method = "notes.get";
+        pathRequest.params = objectFreeze(Object.assign(objectCreate(null), { id: resolution.id }));
         return (await runNotesGet(
-          structural.request,
+          objectFreeze(pathRequest) as unknown as RpcNotesGetRequest,
           runtime,
           id,
-          resolved.note,
+          actual.note,
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -486,18 +521,31 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     params = objectCreate(null) as Record<string, unknown>;
     params.query = rawQuery;
   } else if (rawMethod === "notes.get") {
-    if (!hasExactKeys(paramKeys, ["id"])) return { kind: "err", code: "invalid_request" };
-    const rawNoteId = readOwnStringField(rawParams, "id");
-    if (
-      rawNoteId === undefined ||
-      rawNoteId.length === 0 ||
-      rawNoteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(rawNoteId)
-    ) {
-      return { kind: "err", code: "invalid_request" };
+    if (hasExactKeys(paramKeys, ["id"])) {
+      const rawNoteId = readOwnStringField(rawParams, "id");
+      if (!isBoundedRpcIdentifier(rawNoteId)) return { kind: "err", code: "invalid_request" };
+      params = objectCreate(null) as Record<string, unknown>;
+      params.id = rawNoteId;
+    } else {
+      const hasPath = hasExactKeys(paramKeys, ["path"]);
+      const hasExplicit =
+        hasExactKeys(paramKeys, ["noteTitle"]) ||
+        hasExactKeys(paramKeys, ["notebookPath", "noteTitle"]);
+      if (!hasPath && !hasExplicit) return { kind: "err", code: "invalid_request" };
+      const candidate = rawParams as unknown as RpcNotesDeleteRequest["params"];
+      try {
+        const target = exactNotePathInput(candidate);
+        parseExactNotePath(target);
+        params = objectCreate(null) as Record<string, unknown>;
+        if (typeof target === "string") params.path = target;
+        else {
+          params.noteTitle = target.noteTitle;
+          if (target.notebookPath !== undefined) params.notebookPath = target.notebookPath;
+        }
+      } catch {
+        return { kind: "err", code: "invalid_request" };
+      }
     }
-    params = objectCreate(null) as Record<string, unknown>;
-    params.id = rawNoteId;
   } else if (rawMethod === "notes.create") {
     const allowedCreateShapes: ReadonlyArray<ReadonlyArray<string>> = [
       ["title", "content"],
@@ -1483,19 +1531,58 @@ async function runNotesListNotebooks(
   return buildResultSuccessEnvelope(id, result);
 }
 
+/**
+ * Resolve a path-form `notes.get` request to its opaque note id. Error
+ * mapping mirrors `notes.delete`: invalid_path and ambiguous are caller
+ * errors, not_found is categorical, and everything else fails closed.
+ */
+async function resolveNotesGetPath(
+  params: RpcNotesGetParams,
+  runtime: RpcHandlerRuntimeLike,
+): Promise<{ ok: true; id: string } | { ok: false; code: RpcErrorCode }> {
+  const resolver = readRuntimeMethod(runtime, "resolveNotePath");
+  if (resolver === undefined) return { ok: false, code: "service_unavailable" };
+  let resolution: ExactNotePathResolution;
+  try {
+    const target = exactNotePathInput(params as RpcNotesDeleteRequest["params"]);
+    resolution = (await reflectApply(resolver, runtime, [target])) as ExactNotePathResolution;
+  } catch (error) {
+    if (error instanceof ExactNotePathError) {
+      if (error.code === "not_found") return { ok: false, code: "not_found" };
+      if (error.code === "ambiguous" || error.code === "invalid_path")
+        return { ok: false, code: "invalid_request" };
+    }
+    return { ok: false, code: "service_unavailable" };
+  }
+  if (typeof resolution?.id !== "string" || resolution.id.length === 0)
+    return { ok: false, code: "service_unavailable" };
+  return { ok: true, id: resolution.id };
+}
+
 async function runNotesGet(
   request: RpcNotesGetRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
   resolvedNote?: Record<string, unknown>,
 ): Promise<RpcAnyResponseEnvelope> {
+  // Path-form requests reach here directly when no settings evaluator is
+  // configured (the evaluator branch rewrites them to an id first). Resolve
+  // the exact path with the same error mapping as notes.delete.
+  let noteId: string;
+  if ("id" in request.params) {
+    noteId = request.params.id;
+  } else {
+    const resolved = await resolveNotesGetPath(request.params, runtime);
+    if (!resolved.ok) return buildErrorEnvelope(id, resolved.code);
+    noteId = resolved.id;
+  }
   let note = resolvedNote;
   if (note === undefined) {
     const fn = readRuntimeMethod(runtime, "noteMetadata");
     if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
     let raw: unknown;
     try {
-      raw = await reflectApply(fn, runtime, [request.params.id]);
+      raw = await reflectApply(fn, runtime, [noteId]);
     } catch {
       return buildErrorEnvelope(id, "service_unavailable");
     }
@@ -1505,7 +1592,7 @@ async function runNotesGet(
   }
   const { contentStatus, markdown, markdownBytes } = await readBoundedNoteContent(
     runtime,
-    request.params.id,
+    noteId,
     note,
   );
   const descriptors: PropertyDescriptorMap = {

@@ -234,13 +234,29 @@ const LIST_NOTEBOOKS_TOOL_DEFINITION = Object.freeze({
 
 const GET_NOTE_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_GET_NOTE_TOOL_NAME,
-  description: "Return bounded note metadata only; note bodies and attachments are never exposed.",
+  description:
+    "Return note metadata and bounded Markdown when contentStatus is 'ok'; locked, oversize, and unavailable notes include no content.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({
       id: Object.freeze({ type: "string", minLength: 1, maxLength: NOOK_MCP_MAX_IDENTIFIER_BYTES }),
+      path: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
+      }),
+      notebookPath: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_NOTE_PATH_BYTES,
+      }),
+      noteTitle: Object.freeze({
+        type: "string",
+        minLength: 1,
+        maxLength: NOOK_MCP_MAX_TITLE_BYTES,
+      }),
     }),
-    required: Object.freeze(["id"]),
+    required: Object.freeze([]),
     additionalProperties: false,
   }),
   annotations: SEARCH_TOOL_ANNOTATIONS,
@@ -475,7 +491,20 @@ const searchInputSchema = {
 
 const emptyInputSchema = {};
 const getNoteInputSchema = {
-  id: z.string().min(1).max(NOOK_MCP_MAX_IDENTIFIER_BYTES).describe("Opaque note identifier."),
+  id: z
+    .string()
+    .min(1)
+    .max(NOOK_MCP_MAX_IDENTIFIER_BYTES)
+    .optional()
+    .describe("Opaque note identifier."),
+  path: z
+    .string()
+    .min(1)
+    .max(NOOK_MCP_MAX_NOTE_PATH_BYTES)
+    .optional()
+    .describe("Exact notebook hierarchy/note path, or a bare root-note title."),
+  notebookPath: z.string().min(1).max(NOOK_MCP_MAX_NOTE_PATH_BYTES).optional(),
+  noteTitle: z.string().min(1).max(NOOK_MCP_MAX_TITLE_BYTES).optional(),
 };
 const createNoteInputSchema = {
   title: z.string().min(1).max(NOOK_MCP_MAX_TITLE_BYTES),
@@ -664,7 +693,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       NOOK_MCP_GET_NOTE_TOOL_NAME,
       {
         title: "Get note metadata",
-        description: "Return bounded note metadata without the body.",
+        description:
+          "Return note metadata and bounded Markdown when contentStatus is 'ok'; locked, oversize, and unavailable notes include no content.",
         inputSchema: getNoteInputSchema,
         annotations: SEARCH_TOOL_ANNOTATIONS,
       },
@@ -827,6 +857,9 @@ interface SearchInput {
 }
 interface GetNoteInput {
   id?: unknown;
+  path?: unknown;
+  notebookPath?: unknown;
+  noteTitle?: unknown;
 }
 interface CreateNoteInput {
   title?: unknown;
@@ -1242,22 +1275,59 @@ async function invokeGetNote(
   client: NookdSocketClient,
   input: GetNoteInput,
 ): Promise<CallToolResult> {
-  if (
-    input === null ||
-    typeof input !== "object" ||
-    Array.isArray(input) ||
-    Object.keys(input).some((key) => key !== "id")
-  )
-    return toMcpErrorResult("invalid_request");
-  const id = input.id;
-  if (
-    typeof id !== "string" ||
-    !isSafeIdentifier(id) ||
-    id.length > NOOK_MCP_MAX_IDENTIFIER_BYTES ||
-    Buffer.byteLength(id, "utf8") > NOOK_MCP_MAX_IDENTIFIER_BYTES
-  )
-    return toMcpErrorResult("invalid_request");
-  const result = await client.getNote(id);
+  const keys = Object.keys(input);
+  let params:
+    | { readonly id: string }
+    | { readonly path: string }
+    | { readonly notebookPath?: string; readonly noteTitle: string };
+  if (keys.length === 1 && keys[0] === "id") {
+    const id = input.id;
+    if (
+      typeof id !== "string" ||
+      !isSafeIdentifier(id) ||
+      id.length > NOOK_MCP_MAX_IDENTIFIER_BYTES ||
+      Buffer.byteLength(id, "utf8") > NOOK_MCP_MAX_IDENTIFIER_BYTES
+    )
+      return toMcpErrorResult("invalid_request");
+    params = { id };
+  } else if (keys.length === 1 && keys[0] === "path") {
+    const path = input.path;
+    if (
+      typeof path !== "string" ||
+      path.length === 0 ||
+      Buffer.byteLength(path, "utf8") > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
+      hasControlCharacter(path) ||
+      path.includes("\\")
+    )
+      return toMcpErrorResult("invalid_request");
+    try {
+      parseExactNotePath(path);
+    } catch {
+      return toMcpErrorResult("invalid_request");
+    }
+    params = { path };
+  } else if (
+    (keys.length === 1 && keys[0] === "noteTitle") ||
+    (keys.length === 2 && keys.includes("noteTitle") && keys.includes("notebookPath"))
+  ) {
+    const noteTitle = input.noteTitle;
+    const notebookPath = input.notebookPath;
+    if (
+      typeof noteTitle !== "string" ||
+      noteTitle.length === 0 ||
+      Buffer.byteLength(noteTitle, "utf8") > NOOK_MCP_MAX_TITLE_BYTES ||
+      hasControlCharacter(noteTitle) ||
+      (keys.length === 2 &&
+        (typeof notebookPath !== "string" ||
+          notebookPath.length === 0 ||
+          Buffer.byteLength(notebookPath, "utf8") > NOOK_MCP_MAX_NOTE_PATH_BYTES ||
+          hasControlCharacter(notebookPath)))
+    )
+      return toMcpErrorResult("invalid_request");
+    params =
+      keys.length === 1 ? { noteTitle } : { notebookPath: notebookPath as string, noteTitle };
+  } else return toMcpErrorResult("invalid_request");
+  const result = await client.getNote(params);
   if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
   try {
     if (result.envelope.result.kind !== "note") return toMcpErrorResult("service_unavailable");

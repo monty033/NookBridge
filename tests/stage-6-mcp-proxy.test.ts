@@ -146,6 +146,27 @@ describe("nookd socket client — note revision projection", () => {
     }
   });
 
+  it.each([
+    [{ path: "Private/Memo" }],
+    [{ notebookPath: "Private", noteTitle: "Memo" }],
+    [{ noteTitle: "Memo" }],
+  ] as const)(
+    "sends exactly the path-form get params %j over the framed socket",
+    async (params) => {
+      let seen: unknown;
+      const socketPath = await startFakeDaemon((request) => {
+        seen = { method: request.method, params: request.params };
+        return framedResponse({ id: request.id, ok: false, error: { code: "not_found" } });
+      });
+      const client = new NookdSocketClient({ socketPath });
+
+      const result = await client.getNote(params);
+
+      expect(result.ok).toBe(false);
+      expect(seen).toEqual({ method: "notes.get", params });
+    },
+  );
+
   it("round-trips the closed locked-note proof method over the framed socket", async () => {
     const socketPath = await startFakeDaemon((request) =>
       framedResponse({
