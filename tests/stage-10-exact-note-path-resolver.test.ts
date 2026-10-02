@@ -27,6 +27,24 @@ function source(notes = [{ id: "canoe", title: "Canoe Trip", notebookId: "trips"
 }
 
 describe("exact note path resolver", () => {
+  it("resolves a Hermes top-level note when search metadata omits notebookId", async () => {
+    const hermesSource = {
+      notebooks: [{ id: "hermes-id", title: "Hermes" }],
+      findNotesByTitle: async () => [{ id: "hermes-note", title: "Hermes Note" }],
+      hasNoteInNotebook: async (notebookId: string, noteId: string) =>
+        notebookId === "hermes-id" && noteId === "hermes-note",
+      findNoteIdsByNotebook: async () => {
+        throw new Error("membership probe should resolve before enumeration");
+      },
+      noteMetadata: async () => ({ id: "hermes-note", title: "Hermes Note", revision }),
+    };
+
+    await expect(resolveExactNotePath("Hermes/Hermes Note", hermesSource)).resolves.toEqual({
+      id: "hermes-note",
+      expectedRevision: revision,
+    });
+  });
+
   it("resolves a nested notebook path and revision", async () => {
     await expect(
       resolveExactNotePath("Outdoors/Canoe Trips/Canoe Trip", source()),

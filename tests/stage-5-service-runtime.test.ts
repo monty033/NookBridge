@@ -81,8 +81,15 @@ function createFakeRealCoreModule(
   options: Readonly<{
     notebookLookupFailure?: boolean;
     pathDiagnosticMembershipFailure?: boolean;
+    /**
+     * Mirror a modern Notesnook record: the note carries NO deprecated
+     * `notebooks` array, so notebook membership is only provable through
+     * `db.relations.from({ id, type: "notebook" }, "note").has(noteId)`.
+     */
+    relationOnlyMembership?: boolean;
   }> = {},
 ): NotesnookRealCoreModule {
+  const relationOnly = options.relationOnlyMembership === true;
   const titleSearchResults = {
     ids: async () => (options.pathDiagnosticMembershipFailure ? ["task-note"] : []) as string[],
   };
@@ -136,12 +143,14 @@ function createFakeRealCoreModule(
       notes: {
         note: async (id: string) => {
           if (options.pathDiagnosticMembershipFailure && id === "task-note") {
-            return {
-              id,
-              title: "Task list for Bernie",
-              dateEdited: 2,
-              notebooks: [{ id: "general-id" }],
-            };
+            return relationOnly
+              ? { id, title: "Task list for Bernie", dateEdited: 2 }
+              : {
+                  id,
+                  title: "Task list for Bernie",
+                  dateEdited: 2,
+                  notebooks: [{ id: "general-id" }],
+                };
           }
           return undefined;
         },
@@ -162,6 +171,19 @@ function createFakeRealCoreModule(
           options.pathDiagnosticMembershipFailure ? titleSearchResults : emptySearchResults,
         notebooks: async () => emptySearchResults,
       },
+      ...(relationOnly
+        ? {
+            relations: {
+              from: (reference: { id: string; type: string }, type: string) => ({
+                has: async (noteId: string) =>
+                  reference.type === "notebook" &&
+                  reference.id === "general-id" &&
+                  type === "note" &&
+                  noteId === "task-note",
+              }),
+            },
+          }
+        : {}),
       lastSynced: async () => 0,
       hasUnsyncedChanges: async () => false,
     };
@@ -514,6 +536,47 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
           taskList: "present",
           literalMarkdown: "absent",
         });
+      } finally {
+        if (runtime) await runtime.cleanup();
+      }
+    });
+
+    it("reports real notebook stages and resolves a relation-only member by exact path", async () => {
+      const state = newState();
+      const tempCredentialsDir = mkdtempSync(join(tmpdir(), "nookbridge-stage-5-service-path-"));
+      writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+        mode: 0o600,
+      });
+      const keys = createSystemdCredentialKeyStore({
+        credentialsDirectory: tempCredentialsDir,
+      });
+
+      let runtime: ServiceRuntime | undefined;
+      try {
+        runtime = await createProductionServiceRuntime({
+          stateDir: state.stateDir,
+          keys,
+          injectedModule: createFakeRealCoreModule({
+            pathDiagnosticMembershipFailure: true,
+            relationOnlyMembership: true,
+          }),
+        });
+
+        // The diagnostic must now exercise the notebook stages rather than
+        // hardcoding them to unavailable/not_applicable.
+        const report = await runtime.pathDiagnostic?.("General/Task list for Bernie");
+        expect(report).toMatchObject({
+          kind: "path_diagnostic",
+          title: "one",
+          notebook: "present",
+          directMembership: "present",
+        });
+
+        // And the real resolver, wired through the production projection,
+        // resolves the relation-only member.
+        await expect(
+          runtime.resolveNotePath?.("General/Task list for Bernie"),
+        ).resolves.toMatchObject({ id: "task-note" });
       } finally {
         if (runtime) await runtime.cleanup();
       }

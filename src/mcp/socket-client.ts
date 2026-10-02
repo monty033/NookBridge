@@ -36,6 +36,7 @@ import {
   type RpcNotesAppendParams,
   type RpcNotesUpdateParams,
   type RpcNotesDeleteParams,
+  type RpcNotesGetParams,
   type RpcNotesLockedNoteProofParams,
   type RpcNotesPathDiagnosticParams,
   type RpcAnyResponseEnvelope,
@@ -204,8 +205,8 @@ export class NookdSocketClient {
     return this.#request("notes.list_notebooks", {});
   }
 
-  async getNote(id: string): Promise<NookdSocketResult> {
-    return this.#request("notes.get", { id });
+  async getNote(params: string | RpcNotesGetParams): Promise<NookdSocketResult> {
+    return this.#request("notes.get", typeof params === "string" ? { id: params } : params);
   }
 
   async createNote(params: RpcNotesCreateParams): Promise<NookdSocketResult> {
@@ -325,6 +326,7 @@ function serializeRequest(
     | RpcNotesCreateParams
     | RpcNotesAppendParams
     | RpcNotesUpdateParams
+    | RpcNotesGetParams
     | RpcNotesDeleteParams
     | Record<string, never>
     | { readonly id: string },
@@ -341,16 +343,19 @@ function serializeRequest(
       throw new RangeError("nook-mcp: query is too large");
     cleanParams = { query };
   } else if (method === "notes.get") {
-    const noteId = (params as { readonly id: string }).id;
-    if (
-      typeof noteId !== "string" ||
-      noteId.length === 0 ||
-      noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      Buffer.byteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      hasControlCharacter(noteId)
-    )
-      throw new TypeError("nook-mcp: note id is invalid");
-    cleanParams = { id: noteId };
+    const getParams = params as RpcNotesGetParams;
+    if ("id" in getParams) {
+      const noteId = getParams.id;
+      if (
+        typeof noteId !== "string" ||
+        noteId.length === 0 ||
+        noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        Buffer.byteLength(noteId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(noteId)
+      )
+        throw new TypeError("nook-mcp: note id is invalid");
+      cleanParams = { id: noteId };
+    } else cleanParams = snapshotDeleteParams(getParams);
   } else if (method === "notes.create") {
     const create = params as RpcNotesCreateParams;
     if (

@@ -527,12 +527,19 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           const diagnostic = await diagnoseExactNotePath(path, {
             notebooks,
             findNotesByTitle: async () => titleCandidates,
-            findNoteIdsByNotebook: (notebookId) => findNoteIdsByNotebook(notebookId),
+            findNoteIdsByNotebook: (notebookId) =>
+              withDiagnosticTimeout(
+                findNoteIdsByNotebook(notebookId),
+                PATH_DIAGNOSTIC_MEMBERSHIP_TIMEOUT_MS,
+              ),
             ...(hasNoteInNotebook === undefined
               ? {}
               : {
                   hasNoteInNotebook: (notebookId: string, noteId: string) =>
-                    hasNoteInNotebook(notebookId, noteId),
+                    withDiagnosticTimeout(
+                      hasNoteInNotebook(notebookId, noteId),
+                      PATH_DIAGNOSTIC_MEMBERSHIP_TIMEOUT_MS,
+                    ),
                 }),
             noteMetadata,
           });
@@ -540,14 +547,26 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         };
 
   // The exact-path resolver is optional because it depends on notebook
-  // membership capabilities.  Keep the body-free content diagnostic
-  // available through the already-live title search surface when those
-  // optional capabilities are absent; membership stages remain unavailable.
+  // membership capabilities. Prefer its full notebook-stage report when those
+  // capabilities are wired; retain the search-backed content report otherwise.
+  // The full report is bounded as a whole: title search, notebook listing and
+  // membership probes all touch the live database, so a slow run falls back
+  // to the search-backed report rather than hanging the operator CLI.
   const searchBackedPathDiagnostic = createSearchBackedPathDiagnostic(readOnly);
-  // Keep this diagnostic bounded: exact notebook membership can be slow or
-  // unavailable in the live Notesnook database.  Content classification is
-  // intentionally independent and must not wait on that optional seam.
-  const pathDiagnostic = searchBackedPathDiagnostic;
+  const exactPathDiagnostic = _exactPathDiagnostic;
+  const pathDiagnostic =
+    exactPathDiagnostic === undefined
+      ? searchBackedPathDiagnostic
+      : async (path: ExactNotePathInput): Promise<RpcNotesPathDiagnosticResult> => {
+          try {
+            return await withDiagnosticTimeout(
+              exactPathDiagnostic(path),
+              PATH_DIAGNOSTIC_TOTAL_TIMEOUT_MS,
+            );
+          } catch {
+            return searchBackedPathDiagnostic(path);
+          }
+        };
 
   const localWrite = core.handle.localWrite;
   const createNote =
@@ -748,6 +767,27 @@ function unavailableContentDiagnostic(): NotesnookReadOnlyContentDiagnostic {
     simpleChecklist: "unavailable",
     taskList: "unavailable",
     literalMarkdown: "unavailable",
+  });
+}
+
+/** Per-call bound on one live membership probe in the operator path diagnostic. */
+export const PATH_DIAGNOSTIC_MEMBERSHIP_TIMEOUT_MS = 1500;
+/** Whole-run bound on the full operator path diagnostic before falling back. */
+export const PATH_DIAGNOSTIC_TOTAL_TIMEOUT_MS = 8000;
+
+/**
+ * Bound one live membership probe inside the operator path diagnostic.
+ * A timeout rejects, which the diagnostic maps to the categorical
+ * `unavailable` stage; the timer is always cleared so a fast probe
+ * leaves no pending handle behind.
+ */
+function withDiagnosticTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = globalThis.setTimeout(() => reject(new Error("diagnostic timeout")), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) globalThis.clearTimeout(timer);
   });
 }
 
