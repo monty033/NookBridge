@@ -93,6 +93,8 @@ export interface NotesnookReadOnlyNoteMetadata {
   readonly localOnly?: boolean;
   readonly conflicted?: boolean;
   readonly locked?: boolean;
+  /** True only when absence from every notebook was positively confirmed. */
+  readonly notebookAbsenceConfirmed?: boolean;
 }
 
 const READ_ONLY_REVISION_TOKEN_PATTERN = /^rev_[0-9a-f]{32}$/;
@@ -724,6 +726,7 @@ function coerceNoteMetadata(value: unknown): NotesnookReadOnlyNoteMetadata {
     ...(typeof record.localOnly === "boolean" ? { localOnly: record.localOnly } : {}),
     ...(typeof record.conflicted === "boolean" ? { conflicted: record.conflicted } : {}),
     ...(typeof record.locked === "boolean" ? { locked: record.locked } : {}),
+    ...(record.notebookAbsenceConfirmed === true ? { notebookAbsenceConfirmed: true } : {}),
   };
 }
 
