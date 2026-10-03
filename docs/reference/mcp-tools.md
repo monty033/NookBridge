@@ -20,6 +20,8 @@ not automatically authorized for every deployed client.
 | `notesnook_delete_note` | Move one exact-path note to trash. | Destructive, policy-controlled operation. It is not included in `readWriteNoDelete`. |
 | `notesnook_sync` | Request outbound synchronization. | Explicit, policy-controlled operation; no caller-selected sync mode. |
 
+The Markdown returned by `notesnook_get_note` is a bounded, read-only projection and may be approximate: decoration is dropped and attachments may be represented by placeholders. It is not an edit preimage.
+
 ## Bounds and failures
 
 Inputs have fixed size and shape limits. The proxy validates before opening a
