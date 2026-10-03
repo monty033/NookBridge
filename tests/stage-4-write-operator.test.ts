@@ -58,7 +58,13 @@ type FakeNote = {
   tags?: readonly string[];
 };
 
-type FakeContent = { id: string; noteId: string; type: "tiptap" | "tiny"; data: string };
+type FakeContent = {
+  id: string;
+  noteId: string;
+  type: "tiptap" | "tiny";
+  data: string;
+  synced?: boolean;
+};
 
 type FakeRelation = { fromId: string; fromType: string; toId: string; toType: string };
 
@@ -87,7 +93,8 @@ function createFakeDatabase(
   let nextId = 1;
 
   for (const note of seed?.notes ?? []) notesById.set(note.id, { ...note });
-  for (const content of seed?.content ?? []) contentByNoteId.set(content.noteId, { ...content });
+  for (const content of seed?.content ?? [])
+    contentByNoteId.set(content.noteId, { synced: true, ...content });
   for (const tag of seed?.tags ?? []) tags.set(tag.id, tag.title);
 
   const mint = (prefix: string): string => `${prefix}-${nextId++}`;
@@ -180,6 +187,9 @@ function createFakeDatabase(
         if (existing === undefined) continue;
         if (typeof partial.data === "string") existing.data = partial.data;
         if (partial.type === "tiptap" || partial.type === "tiny") existing.type = partial.type;
+        // Models pinned upstream: the partial is spread into the row, so synced only
+        // changes when the caller includes it.
+        if (typeof partial.synced === "boolean") existing.synced = partial.synced;
       }
     },
   };
@@ -658,6 +668,7 @@ describe("nookctl write — create/append/update dispatch", () => {
     expect(stored?.data.startsWith("<p>original</p>")).toBe(true);
     expect(stored?.data.match(/<p>/g)?.length).toBe(2);
     expect(fake.calls).toContain("content.updateByNoteId");
+    expect(stored?.synced).toBe(false);
   });
 
   it("rejects a stale revision before any mutation fires", async () => {
