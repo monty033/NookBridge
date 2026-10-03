@@ -44,6 +44,22 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     expect(reader).toHaveBeenCalledWith("n1");
   });
 
+  it("returns Markdown when strict native decoding rejects decorated Notesnook HTML", async () => {
+    const reader = vi.fn(async () => ({
+      type: "html" as const,
+      data: '<h4><span style="color:red">Real note</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>',
+    }));
+    const response = await handleRpcRequest(
+      req({ id: "n1" }),
+      runtime(rootNote({ notebookAbsenceConfirmed: true }), reader),
+      policyFor([]),
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      result: { contentStatus: "ok", markdown: "#### Real note\n\n- [x] Done" },
+    });
+  });
+
   it("does not leak the confirmation flag into the client-visible note", async () => {
     const r = runtime(rootNote({ notebookAbsenceConfirmed: true }));
     const response = await handleRpcRequest(req({ id: "n1" }), r, policyFor([]));

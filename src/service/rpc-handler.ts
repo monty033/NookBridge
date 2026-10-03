@@ -82,6 +82,7 @@ import {
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
 import { decodeNoteDocumentNative } from "../core/note-document-native.js";
+import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import {
   authorizeServiceMethod,
@@ -1674,8 +1675,21 @@ async function readBoundedNoteContent(
     const envelope = await reflectApply(reader, runtime.readOnly, [noteId]);
     const revisionField = note.revision;
     const revision = typeof revisionField === "string" ? revisionField : `rev_${"0".repeat(32)}`;
-    const decoded = decodeNoteDocumentNative(envelope, { noteId, revision });
-    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    let markdown: string;
+    try {
+      const decoded = decodeNoteDocumentNative(envelope, { noteId, revision });
+      markdown = serializeNoteDocumentMarkdown(decoded.document);
+    } catch {
+      // Read-only approximation is deliberately a fallback; edit/write decoding stays strict.
+      if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
+      const candidate = envelope as { type?: unknown; data?: unknown };
+      if (
+        (candidate.type !== "tiptap" && candidate.type !== "html") ||
+        typeof candidate.data !== "string"
+      )
+        throw new Error("unavailable");
+      markdown = noteHtmlReadonlyMarkdown(candidate.data);
+    }
     const markdownBytes = bufferByteLength(markdown, "utf8");
     if (markdownBytes > MAX_NOTES_GET_MARKDOWN_BYTES) {
       return { contentStatus: "oversize" };
