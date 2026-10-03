@@ -161,6 +161,7 @@ export interface RpcHandlerRuntimeLike {
         localOnly?: boolean;
         conflicted?: boolean;
         locked?: boolean;
+        notebookAbsenceConfirmed?: boolean;
       }>
     | undefined
   >;
@@ -931,8 +932,18 @@ async function resolveNoteSettingsContext(
 
   const notebookId = readOwnStringField(note, "notebookId");
   const noteTitle = readOwnStringField(note, "title");
-  if (notebookId === undefined || noteTitle === undefined) {
-    return { ok: false, code: "not_found" };
+  if (noteTitle === undefined) return { ok: false, code: "not_found" };
+  if (notebookId === undefined) {
+    // A note is treated as living in the reserved `<root>` context only
+    // when the projection POSITIVELY confirmed it belongs to no
+    // notebook.  A missing notebook id without that confirmation
+    // (lookup unavailable, capped, or incomplete) stays `not_found`.
+    // The flag is read from the raw record, never from the normalised
+    // note, so it cannot leak into the client-visible response.
+    if (readOwnBooleanField(raw as Record<string, unknown>, "notebookAbsenceConfirmed") !== true) {
+      return { ok: false, code: "not_found" };
+    }
+    return { ok: true, context: { noteTitle }, note };
   }
   let notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
   if (notebookPath === undefined) {

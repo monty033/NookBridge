@@ -128,6 +128,14 @@ type CompiledOverride = {
     readonly create?: boolean;
     readonly delete?: boolean;
   }>;
+  /**
+   * True when the override's `notebooks` list contains the reserved
+   * literal `<root>`.  It is deliberately kept OUT of
+   * `compiledNotebooks` so it can never glob-match a real notebook
+   * path (including a notebook literally titled `<root>`); it matches
+   * only the confirmed no-notebook context (`notebookPath` undefined).
+   */
+  readonly matchesRoot: boolean;
   readonly compiledNotebooks: ReadonlyArray<{
     readonly original: string;
     readonly matcher: CompiledMatcher;
@@ -218,6 +226,13 @@ export class SettingsEvaluatorError extends Error {
  * A `undefined` input returns the shared frozen `EMPTY_COMPILED`
  * sentinel so the matcher helpers can iterate unconditionally.
  */
+/**
+ * Reserved notebook name for "a note that is in no notebook".  The
+ * loader accepts exactly this spelling in `notebooks` lists; the
+ * evaluator matches it only against an undefined `notebookPath`.
+ */
+const ROOT_NOTEBOOK_MARKER = "<root>";
+
 const compileList = (
   list: readonly string[] | undefined,
 ): ReadonlyArray<{ readonly original: string; readonly matcher: CompiledMatcher }> => {
@@ -255,12 +270,16 @@ const compileOverrides = (
   const compiled: CompiledOverride[] = [];
   let index = 0;
   for (const override of overrides) {
-    const compiledNotebooks = compileList(override.notebooks);
+    const matchesRoot = override.notebooks?.includes(ROOT_NOTEBOOK_MARKER) === true;
+    const compiledNotebooks = compileList(
+      override.notebooks?.filter((pattern) => pattern !== ROOT_NOTEBOOK_MARKER),
+    );
     const compiledNotes = compileList(override.notes);
     compiled.push(
       Object.freeze({
         overrideIndex: index,
         original: override,
+        matchesRoot,
         compiledNotebooks,
         compiledNotes,
       }),
@@ -335,6 +354,9 @@ const matchNotebooks = (
     const matched = findNotebookMatch(list, notebookPath);
     return matched?.original;
   }
+  // Confirmed no-notebook context: the reserved marker wins over any
+  // wildcard that happens to match the empty input.
+  if (compiled.matchesRoot) return ROOT_NOTEBOOK_MARKER;
   // notebookPath is undefined — substitute the empty input.
   // Only single-segment patterns can match; multi-segment
   // patterns will be rejected by `compileGlob` if they contain
@@ -418,6 +440,10 @@ export const createSettingsEvaluator = (
         // ignored even when present.
         if (ctx.notebookPath !== undefined) {
           matchedPattern = matchNotebooks(entry, ctx.notebookPath);
+        } else if (entry.matchesRoot) {
+          // A notebook-less create matches only the reserved marker,
+          // never a wildcard.
+          matchedPattern = ROOT_NOTEBOOK_MARKER;
         }
       } else {
         // `read` / `edit` / `delete`.  Try `notes` first (the

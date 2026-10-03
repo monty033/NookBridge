@@ -120,6 +120,24 @@ const isValidIdEntry = (value: unknown): value is string => {
   return true;
 };
 
+/**
+ * `<root>` is the reserved notebooks-list name for "a note in no
+ * notebook".  Any pattern whose first path segment equals it
+ * ASCII-case-insensitively is reserved; of those, only the exact,
+ * single-segment, lower-case spelling `<root>` is accepted (and only in
+ * a `notebooks` list).  This keeps look-alikes such as `<ROOT>` or
+ * `<root>/x` from silently becoming ordinary notebook patterns that
+ * could be confused with the root context.  Must stay in step with
+ * `ROOT_NOTEBOOK_MARKER` in `settings-evaluator.ts`.
+ */
+const firstSegmentIsReservedRoot = (value: string): boolean => {
+  const first = value.split("/", 1)[0] ?? "";
+  return first.toLowerCase() === "<root>";
+};
+
+const isReservedRootLookalike = (value: string): boolean =>
+  firstSegmentIsReservedRoot(value) && value !== "<root>";
+
 // ---------------------------------------------------------------------------
 // Override validator.
 // ---------------------------------------------------------------------------
@@ -191,7 +209,7 @@ const validateOverride = (rawOverride: unknown): SettingsOverride => {
       throw new SettingsLoadError();
     }
     for (const entry of notebooks) {
-      if (!isValidIdEntry(entry)) {
+      if (!isValidIdEntry(entry) || isReservedRootLookalike(entry)) {
         throw new SettingsLoadError();
       }
     }
@@ -202,7 +220,10 @@ const validateOverride = (rawOverride: unknown): SettingsOverride => {
       throw new SettingsLoadError();
     }
     for (const entry of notes) {
-      if (!isValidIdEntry(entry)) {
+      // `<root>` is a notebook context, not a note pattern; a note
+      // pattern whose first segment is the reserved name is rejected
+      // so it cannot be mistaken for the root context.
+      if (!isValidIdEntry(entry) || firstSegmentIsReservedRoot(entry)) {
         throw new SettingsLoadError();
       }
     }

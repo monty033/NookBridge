@@ -376,6 +376,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         localOnly?: boolean;
         conflicted?: boolean;
         locked?: boolean;
+        notebookAbsenceConfirmed?: boolean;
       }>
     | undefined
   > => {

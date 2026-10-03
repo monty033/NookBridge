@@ -605,6 +605,75 @@ describe("Stage 3 production projection and sync gate", () => {
     expect(String(failure)).not.toContain("private notebook ids then getter failure");
   });
 
+  describe("notebook absence confirmation (reserved <root> context)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rootDb = (mutate?: (db: any) => void) => {
+      const db = createFakeLiveDatabase({
+        noteSearchIds: ["conflict-note"],
+        notebookSearchIds: [],
+      });
+      mutate?.(db);
+      return flattenLiveDatabaseToReadOnly(db as NotesnookLiveDatabase);
+    };
+
+    it("confirms absence when every probe positively says no", async () => {
+      await expect(rootDb().noteMetadata("conflict-note")).resolves.toMatchObject({
+        notebookAbsenceConfirmed: true,
+      });
+    });
+
+    it("never marks a note that belongs to a notebook", async () => {
+      const meta = await rootDb().noteMetadata("note-1");
+      expect(meta).toMatchObject({ notebookId: "nb-1" });
+      expect(meta).not.toHaveProperty("notebookAbsenceConfirmed");
+    });
+
+    it("does not confirm when relations are unavailable", async () => {
+      const meta = await rootDb((db) => delete db.relations).noteMetadata("conflict-note");
+      expect(meta).not.toHaveProperty("notebookAbsenceConfirmed");
+    });
+
+    it("does not confirm when the notebook list may be truncated at the cap", async () => {
+      const ids = Array.from({ length: 256 }, (_, i) => `nb-cap-${i}`);
+      const meta = await rootDb((db) => {
+        db.notebooks.all = { ids: async () => ids };
+        db.relations.from = () => ({ has: async () => false });
+        db.notebooks.notes = async () => [];
+      }).noteMetadata("conflict-note");
+      expect(meta).not.toHaveProperty("notebookAbsenceConfirmed");
+    });
+
+    it("propagates a failing relations probe instead of confirming", async () => {
+      await expect(
+        rootDb((db) => {
+          db.relations.from = () => ({
+            has: async () => {
+              throw new Error("probe failed");
+            },
+          });
+        }).noteMetadata("conflict-note"),
+      ).rejects.toThrow();
+    });
+
+    it("propagates a failing notebooks.notes probe instead of confirming", async () => {
+      await expect(
+        rootDb((db) => {
+          db.notebooks.notes = async () => {
+            throw new Error("notes probe failed");
+          };
+        }).noteMetadata("conflict-note"),
+      ).rejects.toThrow();
+    });
+
+    it("does not confirm when no membership source exists", async () => {
+      const meta = await rootDb((db) => {
+        delete db.relations;
+        delete db.notebooks.notes;
+      }).noteMetadata("conflict-note");
+      expect(meta).not.toHaveProperty("notebookAbsenceConfirmed");
+    });
+  });
+
   it("classifies stored HTML versus literal Markdown without returning content", async () => {
     const htmlSource = flattenLiveDatabaseToReadOnly(
       createFakeLiveDatabase({
@@ -678,6 +747,8 @@ describe("Stage 3 production projection and sync gate", () => {
       title: privateTitle,
       dateModified: 23,
       revision: createRevisionToken({ id: "conflict-note", dateEdited: 23 }),
+      // The fake note is in no notebook and every probe said so.
+      notebookAbsenceConfirmed: true,
     });
 
     const detectingCleanup = vi.fn(async () => undefined);
