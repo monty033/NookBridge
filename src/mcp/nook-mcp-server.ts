@@ -1024,16 +1024,19 @@ async function invokeUpdateNote(
   };
   try {
     if (!hasExactKeys(input, ["id", "expectedRevision", "patch"]))
-      return toMcpErrorResult("invalid_request");
+      return toMcpErrorResult("invalid_request", "invalid_input");
     if (!isBoundedIdentifier(input.id) || !isRevision(input.expectedRevision))
-      return toMcpErrorResult("invalid_request");
+      return toMcpErrorResult("invalid_request", "invalid_input");
+    if (isPlainEmptyPatch(input.patch)) return toMcpErrorResult("invalid_request", "empty_patch");
     params = {
       id: input.id,
       expectedRevision: input.expectedRevision,
       patch: normaliseUpdatePatch(input.patch),
     };
-  } catch {
-    return toMcpErrorResult("invalid_request");
+    if (Object.keys(params.patch).every((key) => key === "listKind"))
+      return toMcpErrorResult("invalid_request", "non_actionable_patch");
+  } catch (error) {
+    return projectUpdateValidationError(error);
   }
   let result: BoundedWriteResult;
   try {
@@ -1042,6 +1045,31 @@ async function invokeUpdateNote(
     return toMcpErrorResult("service_unavailable");
   }
   return projectUpdateResult(result);
+}
+
+function projectUpdateValidationError(error: unknown): CallToolResult {
+  try {
+    return toMcpErrorResult(
+      "invalid_request",
+      error instanceof UpdatePatchValidationError ? error.reason : "invalid_input",
+    );
+  } catch {
+    return toMcpErrorResult("invalid_request", "invalid_input");
+  }
+}
+
+function isPlainEmptyPatch(value: unknown): boolean {
+  try {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.getPrototypeOf(value) === Object.prototype &&
+      Reflect.ownKeys(value).length === 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function hasExactKeys(
@@ -1115,6 +1143,14 @@ function isClosedListKind(value: unknown): value is NotesnookListKind {
   return typeof value === "string" && NOTESNOOK_LIST_KINDS.includes(value as NotesnookListKind);
 }
 
+class UpdatePatchValidationError extends Error {
+  readonly reason: "invalid_patch";
+  constructor() {
+    super("Invalid update patch");
+    this.reason = "invalid_patch";
+  }
+}
+
 function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
   const allowed = [
     "title",
@@ -1126,25 +1162,25 @@ function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
     "listKind",
   ] as const;
   if (!hasExactKeys(value, allowed, []) || Object.keys(value).length === 0)
-    throw new Error("invalid patch");
+    throw new UpdatePatchValidationError();
   const patch: Record<string, unknown> = {};
   for (const key of Object.keys(value)) {
     const field = value[key];
     if (key === "title" && !isBoundedText(field, NOOK_MCP_MAX_TITLE_BYTES))
-      throw new Error("invalid patch");
-    if (key === "content" && !isAppendableMarkdown(field)) throw new Error("invalid patch");
-    if (key === "notebookId" && !isBoundedIdentifier(field)) throw new Error("invalid patch");
-    if (key === "listKind" && !isClosedListKind(field)) throw new Error("invalid patch");
+      throw new UpdatePatchValidationError();
+    if (key === "content" && !isAppendableMarkdown(field)) throw new UpdatePatchValidationError();
+    if (key === "notebookId" && !isBoundedIdentifier(field)) throw new UpdatePatchValidationError();
+    if (key === "listKind" && !isClosedListKind(field)) throw new UpdatePatchValidationError();
     if (key === "tags") {
       if (!Array.isArray(field) || field.length === 0 || field.length > NOOK_MCP_MAX_TAGS)
-        throw new Error("invalid patch");
+        throw new UpdatePatchValidationError();
       if (field.some((tag) => !isBoundedText(tag, NOOK_MCP_MAX_IDENTIFIER_BYTES)))
-        throw new Error("invalid patch");
+        throw new UpdatePatchValidationError();
       patch[key] = [...field];
       continue;
     }
     if ((key === "pinned" || key === "favorite") && typeof field !== "boolean")
-      throw new Error("invalid patch");
+      throw new UpdatePatchValidationError();
     patch[key] = field;
   }
   return patch;
@@ -1192,7 +1228,12 @@ function projectAppendResult(result: BoundedWriteResult): CallToolResult {
 
 function projectUpdateResult(result: BoundedWriteResult): CallToolResult {
   try {
-    if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
+    if (!result.ok) {
+      return toMcpErrorResult(
+        socketFailureToCode(result.code),
+        result.code === "invalid_request" ? "request_rejected" : undefined,
+      );
+    }
     const value = result.envelope.result as unknown as Record<string, unknown>;
     const fields = value.appliedFields;
     if (
@@ -1331,11 +1372,13 @@ async function invokeGetNote(
   if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
   try {
     if (result.envelope.result.kind !== "note") return toMcpErrorResult("service_unavailable");
-    const { note, contentStatus, markdown, markdownBytes } = result.envelope.result;
+    const { note, contentStatus, contentReason, markdown, markdownBytes } = result.envelope.result;
     return textResult(
       contentStatus === "ok"
         ? { kind: "note", note, contentStatus, markdown, markdownBytes }
-        : { kind: "note", note, contentStatus },
+        : contentReason === undefined
+          ? { kind: "note", note, contentStatus }
+          : { kind: "note", note, contentStatus, contentReason },
     );
   } catch {
     return toMcpErrorResult("service_unavailable");

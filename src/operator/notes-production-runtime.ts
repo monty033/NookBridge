@@ -197,8 +197,13 @@ export function createNotesCommandRuntimeFromOperatorSocket(
   const createBody = options.createBody ?? editBody;
 
   const runtime: NotesCommandRuntime = {
-    browse: async (command: { readonly cursor?: string; readonly limit?: number }) =>
-      mapOperatorPage(await client.request("notes.browse", command)),
+    browse: async (command: { readonly cursor?: string; readonly limit?: number }) => {
+      try {
+        return mapOperatorPage(await client.request("notes.browse", command));
+      } catch {
+        return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
+      }
+    },
     search: async (command: {
       readonly query: string;
       readonly cursor?: string;
@@ -340,7 +345,8 @@ export async function createProductionNotesRuntime(options: {
 
 function mapOperatorPage(result: OperatorSocketResult): NotesCategoricalResult {
   if (!result.ok) return mapOperatorError(result);
-  if (result.result.kind !== "operator-page") return UNAVAILABLE_RESULT;
+  if (result.result.kind !== "operator-page")
+    return { ...UNAVAILABLE_RESULT, reason: "invalid_response" };
   return {
     kind: result.result.notes.length === 0 ? "empty" : "page",
     ...(result.result.notes.length === 0
@@ -375,12 +381,15 @@ function mapOperatorError(
     case "stale_revision":
     case "conflict":
       return { kind: "conflict" };
-    // Everything else (including `sync_failed`) stays categorical and
-    // retryable: the caller cannot tell "not applied" from "unknown".
-    case "service_unavailable":
+    // Preserve trusted socket failure categories without forwarding causes.
+    // These remain retryable; they do not establish whether a write applied.
     case "sync_failed":
-      return UNAVAILABLE_RESULT;
+      return { kind: "error", message: "sync failed", exitCode: 3, reason: "sync_failed" };
+    case "service_unavailable":
+      return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
   }
+  // A malformed injected result is not a trusted diagnostic category.
+  return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
 }
 
 function mapReadResult(result: NotesReadRuntimeResult): NotesCategoricalResult {

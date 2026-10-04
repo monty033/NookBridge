@@ -519,6 +519,7 @@ export interface RpcGetNoteResult {
   readonly note: RpcNoteMetadata;
   /** Categorical outcome of the bounded content read; see notes.get docs. */
   readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+  readonly contentReason?: "reader_unavailable" | "read_failed";
   /** Present only when contentStatus === "ok". */
   readonly markdown?: string;
   readonly markdownBytes?: number;
@@ -1864,17 +1865,25 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     if (kind === "note") {
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "note", "contentStatus", "markdown", "markdownBytes"],
+        ["kind", "note", "contentStatus", "contentReason", "markdown", "markdownBytes"],
         "rpc protocol: note result has unexpected fields",
       );
-      const hasContent = resultKeys.length === 5;
+      const hasContent = resultKeys.includes("markdown");
+      const hasReason = resultKeys.includes("contentReason");
       if (
-        (resultKeys.length !== 3 && resultKeys.length !== 5) ||
+        (resultKeys.length !== 3 &&
+          resultKeys.length !== 4 &&
+          resultKeys.length !== 5 &&
+          resultKeys.length !== 6) ||
         !keysAreExactly(
           resultKeys,
           hasContent
-            ? ["kind", "note", "contentStatus", "markdown", "markdownBytes"]
-            : ["kind", "note", "contentStatus"],
+            ? hasReason
+              ? ["kind", "note", "contentStatus", "contentReason", "markdown", "markdownBytes"]
+              : ["kind", "note", "contentStatus", "markdown", "markdownBytes"]
+            : hasReason
+              ? ["kind", "note", "contentStatus", "contentReason"]
+              : ["kind", "note", "contentStatus"],
         )
       ) {
         throw rpcProtocolError("rpc protocol: note result has unexpected fields");
@@ -1893,17 +1902,36 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
           "rpc protocol: note result content fields do not match contentStatus",
         );
       }
+      const reasonDescriptor = hasReason
+        ? objectGetOwnPropertyDescriptor(resultRecord, "contentReason")
+        : undefined;
+      if (hasReason && (reasonDescriptor === undefined || !("value" in reasonDescriptor))) {
+        throw rpcProtocolError("rpc protocol: note result contentReason must be a data field");
+      }
+      const contentReason: unknown = reasonDescriptor?.value;
+      if (
+        hasReason &&
+        (contentStatus !== "unavailable" ||
+          (contentReason !== "reader_unavailable" && contentReason !== "read_failed"))
+      ) {
+        throw rpcProtocolError("rpc protocol: note result has an invalid contentReason");
+      }
       const cleanNote = normaliseNoteResult(resultRecord.note, rawSum);
       const resultPayload = objectCreate(null) as {
         kind: "note";
         note: Record<string, JsonValue>;
         contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+        contentReason?: "reader_unavailable" | "read_failed";
         markdown?: string;
         markdownBytes?: number;
       };
       resultPayload.kind = "note";
       resultPayload.note = cleanNote;
       resultPayload.contentStatus = contentStatus;
+      if (hasReason) {
+        preflightResponseStringField(contentReason as string, rawSum);
+        resultPayload.contentReason = contentReason as "reader_unavailable" | "read_failed";
+      }
       if (hasContent) {
         assertBoundedMarkdown(
           resultRecord.markdown,

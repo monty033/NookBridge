@@ -13,7 +13,8 @@
  * Hard rules:
  *
  *   - The error body is a single JSON text block whose schema is
- *     `{ "code": string, "message": string }`. No note IDs, no note
+ * `{ "code": string, "message": string }`, with an optional bounded update
+ * refusal `reason`. No note IDs, no note
  *     bodies, no paths, no upstream socket / connect / errno
  *     strings, no `cause` chains cross the boundary.
  *   - `McpErrorResult` is built through the closed helper
@@ -51,6 +52,21 @@ export type NookMcpErrorCode =
   | "conflict"
   | "not_found"
   | "unknown_tool";
+
+/** Update-tool-only categorical reasons; never used on the shared RPC envelope. */
+export type NookMcpUpdateRefusalReason =
+  | "invalid_input"
+  | "empty_patch"
+  | "invalid_patch"
+  | "non_actionable_patch"
+  | "request_rejected";
+const NOOK_MCP_UPDATE_REFUSAL_REASONS: readonly NookMcpUpdateRefusalReason[] = Object.freeze([
+  "invalid_input",
+  "empty_patch",
+  "invalid_patch",
+  "non_actionable_patch",
+  "request_rejected",
+]);
 
 /**
  * Fixed, redacted message text per category. Identical messages
@@ -127,8 +143,21 @@ export function isNookMcpServerError(value: unknown): value is NookMcpServerErro
  * avoid spreading an `Object.freeze` shape that `exactOptionalPropertyTypes`
  * would reject.
  */
-export function toMcpErrorResult(code: NookMcpErrorCode): CallToolResult {
-  const payload = JSON.stringify({ code, message: nookMcpErrorMessage(code) });
+export function toMcpErrorResult(
+  code: NookMcpErrorCode,
+  reason?: NookMcpUpdateRefusalReason,
+): CallToolResult {
+  const safeReason =
+    code === "invalid_request" &&
+    typeof reason === "string" &&
+    NOOK_MCP_UPDATE_REFUSAL_REASONS.includes(reason)
+      ? reason
+      : undefined;
+  const payload = JSON.stringify({
+    code,
+    message: nookMcpErrorMessage(code),
+    ...(safeReason === undefined ? {} : { reason: safeReason }),
+  });
   const result: CallToolResult = {
     isError: true,
     content: [

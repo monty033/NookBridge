@@ -133,6 +133,7 @@ describe("nookd socket client — note revision projection", () => {
             revision: "rev_00000000000000000000000000000001",
           },
           contentStatus: "unavailable",
+          contentReason: "reader_unavailable",
         },
       }),
     );
@@ -141,9 +142,114 @@ describe("nookd socket client — note revision projection", () => {
     const result = await client.getNote("note-1");
 
     expect(result.ok).toBe(true);
-    if (result.ok && result.envelope.result.kind === "note") {
-      expect(result.envelope.result.note.revision).toBe("rev_00000000000000000000000000000001");
-    }
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected a successful note result");
+    expect(result.envelope.result.kind).toBe("note");
+    if (result.envelope.result.kind !== "note") throw new Error("expected a note result");
+    expect(result.envelope.result.note.revision).toBe("rev_00000000000000000000000000000001");
+    expect(result.envelope.result.contentReason).toBe("reader_unavailable");
+    expect(result.envelope.result).not.toHaveProperty("markdown");
+  });
+
+  it.each([
+    ["reader_unavailable", "unavailable", true],
+    ["read_failed", "unavailable", true],
+    [undefined, "unavailable", true],
+    [undefined, "locked", true],
+    [undefined, "oversize", true],
+    ["read_failed", "locked", false],
+    ["read_failed", "oversize", false],
+    ["read_failed", "ok", false],
+    [undefined, "ok", true],
+    ["unknown_reason", "unavailable", false],
+  ] as const)(
+    "accepts only closed unavailable reasons (%s / %s)",
+    async (reason, status, expectedOk) => {
+      const socketPath = await startFakeDaemon((request) => {
+        const result: Record<string, unknown> = {
+          kind: "note",
+          note: { id: "note-1", title: "Title" },
+          contentStatus: status,
+        };
+        if (status === "ok") {
+          result.markdown = "safe";
+          result.markdownBytes = 4;
+        }
+        if (reason !== undefined) result.contentReason = reason;
+        return framedResponse({ id: request.id, ok: true, result });
+      });
+      const client = new NookdSocketClient({ socketPath });
+
+      const result = await client.getNote("note-1");
+
+      expect(result.ok).toBe(expectedOk);
+      if (result.ok && result.envelope.result.kind === "note") {
+        expect(result.envelope.result.contentStatus).toBe(status);
+        if (status === "ok") {
+          expect(result.envelope.result).toMatchObject({ markdown: "safe", markdownBytes: 4 });
+        } else {
+          expect(result.envelope.result).not.toHaveProperty("markdown");
+          expect(result.envelope.result).not.toHaveProperty("markdownBytes");
+        }
+        if (reason === undefined)
+          expect(result.envelope.result).not.toHaveProperty("contentReason");
+        else expect(result.envelope.result.contentReason).toBe(reason);
+      }
+    },
+  );
+
+  it.each(["reader_unavailable", "read_failed"] as const)(
+    "forwards %s through notesnook_get_note MCP output",
+    async (contentReason) => {
+      const socketPath = await startFakeDaemon((request) =>
+        framedResponse({
+          id: request.id,
+          ok: true,
+          result: {
+            kind: "note",
+            note: { id: "note-1", title: "Title" },
+            contentStatus: "unavailable",
+            contentReason,
+          },
+        }),
+      );
+      const client = new NookdSocketClient({ socketPath });
+      const server = buildNookMcpServer({ client });
+      const result = await server.callTool("notesnook_get_note", { id: "note-1" });
+      expect(result.isError).toBeFalsy();
+      const block = result.content[0];
+      if (block?.type !== "text") throw new Error("missing MCP text result");
+      expect(JSON.parse(block.text)).toEqual({
+        kind: "note",
+        note: { id: "note-1", title: "Title" },
+        contentStatus: "unavailable",
+        contentReason,
+      });
+    },
+  );
+
+  it("forwards a legacy unavailable result without contentReason through MCP", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Title" },
+          contentStatus: "unavailable",
+        },
+      }),
+    );
+    const server = buildNookMcpServer({ client: new NookdSocketClient({ socketPath }) });
+    const result = await server.callTool("notesnook_get_note", { id: "note-1" });
+    expect(result.isError).toBeFalsy();
+    const block = result.content[0];
+    if (block?.type !== "text") throw new Error("missing MCP text result");
+    expect(JSON.parse(block.text)).toEqual({
+      kind: "note",
+      note: { id: "note-1", title: "Title" },
+      contentStatus: "unavailable",
+    });
   });
 
   it.each([

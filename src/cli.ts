@@ -479,7 +479,9 @@ async function runNotes(args: Args): Promise<number> {
     },
   });
   try {
-    process.stdout.write(formatNotesResult(result));
+    process.stdout.write(
+      formatNotesResult(result, parsed.command.kind === "browse" ? "browse" : "legacy"),
+    );
     if (result.kind === "error") return result.exitCode;
     return result.kind === "invalid-input" ? 2 : 0;
   } finally {

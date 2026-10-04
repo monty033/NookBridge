@@ -30,6 +30,32 @@ socket request, and the service validates again at its policy boundary. It
 returns categorical errors rather than raw socket failures, upstream messages,
 paths, credentials, revisions, or note content.
 
+Unavailable `notesnook_get_note` results may additionally include
+`contentReason: "reader_unavailable"` (no content reader capability) or
+`"read_failed"` (the read failed). This field is optional for compatibility:
+clients must continue accepting the earlier reason-omitting `unavailable`
+shape. It appears only with `contentStatus: "unavailable"`; locked and
+oversize results contain neither content nor a reason.
+
+Tool errors are returned as a JSON text block with a closed `code` and fixed,
+redacted `message`. The update tool may also return a bounded `reason`, but only
+when `code` is `invalid_request`: `invalid_input`, `empty_patch`,
+`invalid_patch`, `non_actionable_patch`, or `request_rejected`. Input/patch
+reasons describe checks completed locally before dispatch; `request_rejected`
+means the downstream client or service rejected an update request without a
+more specific public reason. The socket client can refuse local serialization
+before dispatch, so this reason does not by itself prove that the service saw
+the request. A thrown socket-client call maps to `service_unavailable`. Other write
+tools do not expose this update-only reason field. The shared RPC error
+envelope is unchanged; readers must tolerate historical error results without
+`reason` and should not infer a new wire-level error field from the MCP result.
+
+For the operator CLI, categorical reason display is currently specific to
+`nookctl notes browse`: it displays only the allowlisted
+`service_unavailable`, `sync_failed`, or `invalid_response` reason, falling
+back to `service_unavailable` for unknown values. This does not change other
+`nookctl notes` command formatting.
+
 Write operations use optimistic revision checks. A stale revision, conflict,
 locked Vault, unavailable service, or failed synchronization is an outcome to
 handle explicitly; the proxy does not automatically resolve conflicts or retry

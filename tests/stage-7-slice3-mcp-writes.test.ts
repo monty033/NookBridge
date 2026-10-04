@@ -15,6 +15,7 @@ import {
   buildNookMcpServer,
 } from "../src/mcp/nook-mcp-server.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
+import { toMcpErrorResult } from "../src/mcp/errors.js";
 
 const REVISION = "rev_00000000000000000000000000000001";
 
@@ -53,6 +54,181 @@ function schemaFor(name: string): Record<string, unknown> {
 }
 
 describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
+  it("never treats hidden or symbol-bearing patches as an empty patch", async () => {
+    const client = makeClient();
+    const update = vi.spyOn(client, "updateNote");
+    const server = buildNookMcpServer({ client });
+    const hidden = Object.defineProperty({}, "secretField", { value: "PATCH_SECRET" });
+    for (const patch of [hidden, { [Symbol("PATCH_SECRET")]: true }]) {
+      const result = await server.callTool("notesnook_update_note", {
+        id: "note-1",
+        expectedRevision: REVISION,
+        patch,
+      });
+      expect(payload(result)).toEqual({
+        code: "invalid_request",
+        message: "Invalid request",
+        reason: "invalid_patch",
+      });
+      expect(JSON.stringify(result)).not.toContain("PATCH_SECRET");
+    }
+    expect(update).not.toHaveBeenCalled();
+  });
+  it("categorically refuses a patch getter that throws a hostile proxy", async () => {
+    const client = makeClient();
+    const update = vi.spyOn(client, "updateNote");
+    const server = buildNookMcpServer({ client });
+    const hostile = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error("RAW_PROXY");
+        },
+      },
+    );
+    const patch = Object.defineProperty({}, "title", {
+      enumerable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    const result = await server.callTool("notesnook_update_note", {
+      id: "note-1",
+      expectedRevision: REVISION,
+      patch,
+    });
+    expect(payload(result)).toEqual({
+      code: "invalid_request",
+      message: "Invalid request",
+      reason: "invalid_input",
+    });
+    expect(JSON.stringify(result)).not.toContain("RAW_PROXY");
+    expect(update).not.toHaveBeenCalled();
+  });
+  it("categorically fails malformed update results with throwing accessors", async () => {
+    const client = makeClient();
+    const update = vi.spyOn(client, "updateNote");
+    const server = buildNookMcpServer({ client });
+    update.mockResolvedValueOnce(
+      Object.defineProperty({}, "ok", {
+        get() {
+          throw new Error("RAW_RESULT");
+        },
+      }) as never,
+    );
+    const result = await server.callTool("notesnook_update_note", {
+      id: "note-1",
+      expectedRevision: REVISION,
+      patch: { title: "ok" },
+    });
+    expect(payload(result)).toEqual({
+      code: "service_unavailable",
+      message: "Service unavailable",
+    });
+    expect(JSON.stringify(result)).not.toContain("RAW_RESULT");
+  });
+  it("keeps the optional error reason allowlisted and invalid-request-only", () => {
+    const legacy = { code: "invalid_request", message: "Invalid request" };
+    expect(
+      payload(
+        toMcpErrorResult(
+          "invalid_request",
+          "SECRET/path" as unknown as Parameters<typeof toMcpErrorResult>[1],
+        ),
+      ),
+    ).toEqual(legacy);
+    const getter = vi.fn(() => "empty_patch");
+    const reason = Object.defineProperty({}, "reason", { get: getter });
+    expect(
+      payload(
+        toMcpErrorResult(
+          "invalid_request",
+          reason as unknown as Parameters<typeof toMcpErrorResult>[1],
+        ),
+      ),
+    ).toEqual(legacy);
+    expect(getter).not.toHaveBeenCalled();
+    expect(payload(toMcpErrorResult("service_unavailable", "empty_patch"))).toEqual({
+      code: "service_unavailable",
+      message: "Service unavailable",
+    });
+  });
+  it("returns bounded update refusal reasons only for update-owned validation and generic rejection", async () => {
+    const client = makeClient();
+    const updateNote = vi.spyOn(client, "updateNote");
+    const server = buildNookMcpServer({ client });
+    const call = (patch: unknown, expectedRevision: unknown = REVISION) =>
+      server.callTool("notesnook_update_note", {
+        id: "note-1",
+        expectedRevision,
+        patch,
+      } as Record<string, unknown>);
+
+    for (const [patch, reason] of [
+      [{}, "empty_patch"],
+      [{ deleted: true }, "invalid_patch"],
+      [{ content: "bad\u0000text" }, "invalid_patch"],
+      [{ content: "é".repeat(30000) }, "invalid_patch"],
+      [{ listKind: "simple-checklist" }, "non_actionable_patch"],
+    ] as const) {
+      const result = await call(patch);
+      expect(payload(result)).toEqual({
+        code: "invalid_request",
+        message: "Invalid request",
+        reason,
+      });
+    }
+    expect(payload(await call({ title: "ok" }, "bad"))).toEqual({
+      code: "invalid_request",
+      message: "Invalid request",
+      reason: "invalid_input",
+    });
+    expect(updateNote).not.toHaveBeenCalled();
+
+    updateNote.mockResolvedValueOnce({
+      ok: true,
+      envelope: {
+        id: "rpc-1",
+        ok: true,
+        result: { kind: "update", id: "note-1", appliedFields: ["content"], contentBytes: 4 },
+      },
+    });
+    const valid = await call({ content: "line\ntext", listKind: "simple-checklist" });
+    expect(payload(valid)).toEqual({
+      kind: "update",
+      id: "note-1",
+      appliedFields: ["content"],
+      contentBytes: 4,
+    });
+    expect(updateNote).toHaveBeenCalledTimes(1);
+
+    updateNote.mockRejectedValueOnce(
+      Object.assign(new Error("secret-path"), {
+        reason: "empty_patch",
+        code: "invalid_request",
+      }),
+    );
+    expect(payload(await call({ title: "ok" }))).toEqual({
+      code: "service_unavailable",
+      message: "Service unavailable",
+    });
+
+    updateNote.mockResolvedValueOnce({ ok: false, code: "invalid_request" });
+    expect(payload(await call({ title: "ok" }))).toEqual({
+      code: "invalid_request",
+      message: "Invalid request",
+      reason: "request_rejected",
+    });
+    updateNote.mockResolvedValueOnce({ ok: false, code: "service_unavailable" });
+    expect(payload(await call({ title: "ok" }))).toEqual({
+      code: "service_unavailable",
+      message: "Service unavailable",
+    });
+    expect(payload(toMcpErrorResult("invalid_request"))).toEqual({
+      code: "invalid_request",
+      message: "Invalid request",
+    });
+  });
   it("registers the four reads plus exactly create, append, and update", () => {
     const client = makeClient();
     const server = buildNookMcpServer({ client });
@@ -329,7 +505,20 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     for (const [name, args] of cases) {
       const result = await server.callTool(name, args);
       expect(result.isError).toBe(true);
-      expect(payload(result)).toEqual({ code: "invalid_request", message: "Invalid request" });
+      expect(payload(result)).toEqual(
+        name === "notesnook_update_note"
+          ? {
+              code: "invalid_request",
+              message: "Invalid request",
+              reason:
+                args.patch !== null &&
+                typeof args.patch === "object" &&
+                Object.keys(args.patch).length === 0
+                  ? "empty_patch"
+                  : "invalid_patch",
+            }
+          : { code: "invalid_request", message: "Invalid request" },
+      );
     }
     expect(createNote).not.toHaveBeenCalled();
     expect(appendNote).not.toHaveBeenCalled();
@@ -568,7 +757,11 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     ] as const) {
       const result = await server.callTool(name, args as Record<string, unknown>);
       expect(result.isError).toBe(true);
-      expect(payload(result)).toEqual({ code: "invalid_request", message: "Invalid request" });
+      expect(payload(result)).toEqual(
+        name === "notesnook_update_note"
+          ? { code: "invalid_request", message: "Invalid request", reason: "invalid_patch" }
+          : { code: "invalid_request", message: "Invalid request" },
+      );
     }
     expect(createNote).not.toHaveBeenCalled();
     expect(appendNote).not.toHaveBeenCalled();
