@@ -37,6 +37,7 @@ import type { CallToolResult, Tool, ToolAnnotations } from "@modelcontextprotoco
 import { z } from "zod";
 
 import { parseExactNotePath } from "../service/exact-note-path-resolver.js";
+import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
 import { toMcpErrorResult, type NookMcpErrorCode } from "./errors.js";
 import { NookdSocketClient, type NookdSocketFailure } from "./socket-client.js";
 import {
@@ -106,9 +107,9 @@ export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
  * accept a query that the underlying RPC would reject.
  */
 export const NOOK_MCP_MAX_QUERY_BYTES = 512;
+export const NOOK_MCP_MAX_CONTENT_BYTES = STAGE5_RPC_LIMITS.maxContentBytes;
 export const NOOK_MCP_MAX_TITLE_BYTES = 256;
 export const NOOK_MCP_MAX_IDENTIFIER_BYTES = 256;
-export const NOOK_MCP_MAX_CONTENT_BYTES = 512;
 export const NOOK_MCP_MAX_TAGS = 16;
 export const NOOK_MCP_MAX_REVISION_BYTES = 36;
 export const NOOK_MCP_MAX_NOTE_PATH_BYTES = 512;

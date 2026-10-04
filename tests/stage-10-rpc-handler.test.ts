@@ -219,6 +219,37 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     );
   });
 
+  describe("content cap at the handler (4096 bytes)", () => {
+    const ID = "0123456789abcdef0123456789abcdef";
+    const REV = "rev_00000000000000000000000000000000";
+    const policy = () => createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+    const run = (method: RpcRequest["method"], body: string) => {
+      const params: Record<string, unknown> =
+        method === "notes.create"
+          ? { title: "New", content: body }
+          : method === "notes.append"
+            ? { id: ID, markdownFragment: body, expectedRevision: REV }
+            : { id: ID, expectedRevision: REV, patch: { content: body } };
+      return handleRpcRequest(
+        request(method, params),
+        makeRuntime({
+          createNote: vi.fn(async () => createResult()),
+          appendNote: vi.fn(async () => appendResult()),
+          updateNote: vi.fn(async () => updateResult()),
+          notebookIndex: makeIndex(),
+        }),
+        policy(),
+      );
+    };
+    for (const method of ["notes.create", "notes.append", "notes.update"] as const) {
+      it(`${method} accepts 4096 bytes and rejects 4097`, async () => {
+        expect((await run(method, "x".repeat(4096))).ok).toBe(true);
+        const over = await run(method, "x".repeat(4097));
+        expect(over.ok).toBe(false);
+      });
+    }
+  });
+
   it("forwards listKind='task-list' through the handler into updateNote patch", async () => {
     const updateNote = vi.fn(async () => updateResult());
     const response = await handleRpcRequest(

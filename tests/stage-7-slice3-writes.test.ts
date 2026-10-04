@@ -257,7 +257,7 @@ describe("rpc protocol — notes.append admission", () => {
   });
 
   it("rejects an oversize markdown fragment", () => {
-    const oversized = "x".repeat(STAGE5_RPC_LIMITS.maxQueryBytes + 1);
+    const oversized = "x".repeat(STAGE5_RPC_LIMITS.maxContentBytes + 1);
     expect(() =>
       parseRpcFrame(
         encodeFrame({

@@ -70,6 +70,7 @@ const numberIsFinite = Number.isFinite;
 export interface Stage5RpcLimits {
   readonly maxFrameBytes: number;
   readonly maxQueryBytes: number;
+  readonly maxContentBytes: number;
   readonly maxResponseBytes: number;
   readonly maxSearchHits: number;
   readonly maxTitleBytes: number;
@@ -102,6 +103,7 @@ export interface Stage5RpcLimits {
 const stage5RpcLimits = objectCreate(null) as {
   maxFrameBytes: number;
   maxQueryBytes: number;
+  maxContentBytes: number;
   maxResponseBytes: number;
   maxSearchHits: number;
   maxTitleBytes: number;
@@ -109,6 +111,7 @@ const stage5RpcLimits = objectCreate(null) as {
 };
 stage5RpcLimits.maxFrameBytes = 65_536;
 stage5RpcLimits.maxQueryBytes = 512;
+stage5RpcLimits.maxContentBytes = 4096;
 stage5RpcLimits.maxResponseBytes = 65_536;
 stage5RpcLimits.maxSearchHits = 64;
 stage5RpcLimits.maxTitleBytes = 256;
@@ -1199,8 +1202,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     if (
       typeof content !== "string" ||
       content.length === 0 ||
-      content.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      utf8ByteLength(content, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      content.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+      utf8ByteLength(content, STAGE5_RPC_LIMITS.maxContentBytes) >
+        STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(content)
     ) {
       throw rpcProtocolError("rpc protocol: request create content is invalid");
@@ -1265,9 +1269,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     if (
       typeof markdownFragment !== "string" ||
       markdownFragment.length === 0 ||
-      markdownFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxQueryBytes) >
-        STAGE5_RPC_LIMITS.maxQueryBytes ||
+      markdownFragment.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+      utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxContentBytes) >
+        STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(markdownFragment)
     ) {
       throw rpcProtocolError("rpc protocol: request append markdown fragment is invalid");
@@ -1361,8 +1365,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       if (
         typeof value !== "string" ||
         value.length === 0 ||
-        value.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-        utf8ByteLength(value, STAGE5_RPC_LIMITS.maxQueryBytes) > STAGE5_RPC_LIMITS.maxQueryBytes ||
+        value.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+        utf8ByteLength(value, STAGE5_RPC_LIMITS.maxContentBytes) >
+          STAGE5_RPC_LIMITS.maxContentBytes ||
         hasControlCharacter(value)
       ) {
         throw rpcProtocolError("rpc protocol: update patch content is invalid");
@@ -1944,7 +1949,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         !isNonNegativeFiniteNumber(resultRecord.titleBytes) ||
         resultRecord.titleBytes > STAGE5_RPC_LIMITS.maxTitleBytes ||
         !isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
-        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes
       ) {
         throw rpcProtocolError("rpc protocol: create result byte counts are invalid");
       }
@@ -1988,7 +1993,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       preflightResponseStringField(noteId, rawSum);
       if (
         !isNonNegativeFiniteNumber(resultRecord.fragmentBytes) ||
-        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxContentBytes
       ) {
         throw rpcProtocolError("rpc protocol: append result fragmentBytes is invalid");
       }
@@ -2092,7 +2097,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       if (
         resultRecord.contentBytes !== undefined &&
         (!isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
-          resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes)
+          resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes)
       ) {
         throw rpcProtocolError("rpc protocol: update result contentBytes is invalid");
       }

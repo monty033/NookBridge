@@ -1940,6 +1940,62 @@ function writeFrameLength(frame: Uint8Array, length: number): void {
   frame[3] = length & 0xff;
 }
 
+// ---------------------------------------------------------------------------
+// Content byte cap — dedicated maxContentBytes, independent of maxQueryBytes.
+// ---------------------------------------------------------------------------
+
+describe("parseRpcFrame — content cap (maxContentBytes)", () => {
+  const NOTE_ID = "0123456789abcdef0123456789abcdef";
+  const REV = "rev_00000000000000000000000000000000";
+  const frame = (method: string, params: Record<string, unknown>): Uint8Array =>
+    wrapFrame(encode(JSON.stringify({ id: "a", method, params })));
+  const create = (content: string) => frame("notes.create", { title: "T", content });
+  const append = (markdownFragment: string) =>
+    frame("notes.append", { id: NOTE_ID, markdownFragment, expectedRevision: REV });
+  const update = (content: string) =>
+    frame("notes.update", { id: NOTE_ID, expectedRevision: REV, patch: { content } });
+
+  it("publishes a content cap of 4096 that is separate from the query cap", () => {
+    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(4096);
+    expect(STAGE5_RPC_LIMITS.maxQueryBytes).toBe(512);
+  });
+
+  const cases: Array<[string, (c: string) => Uint8Array]> = [
+    ["notes.create content", create],
+    ["notes.append markdownFragment", append],
+    ["notes.update patch content", update],
+  ];
+  for (const [label, build] of cases) {
+    it(`${label}: accepts exactly maxContentBytes ASCII bytes`, () => {
+      const body = "x".repeat(STAGE5_RPC_LIMITS.maxContentBytes);
+      expect(() => parseRpcFrame(build(body))).not.toThrow();
+    });
+    it(`${label}: rejects maxContentBytes + 1 bytes`, () => {
+      const body = "x".repeat(STAGE5_RPC_LIMITS.maxContentBytes + 1);
+      expect(() => parseRpcFrame(build(body))).toThrow(/rpc protocol/);
+    });
+    it(`${label}: counts multi-byte UTF-8 in bytes, not characters`, () => {
+      const half = STAGE5_RPC_LIMITS.maxContentBytes / 2;
+      expect(() => parseRpcFrame(build("é".repeat(half)))).not.toThrow();
+      expect(() => parseRpcFrame(build("é".repeat(half + 1)))).toThrow(/rpc protocol/);
+    });
+  }
+
+  it("still rejects a search query over maxQueryBytes (query cap did not move)", () => {
+    const json = JSON.stringify({
+      id: "a",
+      method: "notes.search",
+      params: { query: "x".repeat(STAGE5_RPC_LIMITS.maxQueryBytes + 1) },
+    });
+    expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
+  });
+
+  it("a worst-case escaped 4096-byte body still fits in one request frame", () => {
+    const body = "\n".repeat(STAGE5_RPC_LIMITS.maxContentBytes);
+    expect(create(body).length).toBeLessThanOrEqual(STAGE5_RPC_LIMITS.maxFrameBytes);
+  });
+});
+
 // Force `Buffer` to be referenced so the import is not tree-shaken — the
 // slice is intentionally pure but the test mirrors the planned wire shape.
 void Buffer;

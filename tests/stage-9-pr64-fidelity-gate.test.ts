@@ -625,6 +625,76 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       });
       expect(appended.data).toBe(wrap("<h1>Title</h1><blockquote><p>a quote</p></blockquote>"));
     });
+
+    it.each(["simple-checklist", "task-list"] as const)(
+      "merges a same-kind trailing %s",
+      (listKind) => {
+        const base = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [ ] first", listKind);
+        const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+          storedType: "tiptap",
+          storedData: base.data,
+          markdownFragment: "- [x] second",
+          listKind,
+        });
+        expect(appended.data.match(/<ul /g)).toHaveLength(1);
+        expect(appended.data).toContain("<p>first</p></li><li");
+        expect(appended.data).toContain("<p>second</p>");
+      },
+    );
+
+    it("does not merge when the trailing list is nested inside another list", () => {
+      const storedData =
+        '<div data-type="document"><ul class="simple-checklist"><li class="simple-checklist--item"><p>outer</p><ul class="simple-checklist"><li class="simple-checklist--item"><p>inner</p></li></ul></li></ul></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.startsWith(storedData.slice(0, -"</div>".length))).toBe(true);
+      expect(appended.data.endsWith("<p>new</p></li></ul></div>")).toBe(true);
+      expect(appended.data.match(/<ul /g)).toHaveLength(3);
+    });
+
+    it("does not merge when a paragraph follows the trailing list", () => {
+      const storedData =
+        '<div data-type="document"><ul class="simple-checklist"><li class="simple-checklist--item"><p>a</p></li></ul><p>after</p></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.match(/<ul /g)).toHaveLength(2);
+      expect(appended.data.indexOf("<p>after</p>")).toBeLessThan(
+        appended.data.indexOf("<p>new</p>"),
+      );
+    });
+
+    it("does not merge into html-typed stored content", () => {
+      const storedData =
+        '<ul class="simple-checklist"><li class="simple-checklist--item"><p>a</p></li></ul>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "html",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.startsWith(storedData)).toBe(true);
+      expect(appended.data.match(/<ul /g)).toHaveLength(2);
+    });
+
+    it("preserves existing bytes and does not merge a different-kind list", () => {
+      const storedData =
+        '<div data-type="document"><h1 data-x="keep">title</h1><ul class="checklist"><li class="checklist--item"><p>old</p></li></ul></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+      });
+      expect(appended.data.startsWith(storedData.slice(0, storedData.indexOf("<ul")))).toBe(true);
+      expect(appended.data.match(/<ul /g)).toHaveLength(2);
+    });
   });
 
   describe("listKind intent — explicit simple-checklist vs task-list", () => {

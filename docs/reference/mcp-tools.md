@@ -24,7 +24,8 @@ The Markdown returned by `notesnook_get_note` is a bounded, read-only projection
 
 ## Bounds and failures
 
-Inputs have fixed size and shape limits. The proxy validates before opening a
+Inputs have fixed size and shape limits. Create, append, and update content are
+limited to 4096 UTF-8 bytes per field. The proxy validates before opening a
 socket request, and the service validates again at its policy boundary. It
 returns categorical errors rather than raw socket failures, upstream messages,
 paths, credentials, revisions, or note content.

@@ -573,8 +573,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       hasControlCharacter(rawTitle) ||
       rawContent === undefined ||
       rawContent.length === 0 ||
-      rawContent.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      bufferByteLength(rawContent, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      rawContent.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+      bufferByteLength(rawContent, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(rawContent)
     ) {
       return { kind: "err", code: "invalid_request" };
@@ -622,8 +622,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       !isBoundedRpcIdentifier(rawNoteId) ||
       rawFragment === undefined ||
       rawFragment.length === 0 ||
-      rawFragment.length > STAGE5_RPC_LIMITS.maxQueryBytes ||
-      bufferByteLength(rawFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      rawFragment.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+      bufferByteLength(rawFragment, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(rawFragment) ||
       !isRevisionToken(rawRevision)
     ) {
@@ -677,7 +677,7 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "content") {
-        if (!isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxQueryBytes)) {
+        if (!isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxContentBytes)) {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "notebookId") {
