@@ -7,6 +7,12 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- The trailing-checklist merge in `notes.append` now matches stored lists that
+  carry Notesnook's `data-block-id` attributes. Notesnook adds those to every
+  list and paragraph when content is read, so the previous bare-tag matcher
+  never merged into a real stored list and started a second list instead. Only
+  that one attribute is accepted; other attributes, nested lists, and trailing
+  blocks still skip the merge.
 - Content inputs for `notes.create`, `notes.append`, and `notes.update` now
   accept up to 4096 UTF-8 bytes (previously 512). The RPC boundary gains a
   dedicated `maxContentBytes` limit; query, path, title, and identifier caps

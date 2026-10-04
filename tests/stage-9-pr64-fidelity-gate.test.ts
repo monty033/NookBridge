@@ -656,6 +656,63 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(appended.data.match(/<ul /g)).toHaveLength(3);
     });
 
+    // Notesnook's content read rewrites stored HTML to add data-block-id to
+    // every div/ul/p, so real stored lists never match a bare-tag pattern.
+    it.each([
+      ["simple-checklist", "simple-checklist", "simple-checklist--item"],
+      ["task-list", "checklist", "checklist--item"],
+    ] as const)("merges into a stored %s carrying data-block-ids", (listKind, ul, li) => {
+      const storedData = `<div data-type="document" data-block-id="div1"><ul class="${ul}" data-block-id="ul2"><li class="${li}"><p data-block-id="p3">a</p></li><li class="${li}"><p data-block-id="p4">b</p></li></ul></div>`;
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] c\n- [ ] d",
+        listKind,
+      });
+      expect(appended.data.match(/<ul /g)).toHaveLength(1);
+      expect(appended.data).toContain('<ul class="' + ul + '" data-block-id="ul2">');
+      expect(appended.data).toContain('<p data-block-id="p4">b</p></li><li');
+      expect(appended.data).toContain("<p>c</p>");
+      expect(appended.data).toContain("<p>d</p>");
+      expect(appended.data.endsWith("</ul></div>")).toBe(true);
+    });
+
+    it("does not merge a block-id list when a block-id paragraph follows it", () => {
+      const storedData =
+        '<div data-type="document" data-block-id="div1"><ul class="simple-checklist" data-block-id="ul2"><li class="simple-checklist--item"><p data-block-id="p3">a</p></li></ul><p data-block-id="p4">after</p></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.match(/<ul /g)).toHaveLength(2);
+    });
+
+    it("does not merge a block-id list nested inside another block-id list", () => {
+      const storedData =
+        '<div data-type="document" data-block-id="div1"><ul class="simple-checklist" data-block-id="ul2"><li class="simple-checklist--item"><p data-block-id="p3">o</p><ul class="simple-checklist" data-block-id="ul4"><li class="simple-checklist--item"><p data-block-id="p5">i</p></li></ul></li></ul></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.match(/<ul /g)).toHaveLength(3);
+    });
+
+    it("does not merge when the list item carries an unexpected attribute", () => {
+      const storedData =
+        '<div data-type="document"><ul class="simple-checklist" data-block-id="ul2"><li class="simple-checklist--item" onclick="x"><p>a</p></li></ul></div>';
+      const appended = DETERMINISTIC_MARKDOWN_CODEC.appendMarkdownToStoredContent({
+        storedType: "tiptap",
+        storedData,
+        markdownFragment: "- [ ] new",
+        listKind: "simple-checklist",
+      });
+      expect(appended.data.match(/<ul /g)).toHaveLength(2);
+    });
+
     it("does not merge when a paragraph follows the trailing list", () => {
       const storedData =
         '<div data-type="document"><ul class="simple-checklist"><li class="simple-checklist--item"><p>a</p></li></ul><p>after</p></div>';
