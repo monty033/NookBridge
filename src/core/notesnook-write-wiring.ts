@@ -332,7 +332,14 @@ export function bindNotesnookWriteRuntime(
   ): Promise<void> => {
     const safePartial = mapContentPartial(partial);
     const safeIds = readStringArray(ids, "invalid_input", true);
-    await safeCall(() => snapshot.content.updateByNoteId(safePartial, ...safeIds));
+    // Pinned @notesnook/core `Content.updateByNoteId` spreads `partial` straight into
+    // the SQL SET and does not clear `synced`, so an edited body would never upload.
+    // Carry `synced: false` in the SAME statement so body write and unsynced flag are
+    // atomic (no partial-failure window between two writes).
+    const unsyncedPartial = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(safePartial)) unsyncedPartial[key] = safePartial[key];
+    unsyncedPartial.synced = false;
+    await safeCall(() => snapshot.content.updateByNoteId(unsyncedPartial, ...safeIds));
   };
 
   const notebookExists = async (id: string): Promise<boolean> => {

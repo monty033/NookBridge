@@ -5,6 +5,14 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
+### Fixed
+
+- Edits to existing notes (`notes.append`, and `notes.update` when content
+  changes) now mark the note's content row as unsynced in the same statement
+  as the body write. Previously the pinned `Content.updateByNoteId` left
+  `synced` untouched, so sync pushed the note row but never the edited body
+  and other clients kept the old content.
+
 ## [0.1.3] - 2026-09-26
 
 Release focused on reliable production operator workflows and clearer command

@@ -985,6 +985,36 @@ describe("Stage 4 write wiring — concrete mapping", () => {
     expect(runtime.calls.contentUpdate[0]?.ids).toEqual([NOTE_ID]);
   });
 
+  it("marks the content row unsynced in the same updateByNoteId statement (atomic)", async () => {
+    const runtime = createFakeRuntime({
+      content: new Map([
+        ["content-1", { id: "content-1", noteId: NOTE_ID, type: "tiptap" as const, data: "{}" }],
+      ]),
+    });
+    const seam = bindNotesnookWriteRuntime(runtime);
+    await seam.contentUpdateByNoteId({ type: "tiptap", data: "new" }, NOTE_ID);
+    expect(runtime.calls.contentUpdate).toHaveLength(1);
+    expect(runtime.calls.contentUpdate[0]?.partial).toEqual({
+      type: "tiptap",
+      data: "new",
+      synced: false,
+    });
+  });
+
+  it("surfaces a categorical error with no detail when the combined update rejects", async () => {
+    const runtime = createFakeRuntime();
+    (runtime as unknown as FakeRuntimeCollections).content.updateByNoteId = async () => {
+      throw new Error("secret-detail /var/lib/nookbridge");
+    };
+    const seam = bindNotesnookWriteRuntime(runtime);
+    const failure = await seam.contentUpdateByNoteId({ data: "new" }, NOTE_ID).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect((failure as unknown as { code?: string }).code).toBe("sync_failed");
+    expect(String(failure?.message)).not.toContain("secret-detail");
+  });
+
   it("forwards notebookExists and notebookNotes", async () => {
     const runtime = createFakeRuntime({
       notebooks: new Map([[NOTEBOOK_ID, { id: NOTEBOOK_ID, title: "Work", notes: [NOTE_ID] }]]),
