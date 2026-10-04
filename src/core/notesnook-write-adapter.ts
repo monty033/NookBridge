@@ -534,6 +534,12 @@ export class NotesnookWriteAdapter {
   async updateNote(command: UpdateNoteCommand): Promise<UpdateNoteResult> {
     const snapshot = snapshotUpdateCommand(command);
     const plan = planUpdateNote(snapshot);
+    if (plan.patchFields.length === 1 && plan.patchFields[0] === "listKind") {
+      throw adapterError(
+        "invalid_input",
+        "Notesnook write adapter: listKind requires a content update",
+      );
+    }
 
     // Re-read immediately before mutation.
     const observed = await this.#readNoteFreshly(plan.id);
@@ -841,7 +847,7 @@ export class NotesnookWriteAdapter {
     } = {
       operation: "update" as const,
       id: plan.id,
-      appliedFields: plan.patchFields,
+      appliedFields: Object.freeze(plan.patchFields.filter((field) => field !== "listKind")),
       localCommitted: true as const,
       remoteSynced: false as const,
       pendingSync: true as const,

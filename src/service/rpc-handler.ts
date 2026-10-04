@@ -1176,6 +1176,12 @@ async function runNotesUpdate(
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "updateNote");
   if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+  if (
+    Object.keys(request.params.patch).length === 1 &&
+    readOwnDataField(request.params.patch as Record<string, unknown>, "listKind") !== undefined
+  ) {
+    return buildErrorEnvelope(id, "invalid_request");
+  }
 
   const patchRecord = objectCreate(null) as Record<string, unknown>;
   const parsedPatch = request.params.patch;

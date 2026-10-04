@@ -34,6 +34,9 @@ import {
   type NotesnookWriteStoredContent,
 } from "../src/core/notesnook-write-adapter.js";
 import type { NotesnookListKind } from "../src/core/notesnook-write-codec.js";
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
+import { serializeRpcResponse } from "../src/service/rpc-protocol.js";
 import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
@@ -1306,40 +1309,114 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(codec.appendCalls).toBe(0);
   });
 
-  it("handles a listKind-only update patch without a sync failure", async () => {
+  it("rejects a listKind-only update before mutation because it has no persisted field", async () => {
     const { adapter, database } = setupUpdatable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    await expect(
+      adapter.updateNote({
+        id: NOTE_ID,
+        patch: { listKind: "task-list" },
+        expectedRevision,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  it("reports only persisted content when content update carries listKind codec intent", async () => {
+    const { adapter, database, codec } = setupUpdatable();
     const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
 
     const result = await adapter.updateNote({
-      id: NOTE_ID,
-      patch: { listKind: "task-list" },
-      expectedRevision,
-    });
-
-    expect(result.operation).toBe("update");
-    expect(result.localCommitted).toBe(true);
-    // listKind is a meta-field, never forwarded as a note attribute, and a
-    // patch carrying only a meta-field must not issue an empty notes update
-    // (the real database rejects it, surfacing as sync_failed).
-    expect(database.calls.update).toHaveLength(0);
-  });
-
-  it("does not issue an empty notes update when a patch carries content and listKind", async () => {
-    const { adapter, database } = setupUpdatable();
-    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
-
-    await adapter.updateNote({
       id: NOTE_ID,
       patch: { content: "- [ ] item", listKind: "task-list" },
       expectedRevision,
     });
 
+    expect(codec.listKindCalls).toEqual(["task-list"]);
+    expect(result.appliedFields).toEqual(["content"]);
+    expect(Object.isFrozen(result.appliedFields)).toBe(true);
+    expect(() => (result.appliedFields as string[]).push("listKind")).toThrow();
+    expect(result.appliedFields).toEqual(["content"]);
     for (const call of database.calls.update) {
       expect(Object.keys(call.partial).length).toBeGreaterThan(0);
       expect(call.partial).not.toHaveProperty("listKind");
     }
     expect(database.calls.contentUpdate).toHaveLength(1);
   });
+
+  it("rejects listKind-only update at the wire boundary before invoking the adapter", async () => {
+    const { adapter, database } = setupUpdatable();
+    const updateNote = vi.fn((command: UpdateNoteCommand) => adapter.updateNote(command));
+    const response = await handleRpcRequest(
+      {
+        id: "list-kind-only-wire",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+          patch: { listKind: "task-list" },
+        },
+      },
+      {
+        search: async () => [],
+        status: async () => ({ lastSynced: 0, hasUnsyncedChanges: false }),
+        listNotebooks: async () => [],
+        noteMetadata: async () => undefined,
+        updateNote,
+      },
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    expect(response).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(updateNote).not.toHaveBeenCalled();
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      patch: { content: "- [ ] item", listKind: "task-list" },
+      fields: ["content"],
+      kind: "task-list",
+    },
+    {
+      patch: { title: "Renamed", content: "- [ ] item", listKind: "task-list" },
+      fields: ["content", "title"],
+      kind: "task-list",
+    },
+    { patch: { content: "- [ ] item" }, fields: ["content"], kind: "simple-checklist" },
+  ] as const)(
+    "projects and serializes the real adapter result for $fields with $kind",
+    async ({ patch, fields, kind }) => {
+      const { adapter, database, codec } = setupUpdatable();
+      const response = await handleRpcRequest(
+        {
+          id: "adapter-rpc-regression",
+          method: "notes.update",
+          params: {
+            id: NOTE_ID,
+            expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+            patch,
+          },
+        },
+        {
+          search: async () => [],
+          status: async () => ({ lastSynced: 0, hasUnsyncedChanges: false }),
+          listNotebooks: async () => [],
+          noteMetadata: async () => undefined,
+          updateNote: (command: UpdateNoteCommand) => adapter.updateNote(command),
+        },
+        createReadWriteNoDeleteServicePolicy(),
+      );
+      expect(database.calls.contentUpdate).toHaveLength(1);
+      expect(codec.listKindCalls).toEqual([kind]);
+      expect(response.ok).toBe(true);
+      if (!response.ok) throw new Error(response.error.code);
+      expect(response.result).toMatchObject({ kind: "update", id: NOTE_ID, appliedFields: fields });
+      expect(() => serializeRpcResponse(response)).not.toThrow();
+    },
+  );
 
   it("refreshes the note content when the patch replaces content", async () => {
     const { adapter, database, codec } = setupUpdatable();

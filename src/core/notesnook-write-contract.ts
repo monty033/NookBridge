@@ -180,11 +180,11 @@ export const STAGE4_WRITE_LIMITS: Stage4WriteLimits = Object.freeze({
  *
  * `listKind` is a meta-field: it does not mutate a note attribute
  * itself, it tells the codec which checklist HTML shape to emit when
- * the patch also carries a `content` field.  Including it in the
- * allowlist lets a wire envelope update the note body and pick the
- * intent in a single patch; a patch that omits `content` is still
- * valid with `listKind` set, and the contract surfaces the resolved
- * kind on the plan so the adapter can forward it to the codec seam.
+ * the patch also carries a `content` field. Including it in the pure
+ * plan allowlist lets validation resolve that intent alongside content.
+ * The adapter requires at least one persisted field: a listKind-only
+ * command may produce a valid pure plan, but is rejected before mutation
+ * because there is no note attribute or content to persist.
  *
  * This is *not* a real `Set` instance.  A real `Set` exposes its internal
  * `[[SetData]]` slot to `Set.prototype.add`/`delete`/`clear` even when the
