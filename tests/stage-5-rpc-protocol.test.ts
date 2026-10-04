@@ -1981,6 +1981,31 @@ describe("parseRpcFrame — content cap (maxContentBytes)", () => {
     });
   }
 
+  // Multi-line Markdown is the normal shape of note content. create and append
+  // already accept tab/LF/CR; notes.update must match, while every other control
+  // character stays rejected.
+  for (const [label, build] of cases) {
+    it(`${label}: accepts multi-line Markdown (LF, CRLF, tab)`, () => {
+      expect(() =>
+        parseRpcFrame(build("## H\n\n- [ ] one\n- [ ] two\r\n\tindented\n")),
+      ).not.toThrow();
+    });
+    for (const bad of ["\u0000", "\u0001", "\u001b", "\u007f"]) {
+      it(`${label}: still rejects control character U+${bad.charCodeAt(0).toString(16).padStart(4, "0")}`, () => {
+        expect(() => parseRpcFrame(build(`line one\n${bad}\nline two`))).toThrow(/rpc protocol/);
+      });
+    }
+  }
+
+  it("notes.update patch title still rejects a newline (title check did not loosen)", () => {
+    const f = frame("notes.update", {
+      id: NOTE_ID,
+      expectedRevision: REV,
+      patch: { title: "a\nb" },
+    });
+    expect(() => parseRpcFrame(f)).toThrow(/rpc protocol/);
+  });
+
   it("still rejects a search query over maxQueryBytes (query cap did not move)", () => {
     const json = JSON.stringify({
       id: "a",

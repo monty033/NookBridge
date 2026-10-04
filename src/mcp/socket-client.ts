@@ -597,7 +597,7 @@ function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> 
     } else if (key === "title") {
       output[key] = requireBoundedSocketString(raw, 256, false);
     } else if (key === "content") {
-      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxContentBytes, false);
+      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxContentBytes, false, true);
     } else if (key === "notebookId") {
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxIdentifierBytes, true);
     } else if (key === "listKind") {
@@ -640,11 +640,23 @@ function isClosedListKind(value: unknown): value is NotesnookListKind {
   return typeof value === "string" && NOTESNOOK_LIST_KINDS.includes(value as NotesnookListKind);
 }
 
-function requireBoundedSocketString(value: unknown, maxBytes: number, identifier: boolean): string {
+/**
+ * `markdownContent` marks note body text: tab/LF/CR are structural whitespace there
+ * (as in create/append), while every other control character stays invalid.
+ */
+function requireBoundedSocketString(
+  value: unknown,
+  maxBytes: number,
+  identifier: boolean,
+  markdownContent = false,
+): string {
   if (typeof value !== "string" || value.length === 0 || value.length > maxBytes) {
     throw new TypeError("nook-mcp: update patch is invalid");
   }
-  if (Buffer.byteLength(value, "utf8") > maxBytes || hasControlCharacter(value)) {
+  const hasBadControl = markdownContent
+    ? hasDisallowedControlCharacter(value)
+    : hasControlCharacter(value);
+  if (Buffer.byteLength(value, "utf8") > maxBytes || hasBadControl) {
     throw new TypeError("nook-mcp: update patch is invalid");
   }
   if (identifier && !isSafeIdentifier(value)) {

@@ -1132,8 +1132,7 @@ function normaliseUpdatePatch(value: unknown): Record<string, unknown> {
     const field = value[key];
     if (key === "title" && !isBoundedText(field, NOOK_MCP_MAX_TITLE_BYTES))
       throw new Error("invalid patch");
-    if (key === "content" && !isBoundedText(field, NOOK_MCP_MAX_CONTENT_BYTES))
-      throw new Error("invalid patch");
+    if (key === "content" && !isAppendableMarkdown(field)) throw new Error("invalid patch");
     if (key === "notebookId" && !isBoundedIdentifier(field)) throw new Error("invalid patch");
     if (key === "listKind" && !isClosedListKind(field)) throw new Error("invalid patch");
     if (key === "tags") {

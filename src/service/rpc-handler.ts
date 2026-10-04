@@ -677,7 +677,7 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "content") {
-        if (!isBoundedRpcText(value, STAGE5_RPC_LIMITS.maxContentBytes)) {
+        if (!isBoundedRpcContent(value, STAGE5_RPC_LIMITS.maxContentBytes)) {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "notebookId") {
@@ -805,6 +805,17 @@ function isBoundedRpcText(value: unknown, maxBytes: number): value is string {
     value.length <= maxBytes &&
     bufferByteLength(value, "utf8") <= maxBytes &&
     !hasControlCharacter(value)
+  );
+}
+
+/** Note content is multi-line Markdown: tab/LF/CR are allowed, other controls are not. */
+function isBoundedRpcContent(value: unknown, maxBytes: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxBytes &&
+    bufferByteLength(value, "utf8") <= maxBytes &&
+    !hasDisallowedControlCharacter(value)
   );
 }
 

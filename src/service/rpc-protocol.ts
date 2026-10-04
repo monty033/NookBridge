@@ -1368,7 +1368,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
         value.length > STAGE5_RPC_LIMITS.maxContentBytes ||
         utf8ByteLength(value, STAGE5_RPC_LIMITS.maxContentBytes) >
           STAGE5_RPC_LIMITS.maxContentBytes ||
-        hasControlCharacter(value)
+        hasDisallowedControlCharacter(value)
       ) {
         throw rpcProtocolError("rpc protocol: update patch content is invalid");
       }

@@ -247,7 +247,24 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
         const over = await run(method, "x".repeat(4097));
         expect(over.ok).toBe(false);
       });
+      it(`${method} accepts multi-line Markdown (LF, CRLF, tab)`, async () => {
+        expect((await run(method, "## H\n\n- [ ] one\r\n\t- [ ] two\n")).ok).toBe(true);
+      });
+      it(`${method} still rejects other control characters in content`, async () => {
+        for (const bad of ["\u0000", "\u0001", "\u001b", "\u007f"]) {
+          expect((await run(method, `a\n${bad}\nb`)).ok).toBe(false);
+        }
+      });
     }
+
+    it("notes.update patch title still rejects a newline at the handler", async () => {
+      const response = await handleRpcRequest(
+        request("notes.update", { id: ID, expectedRevision: REV, patch: { title: "a\nb" } }),
+        makeRuntime({ updateNote: vi.fn(async () => updateResult()), notebookIndex: makeIndex() }),
+        policy(),
+      );
+      expect(response.ok).toBe(false);
+    });
   });
 
   it("forwards listKind='task-list' through the handler into updateNote patch", async () => {
