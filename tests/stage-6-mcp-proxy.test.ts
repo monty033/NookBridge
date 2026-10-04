@@ -983,6 +983,66 @@ describe("NookdSocketClient", () => {
     });
   });
 
+  it("sends multi-line update content over the wire and rejects other controls before connecting", async () => {
+    const dir = makeTempDir();
+    const socketPath = join(dir, "update-multiline.sock");
+    const captured: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const server = createServer((socket) => {
+      let buffer = Buffer.alloc(0);
+      socket.on("data", (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (buffer.length < 4) return;
+        const len = buffer.readUInt32BE(0);
+        if (buffer.length < 4 + len) return;
+        const payload = JSON.parse(buffer.subarray(4, 4 + len).toString("utf8")) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        captured.push({ method: payload.method, params: payload.params });
+        const response = Buffer.from(
+          JSON.stringify({
+            id: payload.id,
+            ok: true,
+            result: { kind: "update", id: "note-1", appliedFields: ["content"] },
+          }),
+          "utf8",
+        );
+        const frame = Buffer.alloc(4 + response.length);
+        frame.writeUInt32BE(response.length, 0);
+        response.copy(frame, 4);
+        socket.write(frame);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    const multiline = "## H\n\n- [ ] one\r\n\t- [ ] two\n";
+    const id = "0123456789abcdef0123456789abcdef";
+    const expectedRevision = "rev_00000000000000000000000000000000";
+    try {
+      const client = new NookdSocketClient({ socketPath });
+      const ok = await client.updateNote({ id, expectedRevision, patch: { content: multiline } });
+      expect(ok.ok).toBe(true);
+      for (const bad of ["\u0000", "\u0001", "\u001b", "\u007f"]) {
+        const rejected = await client.updateNote({
+          id,
+          expectedRevision,
+          patch: { content: `a\n${bad}\nb` },
+        });
+        expect(rejected).toEqual({ ok: false, code: "invalid_request" });
+      }
+      const badTitle = await client.updateNote({
+        id,
+        expectedRevision,
+        patch: { title: "a\nb" },
+      });
+      expect(badTitle).toEqual({ ok: false, code: "invalid_request" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.params.patch).toEqual({ content: multiline });
+  });
+
   it("rejects a listKind outside the closed set before opening the socket", async () => {
     const dir = makeTempDir();
     const socketPath = join(dir, "listkind-bad.sock");

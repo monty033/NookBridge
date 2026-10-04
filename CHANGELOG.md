@@ -7,6 +7,13 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- `notes.update` now accepts multi-line Markdown in `patch.content`. Four
+  layers (the MCP tool validator, the socket client, the RPC parser, and the RPC
+  handler) rejected tab, newline, and carriage return in update content, so any
+  multi-line update failed with a bare `invalid_request`. They now match
+  `notes.create` and `notes.append`: tab, LF, and CR are allowed, every other
+  control character is still rejected, and the title and identifier checks are
+  unchanged.
 - The trailing-checklist merge in `notes.append` now matches stored lists that
   carry Notesnook's `data-block-id` attributes. Notesnook adds those to every
   list and paragraph when content is read, so the previous bare-tag matcher

@@ -237,6 +237,49 @@ describe("Stage 7 Slice 3 — bounded MCP write surface", () => {
     });
   });
 
+  it("accepts multi-line update content at the MCP boundary and rejects other controls", async () => {
+    const client = makeClient();
+    const updateNote = vi.spyOn(client, "updateNote").mockResolvedValue({
+      ok: true,
+      envelope: {
+        id: "rpc-ml",
+        ok: true,
+        result: { kind: "update", id: "note-1", appliedFields: ["content"], contentBytes: 30 },
+      },
+    });
+    const server = buildNookMcpServer({ client });
+    const multiline = "## H\n\n- [ ] one\r\n\t- [ ] two\n";
+
+    const ok = await server.callTool("notesnook_update_note", {
+      id: "note-1",
+      expectedRevision: REVISION,
+      patch: { content: multiline },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(updateNote).toHaveBeenCalledTimes(1);
+    expect(updateNote).toHaveBeenCalledWith({
+      id: "note-1",
+      expectedRevision: REVISION,
+      patch: { content: multiline },
+    });
+
+    for (const bad of ["\u0000", "\u0001", "\u001b", "\u007f"]) {
+      const rejected = await server.callTool("notesnook_update_note", {
+        id: "note-1",
+        expectedRevision: REVISION,
+        patch: { content: `a\n${bad}\nb` },
+      });
+      expect(rejected.isError).toBe(true);
+    }
+    const badTitle = await server.callTool("notesnook_update_note", {
+      id: "note-1",
+      expectedRevision: REVISION,
+      patch: { title: "a\nb" },
+    });
+    expect(badTitle.isError).toBe(true);
+    expect(updateNote).toHaveBeenCalledTimes(1);
+  });
+
   it("accepts a title-only root-note delete path at the MCP boundary", async () => {
     const client = makeClient();
     const deleteNote = vi.spyOn(client, "deleteNote").mockResolvedValue({
