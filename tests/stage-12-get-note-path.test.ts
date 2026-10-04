@@ -5,7 +5,7 @@ import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-pol
 import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 import { buildNookMcpServer } from "../src/mcp/nook-mcp-server.js";
-import type { RpcRequest } from "../src/service/rpc-protocol.js";
+import { STAGE5_RPC_LIMITS, type RpcRequest } from "../src/service/rpc-protocol.js";
 
 const request = (params: Record<string, unknown>) =>
   ({ id: "get-1", method: "notes.get", params }) as unknown as RpcRequest;
@@ -44,6 +44,8 @@ describe("notes.get exact path", () => {
     expect(response.ok && response.result.kind === "note" && response.result.markdown).toContain(
       "Hello",
     );
+    if (!response.ok) throw new Error("expected successful note result");
+    expect(response.result).not.toHaveProperty("contentReason");
   });
   it("does not read locked path-resolved notes", async () => {
     const reader = vi.fn(async () => ({ type: "html" as const, data: "<p>Hello</p>" }));
@@ -60,6 +62,95 @@ describe("notes.get exact path", () => {
       response.ok && response.result.kind === "note" && "markdownBytes" in response.result,
     ).toBe(false);
     expect(reader).not.toHaveBeenCalled();
+    if (!response.ok) throw new Error("expected successful locked result");
+    expect(response.result).not.toHaveProperty("contentReason");
+  });
+  it("reports reader_unavailable when the content reader is absent", async () => {
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({ readOnly: {} }),
+    );
+    expect(
+      response.ok && response.result.kind === "note" ? response.result : undefined,
+    ).toMatchObject({ contentStatus: "unavailable", contentReason: "reader_unavailable" });
+    if (!response.ok) throw new Error("expected successful unavailable result");
+    expect(response.result).not.toHaveProperty("markdown");
+    expect(response.result).not.toHaveProperty("markdownBytes");
+  });
+  it("reports reader_unavailable when the reader capability getter throws", async () => {
+    const readOnly = {};
+    Object.defineProperty(readOnly, "readOperatorNoteContent", {
+      get() {
+        throw new Error("CAPABILITY_SECRET/private");
+      },
+    });
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({ readOnly }),
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      result: { contentStatus: "unavailable", contentReason: "reader_unavailable" },
+    });
+    expect(JSON.stringify(response)).not.toContain("CAPABILITY_SECRET");
+    if (!response.ok) throw new Error("expected successful unavailable result");
+    expect(response.result).not.toHaveProperty("markdown");
+    expect(response.result).not.toHaveProperty("markdownBytes");
+  });
+  it("reports read_failed without exposing thrown reader details", async () => {
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({
+        readOnly: {
+          readOperatorNoteContent: async () => {
+            throw new Error("secret");
+          },
+        },
+      }),
+    );
+    expect(
+      response.ok && response.result.kind === "note" ? response.result : undefined,
+    ).toMatchObject({ contentStatus: "unavailable", contentReason: "read_failed" });
+    expect(JSON.stringify(response)).not.toContain("secret");
+    if (!response.ok) throw new Error("expected successful unavailable result");
+    expect(response.result).not.toHaveProperty("markdown");
+    expect(response.result).not.toHaveProperty("markdownBytes");
+  });
+  it("withholds oversize content without a reason or byte count", async () => {
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({
+        readOnly: {
+          readOperatorNoteContent: async () => ({
+            type: "html",
+            data: `<p>${"x".repeat(STAGE5_RPC_LIMITS.maxResponseBytes + 1)}</p>`,
+          }),
+        },
+      }),
+    );
+    expect(response).toMatchObject({ ok: true, result: { contentStatus: "oversize" } });
+    if (!response.ok) throw new Error("expected successful oversize result");
+    for (const key of ["contentReason", "markdown", "markdownBytes"])
+      expect(response.result).not.toHaveProperty(key);
+  });
+  it("classifies malformed reader envelopes as read_failed, not a guessed exception category", async () => {
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({
+        readOnly: {
+          readOperatorNoteContent: async () =>
+            ({ type: "unknown", data: "SECRET" }) as unknown as Readonly<{
+              type: "html" | "tiptap";
+              data: string;
+            }>,
+        },
+      }),
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      result: { contentStatus: "unavailable", contentReason: "read_failed" },
+    });
+    expect(JSON.stringify(response)).not.toContain("SECRET");
   });
   it.each([
     ["not_found", "not_found"],

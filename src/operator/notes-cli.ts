@@ -299,7 +299,12 @@ export type NotesCategoricalResult =
   | Readonly<{ kind: "invalid-input" }>
   | Readonly<{ kind: "locked" }>
   | Readonly<{ kind: "missing" }>
-  | Readonly<{ kind: "error"; message: string; exitCode: 2 | 3 }>;
+  | Readonly<{
+      kind: "error";
+      message: string;
+      exitCode: 2 | 3;
+      reason?: "service_unavailable" | "sync_failed" | "invalid_response";
+    }>;
 
 // ---------------------------------------------------------------------------
 // Runtime seam.
@@ -488,7 +493,10 @@ export function formatNotesHelp(): string {
  * handles cross this boundary. Labels, bodies, IDs, revisions, paths, causes,
  * and upstream messages are intentionally discarded.
  */
-export function formatNotesResult(result: NotesCategoricalResult): string {
+export function formatNotesResult(
+  result: NotesCategoricalResult,
+  context: "legacy" | "browse" = "legacy",
+): string {
   try {
     switch (result.kind) {
       case "help":
@@ -572,8 +580,18 @@ export function formatNotesResult(result: NotesCategoricalResult): string {
         return "nookctl notes: missing\n";
       case "empty":
         return "nookctl notes: empty\n";
-      case "error":
-        return "nookctl notes: error\n";
+      case "error": {
+        if (context !== "browse") return "nookctl notes: error\n";
+        let reason: unknown;
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(result, "reason");
+          reason = descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+        } catch {
+          reason = undefined;
+        }
+        const allowedReasons = ["service_unavailable", "sync_failed", "invalid_response"] as const;
+        return `nookctl notes: ${allowedReasons.find((candidate) => candidate === reason) ?? "service_unavailable"}\n`;
+      }
       default: {
         // Exhaustiveness guard.  Every variant of NotesCategoricalResult must
         // return above; a new variant without a formatter case must fail to

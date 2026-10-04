@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { URL } from "node:url";
 
 import {
+  createNotesCommandRuntimeFromOperatorSocket,
   createNotesCommandRuntimeFromReadOnly,
   createNotesOpaqueHandleCodec,
   createNotesReadSource,
   createProductionNotesRuntime,
 } from "../src/operator/notes-production-runtime.js";
+import type { OperatorSocketResult } from "../src/operator/operator-socket-client.js";
 import type { NotesCategoricalResult } from "../src/operator/notes-cli.js";
 
 function expectPage(result: NotesCategoricalResult) {
@@ -19,6 +21,81 @@ function expectNote(result: NotesCategoricalResult) {
   if (result.kind !== "note") throw new Error(`expected note, got ${result.kind}`);
   return result;
 }
+
+describe("operator socket browse categorical mapping", () => {
+  const socket = (response: OperatorSocketResult | (() => Promise<OperatorSocketResult>)) =>
+    createNotesCommandRuntimeFromOperatorSocket({
+      request: async () => (typeof response === "function" ? await response() : response),
+    });
+
+  it.each([
+    ["not_found", { kind: "missing" }],
+    ["permission_denied", { kind: "denied" }],
+    ["invalid_request", { kind: "invalid-input" }],
+    ["vault_locked", { kind: "locked" }],
+    ["stale_revision", { kind: "conflict" }],
+    ["conflict", { kind: "conflict" }],
+    ["sync_failed", { kind: "error", message: "sync failed", exitCode: 3, reason: "sync_failed" }],
+    [
+      "service_unavailable",
+      {
+        kind: "error",
+        message: "nookctl notes: runtime unavailable",
+        exitCode: 3,
+        reason: "service_unavailable",
+      },
+    ],
+  ] as const)("preserves trusted %s category", async (code, expected) => {
+    const runtime = socket({ ok: false, code });
+    await expect(runtime.browse({})).resolves.toEqual(expected);
+  });
+
+  it("labels an unexpected success payload as invalid_response", async () => {
+    const runtime = socket({
+      ok: true,
+      result: {
+        kind: "view",
+        id: "x",
+        markdown: "",
+        revision: "rev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        contentBytes: 0,
+      },
+    });
+    await expect(runtime.browse({})).resolves.toMatchObject({
+      kind: "error",
+      reason: "invalid_response",
+    });
+  });
+
+  it("collapses thrown exceptions and arbitrary codes without details", async () => {
+    for (const request of [
+      async () => {
+        throw Object.assign(new Error("/private/path BODY_SECRET"), { code: "vault_locked" });
+      },
+      async () => ({ ok: false, code: "unexpected_secret" }) as unknown as OperatorSocketResult,
+    ]) {
+      const runtime = socket(request);
+      const result = await runtime.browse({});
+      expect(result).toMatchObject({ kind: "error", reason: "service_unavailable" });
+      expect(JSON.stringify(result)).not.toContain("BODY_SECRET");
+      expect(JSON.stringify(result)).not.toContain("/private/path");
+    }
+  });
+
+  it("retains valid page and empty responses", async () => {
+    const page = socket({
+      ok: true,
+      result: {
+        kind: "operator-page",
+        notes: [{ handle: "h_Ab12Ab12Ab12Ab12Ab12Ab12", label: "x", bytes: 1 }],
+        next: null,
+      },
+    });
+    await expect(page.browse({})).resolves.toMatchObject({ kind: "page" });
+    const empty = socket({ ok: true, result: { kind: "operator-page", notes: [], next: null } });
+    await expect(empty.browse({})).resolves.toEqual({ kind: "empty" });
+  });
+});
 
 describe("Stage 9 production read-only notes composition", () => {
   it("uses only the closed list/search/note metadata source surface", async () => {

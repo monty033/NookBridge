@@ -180,10 +180,10 @@ function restoreEnv(): void {
 //     The dispatcher prints the parser message to stderr (prefixed by
 //     `nookctl:`) and returns exit code 2.
 //
-// Because the closed-categorical formatter NEVER echoes the result
-// message into stdout, and because the dispatcher's stderr wrapper
-// prefixes parser messages with `nookctl:` and never interpolates
-// argv / env values, these signals together prove:
+// The formatter prints an allowlisted reason for runtime errors; it never
+// prints the internal message.
+// The dispatcher stderr wrapper prefixes parser messages with `nookctl:` and
+// never interpolates argv / env values, so these signals together prove:
 //
 //   exit === 0 + help text  →  runtime NOT reached
 //   exit === 3 + "nookctl notes: error\n"  →  runtime WAS reached
@@ -321,10 +321,9 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
     try {
       const out = await driveCli(["notes", "browse"]);
       expect(out.code).toBe(3);
-      expect(out.stdout).toBe("nookctl notes: error\n");
+      expect(out.stdout).toBe("nookctl notes: service_unavailable\n");
       expect(out.stderr).toBe("");
-      // The runtime seam must have been reached exactly once for the
-      // single valid `browse` invocation.
+      // The runtime seam is reached and reports its closed service category.
       expect(probe.calls).toBeGreaterThanOrEqual(1);
     } finally {
       delete internal.notesRuntimeFactory;
@@ -335,7 +334,7 @@ describe("nookctl notes — valid commands reach the fixed unavailable seam", ()
     const cursor = "pag_abc1234";
     const out = await driveCli(["notes", "browse", "--cursor", cursor, "--limit", "5"]);
     expect(out.code).toBe(3);
-    expect(out.stdout).toBe("nookctl notes: error\n");
+    expect(out.stdout).toBe("nookctl notes: service_unavailable\n");
     expect(out.stderr).toBe("");
     // The opaque cursor must NEVER echo into either stream.
     expect(out.stdout).not.toContain(cursor);

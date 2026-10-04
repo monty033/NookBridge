@@ -890,7 +890,14 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         "markdownBytes",
       ]);
       const hasNoContent = hasExactOwnKeys(resultRecord, ["kind", "note", "contentStatus"]);
-      if (!hasContent && !hasNoContent) throw new Error("invalid response");
+      const hasUnavailableReason = hasExactOwnKeys(resultRecord, [
+        "kind",
+        "note",
+        "contentStatus",
+        "contentReason",
+      ]);
+      if (!hasContent && !hasNoContent && !hasUnavailableReason)
+        throw new Error("invalid response");
       if (
         resultRecord.contentStatus !== "ok" &&
         resultRecord.contentStatus !== "locked" &&
@@ -899,12 +906,25 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       )
         throw new Error("invalid response");
       if (hasContent !== (resultRecord.contentStatus === "ok")) throw new Error("invalid response");
+      if (
+        hasUnavailableReason &&
+        (resultRecord.contentStatus !== "unavailable" ||
+          (resultRecord.contentReason !== "reader_unavailable" &&
+            resultRecord.contentReason !== "read_failed"))
+      )
+        throw new Error("invalid response");
       const note = decodeNote(resultRecord.note);
       if (!hasContent) {
+        const noContentResult: Record<string, unknown> = {
+          kind: "note",
+          note,
+          contentStatus: resultRecord.contentStatus,
+        };
+        if (hasUnavailableReason) noContentResult.contentReason = resultRecord.contentReason;
         return Object.freeze({
           id: candidate.id,
           ok: true,
-          result: Object.freeze({ kind: "note", note, contentStatus: resultRecord.contentStatus }),
+          result: Object.freeze(noContentResult),
         }) as unknown as RpcAnyResponseEnvelope;
       }
       if (

@@ -47,6 +47,14 @@ external service, that disclosure is outside NookBridge's local encryption and
 Unix-socket protections. Configure the client and its model/provider according
 to the privacy requirements for the information it is allowed to retrieve.
 
+Error diagnostics remain categorical and redacted. The MCP update tool's
+optional refusal reason is a closed allowlist and is emitted only alongside
+`invalid_request`; fixed messages do not expose parser text, request bodies,
+paths, or upstream exceptions. `notes.get` may distinguish an unavailable
+reader from a failed read with an optional categorical `contentReason`, but
+never includes that field for locked or oversize content results. Older
+reason-omitting result shapes remain valid; see the [MCP tool reference](reference/mcp-tools.md).
+
 For detailed threat model, review evidence, and fail-closed requirements, see
 the [implementation plan](implementation-plan-v1.5.md#9-security-and-privacy-model)
 and [security reviews](security-reviews.md).

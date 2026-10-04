@@ -1619,7 +1619,7 @@ async function runNotesGet(
     note = normaliseNoteMetadata(raw);
     if (note === undefined) return buildErrorEnvelope(id, "service_unavailable");
   }
-  const { contentStatus, markdown, markdownBytes } = await readBoundedNoteContent(
+  const { contentStatus, contentReason, markdown, markdownBytes } = await readBoundedNoteContent(
     runtime,
     noteId,
     note,
@@ -1634,6 +1634,14 @@ async function runNotesGet(
       writable: false,
     },
   };
+  if (contentReason !== undefined) {
+    descriptors.contentReason = {
+      value: contentReason,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    };
+  }
   if (contentStatus === "ok") {
     descriptors.markdown = {
       value: markdown,
@@ -1671,6 +1679,7 @@ async function readBoundedNoteContent(
   note: Record<string, unknown>,
 ): Promise<{
   readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
+  readonly contentReason?: "reader_unavailable" | "read_failed";
   readonly markdown?: string;
   readonly markdownBytes?: number;
 }> {
@@ -1687,7 +1696,8 @@ async function readBoundedNoteContent(
   } catch {
     reader = undefined;
   }
-  if (reader === undefined) return { contentStatus: "unavailable" };
+  if (reader === undefined)
+    return { contentStatus: "unavailable", contentReason: "reader_unavailable" };
   try {
     const envelope = await reflectApply(reader, runtime.readOnly, [noteId]);
     const revisionField = note.revision;
@@ -1727,7 +1737,7 @@ async function readBoundedNoteContent(
     }
     return { contentStatus: "ok", markdown, markdownBytes };
   } catch {
-    return { contentStatus: "unavailable" };
+    return { contentStatus: "unavailable", contentReason: "read_failed" };
   }
 }
 

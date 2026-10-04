@@ -593,6 +593,104 @@ describe("parseRpcFrame — listKind intent (create / append / update)", () => {
 });
 
 describe("serializeRpcResponse", () => {
+  const unavailableReasonResult = () => ({
+    kind: "note" as const,
+    note: { id: "note-1", title: "Memo" },
+    contentStatus: "unavailable" as const,
+    contentReason: "read_failed" as const,
+  });
+  const serializeReasonResult = (result: unknown) =>
+    serializeRpcResponse({
+      id: "reason-guard",
+      ok: true,
+      result,
+    } as unknown as RpcResponseEnvelope);
+
+  it("rejects reason accessors without invoking them", () => {
+    let reads = 0;
+    const result = unavailableReasonResult();
+    Object.defineProperty(result, "contentReason", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return "read_failed";
+      },
+    });
+    expect(() => serializeReasonResult(result)).toThrow();
+    expect(reads).toBe(0);
+  });
+  it("rejects unknown, inherited, nonenumerable and hostile proxy reason fields", () => {
+    expect(() =>
+      serializeReasonResult({ ...unavailableReasonResult(), contentReason: "SECRET/path" }),
+    ).toThrow();
+    const { contentReason: _reason, ...legacy } = unavailableReasonResult();
+    void _reason;
+    const inherited = Object.assign(Object.create({ contentReason: "read_failed" }), legacy);
+    expect(() => serializeReasonResult(inherited)).toThrow();
+    const hidden = unavailableReasonResult();
+    Object.defineProperty(hidden, "contentReason", { value: "read_failed", enumerable: false });
+    expect(() => serializeReasonResult(hidden)).toThrow();
+    const proxy = new Proxy(unavailableReasonResult(), {
+      ownKeys() {
+        throw new Error("SECRET");
+      },
+    });
+    expect(() => serializeReasonResult(proxy)).toThrow();
+    expect(() =>
+      serializeReasonResult({ ...unavailableReasonResult(), rawCause: "SECRET" }),
+    ).toThrow();
+  });
+  it.each(["ok", "locked", "oversize"] as const)("rejects reason on %s status", (status) => {
+    const result = {
+      ...unavailableReasonResult(),
+      contentStatus: status,
+      ...(status === "ok" ? { markdown: "safe", markdownBytes: 4 } : {}),
+    };
+    const { contentReason: _reason, ...withoutReason } = result;
+    void _reason;
+    expect(() => serializeReasonResult(withoutReason)).not.toThrow();
+    expect(() => serializeReasonResult(result)).toThrow();
+  });
+  it("accepts legacy unavailable results without a reason", () => {
+    const { contentReason: _reason, ...legacy } = unavailableReasonResult();
+    void _reason;
+    const decoded = decode(serializeReasonResult(legacy));
+    expect(decoded.result).toEqual(legacy);
+    expect(decoded.result).not.toHaveProperty("contentReason");
+  });
+  it.each(["reader_unavailable", "read_failed"] as const)(
+    "serializes unavailable note reason %s",
+    (reason) => {
+      const bytes = serializeRpcResponse({
+        id: "reason",
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Memo" },
+          contentStatus: "unavailable",
+          contentReason: reason,
+        },
+      });
+      expect(decode(bytes).result).toMatchObject({
+        contentStatus: "unavailable",
+        contentReason: reason,
+      });
+    },
+  );
+  it("rejects a content reason with locked status", () => {
+    expect(() =>
+      serializeRpcResponse({
+        id: "bad",
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Memo" },
+          contentStatus: "locked",
+          contentReason: "read_failed",
+        },
+      } as never),
+    ).toThrow();
+  });
   it("serializes a success envelope with the documented fields", () => {
     const envelope: RpcResponseEnvelope = {
       id: "a",

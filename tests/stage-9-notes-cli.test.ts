@@ -1253,6 +1253,45 @@ describe("formatNotesResult — closed output boundary", () => {
       "nookctl notes: error\n",
     );
   });
+  it("prints only own data-property allowlisted error reasons", () => {
+    const legacy = { kind: "error", message: "secret", exitCode: 3 } as const;
+    const withReason = (reason: unknown) =>
+      ({ ...legacy, reason }) as unknown as NotesCategoricalResult;
+    expect(formatNotesResult(withReason("sync_failed"), "browse")).toBe(
+      "nookctl notes: sync_failed\n",
+    );
+    expect(formatNotesResult(withReason("invalid_response"), "browse")).toBe(
+      "nookctl notes: invalid_response\n",
+    );
+    expect(formatNotesResult(withReason("vault_locked"), "browse")).toBe(
+      "nookctl notes: service_unavailable\n",
+    );
+    expect(formatNotesResult(legacy)).toBe("nookctl notes: error\n");
+    expect(formatNotesResult(withReason("sync_failed"))).toBe("nookctl notes: error\n");
+    expect(formatNotesResult(legacy, "browse")).toBe("nookctl notes: service_unavailable\n");
+    const inherited = Object.assign(
+      Object.create({ reason: "sync_failed" }),
+      legacy,
+    ) as unknown as NotesCategoricalResult;
+    expect(formatNotesResult(inherited, "browse")).toBe("nookctl notes: service_unavailable\n");
+    const throwingGetter = Object.create(legacy, {
+      reason: {
+        get() {
+          throw new Error("SECRET");
+        },
+      },
+    }) as NotesCategoricalResult;
+    expect(formatNotesResult(throwingGetter, "browse")).toBe(
+      "nookctl notes: service_unavailable\n",
+    );
+    const proxy = new Proxy(legacy, {
+      getOwnPropertyDescriptor() {
+        throw new Error("SECRET");
+      },
+    }) as unknown as NotesCategoricalResult;
+    expect(formatNotesResult(proxy, "browse")).toBe("nookctl notes: service_unavailable\n");
+  });
+
   it("never forwards runtime error text or help text", () => {
     expect(
       formatNotesResult({
