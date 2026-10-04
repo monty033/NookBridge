@@ -365,7 +365,7 @@ function serializeRequest(
       hasControlCharacter(create.title) ||
       typeof create.content !== "string" ||
       create.content.length === 0 ||
-      Buffer.byteLength(create.content, "utf8") > 512 ||
+      Buffer.byteLength(create.content, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(create.content) ||
       (create.notebookId !== undefined &&
         (!isSafeIdentifier(create.notebookId) ||
@@ -388,7 +388,7 @@ function serializeRequest(
       Buffer.byteLength(append.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
       typeof append.markdownFragment !== "string" ||
       append.markdownFragment.length === 0 ||
-      Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxQueryBytes ||
+      Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
       hasDisallowedControlCharacter(append.markdownFragment) ||
       typeof append.expectedRevision !== "string" ||
       !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision) ||
@@ -597,7 +597,7 @@ function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> 
     } else if (key === "title") {
       output[key] = requireBoundedSocketString(raw, 256, false);
     } else if (key === "content") {
-      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxQueryBytes, false);
+      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxContentBytes, false);
     } else if (key === "notebookId") {
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxIdentifierBytes, true);
     } else if (key === "listKind") {
@@ -931,7 +931,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         typeof resultRecord.contentBytes !== "number" ||
         !Number.isInteger(resultRecord.contentBytes) ||
         resultRecord.contentBytes < 0 ||
-        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes
       )
         throw new Error("invalid response");
       return Object.freeze({
@@ -954,7 +954,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         typeof resultRecord.fragmentBytes !== "number" ||
         !Number.isFinite(resultRecord.fragmentBytes) ||
         resultRecord.fragmentBytes < 0 ||
-        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxQueryBytes
+        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxContentBytes
       )
         throw new Error("invalid response");
       return Object.freeze({
@@ -992,7 +992,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
           (typeof resultRecord.contentBytes !== "number" ||
             !Number.isFinite(resultRecord.contentBytes) ||
             resultRecord.contentBytes < 0 ||
-            resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxQueryBytes))
+            resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes))
       )
         throw new Error("invalid response");
       const updateResult: Record<string, unknown> = {

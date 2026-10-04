@@ -1038,12 +1038,47 @@ function boundedStored(type: "tiptap" | "html", data: string): NotesnookStoredCo
  * without breaking subsequent reads; the existing test suite codifies that
  * contract.
  */
+function mergeTrailingChecklist(storedData: string, fragmentHtml: string): string | null {
+  const fragmentMatch =
+    /^(<ul class="(simple-checklist|checklist)">)((?:<li(?: class="(?:checked )?(?:simple-checklist|checklist)--item")?><p>(?:(?!<\/p>)[\s\S])*<\/p><\/li>)+)<\/ul>$/.exec(
+      fragmentHtml,
+    );
+  if (fragmentMatch === null) return null;
+  const kind = fragmentMatch[2] === "checklist" ? "task-list" : "simple-checklist";
+  const expectedClass = kind === "task-list" ? "checklist" : "simple-checklist";
+  const rootClose = /<\/div>\s*$/.exec(storedData);
+  if (rootClose === null) return null;
+  const rootEnd = storedData.length - rootClose[0].length;
+  const inner = storedData.slice(0, rootEnd);
+  const open = `<ul class="${expectedClass}">`;
+  const closeAt = inner.lastIndexOf("</ul>");
+  if (closeAt < 0) return null;
+  const openAt = inner.lastIndexOf(open, closeAt);
+  if (openAt < 0) return null;
+  const tail = inner.slice(openAt, closeAt + 5);
+  const items = tail.slice(open.length, -5);
+  if (
+    items.length === 0 ||
+    !/^(?:<li(?: class="(?:checked )?(?:simple-checklist|checklist)--item")?><p>(?:(?!<\/p>)[\s\S])*<\/p><\/li>)+$/.test(
+      items,
+    ) ||
+    (expectedClass === "checklist" && items.includes("simple-checklist")) ||
+    (expectedClass === "simple-checklist" && items.includes('class="checklist--item"'))
+  )
+    return null;
+  const after = inner.slice(closeAt + 5);
+  if (after !== "" && /<(?:ul|li|p|h[1-6]|blockquote|table)\b/.test(after)) return null;
+  return `${inner.slice(0, closeAt)}${fragmentMatch[3]}</ul>${after}${rootClose[0]}`;
+}
+
 function appendStored(
   storedType: "tiptap" | "html",
   storedData: string,
   fragmentHtml: string,
 ): string {
   if (storedType === "tiptap") {
+    const merged = mergeTrailingChecklist(storedData, fragmentHtml);
+    if (merged !== null) return merged;
     const trailingMatch = /<\/div>\s*$/.exec(storedData);
     if (trailingMatch === null) return `${storedData}${fragmentHtml}`;
     const head = storedData.slice(0, storedData.length - trailingMatch[0].length);

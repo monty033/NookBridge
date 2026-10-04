@@ -7,6 +7,14 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- Content inputs for `notes.create`, `notes.append`, and `notes.update` now
+  accept up to 4096 UTF-8 bytes (previously 512). The RPC boundary gains a
+  dedicated `maxContentBytes` limit; query, path, title, and identifier caps
+  are unchanged.
+- `notes.append` now merges a checklist fragment into the document's trailing
+  list when it is the same kind (`simple-checklist` or `task-list`) instead of
+  starting a second list. Nested, mixed, or non-trailing lists keep the
+  previous append behavior.
 - Edits to existing notes (`notes.append`, and `notes.update` when content
   changes) now mark the note's content row as unsynced in the same statement
   as the body write. Previously the pinned `Content.updateByNoteId` left
