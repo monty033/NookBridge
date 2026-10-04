@@ -7,6 +7,11 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- `notes.update` no longer fails with `sync_failed` when the patch carries
+  `listKind`. The adapter treated `listKind` (a codec intent, not a note
+  attribute) as a metadata field and issued a notes update with an empty
+  partial, which the database rejects. `listKind` now only steers how `content`
+  is encoded, and a `listKind`-only patch is a no-op that still commits.
 - `notes.update` now accepts multi-line Markdown in `patch.content`. Four
   layers (the MCP tool validator, the socket client, the RPC parser, and the RPC
   handler) rejected tab, newline, and carriage return in update content, so any
