@@ -546,7 +546,10 @@ export class NotesnookWriteAdapter {
     let contentBytes: number | undefined;
 
     for (const field of plan.patchFields) {
-      if (field === "content") continue;
+      // `content` has its own mutator below. `listKind` is a codec intent,
+      // not a note attribute: forwarding it would issue a notes update with
+      // an empty partial, which the database rejects (surfacing as sync_failed).
+      if (field === "content" || field === "listKind") continue;
       metadataFields.push(field);
     }
 

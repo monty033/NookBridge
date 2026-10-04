@@ -1306,6 +1306,41 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(codec.appendCalls).toBe(0);
   });
 
+  it("handles a listKind-only update patch without a sync failure", async () => {
+    const { adapter, database } = setupUpdatable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      patch: { listKind: "task-list" },
+      expectedRevision,
+    });
+
+    expect(result.operation).toBe("update");
+    expect(result.localCommitted).toBe(true);
+    // listKind is a meta-field, never forwarded as a note attribute, and a
+    // patch carrying only a meta-field must not issue an empty notes update
+    // (the real database rejects it, surfacing as sync_failed).
+    expect(database.calls.update).toHaveLength(0);
+  });
+
+  it("does not issue an empty notes update when a patch carries content and listKind", async () => {
+    const { adapter, database } = setupUpdatable();
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      patch: { content: "- [ ] item", listKind: "task-list" },
+      expectedRevision,
+    });
+
+    for (const call of database.calls.update) {
+      expect(Object.keys(call.partial).length).toBeGreaterThan(0);
+      expect(call.partial).not.toHaveProperty("listKind");
+    }
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+
   it("refreshes the note content when the patch replaces content", async () => {
     const { adapter, database, codec } = setupUpdatable();
     const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
