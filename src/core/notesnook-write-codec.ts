@@ -1050,16 +1050,22 @@ function mergeTrailingChecklist(storedData: string, fragmentHtml: string): strin
   if (rootClose === null) return null;
   const rootEnd = storedData.length - rootClose[0].length;
   const inner = storedData.slice(0, rootEnd);
-  const open = `<ul class="${expectedClass}">`;
+  // Notesnook rewrites stored HTML on read, adding data-block-id to div/ul/p.
+  // Accept that one attribute (and nothing else) on the list and paragraphs so
+  // real stored lists merge; the list's own open tag is reused unchanged.
   const closeAt = inner.lastIndexOf("</ul>");
   if (closeAt < 0) return null;
-  const openAt = inner.lastIndexOf(open, closeAt);
+  const openAt = inner.lastIndexOf(`<ul class="${expectedClass}"`, closeAt);
   if (openAt < 0) return null;
-  const tail = inner.slice(openAt, closeAt + 5);
-  const items = tail.slice(open.length, -5);
+  const openTag =
+    /^<ul class="(?:simple-checklist|checklist)"(?: data-block-id="[A-Za-z0-9_-]+")?>/.exec(
+      inner.slice(openAt, closeAt),
+    );
+  if (openTag === null) return null;
+  const items = inner.slice(openAt + openTag[0].length, closeAt);
   if (
     items.length === 0 ||
-    !/^(?:<li(?: class="(?:checked )?(?:simple-checklist|checklist)--item")?><p>(?:(?!<\/p>)[\s\S])*<\/p><\/li>)+$/.test(
+    !/^(?:<li(?: class="(?:checked )?(?:simple-checklist|checklist)--item")?><p(?: data-block-id="[A-Za-z0-9_-]+")?>(?:(?!<\/p>)[\s\S])*<\/p><\/li>)+$/.test(
       items,
     ) ||
     (expectedClass === "checklist" && items.includes("simple-checklist")) ||
