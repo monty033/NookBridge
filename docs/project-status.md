@@ -12,7 +12,7 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
-| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; source PR #125 merged `beaff27811f08bcd010e56b519ad3725053d6c9d` on 2026-09-21. The dedicated lock proof and the read-only sync proof remain open — see below. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; source PR #125 merged `beaff27811f08bcd010e56b519ad3725053d6c9d` on 2026-09-21. The dedicated lock proof and the `pendingSync` upload gap remain open; the read-only sync proof's implicit-state-directory gap is closed — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
@@ -65,10 +65,15 @@ Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
 categorical `vault_locked` for a locked note and `permission_denied` for the
 unlocked control — proven live on 1.3.9 — but the daemon still records
 `peerCredentials: "unknown"` for the peer, and the proof's own path resolution
-collapses every failure other than `not_found` into the generic code. The
-read-only sync proof reports a pass against an empty store, because its state
-directory is derived from the working directory when the environment variable is
-unset.
+collapses every failure other than `not_found` into the generic code.
+
+The read-only sync proof no longer reports a pass against an implicit store. Its
+state directory used to be derived from the working directory when
+`NOOKBRIDGE_STATE_DIR` was unset, so the proof could exercise an empty store and
+still report `pass`. `nookctl sync status` and `nookctl sync read-only` now
+require an explicit `NOOKBRIDGE_STATE_DIR` and refuse categorically when it is
+absent. Any caller that relied on the working-directory fallback — the deployment
+helper that wraps this command among them — must set the variable.
 
 An independent read-only review of source PR #125 returned `REQUEST_CHANGES`
 across three rounds before merge. Round 1 raised seven findings; four are now
@@ -100,6 +105,29 @@ since 2026-09-21 (operator-notes follow-ups #126/#136, release/CI hardening
 #127–#159, and native block-markdown parity #160 do not touch any of the four
 affected files). This section was not stale; it is confirmed current as of
 2026-09-28.
+
+### Implicit-state-directory sync proof — 2026-10-04
+
+The `NOOKBRIDGE_STATE_DIR` fallback named above is closed. `resolveSyncStateDir`
+(`src/core/notesnook-sync-admin.ts`) reads the variable explicitly and reports a
+missing, blank, or non-string carrier as `unset`; there is no working-directory
+probe left in the sync path. The runner maps that to a categorical `exitCode: 2`
+refusal naming the variable, returned before any proof source is constructed, so
+the proof can no longer report `pass` for a store that was never named.
+Regression coverage lives in `tests/stage-3-sync-state-dir.test.ts`.
+
+Two limits on this claim, stated so it is not read as more than it is:
+
+- The gate is on the *sync* tree only. Other subcommand trees still resolve a
+  working-directory default of their own; they are separate slices.
+- An explicitly named store that happens to be empty can still produce a vacuous
+  `pass` when no search query or canary flag is supplied, because the conflict and
+  search steps record `pass` when they are skipped. That second half of the gap is
+  not addressed by this change.
+
+The other three defects remain open and untouched: the `pendingSync` upload gap,
+the hardcoded `peerCredentials: "unknown"` audit field, and the locked-note
+proof's generic-code collapse on non-`not_found` path-resolution failures.
 
 ## Reading status claims safely
 

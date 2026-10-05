@@ -40,7 +40,9 @@ import {
   formatSyncCommandResult,
   formatSyncHelp,
   parseSyncCommand,
+  resolveSyncStateDir,
   runSyncCommand,
+  SyncStateDirUnsetError,
 } from "./core/notesnook-sync-admin.js";
 import {
   formatWriteCommandResult,
@@ -712,11 +714,17 @@ async function runSync(args: Args, logger: ReturnType<typeof createLogger>): Pro
     process.stdout.write(formatSyncHelp());
     return 0;
   }
-  const stateDir = resolve(environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"));
   const result = await runSyncCommand({
     argv,
     env: environment,
     createProofRuntime: async () => {
+      // The state directory stays explicit: resolving it here, rather
+      // than up front, keeps the live gate and the parser rungs ahead
+      // of any filesystem concern, and refuses an implicit store
+      // instead of probing `process.cwd()`.
+      const stateDirResolution = resolveSyncStateDir(environment);
+      if (stateDirResolution.kind === "unset") throw new SyncStateDirUnsetError();
+      const stateDir = resolve(stateDirResolution.stateDir);
       const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
       const runtime = await createProductionLiveLoginRuntime({ stateDir, logger });
       if (runtime.readOnly === undefined) {
