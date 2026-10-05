@@ -332,7 +332,7 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
             .join("\n");
           break;
         case "task-list": {
-          keys(block, ["type", "kind", "items"]);
+          keys(block, ["type", "kind", "title", "items"]);
           const tasks = (items: readonly NoteTaskItem[], level: number): string =>
             items
               .map((item) => {
@@ -346,7 +346,10 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
               })
               .join("\n");
           out = tasks(block.items, 0);
-          if (block.kind !== undefined) out = `:::nookbridge list ${block.kind}\n${out}\n:::`;
+          if (block.kind !== undefined) {
+            const title = !block.title ? "" : ` title=${JSON.stringify(block.title)}`;
+            out = `:::nookbridge list ${block.kind}${title}\n${out}\n:::`;
+          }
           break;
         }
         case "opaque":
@@ -445,13 +448,30 @@ class Parser {
           blocks: this.blocks(depth + 1, true),
         };
       }
-      const list = /^:::nookbridge list (\S+)$/.exec(line);
+      const list = /^:::nookbridge list (\S+?)(?: title=([\s\S]*))?$/.exec(line);
       if (list) {
         if (list[1] !== "simple-checklist" && list[1] !== "task-list")
           fail("unsupported_list_kind");
+        if (list[2] !== undefined && list[1] !== "task-list") fail();
+        let title: string | undefined;
+        if (list[2] !== undefined) {
+          try {
+            title = JSON.parse(list[2]);
+            if (JSON.stringify(title) !== list[2]) fail();
+          } catch {
+            fail();
+          }
+          if (typeof title !== "string") fail();
+          if (title.length === 0) title = undefined;
+        }
         const items = this.tasks(depth, 0);
         if (!items.length || this.lines[this.pos++] !== ":::") fail();
-        return { type: "task-list", kind: list[1], items };
+        return {
+          type: "task-list",
+          kind: list[1],
+          items,
+          ...(title === undefined ? {} : { title }),
+        };
       }
       const opaque = /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)$/.exec(line);
       if (opaque) {
@@ -595,6 +615,32 @@ export function parseNoteDocumentMarkdown(
     return doc;
   });
 }
+/**
+ * Inspect canonical grammar without authorizing an opaque-content edit.
+ * Only top-level task-list title payloads are removed from the returned text.
+ * The write adapter must still parse the ORIGINAL input against its trusted
+ * preimage; this inspection deliberately does not supply or mint that authority.
+ */
+export function inspectNoteDocumentMarkdownWithoutTaskTitles(input: string): string {
+  return guard(() => {
+    const doc = decode(input);
+    references(doc);
+    if (emit(doc) !== input) fail();
+    return emit({
+      ...doc,
+      blocks: doc.blocks.map((block) =>
+        block.type === "task-list"
+          ? {
+              type: block.type,
+              ...(block.kind === undefined ? {} : { kind: block.kind }),
+              items: block.items,
+            }
+          : block,
+      ),
+    });
+  });
+}
+
 // Compare semantic trees as well as rendered bytes. Coalescing adjacent text
 // runs and dropping empty optional arrays are the only allowed normalization.
 function semantics(value: unknown): string {
@@ -605,7 +651,12 @@ function semantics(value: unknown): string {
     const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const k of Object.keys(record).sort()) {
       const field = record[k];
-      if (field === undefined || (k === "marks" && Array.isArray(field) && !field.length)) continue;
+      if (
+        field === undefined ||
+        (k === "title" && field === "") ||
+        (k === "marks" && Array.isArray(field) && !field.length)
+      )
+        continue;
       if (
         k === "blocks" &&
         !("type" in record) &&

@@ -57,7 +57,11 @@ import {
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
 import { assertSupportedConstructs, type NotesnookListKind } from "./notesnook-write-codec.js";
-import { decodeNoteDocumentNative, serializeNoteDocumentNative } from "./note-document-native.js";
+import {
+  decodeNoteDocumentNative,
+  hasNonemptyNativeTaskListTitle,
+  serializeNoteDocumentNative,
+} from "./note-document-native.js";
 import {
   NOTE_DOCUMENT_MARKDOWN_HEADER,
   parseNoteDocumentMarkdown,
@@ -628,6 +632,23 @@ export class NotesnookWriteAdapter {
             );
           }
         } else {
+          // The legacy codec cannot preserve native list-title metadata. Refuse
+          // rather than silently flattening a titled or opaque list.
+          let hasTitle: boolean;
+          try {
+            hasTitle = hasNonemptyNativeTaskListTitle(stored.data);
+          } catch {
+            throw adapterError(
+              "unsupported_content",
+              "Notesnook write adapter: cannot safely inspect stored content",
+            );
+          }
+          if (hasTitle) {
+            throw adapterError(
+              "unsupported_content",
+              "Notesnook write adapter: legacy content update would discard a task-list title",
+            );
+          }
           try {
             assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
           } catch {

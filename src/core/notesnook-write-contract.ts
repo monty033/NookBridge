@@ -49,6 +49,22 @@ import {
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
 
+import { inspectNoteDocumentMarkdownWithoutTaskTitles } from "./note-document-markdown.js";
+
+// Canonical task-list titles are JSON text, not authored HTML. Parse the whole
+// document before masking only title payloads; malformed directives fail closed.
+function hasForbiddenEmbeddedMarkup(value: string, allowCanonicalTaskTitles = false): boolean {
+  let checked = value;
+  if (allowCanonicalTaskTitles && /<\s*(?:script|style|iframe|object|embed)\b/i.test(value)) {
+    try {
+      checked = inspectNoteDocumentMarkdownWithoutTaskTitles(value);
+    } catch {
+      return true;
+    }
+  }
+  return /<\s*(script|style|iframe|object|embed)\b/i.test(checked);
+}
+
 // ---------------------------------------------------------------------------
 // Categorical error codes.
 // ---------------------------------------------------------------------------
@@ -851,7 +867,12 @@ function containsControlCharacters(value: string): boolean {
  * `safePredicate` so a hostile/revoked string proxy is rewritten to a
  * categorical `invalid_input` without leaking the canary.
  */
-function requireBoundedBody(value: unknown, maxBytes: number, what: string): number {
+function requireBoundedBody(
+  value: unknown,
+  maxBytes: number,
+  what: string,
+  allowCanonicalTaskTitles = false,
+): number {
   if (typeof value !== "string") {
     fail("invalid_input", `${what} must be a non-empty string`);
   }
@@ -877,7 +898,7 @@ function requireBoundedBody(value: unknown, maxBytes: number, what: string): num
   }
   if (
     !safePredicate(
-      () => !/<\s*(script|style|iframe|object|embed)\b/i.test(value),
+      () => !hasForbiddenEmbeddedMarkup(value, allowCanonicalTaskTitles),
       `${what} contains unsupported embedded markup`,
     )
   ) {
@@ -1007,7 +1028,7 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
         requireTitle(value);
         break;
       case "content":
-        requireBoundedBody(value, STAGE4_WRITE_LIMITS.maxContentBytes, "content");
+        requireBoundedBody(value, STAGE4_WRITE_LIMITS.maxContentBytes, "content", true);
         patchHasMarkdownContent = true;
         break;
       case "storedContent":

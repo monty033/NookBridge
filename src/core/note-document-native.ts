@@ -164,7 +164,7 @@ const tags = new Set(
     " ",
   ),
 );
-function parseHtml(html: string): HtmlNode[] {
+function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
   clean(html);
   const root: Element = { tag: "root", attrs: {}, children: [], raw: "", start: 0 };
   const stack = [root];
@@ -243,6 +243,12 @@ function parseHtml(html: string): HtmlNode[] {
       // Closed inert attributes. Preserve unfamiliar data/aria attributes opaquely.
       if (
         !/^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) &&
+        !(
+          allowHrStyle &&
+          tag === "hr" &&
+          key === "style" &&
+          value === "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0"
+        ) &&
         ![
           "class",
           "title",
@@ -273,6 +279,23 @@ function parseHtml(html: string): HtmlNode[] {
   }
   if (stack.length !== 1) fail();
   return root.children;
+}
+/** Fail-closed preflight for legacy writers that cannot retain rich-list titles. */
+export function hasNonemptyNativeTaskListTitle(html: string): boolean {
+  const visit = (nodes: HtmlNode[]): boolean =>
+    nodes.some((node) => {
+      if (typeof node === "string") return false;
+      return (
+        ((node.tag === "ul" || node.tag === "ol") &&
+          (node.attrs.class ?? "")
+            .split(/\s+/)
+            .some((token) => ["checklist", "simple-checklist"].includes(token)) &&
+          node.attrs["data-title"] !== undefined &&
+          node.attrs["data-title"]!.length > 0) ||
+        visit(node.children)
+      );
+    });
+  return visit(parseHtml(html, true));
 }
 // Internal signal: syntactically safe but not representable without data loss.
 class Preserve extends Error {}
@@ -392,8 +415,9 @@ function listKind(n: Element): NotesnookListKind | undefined {
   if (n.attrs.class === "checklist") return "task-list";
   return undefined;
 }
-function taskItems(n: Element, kind: NotesnookListKind): NoteTaskItem[] {
+function taskItems(n: Element, kind: NotesnookListKind, allowTitle = false): NoteTaskItem[] {
   attrs(n, { class: kind === "task-list" ? "checklist" : "simple-checklist" });
+  if (!allowTitle && n.attrs["data-title"] !== undefined) preserve();
   return elements(n.children).map((li) => {
     if (li.tag !== "li") preserve();
     const itemClass = kind === "task-list" ? "checklist--item" : "simple-checklist--item";
@@ -463,10 +487,14 @@ function references(doc: NoteDocumentV1): string[] {
   walk(doc.blocks, "");
   return refs;
 }
-function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlock[] {
+function decodeBlocks(
+  nodes: HtmlNode[],
+  payloads: Map<string, string>,
+  topLevel = false,
+): NoteBlock[] {
   return elements(nodes).map((n) => {
     try {
-      return decodeBlock(n, payloads);
+      return decodeBlock(n, payloads, topLevel);
     } catch (error) {
       if (!(error instanceof Preserve)) throw error;
       // Deterministic, position-mixed token.  The operator preimage contract
@@ -489,7 +517,7 @@ function decodeBlocks(nodes: HtmlNode[], payloads: Map<string, string>): NoteBlo
     }
   });
 }
-function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
+function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false): NoteBlock {
   if (n.tag === "p" || /^h[1-3]$/.test(n.tag)) {
     attrs(n);
     const inlines = inline(n.children);
@@ -499,7 +527,18 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
   }
   if (n.tag === "ul" || n.tag === "ol") {
     const kind = listKind(n);
-    if (kind) return { type: "task-list", kind, items: taskItems(n, kind) };
+    if (kind) {
+      const title = n.attrs["data-title"];
+      if (!topLevel && title !== undefined && title.length > 0) preserve();
+      if (title !== undefined && kind !== "task-list") preserve();
+      const items = taskItems(n, kind, true);
+      return {
+        type: "task-list",
+        kind,
+        items,
+        ...(title === undefined || title.length === 0 ? {} : { title }),
+      };
+    }
     // A class naming a checklist kind but not exactly one cannot be represented
     // faithfully: the recorded item states would be dropped and the list would
     // read back as ordinary bullets.  Preserve rather than guess.  `start` and
@@ -521,6 +560,9 @@ function decodeBlock(n: Element, payloads: Map<string, string>): NoteBlock {
       if (typeof first === "object" && first.tag === "p") {
         attrs(first);
         const blocks = decodeBlocks(li.children.slice(1), payloads);
+        // Markdown cannot place an opaque reference inside an ordinary list item.
+        // Preserve its containing list rather than make the whole note unreadable.
+        if (references({ version: 1, blocks }).length > 0) preserve();
         return { inlines: inline(first.children), ...(blocks.length ? { blocks } : {}) };
       }
       // Legacy writer emits bare inline list labels.
@@ -604,7 +646,7 @@ export function decodeNoteDocumentNative(
     )
       content = roots[0]!.children;
     const payloads = new Map<string, string>();
-    const document: NoteDocumentV1 = { version: 1, blocks: decodeBlocks(content, payloads) };
+    const document: NoteDocumentV1 = { version: 1, blocks: decodeBlocks(content, payloads, true) };
     validateNoteDocument(document);
     const context: NativeNoteContext = Object.freeze({ version: 1 });
     contexts.set(context, {
@@ -665,8 +707,12 @@ function renderBlocks(
           const tag = b.type === "bullet-list" ? "ul" : "ol";
           return `<${tag}>${b.items.map((item) => `<li><p>${renderInline(item.inlines)}</p>${render(item.blocks ?? [])}</li>`).join("")}</${tag}>`;
         }
-        case "task-list":
-          return renderTasks(b.items, b.kind ?? kind);
+        case "task-list": {
+          const taskKind = b.kind ?? kind;
+          const title =
+            b.title === undefined || b.title.length === 0 ? "" : ` data-title="${escape(b.title)}"`;
+          return `<ul class="${taskKind === "task-list" ? "checklist" : "simple-checklist"}"${title}>${b.items.map((item) => `<li class="${item.checked ? "checked " : ""}${taskKind === "task-list" ? "checklist" : "simple-checklist"}--item"><p>${renderInline(item.inlines)}</p>${item.children.length ? renderTasks(item.children, taskKind) : ""}</li>`).join("")}</ul>`;
+        }
         case "blockquote":
           return `<blockquote>${render(b.blocks)}</blockquote>`;
         case "code-block":
@@ -718,7 +764,7 @@ function closedDocument(doc: NoteDocumentV1): void {
         heading: ["type", "level", "inlines"],
         "bullet-list": ["type", "items"],
         "ordered-list": ["type", "items"],
-        "task-list": ["type", "kind", "items"],
+        "task-list": ["type", "kind", "title", "items"],
         blockquote: ["type", "blocks"],
         "code-block": ["type", "text", "language"],
         table: ["type", "columns", "rows"],
