@@ -136,3 +136,14 @@ tests. “Live-validated” means a bounded receipt exists for the stated scenar
 not that every account, device, or deployment has been tested. “Supported” is a
 deployment claim and requires the corresponding packaging, secret handling,
 service isolation, and release gates.
+
+
+### Canonical Markdown update round trips — 2026-10-04
+
+Canonical `nookbridge-format: 1` Markdown updates preserve the trusted native
+document semantics across repeated get→update cycles. Recognized malformed or
+unsupported version claims, noncanonical versioned input, and undecodable
+native preimages are refused as `unsupported_content` before mutators run.
+Unversioned Markdown remains on the legacy codec path. This is local adapter
+regression coverage, not a deployment or live Notesnook validation claim.
+See `tests/stage-4-write-adapter.test.ts`.

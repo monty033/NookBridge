@@ -57,6 +57,11 @@ import {
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
 import { assertSupportedConstructs, type NotesnookListKind } from "./notesnook-write-codec.js";
+import { decodeNoteDocumentNative, serializeNoteDocumentNative } from "./note-document-native.js";
+import {
+  NOTE_DOCUMENT_MARKDOWN_HEADER,
+  parseNoteDocumentMarkdown,
+} from "./note-document-markdown.js";
 import {
   createNotesnookRecoveryMarker,
   type NotesnookRecoveryJournal,
@@ -591,23 +596,56 @@ export class NotesnookWriteAdapter {
         contentBytes = Buffer.byteLength(plan.storedContent.data, "utf8");
       } else {
         const newContent = patch.content as string;
-        // Fidelity gate.  Refuse Markdown constructs the codec cannot
-        // round-trip before any mutator fires (Astra finding P1-7).
-        try {
-          assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
-        } catch {
-          throw adapterError(
-            "unsupported_content",
-            "Notesnook write adapter: update content uses an unsupported construct",
-          );
-        }
         contentBytes = Buffer.byteLength(newContent, "utf8");
-        // Forward the resolved listKind from the plan.  The contract only
-        // surfaces a `listKind` slot on the plan when the patch carries
-        // a `content` field, so this is exactly the case where the codec
-        // must run.
-        const encoded = this.#encodeMarkdown(newContent, plan.listKind);
-        preparedContent = { type: stored.type, data: encoded.data };
+        const canonicalHeader = newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER);
+        const claimsVersionedFormat =
+          canonicalHeader ||
+          /^---[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*nookbridge-format\b/i.test(newContent);
+        if (claimsVersionedFormat) {
+          // Versioned input is a distinct, fail-closed representation. Never
+          // reinterpret a malformed/unknown version as legacy Markdown.
+          try {
+            if (!canonicalHeader) throw new Error("unsupported format");
+            const binding = {
+              noteId: plan.id,
+              revision: createRevisionToken({ id: observed.id, dateEdited: observed.dateEdited }),
+            };
+            const trusted = decodeNoteDocumentNative(
+              { type: stored.type, data: stored.data },
+              binding,
+            );
+            const document = parseNoteDocumentMarkdown(newContent, { preimage: trusted.document });
+            const nativeStored = serializeNoteDocumentNative(document, {
+              context: trusted.context,
+              binding,
+              ...(plan.listKind === undefined ? {} : { listKind: plan.listKind }),
+            });
+            preparedContent = { type: stored.type, data: nativeStored.data };
+          } catch {
+            throw adapterError(
+              "unsupported_content",
+              "Notesnook write adapter: unsupported content format",
+            );
+          }
+        } else {
+          try {
+            assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
+          } catch {
+            throw adapterError(
+              "unsupported_content",
+              "Notesnook write adapter: update content uses an unsupported construct",
+            );
+          }
+          try {
+            const encoded = this.#encodeMarkdown(newContent, plan.listKind);
+            preparedContent = { type: stored.type, data: encoded.data };
+          } catch {
+            throw adapterError(
+              "unsupported_content",
+              "Notesnook write adapter: update content uses an unsupported construct",
+            );
+          }
+        }
       }
       // Only the prepared bytes are written forward; the stored shape
       // must be restored verbatim on compensation.  We snapshot a closed
