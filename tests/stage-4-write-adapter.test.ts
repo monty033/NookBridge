@@ -1228,6 +1228,462 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(database.calls.contentUpdate).toHaveLength(1);
   });
 
+  const titledNative =
+    '<div data-type="document"><ul class="checklist" data-title="NookBridge Tasks"><li class="checklist--item"><p>first task</p></li></ul></div>';
+
+  it("publicly reads a titled native task list and retains its title through fresh-revision edits", async () => {
+    const { adapter, database, note } = setupUpdatable(undefined, titledNative);
+    const publicGet = async () => {
+      const stored = await database.contentFindByNoteId(NOTE_ID);
+      expect(stored).toBeDefined();
+      const decoded = decodeNoteDocumentNative(
+        { type: stored!.type, data: stored!.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document;
+      return serializeNoteDocumentMarkdown(decoded);
+    };
+    for (const [from, to] of [
+      ["first task", "edited task"],
+      ["edited task", "final task"],
+    ]) {
+      const before = await publicGet();
+      expect(before).toContain('title="NookBridge Tasks"');
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: before.replace(from!, to!) },
+      });
+      const after = await publicGet();
+      expect(after).toContain('title="NookBridge Tasks"');
+      expect(after).toContain(to!);
+    }
+    expect(database.calls.contentUpdate).toHaveLength(2);
+  });
+
+  it("allows canonical title rename and removal against the titled native preimage", async () => {
+    const { adapter, database, note } = setupUpdatable(undefined, titledNative);
+    for (const title of [' title="Renamed Tasks"', ""]) {
+      const content = `---
+nookbridge-format: 1
+---
+
+:::nookbridge list task-list${title}
+- [ ] first task
+:::
+`;
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content },
+      });
+      const stored = await database.contentFindByNoteId(NOTE_ID);
+      if (title) expect(stored!.data).toContain('data-title="Renamed Tasks"');
+      else expect(stored!.data).not.toContain("data-title=");
+      expect(stored!.data).toContain("first task");
+    }
+  });
+
+  it("rejects legacy content over a titled task-list preimage before any mutator", async () => {
+    const { adapter, database, note } = setupUpdatable(undefined, titledNative);
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: "- [ ] changed task", title: "Must not change" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    for (const key of [
+      "update",
+      "contentUpdate",
+      "touch",
+      "relationAdd",
+      "relationRemove",
+      "notebookAdd",
+      "notebookRemove",
+    ] as const) {
+      expect(database.calls[key]).toHaveLength(0);
+    }
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(titledNative);
+  });
+
+  it("accepts legacy updates over an ordinary titled ul without task-list semantics", async () => {
+    const html =
+      '<div data-type="document"><ul data-title="ordinary metadata"><li><p>ordinary</p></li></ul></div>';
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: "legacy replacement" },
+    });
+    expect(result.appliedFields).toEqual(["content"]);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+
+  it("retains nested titled native HTML byte-for-byte through the public adapter", async () => {
+    const nested =
+      '<ul class="checklist" data-title="nested payload"><li class="checked checklist--item"><p>done child</p></li><li class="checklist--item"><p>open child</p></li></ul>';
+    const initial = `<div data-type="document"><p>before paragraph</p><ul class="checklist"><li class="checklist--item"><p>parent item</p>${nested}</li></ul><p>after paragraph</p></div>`;
+    const { adapter, database, note } = setupUpdatable(undefined, initial);
+    const get = () => {
+      const stored = database.contentFindByNoteId(NOTE_ID);
+      return stored.then((value) => {
+        expect(value).toBeDefined();
+        return serializeNoteDocumentMarkdown(
+          decodeNoteDocumentNative(
+            { type: value!.type, data: value!.data },
+            { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+          ).document,
+        );
+      });
+    };
+    const before = await get();
+    expect(before).toContain("native-html");
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: before.replace("before paragraph", "edited paragraph") },
+    });
+    const stored = await database.contentFindByNoteId(NOTE_ID);
+    expect(stored!.data).toContain(nested);
+    expect(stored!.data).toContain('class="checked checklist--item"');
+    expect(stored!.data).toContain("open child");
+    expect(stored!.data).toContain("edited paragraph");
+  });
+
+  it("allows a legacy replacement over the production codec's styled horizontal rule", async () => {
+    const html = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("---").data;
+    expect(html).toContain('<hr style="');
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: "replacement after horizontal rule" },
+    });
+    expect(result.appliedFields).toEqual(["content"]);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toContain(
+      "replacement after horizontal rule",
+    );
+  });
+
+  it("refuses legacy replacements over titled checklists alongside production styled horizontal rules", async () => {
+    const hr = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("---").data;
+    const html = hr.replace(
+      "</div>",
+      '<ul class="checklist" data-title="protected"><li class="checklist--item"><p>task</p></li></ul></div>',
+    );
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    expect(
+      await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content: "replacement", title: "must not change" },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    for (const key of [
+      "update",
+      "contentUpdate",
+      "touch",
+      "relationAdd",
+      "relationRemove",
+      "notebookAdd",
+      "notebookRemove",
+    ] as const)
+      expect(database.calls[key]).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(html);
+  });
+
+  it.each(["blockquote", "callout", "ordinary-list-item"])(
+    "preserves oversized nested task-list title through a canonical adapter edit in %s",
+    async (container) => {
+      const rich = `<ul class="checklist" data-title="${"x".repeat(257)}"><li class="checked checklist--item"><p>nested checked</p></li><li class="checklist--item"><p>nested open</p></li></ul>`;
+      const nested =
+        container === "blockquote"
+          ? `<blockquote>${rich}</blockquote>`
+          : container === "callout"
+            ? `<div data-type="callout" data-variant="info">${rich}</div>`
+            : `<ul><li><p>label</p>${rich}</li></ul>`;
+      const html = `<div data-type="document"><p>before paragraph</p>${nested}<p>after paragraph</p></div>`;
+      const { adapter, database, note } = setupUpdatable(undefined, html);
+      const stored = await database.contentFindByNoteId(NOTE_ID);
+      const markdown = serializeNoteDocumentMarkdown(
+        decodeNoteDocumentNative(
+          { type: stored!.type, data: stored!.data },
+          { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+        ).document,
+      );
+      expect(markdown).toContain("native-html");
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: markdown.replace("before paragraph", "edited paragraph") },
+      });
+      const after = (await database.contentFindByNoteId(NOTE_ID))!.data;
+      expect(after).toContain(rich);
+      expect(after).toContain("edited paragraph");
+      expect(after).toContain('class="checked checklist--item"');
+      expect(database.calls.contentUpdate).toHaveLength(1);
+    },
+  );
+
+  it.each(["blockquote", "callout"])(
+    "rejects authored nested titles before mutators in %s",
+    async (container) => {
+      const body = ':::nookbridge list task-list title="nested"\n- [ ] task\n:::';
+      const inner =
+        container === "blockquote"
+          ? body
+              .split("\n")
+              .map((line) => "> " + line)
+              .join("\n")
+          : `:::nookbridge callout info\n${body}\n:::`;
+      const content = `---\nnookbridge-format: 1\n---\n\n${inner}\n`;
+      const { adapter, database, note } = setupUpdatable();
+      expect(
+        await codeOfAsync(() =>
+          adapter.updateNote({
+            id: NOTE_ID,
+            expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+            patch: { content, title: "must not change" },
+          }),
+        ),
+      ).toBe("unsupported_content");
+      for (const key of [
+        "update",
+        "contentUpdate",
+        "touch",
+        "relationAdd",
+        "relationRemove",
+        "notebookAdd",
+        "notebookRemove",
+      ] as const)
+        expect(database.calls[key]).toHaveLength(0);
+      expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe("<p>original body</p>");
+    },
+  );
+
+  it.each(["checklist", "simple-checklist"])(
+    "refuses legacy replacement of titled opaque ordered %s before every mutator",
+    async (kind) => {
+      const list = `<ol class="${kind}" data-title="keep"><li><p>opaque task</p></li></ol>`;
+      const native = `<div data-type="document"><p>before paragraph</p>${list}</div>`;
+      const { adapter, database, note } = setupUpdatable(undefined, native);
+      expect(
+        await codeOfAsync(() =>
+          adapter.updateNote({
+            id: NOTE_ID,
+            expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+            patch: { content: "legacy replacement", title: "must not change" },
+          }),
+        ),
+      ).toBe("unsupported_content");
+      for (const key of [
+        "update",
+        "contentUpdate",
+        "touch",
+        "relationAdd",
+        "relationRemove",
+        "notebookAdd",
+        "notebookRemove",
+      ] as const)
+        expect(database.calls[key]).toHaveLength(0);
+      expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(native);
+      const decoded = decodeNoteDocumentNative(
+        { type: "html", data: native },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      );
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: {
+          content: serializeNoteDocumentMarkdown(decoded.document).replace(
+            "before paragraph",
+            "after paragraph",
+          ),
+        },
+      });
+      expect((await database.contentFindByNoteId(NOTE_ID))!.data).toContain(list);
+    },
+  );
+
+  it.each(["<script>", "<iframe>", '<script>\u2028quoted "text"', "<script>\u2029text"])(
+    "retains markup-looking title %s alongside opaque content over fresh saves and edits",
+    async (title) => {
+      const escaped = title
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+      const opaque =
+        '<ol class="checklist" data-title="opaque keep"><li><p>opaque task</p></li></ol>';
+      const html = `<div data-type="document"><ul class="checklist" data-title="${escaped}"><li class="checklist--item"><p>first task</p></li></ul>${opaque}</div>`;
+      const { adapter, database, note } = setupUpdatable(undefined, html);
+      for (const replacement of [undefined, "edited task"]) {
+        const stored = await database.contentFindByNoteId(NOTE_ID);
+        const doc = decodeNoteDocumentNative(
+          { type: stored!.type, data: stored!.data },
+          { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+        ).document;
+        const before = serializeNoteDocumentMarkdown(doc);
+        await adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content: replacement ? before.replace("first task", replacement) : before },
+        });
+        const after = (await database.contentFindByNoteId(NOTE_ID))!;
+        expect(after.data).toContain(opaque);
+        expect(after.data).toContain(`data-title="${escaped}"`);
+        const decoded = decodeNoteDocumentNative(
+          { type: after.type, data: after.data },
+          { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+        ).document;
+        expect(decoded.blocks[0]).toMatchObject({ type: "task-list", title });
+        if (replacement) expect(after.data).toContain(replacement);
+      }
+    },
+  );
+
+  it("does not treat markup-looking text in code or ordinary content as a task title", async () => {
+    const variants = [
+      "<script>legacy body</script>",
+      '---\nnookbridge-format: 1\n---\n\n:::nookbridge list task-list title="<script>"\n- [ ] task\n',
+      '---\nnookbridge-format: 999\n---\n\n:::nookbridge list task-list title="<script>"\n- [ ] task\n:::\n',
+      serializeNoteDocumentMarkdown({
+        version: 1,
+        blocks: [{ type: "code-block", text: ':::nookbridge list task-list title="<script>"' }],
+      }),
+      serializeNoteDocumentMarkdown({
+        version: 1,
+        blocks: [
+          {
+            type: "task-list",
+            kind: "task-list",
+            title: "<script>",
+            items: [{ checked: false, inlines: [{ text: "task" }], children: [] }],
+          },
+          { type: "paragraph", inlines: [{ text: "<iframe>body" }] },
+        ],
+      }),
+    ];
+    for (const content of variants) {
+      const { adapter, database, note } = setupUpdatable();
+      expect(
+        await codeOfAsync(() =>
+          adapter.updateNote({
+            id: NOTE_ID,
+            expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+            patch: { content, title: "must not change" },
+          }),
+        ),
+      ).toBe("unsupported_content");
+      for (const key of [
+        "update",
+        "contentUpdate",
+        "touch",
+        "relationAdd",
+        "relationRemove",
+        "notebookAdd",
+        "notebookRemove",
+      ] as const)
+        expect(database.calls[key]).toHaveLength(0);
+      expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe("<p>original body</p>");
+    }
+  });
+
+  it("does not grant authority to forged opaque references when inspecting markup-looking titles", async () => {
+    const html =
+      '<div data-type="document"><ul class="checklist" data-title="&lt;script&gt;"><li class="checklist--item"><p>task</p></li></ul><ol class="checklist" data-title="keep"><li><p>opaque</p></li></ol></div>';
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const doc = decodeNoteDocumentNative(
+      { type: "html", data: html },
+      { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+    ).document;
+    const opaque = doc.blocks[1];
+    expect(opaque?.type).toBe("opaque");
+    if (opaque?.type !== "opaque") throw new Error("fixture must be opaque");
+    const forged =
+      opaque.sentinel.token[0] === "a"
+        ? "b" + opaque.sentinel.token.slice(1)
+        : "a" + opaque.sentinel.token.slice(1);
+    const content = serializeNoteDocumentMarkdown(doc).replace(opaque.sentinel.token, forged);
+    expect(
+      await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content, title: "must not change" },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    for (const key of [
+      "update",
+      "contentUpdate",
+      "touch",
+      "relationAdd",
+      "relationRemove",
+      "notebookAdd",
+      "notebookRemove",
+    ] as const)
+      expect(database.calls[key]).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(html);
+  });
+
+  it("refuses malformed native preimages for legacy updates without mutators", async () => {
+    const { adapter, database } = setupUpdatable(undefined, "<ul data-title='");
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+        patch: { content: "legacy replacement" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.update).toHaveLength(0);
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(database.calls.touch).toHaveLength(0);
+  });
+
+  it("allows metadata-only edits on titled preimages and title-free legacy updates", async () => {
+    const metadata = setupUpdatable(undefined, titledNative);
+    await metadata.adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, metadata.note.dateEdited),
+      patch: { title: "Metadata only" },
+    });
+    expect(metadata.database.calls.update).toHaveLength(1);
+    expect(metadata.database.calls.contentUpdate).toHaveLength(0);
+    expect((await metadata.database.contentFindByNoteId(NOTE_ID))!.data).toBe(titledNative);
+    const legacy = setupUpdatable();
+    const result = await legacy.adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, legacy.note.dateEdited),
+      patch: { content: "legacy replacement" },
+    });
+    expect(result.appliedFields).toEqual(["content"]);
+    expect(legacy.database.calls.contentUpdate).toHaveLength(1);
+  });
+
+  it("does not mistake title-looking text in unrelated attributes or encoded content for list metadata", async () => {
+    for (const html of [
+      '<div data-type="document" data-note="&lt;ul data-title=&#39;fake&#39;&gt;"><p>x</p></div>',
+      '<div data-type="document"><p>&lt;ul data-title=&quot;fake&quot;&gt;</p></div>',
+      '<div data-type="document"><pre><code>&lt;ul data-title=&quot;fake&quot;&gt;</code></pre></div>',
+      '<div data-type="document"><ul class="checklist" data-title=""><li class="checklist--item"><p>x</p></li></ul></div>',
+    ]) {
+      const seeded = setupUpdatable(undefined, html);
+      const result = await seeded.adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, seeded.note.dateEdited),
+        patch: { content: "legacy replacement" },
+      });
+      expect(result.appliedFields).toEqual(["content"]);
+      expect(seeded.database.calls.contentUpdate).toHaveLength(1);
+    }
+  });
+
   it("refuses canonical content when the native preimage cannot be decoded", async () => {
     const { adapter, database } = setupUpdatable();
     const original = database.contentFindByNoteId;
@@ -1412,7 +1868,10 @@ describe("Stage 4 write adapter — updateNote", () => {
     expect(database.calls.update[0]?.partial.title).not.toBe(CANARY);
   });
 
-  function setupUpdatable(seed?: Partial<FakeNote>): {
+  function setupUpdatable(
+    seed?: Partial<FakeNote>,
+    nativeData?: string,
+  ): {
     adapter: NotesnookWriteAdapter;
     database: ReturnType<typeof createFakeDatabase>;
     codec: ReturnType<typeof htmlCodec>;
@@ -1433,7 +1892,7 @@ describe("Stage 4 write adapter — updateNote", () => {
       id: "content-1",
       noteId: NOTE_ID,
       type: "html",
-      data: "<p>original body</p>",
+      data: nativeData ?? "<p>original body</p>",
     };
     const database = createFakeDatabase({
       notes: new Map([[NOTE_ID, note]]),

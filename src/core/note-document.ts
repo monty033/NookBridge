@@ -310,6 +310,8 @@ export interface NoteOrderedListBlock {
 export interface NoteTaskListBlock {
   readonly type: "task-list";
   readonly kind?: NoteListKind;
+  /** Optional native title for a top-level rich task list. */
+  readonly title?: string;
   readonly items: readonly NoteTaskItem[];
 }
 
@@ -677,6 +679,20 @@ function validateListItem(
 }
 
 function validateTaskList(value: Record<string, unknown>, depth: number): void {
+  if (value.title !== undefined) {
+    if (value.kind !== "task-list") fail("invalid_shape");
+    if (typeof value.title !== "string") fail("invalid_shape");
+    if (value.title.length > 0 && depth !== 1) fail("invalid_shape");
+    if (Buffer.byteLength(value.title, "utf8") > 256) fail("oversize_inline");
+    if (
+      [...value.title].some((character) => {
+        const code = character.codePointAt(0)!;
+        return code <= 31 || (code >= 127 && code <= 159);
+      }) ||
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value.title)
+    )
+      fail("invalid_shape");
+  }
   if (value.kind !== undefined) {
     try {
       normaliseNoteDocumentListKind(value.kind);

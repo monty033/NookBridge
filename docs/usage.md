@@ -1,5 +1,11 @@
 # Usage
 
+## Task-list titles
+
+A native rich task list may carry an optional title of at most 256 UTF-8 bytes. The versioned Markdown representation uses `:::nookbridge list task-list title="NookBridge Tasks"`. Omit `title=` to remove the title. Empty titles normalize to absent. Titles on simple checklists and unsupported/nested native title shapes remain opaque rather than being reinterpreted. Legacy unversioned edits are refused when stored content contains task-list title metadata, because the legacy writer cannot preserve it. The v1 document format is bound to the native source context/revision and does not promise forward compatibility with unknown versions.
+
+**Source provenance caveat:** the `title`/`data-title` representation comes from `packages/editor/src/extensions/task-list/task-list.ts` in Notesnook editor commit `53c2a3500c05ba193dfb90791d6c7a1f82eac82c`. The runtime dependency remains `@notesnook/core` 8.1.3; that package version does not establish the editor version used by a live client. Matching-client visual acceptance remains a separate gate.
+
 ## MCP client connection
 
 The approved local MCP client launches the thin proxy over stdio and supplies
