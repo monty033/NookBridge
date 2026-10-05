@@ -166,6 +166,53 @@ const FORBIDDEN_ENV_VARS: readonly string[] = [
 export const LIVE_SYNC_ENABLE_ENV = "NOOKBRIDGE_ENABLE_LIVE_SYNC" as const;
 
 /**
+ * The environment variable that names the store the proof must open.
+ *
+ * The state directory MUST be explicit.  It used to fall back to
+ * `process.cwd()/var/state`, which meant an operator who ran the proof
+ * without configuring this variable exercised an implicit — usually
+ * empty — store and still received a `pass`.  A `pass` is what a
+ * release claim rests on, so an implicit store is a silent false
+ * assurance rather than a convenience.  Absence is now a categorical
+ * refusal.
+ */
+export const STATE_DIR_ENV = "NOOKBRIDGE_STATE_DIR" as const;
+
+/** Result of resolving {@link STATE_DIR_ENV} out of an env snapshot. */
+export type SyncStateDirResolution =
+  | Readonly<{ readonly kind: "resolved"; readonly stateDir: string }>
+  | Readonly<{ readonly kind: "unset" }>;
+
+/**
+ * Resolve the explicit state directory for a sync proof.
+ *
+ * Deliberately pure: no `process.cwd()`, no filesystem probe, no
+ * coercion.  A non-string or blank carrier is `unset` — never a
+ * partially-formed path that could resolve somewhere unintended.
+ */
+export function resolveSyncStateDir(
+  env: Readonly<Record<string, string | undefined>>,
+): SyncStateDirResolution {
+  if (typeof env !== "object" || env === null) return { kind: "unset" };
+  const value = env[STATE_DIR_ENV];
+  if (typeof value !== "string" || value.trim().length === 0) return { kind: "unset" };
+  return { kind: "resolved", stateDir: value };
+}
+
+/**
+ * Raised by a proof-runtime factory when {@link STATE_DIR_ENV} is unset.
+ *
+ * Carries no value: the message is fixed and names only the variable,
+ * so no path or state content can reach a log line.
+ */
+export class SyncStateDirUnsetError extends Error {
+  public constructor() {
+    super("sync proof state directory is not configured");
+    Object.defineProperty(this, "name", { configurable: true, value: "SyncStateDirUnsetError" });
+  }
+}
+
+/**
  * Parse `argv` (the part of `process.argv` AFTER the `sync` token)
  * into a {@link ParsedSyncCommand}.  Mirrors the auth parser's
  * credential-carrier policy.
@@ -510,7 +557,14 @@ export async function runSyncCommand(
     } else {
       source = (normalized.createProofSource as () => RunOfflineSyncProofOptions["source"])();
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof SyncStateDirUnsetError) {
+      return {
+        kind: "error",
+        exitCode: 2,
+        message: `nookctl sync ${command.subcommand}: ${STATE_DIR_ENV} is not set; refusing to run the read-only proof against an implicit state directory`,
+      };
+    }
     return {
       kind: "error",
       exitCode: 3,
