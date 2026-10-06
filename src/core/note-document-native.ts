@@ -243,12 +243,7 @@ function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
       // Closed inert attributes. Preserve unfamiliar data/aria attributes opaquely.
       if (
         !/^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) &&
-        !(
-          allowHrStyle &&
-          tag === "hr" &&
-          key === "style" &&
-          value === "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0"
-        ) &&
+        !(allowHrStyle && tag === "hr" && key === "style") &&
         ![
           "class",
           "title",
@@ -518,6 +513,17 @@ function decodeBlocks(
   });
 }
 function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false): NoteBlock {
+  if (n.tag === "hr") {
+    const canonicalStyle =
+      "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+    if (
+      Object.keys(n.attrs).some((key) => key !== "style") ||
+      n.attrs.style !== canonicalStyle ||
+      n.children.length !== 0
+    )
+      preserve();
+    return { type: "horizontal-rule" };
+  }
   if (n.tag === "p" || /^h[1-3]$/.test(n.tag)) {
     attrs(n);
     const inlines = inline(n.children);
@@ -559,11 +565,14 @@ function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false
       const first = li.children[0];
       if (typeof first === "object" && first.tag === "p") {
         attrs(first);
-        const blocks = decodeBlocks(li.children.slice(1), payloads);
-        // Markdown cannot place an opaque reference inside an ordinary list item.
-        // Preserve its containing list rather than make the whole note unreadable.
-        if (references({ version: 1, blocks }).length > 0) preserve();
-        return { inlines: inline(first.children), ...(blocks.length ? { blocks } : {}) };
+        // The Markdown writer rejects every ordinary-list item continuation
+        // (`item.blocks`), so preserve the containing list opaquely instead of
+        // admitting a decoded child the interchange cannot serialize. This
+        // covers HR and all other recursive continuation shapes without
+        // widening ordinary-list Markdown support.
+        if (li.children.slice(1).some((child) => typeof child !== "string" || child.trim() !== ""))
+          preserve();
+        return { inlines: inline(first.children) };
       }
       // Legacy writer emits bare inline list labels.
       return { inlines: inline(li.children) };
@@ -629,7 +638,7 @@ export function decodeNoteDocumentNative(
     const r = record(snapshot(envelope), ["type", "data"]);
     if ((r.type !== "html" && r.type !== "tiptap") || typeof r.data !== "string") fail();
     const original = bounded({ type: r.type, data: r.data });
-    const nodes = parseHtml(r.data);
+    const nodes = parseHtml(r.data, true);
     const roots = elements(nodes);
     if (!roots.length && r.data.trim()) fail();
     let content: HtmlNode[] = roots;
@@ -724,15 +733,11 @@ function renderBlocks(
         case "callout":
           return `<div data-type="callout" data-variant="${b.variant}">${render(b.blocks)}</div>`;
         case "horizontal-rule":
+          return '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />';
         case "image":
         case "attachment":
         case "embed":
-          // T01 (native-block-parity plan, Task 1.1) added these as
-          // closed structured-reference AST nodes only. Native HTML
-          // encoding is Task 2.x/3.x and requires a pinned-runtime
-          // schema proof that has not happened yet, so this renderer
-          // refuses categorically rather than guessing a native shape
-          // or silently dropping the block.
+          // These node types still have no native HTML encoding.
           return fail();
         case "opaque":
           return payloads?.get(b.sentinel.token) ?? fail();

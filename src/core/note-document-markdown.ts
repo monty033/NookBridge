@@ -367,16 +367,12 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
           );
           out = `:::nookbridge opaque ${block.nodeType}\nref:1:${block.sentinel.source}:${block.sentinel.token}\n:::`;
           break;
+        case "horizontal-rule":
+          keys(block, ["type"]);
+          out = "---";
+          break;
         default:
-          // T01 (note-document.ts) added `horizontal-rule` / `image` /
-          // `attachment` / `embed` to the closed `NoteBlock` union
-          // (native-block-parity plan, Task 1.1). This grammar's
-          // Markdown interchange forms for those node types are Task
-          // 1.2 and are explicitly out of scope for T01 — until that
-          // work lands, any attempt to serialize one through this path
-          // fails categorically rather than being silently dropped or
-          // downgraded to a paragraph, satisfying the plan's
-          // non-negotiable invariant (plan §4).
+          // Every supported NoteBlock has an explicit representation above.
           fail("unsupported_node");
       }
       bounded(out, MAX_NOTE_DOCUMENT_BLOCK_BYTES, "oversize_block");
@@ -504,6 +500,7 @@ class Parser {
       this.pos--;
       return { type: "task-list", items: this.tasks(depth, 0) };
     }
+    if (line === "---") return { type: "horizontal-rule" };
     if (/^(?:- |\d+\. )/.test(line)) {
       this.pos--;
       const ordered = /^\d/.test(line);

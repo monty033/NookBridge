@@ -28,6 +28,158 @@ function roundTrip(html: string) {
 }
 
 describe("T03 native HTML adapter", () => {
+  it.each([
+    {
+      name: "blockquote",
+      html: '<blockquote><p>before</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>after</p></blockquote>',
+      expected: "> before\n>\n> ---\n>\n> after\n",
+    },
+    {
+      name: "callout",
+      html: '<div data-type="callout" data-variant="warning"><p>before</p><hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" /><p>after</p></div>',
+      expected: ":::nookbridge callout warning\nbefore\n\n---\n\nafter\n:::\n",
+    },
+  ])(
+    "round-trips a canonical horizontal rule inside $name through Markdown and native after an unrelated edit",
+    ({ html, expected }) => {
+      const nestedRule = (doc: {
+        blocks: readonly { type: string; blocks?: readonly { type: string }[] }[];
+      }) => doc.blocks[0]?.blocks?.some((b) => b.type === "horizontal-rule") === true;
+      const result = roundTrip(html);
+      expect(nestedRule(result.document)).toBe(true);
+      expect(result.markdown).toContain(expected);
+      const edited = parseNoteDocumentMarkdown(result.markdown.replace("before", "changed"), {
+        preimage: result.document,
+      });
+      expect(nestedRule(edited)).toBe(true);
+      const native = serializeNoteDocumentNative(edited, { context: result.context, binding });
+      const decoded = decodeNoteDocumentNative(native, binding);
+      expect(serializeNoteDocumentMarkdown(decoded.document)).toContain(
+        expected.replace("before", "changed"),
+      );
+      expect(nestedRule(decoded.document)).toBe(true);
+    },
+  );
+  it("round-trips the canonical horizontal-rule Markdown block through native HTML", () => {
+    const source = "---\nnookbridge-format: 1\n---\n\nabove\n\n---\n\nbelow\n";
+    const parsed = parseNoteDocumentMarkdown(source);
+    expect(parsed.blocks).toEqual([
+      { type: "paragraph", inlines: [{ text: "above" }] },
+      { type: "horizontal-rule" },
+      { type: "paragraph", inlines: [{ text: "below" }] },
+    ]);
+    const markdown = serializeNoteDocumentMarkdown(parsed);
+    expect(markdown).toBe(source);
+    const native = serializeNoteDocumentNative(parsed, { binding });
+    const decoded = decodeNoteDocumentNative(native, binding);
+    expect(serializeNoteDocumentMarkdown(decoded.document)).toBe(source);
+  });
+
+  it("keeps an escaped standalone rule literal and refuses ambiguous paragraph syntax", () => {
+    const header = "---\nnookbridge-format: 1\n---\n\n";
+    const source = header + "\\-\\-\\-\n";
+    const literal = parseNoteDocumentMarkdown(source);
+    expect(literal.blocks).toEqual([{ type: "paragraph", inlines: [{ text: "---" }] }]);
+    expect(serializeNoteDocumentMarkdown(literal)).toBe(source);
+    expect(() => parseNoteDocumentMarkdown(header + "above\n---\nbelow\n")).toThrow();
+  });
+
+  it("preserves noncanonical HR styles opaquely and still rejects styles on other elements", () => {
+    const hr = decodeNoteDocumentNative(wrap('<hr style="border-top:1px dashed red" />'), binding);
+    expect(hr.document.blocks[0]?.type).toBe("opaque");
+    expect(() =>
+      decodeNoteDocumentNative(wrap('<p style="color:red">text</p>'), binding),
+    ).toThrow();
+  });
+
+  it("retains an adjacent task title and opaque block when reconstructing a rule document", () => {
+    const style = "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+    const opaque = "<h4>Keep this opaque heading</h4>";
+    const result = roundTrip(
+      '<ul class="checklist" data-title="Keep title"><li class="checklist--item"><p>Task</p></li></ul>' +
+        `<hr style="${style}" />` +
+        opaque +
+        "<p>before</p>",
+    );
+    expect(result.document.blocks.map((block) => block.type)).toEqual([
+      "task-list",
+      "horizontal-rule",
+      "opaque",
+      "paragraph",
+    ]);
+    expect(result.markdown).toContain('title="Keep title"');
+    const edited = parseNoteDocumentMarkdown(result.markdown.replace("before", "after"), {
+      preimage: result.document,
+    });
+    const stored = serializeNoteDocumentNative(edited, { context: result.context, binding });
+    expect(stored.data).toContain('data-title="Keep title"');
+    expect(stored.data).toContain(`<hr style="${style}" />`);
+    expect(stored.data).toContain(opaque);
+    expect(stored.data).toContain("<p>after</p>");
+  });
+
+  it.each([
+    '<hr width="10" />',
+    "<hr />",
+    '<hr style="border-top:1px dashed red" />',
+    '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" data-semantic="keep" />',
+  ])("preserves a noncanonical HR opaquely through an unrelated edit: %s", (hr) => {
+    const initial = roundTrip(`<p>before</p>${hr}<p>after</p>`);
+    expect(initial.document.blocks.map((b) => b.type)).toEqual([
+      "paragraph",
+      "opaque",
+      "paragraph",
+    ]);
+    const edited = parseNoteDocumentMarkdown(initial.markdown.replace("before", "changed"), {
+      preimage: initial.document,
+    });
+    const stored = serializeNoteDocumentNative(edited, { context: initial.context, binding });
+    expect(stored.data).toContain(hr);
+    expect(stored.data).toContain("<p>changed</p>");
+  });
+
+  it.each(["ul", "ol"] as const)(
+    "keeps a %s with trailing whitespace editable through Markdown/native round-trip",
+    (tag) => {
+      for (const trailing of [" ", "\n", " \n "]) {
+        const list = `<${tag}><li><p>inside</p>${trailing}</li></${tag}>`;
+        const decoded = decodeNoteDocumentNative(wrap(`${list}<p>outside</p>`), binding);
+        expect(decoded.document.blocks.map((block) => block.type)).toEqual([
+          `${tag === "ul" ? "bullet" : "ordered"}-list`,
+          "paragraph",
+        ]);
+        const markdown = serializeNoteDocumentMarkdown(decoded.document);
+        const edited = parseNoteDocumentMarkdown(markdown.replace("outside", "edited outside"), {
+          preimage: decoded.document,
+        });
+        const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+        expect(stored.data).toContain("<p>edited outside</p>");
+        expect(stored.data).toContain("<p>inside</p>");
+      }
+    },
+  );
+
+  it.each(["ul", "ol"] as const)("preserves a %s with meaningful continuations opaquely", (tag) => {
+    const style = "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
+    for (const continuation of [
+      "<p>continued</p>",
+      `<hr style="${style}" />`,
+      '<hr style="border-top:1px dashed red" />',
+      "continued text",
+    ]) {
+      const list = `<${tag}><li><p>inside</p>${continuation}</li></${tag}>`;
+      const decoded = decodeNoteDocumentNative(wrap(`${list}<p>outside</p>`), binding);
+      expect(decoded.document.blocks.map((block) => block.type)).toEqual(["opaque", "paragraph"]);
+      const markdown = serializeNoteDocumentMarkdown(decoded.document);
+      const edited = parseNoteDocumentMarkdown(markdown.replace("outside", "edited outside"), {
+        preimage: decoded.document,
+      });
+      const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+      expect(stored.data).toContain(list);
+      expect(stored.data).toContain("<p>edited outside</p>");
+    }
+  });
+
   it("reads tiptap as HTML, including literal leading JSON text; JSON writing stays off", () => {
     expect(NOTESNOOK_JSON_WRITER_ENABLED).toBe(false);
     expect(roundTrip('<p>{"type":"doc"}</p>').document.blocks[0]).toEqual({
