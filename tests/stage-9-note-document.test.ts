@@ -62,8 +62,14 @@ describe("NoteDocumentV1 — horizontal-rule block", () => {
     expectAccepted(block);
   });
 
-  it("refuses native serialization until the decoder and pinned runtime prove the node", () => {
-    expect(() => serializeNoteDocumentNative(doc([{ type: "horizontal-rule" }]))).toThrow();
+  it("serializes the supported canonical rule to native HTML when bound", () => {
+    expect(
+      serializeNoteDocumentNative(doc([{ type: "horizontal-rule" }]), {
+        binding: { noteId: "fixture-note", revision: "fixture-revision" },
+      }).data,
+    ).toContain(
+      '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />',
+    );
   });
 
   it("rejects an extra/unknown key", () => {
