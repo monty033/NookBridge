@@ -50,6 +50,7 @@ import {
   planUpdateNote,
   type AppendNoteCommand,
   type CreateNoteCommand,
+  type CreateNotePlan,
   type DeleteNoteCommand,
   type NotesnookRevisionState,
   type NotesnookRevisionToken,
@@ -65,7 +66,11 @@ import {
 import {
   NOTE_DOCUMENT_MARKDOWN_HEADER,
   parseNoteDocumentMarkdown,
+  serializeNoteDocumentMarkdown,
 } from "./note-document-markdown.js";
+import type { NoteBlock } from "./note-document.js";
+import { classifyMarkdownVersionClaim } from "./note-document-version-claim.js";
+import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
 import {
   createNotesnookRecoveryMarker,
   type NotesnookRecoveryJournal,
@@ -324,28 +329,43 @@ export class NotesnookWriteAdapter {
       await this.#validateTags(plan.tags);
     }
 
-    // Step 2.5 — fidelity gate.  Refuse Markdown constructs the codec
-    // cannot round-trip (Astra finding P1-7).  The throw is normalised
-    // to `unsupported_content` so the categorical boundary stays
-    // closed.  Runs before any mutator so the unsupported construct is
-    // never silently downgraded to a paragraph.
-    try {
-      assertSupportedConstructs(snapshot.content, STAGE4_WRITE_LIMITS.maxContentBytes);
-    } catch {
+    // Step 2.5 — versioned-document dispatch.  The exact canonical v1 header
+    // goes through the strict parser and the native serializer; every other
+    // reserved-version claim (unknown, malformed, noncanonical, or one the
+    // classifier cannot prove claim-free) is refused.  Neither ever reaches
+    // the legacy codec.  All of this runs before any mutator.
+    let encoded: NotesnookStoredContent;
+    if (snapshot.content.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)) {
+      encoded = encodeVersionedCreate(snapshot.content, plan);
+    } else if (classifyMarkdownVersionClaim(snapshot.content) !== "claim-free") {
       throw adapterError(
         "unsupported_content",
-        "Notesnook write adapter: create content uses an unsupported construct",
+        "Notesnook write adapter: unsupported content format",
       );
-    }
+    } else {
+      // Step 2.6 — fidelity gate for claim-free (legacy) Markdown.  Refuse
+      // constructs the codec cannot round-trip (Astra finding P1-7).  The
+      // throw is normalised to `unsupported_content` so the categorical
+      // boundary stays closed.  Runs before any mutator so the unsupported
+      // construct is never silently downgraded to a paragraph.
+      try {
+        assertSupportedConstructs(snapshot.content, STAGE4_WRITE_LIMITS.maxContentBytes);
+      } catch {
+        throw adapterError(
+          "unsupported_content",
+          "Notesnook write adapter: create content uses an unsupported construct",
+        );
+      }
 
-    // Step 3 — translate Markdown to the stored representation via the
-    // injected codec.  Any throw is normalised to `unsupported_content`.
-    // The contract only stores byte counts here; the raw Markdown is
-    // never concatenated into the stored content slot.  `listKind` is
-    // forwarded verbatim from the plan so the codec picks the requested
-    // intent; a malformed value has already been rewritten to
-    // `invalid_input` by the contract plan.
-    const encoded = this.#encodeMarkdown(snapshot.content, plan.listKind);
+      // Step 3 — translate Markdown to the stored representation via the
+      // injected codec.  Any throw is normalised to `unsupported_content`.
+      // The contract only stores byte counts here; the raw Markdown is
+      // never concatenated into the stored content slot.  `listKind` is
+      // forwarded verbatim from the plan so the codec picks the requested
+      // intent; a malformed value has already been rewritten to
+      // `invalid_input` by the contract plan.
+      encoded = this.#encodeMarkdown(snapshot.content, plan.listKind);
+    }
 
     // Step 4 — perform the local mutation.  We catch every upstream
     // throw and rewrite it to a categorical failure.  The adapter
@@ -1432,6 +1452,68 @@ function isUpstreamVaultLockedRefusal(value: unknown): boolean {
 }
 
 const WRITE_ADAPTER_ERRORS = new WeakSet<object>();
+
+// Placeholder identity for the create preflight: a note that does not exist
+// yet has no id or revision, and decoding binds only to what it is handed.
+const CREATE_PREFLIGHT_BINDING = Object.freeze({
+  noteId: "0".repeat(32),
+  revision: `rev_${"0".repeat(32)}`,
+});
+
+function withResolvedListKind(
+  blocks: readonly NoteBlock[],
+  kind: NotesnookListKind,
+): readonly NoteBlock[] {
+  return blocks.map((block): NoteBlock => {
+    if (block.type === "task-list") return block.kind === undefined ? { ...block, kind } : block;
+    if (block.type === "callout" || block.type === "blockquote") {
+      return { ...block, blocks: withResolvedListKind(block.blocks, kind) } as NoteBlock;
+    }
+    return block;
+  });
+}
+
+/**
+ * Encode exact canonical v1 Markdown for a NEW note.
+ *
+ * The input is parsed with the strict canonical grammar (no preimage, so any
+ * opaque reference is refused) and serialized natively. Before the caller may
+ * touch a mutator, the native output must also survive the same strict decode
+ * and Markdown projection the public `notes.get` reader performs, reproduce the
+ * requested document byte-for-byte (an unwrapped task list reads back wrapped
+ * with its resolved list intent), and fit the reader's response limits, so the
+ * note cannot be written in a form the public reader would degrade or withhold.
+ */
+function encodeVersionedCreate(content: string, plan: CreateNotePlan): NotesnookStoredContent {
+  try {
+    const document = parseNoteDocumentMarkdown(content);
+    const stored = serializeNoteDocumentNative(document, { listKind: plan.listKind });
+    const decoded = decodeNoteDocumentNative(stored, CREATE_PREFLIGHT_BINDING);
+    const readBack = serializeNoteDocumentMarkdown(decoded.document);
+    const expected = serializeNoteDocumentMarkdown({
+      version: 1,
+      blocks: withResolvedListKind(document.blocks, plan.listKind),
+    });
+    if (readBack !== expected) throw new Error("parity");
+    if (Buffer.byteLength(readBack, "utf8") > STAGE5_RPC_LIMITS.maxResponseBytes) {
+      throw new Error("reader limit");
+    }
+    const charged = [
+      CREATE_PREFLIGHT_BINDING.noteId,
+      plan.title,
+      CREATE_PREFLIGHT_BINDING.revision,
+      ...(plan.notebookId === undefined ? [] : [plan.notebookId]),
+      readBack,
+    ];
+    if (!fitsResponsePreflight(charged)) throw new Error("reader limit");
+    return stored;
+  } catch {
+    throw adapterError(
+      "unsupported_content",
+      "Notesnook write adapter: unsupported content format",
+    );
+  }
+}
 
 /**
  * Construct a categorical, chain-free write-adapter error.

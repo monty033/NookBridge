@@ -2,7 +2,7 @@
 , buildNpmPackage
 , gnumake
 , makeWrapper
-, musl
+, pkgsStatic
 , nodejs_22
 , openssl
 , pkg-config
@@ -19,11 +19,11 @@ buildNpmPackage rec {
 
   # Keep this in lock-step with package-lock.json. Native dependencies are
   # rebuilt against the package's pinned Node 22 toolchain below.
-  npmDepsHash = "sha256-1cff91fgAnESE6Jh3BD0peaJKN2msjy8DEsSkPxOaeg=";
+  npmDepsHash = "sha256-BtaHuNOkEVYKPBhNC1ki9gvxDejYbHwGg1mXVCnizhs=";
   npmRebuildFlags = [ "--ignore-scripts" ];
 
   preBuild = ''
-    ${musl}/bin/musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+    ${pkgsStatic.stdenv.cc}/bin/${pkgsStatic.stdenv.cc.targetPrefix}gcc -std=c11 -O2 -Wall -Wextra -Werror -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-pie -no-pie -Wl,-e,_start -Wl,--build-id=none \
       native/operator-peercred.c -o operator-peercred-helper
     substituteInPlace node_modules/better-sqlite3-multiple-ciphers/src/better_sqlite3.hpp \
       --replace-fail '#include <sqlite3.h>' '#include "../deps/sqlite3/sqlite3.h"'
