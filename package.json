@@ -51,7 +51,8 @@
     "better-sqlite3-multiple-ciphers": "11.5.0",
     "sqlite-better-trigram": "0.0.3",
     "sqlite-regex": "0.2.4-alpha.1",
-    "sqlite3-fts5-html": "0.0.4"
+    "sqlite3-fts5-html": "0.0.4",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
