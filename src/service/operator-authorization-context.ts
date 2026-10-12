@@ -56,7 +56,7 @@ function requestStringField(
  * against the published shape before the store is consulted, so a malformed or
  * forged value never drives a lookup.
  */
-function targetNoteId(input: {
+export function targetNoteId(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest;
   readonly peer: OperatorPeer | undefined;
