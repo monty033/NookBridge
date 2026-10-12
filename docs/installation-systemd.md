@@ -123,6 +123,22 @@ note refuses mutation outright (`vault_locked`), and an operation the note's
 notebook policy forbids is refused (`permission_denied`); per-notebook overrides
 live in the settings file.
 
+A mutation that addresses an existing note also needs handles that belong to
+the same peer:
+
+- `apply-edit` requires a note handle (from browse or search) that resolves for
+  that peer.
+- A bare `apply-undo` requires an operation handle that peer owns and whose
+  stored target note resolves.
+- If `apply-undo` supplies both a note `id` and an operation handle, they must
+  identify the same note.
+
+A missing, unknown, or another peer's note handle is denied before dispatch as
+`permission_denied`. A mismatched, malformed, or unknown operation handle is
+also refused without changing any note, but its categorical code depends on
+where it is caught (`permission_denied`, `not_found`, or `invalid_request`);
+do not rely on a single code for every handle error.
+
 The operator socket is a separate path from the service socket
 (`/run/nookbridge/operator.sock`). The daemon's peer-credential authorization
 is the enforcement boundary for that socket: filesystem ownership remains the

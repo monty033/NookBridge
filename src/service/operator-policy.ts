@@ -22,10 +22,11 @@
  *       per-notebook edit without ever exposing the notebook id or
  *       title in the denial reason.
  *
- *   (c) lock-state hooks — locked notes reject `notes.apply-edit`,
- *       `notes.apply-undo`, and `notes.create` with categorical
- *       `permission_denied` (the canonical `locked` rejection lives
- *       upstream; the operator seam is the second line of defence).
+ *   (c) lock-state hooks — locked notes reject `notes.apply-edit` and
+ *       `notes.apply-undo` with a categorical denial (the canonical
+ *       `locked` rejection lives upstream; the operator seam is the
+ *       second line of defence).  `notes.create` has no existing target,
+ *       so it carries no lock state.
  *
  * The seam is intentionally tiny and pure:
  *

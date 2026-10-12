@@ -353,3 +353,158 @@ describe("daemon operator mutation wiring", () => {
     expect(stillListed.result.handles).toHaveLength(1);
   });
 });
+
+/**
+ * Two notes behind one registry and one operation store, so a request can name
+ * note A by `id` while carrying an operation handle recorded for note B.
+ */
+async function composeTwoNotes() {
+  const notes = new Map<
+    string,
+    { title: string; revision: string; content: OperatorStoredContent }
+  >([
+    ["note-a", { title: "Note A", revision: REVISION_1, content: wrap("<p>alpha</p>") }],
+    ["note-b", { title: "Note B", revision: REVISION_1, content: wrap("<p>bravo</p>") }],
+  ]);
+  const readOnly = {
+    async listNotes() {
+      return [...notes].map(([id, note]) => ({ id, title: note.title }));
+    },
+    async search() {
+      return [];
+    },
+    async noteMetadata(id: string) {
+      const note = notes.get(id);
+      return note === undefined ? undefined : { id, title: note.title, revision: note.revision };
+    },
+    async readOperatorNoteContent(id: string) {
+      return { ...notes.get(id)!.content };
+    },
+  } as unknown as ServiceRuntime["readOnly"];
+
+  const store = await createNotesUndoStore({
+    fs: new MemoryFs(),
+    daemonKey: new Uint8Array(32).fill(3),
+    now: () => 1000,
+  });
+  const registry = createOperatorHandleRegistry();
+  const discovery = createOperatorDiscoveryRuntime({ readOnly } as ServiceRuntime, registry);
+  const updates: string[] = [];
+  const write = createOperatorWriteRuntime({
+    store,
+    resolveHandle: (handle, peer) => registry.resolve(handle, peer),
+    now: () => 1000,
+    ttlMs: 60_000,
+    source: {
+      read: async (noteId) => {
+        const note = notes.get(noteId);
+        return note === undefined
+          ? undefined
+          : { revision: note.revision, content: { ...note.content } };
+      },
+      update: async (command) => {
+        const note = notes.get(command.noteId);
+        if (note === undefined) return { kind: "missing" as const };
+        if (command.expectedRevision !== note.revision) return { kind: "conflict" as const };
+        updates.push(command.noteId);
+        note.content = { ...command.content };
+        note.revision = command.expectedRevision === REVISION_1 ? REVISION_2 : REVISION_1;
+        return { kind: "updated" as const, revision: note.revision };
+      },
+    },
+  });
+  const handler = createOperatorDiscoveryHandler({ ...discovery, ...write });
+  const peer = { uid: 1, gid: 2, groups: [] as string[] };
+  return { handler, peer, notes, updates };
+}
+
+describe("daemon operator undo target agreement", () => {
+  it("refuses an id for note A paired with an operation handle for note B, mutating neither", async () => {
+    const { handler, peer, notes, updates } = await composeTwoNotes();
+    const browse = (await handler(
+      { id: "browse", method: "notes.browse", params: {} } as RpcRequest,
+      peer,
+    )) as { ok: boolean; result: { notes: ReadonlyArray<{ handle: string; label: string }> } };
+    const handleFor = (title: string): string => {
+      const entry = browse.result.notes.find((note) => note.label === title);
+      if (entry === undefined) throw new Error("browse did not list the fixture note");
+      return entry.handle;
+    };
+    const handleA = handleFor("Note A");
+    const handleB = handleFor("Note B");
+    expect(handleA).not.toBe(handleB);
+
+    // The same peer commits an edit on note B, which records the operation.
+    const preimageB = (await handler(
+      { id: "pre-b", method: "notes.edit-preimage", params: { id: handleB } } as RpcRequest,
+      peer,
+    )) as { ok: boolean; result: { markdown: string; revision: string } };
+    expect(preimageB.ok).toBe(true);
+    const editB = (await handler(
+      {
+        id: "edit-b",
+        method: "notes.apply-edit",
+        params: {
+          id: handleB,
+          expectedRevision: preimageB.result.revision,
+          markdown: preimageB.result.markdown.replace("bravo", "bravo edited"),
+        },
+      } as RpcRequest,
+      peer,
+    )) as { ok: boolean };
+    expect(editB.ok).toBe(true);
+    const listed = (await handler(
+      { id: "list", method: "notes.operation-list", params: {} } as RpcRequest,
+      peer,
+    )) as { result: { handles: ReadonlyArray<string> } };
+    const operationHandleB = listed.result.handles[0];
+    if (operationHandleB === undefined) throw new Error("missing operation handle");
+
+    const snapshot = () =>
+      JSON.stringify([...notes].map(([id, note]) => [id, note.revision, note.content]));
+    const before = snapshot();
+    const updatesBefore = updates.length;
+
+    // Note A's handle, note B's operation: the two disagree about the target.
+    const mismatched = await handler(
+      {
+        id: "mismatch",
+        method: "notes.apply-undo",
+        params: { id: handleA, operationHandle: operationHandleB },
+      } as RpcRequest,
+      peer,
+    );
+    expect(mismatched).toEqual({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+      id: "mismatch",
+    });
+
+    // Refused before any mutation: no source update ran, and both notes are
+    // exactly as they were, B still carrying its edit.
+    expect(updates).toHaveLength(updatesBefore);
+    expect(snapshot()).toBe(before);
+    expect(notes.get("note-a")!.content.data).toContain("alpha");
+    expect(notes.get("note-b")!.content.data).toContain("bravo edited");
+
+    // The refusal did not consume the operation, and it is not that the
+    // operation was unusable: the agreeing request is honored.
+    const stillListed = (await handler(
+      { id: "list-again", method: "notes.operation-list", params: {} } as RpcRequest,
+      peer,
+    )) as { result: { handles: ReadonlyArray<string> } };
+    expect(stillListed.result.handles).toEqual([operationHandleB]);
+    const agreeing = (await handler(
+      {
+        id: "agree",
+        method: "notes.apply-undo",
+        params: { id: handleB, operationHandle: operationHandleB },
+      } as RpcRequest,
+      peer,
+    )) as { ok: boolean };
+    expect(agreeing.ok).toBe(true);
+    expect(notes.get("note-b")!.content.data).toContain("bravo");
+    expect(notes.get("note-b")!.content.data).not.toContain("edited");
+    expect(notes.get("note-a")!.content.data).toContain("alpha");
+  });
+});

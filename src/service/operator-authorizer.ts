@@ -12,7 +12,8 @@
  *      groups are a privilege boundary, not decoration: membership of the
  *      read-only group must not be enough to call `apply-edit`.
  *   3. Target — a locked note refuses mutation categorically, and a notebook
- *      whose policy forbids the operation refuses it.
+ *      whose policy forbids the operation refuses it.  A target-addressed
+ *      mutation whose target does not resolve for the calling peer is refused.
  *
  * Resolution happens before the synchronous policy seam runs, so the evaluator
  * sees the target it is judging.
@@ -22,6 +23,7 @@ import {
   OPERATOR_MUTATING_METHODS,
   resolveOperatorRequestLockState,
   resolveOperatorRequestNotebookPolicy,
+  targetNoteId,
 } from "./operator-authorization-context.js";
 import {
   authorizeOperatorMethod,
@@ -101,35 +103,46 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
     });
     if (notebookPolicy !== undefined) context.notebookPolicy = notebookPolicy;
     if (OPERATOR_MUTATING_METHODS.includes(method)) {
-      const targetKnown = await requestTargetKnown(deps, request, peer, method);
-      if (method === "notes.create" || targetKnown) {
-        if (notebookPolicy === undefined) {
+      // A target-addressed mutation must name a target this peer can resolve.
+      // A handle minted for another peer, a forged or malformed one, or no
+      // target at all yields no lock or notebook context, which the evaluator
+      // would read as "nothing to refuse"; deny instead.
+      if (method !== "notes.create") {
+        if (!(await requestTargetKnown(deps, request, peer, method))) {
           return { allowed: false, reason: "permission_denied" };
         }
-        if (method !== "notes.create" && deps.readNoteLockState === undefined) {
+        if (deps.readNoteLockState === undefined) {
           return { allowed: false, reason: "permission_denied" };
         }
+      }
+      if (notebookPolicy === undefined) {
+        return { allowed: false, reason: "permission_denied" };
       }
     }
     return authorizeOperatorMethod(createOperatorPolicy(evaluateOperatorRequest), method, context);
   };
 }
 
+/**
+ * Whether the request names a target that resolves for this peer.  This is the
+ * same resolution the lock and notebook-policy contexts use, so the gate and
+ * the contexts cannot disagree about what the request targets.
+ */
 async function requestTargetKnown(
   deps: OperatorAuthorizerDependencies,
   request: RpcRequest | undefined,
   peer: OperatorPeer,
   method: OperatorMethod,
 ): Promise<boolean> {
-  if (request === undefined || request.params === null || typeof request.params !== "object") {
-    return false;
-  }
-  const params = request.params as Record<string, unknown>;
-  if (typeof params.id === "string") return deps.resolveHandle(params.id, peer) !== undefined;
-  if (method === "notes.apply-undo" && typeof params.operationHandle === "string") {
-    return (await deps.resolveOperationNoteId?.(params.operationHandle, peer)) !== undefined;
-  }
-  return false;
+  if (request === undefined) return false;
+  const noteId = await targetNoteId({
+    method,
+    request,
+    peer,
+    resolveHandle: deps.resolveHandle,
+    resolveOperationNoteId: deps.resolveOperationNoteId,
+  });
+  return noteId !== undefined;
 }
 
 /**
