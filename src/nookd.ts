@@ -65,6 +65,10 @@ import {
   deriveOperationStoreKey,
 } from "./service/notes-operation-store-fs.js";
 import { createOperatorAuthorizer } from "./service/operator-authorizer.js";
+import {
+  FAIL_CLOSED_DISCOVERY_VISIBILITY,
+  createDiscoveryVisibility,
+} from "./service/discovery-visibility.js";
 import { createSettingsEvaluator } from "./settings/settings-evaluator.js";
 import { loadSettings } from "./settings/settings-loader.js";
 
@@ -318,7 +322,6 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     throw startupError("credentials", "nookd credential startup failed");
   }
 
-  let search: NookdStartupRuntime["search"];
   let status: NookdStartupRuntime["status"];
   let listNotebooks: NookdStartupRuntime["listNotebooks"];
   let noteMetadata: NookdStartupRuntime["noteMetadata"];
@@ -386,7 +389,6 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       throw new Error("invalid service runtime");
     }
     readOnly = capturedReadOnly;
-    search = capturedSearch;
     status = capturedStatus;
     listNotebooks = capturedListNotebooks;
     noteMetadata = capturedNoteMetadata;
@@ -428,10 +430,36 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
 
   if (runtimeCleanup === undefined) throw startupError("runtime", "nookd runtime startup failed");
   const cleanup = onceAsync(runtimeCleanup);
+
+  // One visibility filter decides every discovery title: ordinary MCP
+  // notes.search / notes.list_notebooks and operator browse / search.  Notebook
+  // paths and ancestry come from one fresh listNotebooksForSettings snapshot per
+  // request, never the boot-time index; a missing visibility input yields the
+  // fail-closed filter (empty results), never the raw unfiltered runtime.
+  const discoveryVisibility =
+    readOnly === undefined || settingsEvaluator === undefined
+      ? FAIL_CLOSED_DISCOVERY_VISIBILITY
+      : createDiscoveryVisibility({
+          source: readOnly,
+          settingsEvaluator,
+          listNotebooksForSettings,
+        });
+  const visibleSearch: NookdServerRuntime["search"] = async (query) =>
+    freeze(
+      (await discoveryVisibility.searchHits(query)).map((hit) => freeze({ title: hit.title })),
+    );
+  const rawListNotebooks = listNotebooks;
+  const visibleListNotebooks =
+    rawListNotebooks === undefined
+      ? undefined
+      : async (): Promise<
+          ReturnType<typeof rawListNotebooks> extends Promise<infer R> ? R : never
+        > => discoveryVisibility.filterNotebooks(await rawListNotebooks());
+
   const serverRuntime: NookdServerRuntime = freeze({
-    search,
+    search: visibleSearch,
     ...(status === undefined ? {} : { status }),
-    ...(listNotebooks === undefined ? {} : { listNotebooks }),
+    ...(visibleListNotebooks === undefined ? {} : { listNotebooks: visibleListNotebooks }),
     ...(noteMetadata === undefined ? {} : { noteMetadata }),
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
@@ -570,6 +598,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
             const discoveryRuntime = createOperatorDiscoveryRuntime(
               { readOnly } as ServiceRuntime,
               operatorHandles,
+              discoveryVisibility,
             );
             const { create: _untrackedCreate, ...discoveryMethods } = discoveryRuntime;
             return createOperatorDiscoveryHandler({

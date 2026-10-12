@@ -325,7 +325,9 @@ export function flattenLiveDatabaseToReadOnly(
     noteId: string,
   ): Promise<{ readonly notebookId?: string; readonly absent: boolean }> => {
     if (notebookNotesFn === undefined && relationsFromFn === undefined) return { absent: false };
-    const allNotebookIds = await readFilteredSelectorIds(notebooksAll, "notebooks.all.ids");
+    // Strict: an unavailable or malformed index must never look like an empty
+    // vault, or absence would be "confirmed" against nothing.
+    const allNotebookIds = await readStrictSelectorIds(notebooksAll, "notebooks.all.ids");
     const notebookIds = truncateIds(allNotebookIds, MAX_LIST_NOTEBOOKS);
     // Reaching the cap means the list may have been truncated, so
     // "no notebook contains it" cannot be proven.
@@ -536,6 +538,63 @@ export function flattenLiveDatabaseToReadOnly(
           }
         }
         summaries.push(parentId === undefined ? summary : { ...summary, parentId });
+      }
+      return summaries as never;
+    },
+
+    // STRICT counterpart of `listNotebooksWithParents` for settings/policy paths
+    // and discovery visibility.  Unlike the tolerant method it never falls back
+    // to root-only summaries and never skips a record: breadcrumbs are required,
+    // and every enumerated id must yield a valid notebook (matching id) with a
+    // valid parent result whose parent is itself enumerated.  Any failure is a
+    // fixed-message projection error carrying no cause, id, title or path.
+    // The enumeration is bounded by `MAX_LIST_NOTEBOOKS`: a larger id array is
+    // rejected before any per-id read rather than truncated, so the hierarchy is
+    // always complete or absent.
+    listNotebooksWithParentsStrict: async (): Promise<
+      NotesnookReadOnlyDatabase["listNotebooks"] extends () => Promise<infer R> ? R : never
+    > => {
+      if (breadcrumbsFn === undefined) {
+        throw projectionError("Notesnook read-only projection: notebooks.breadcrumbs unavailable");
+      }
+      const ids = await readStrictSelectorIds(notebooksAll, "notebooks.all.ids");
+      // Availability bound.  Unlike the tolerant `listNotebooks` seam, this
+      // hierarchy may never be truncated: a partial strict hierarchy would
+      // let a policy/visibility decision resolve against a notebook set the
+      // live vault does not actually have (fail-open).  So an enumeration
+      // larger than the published cap is rejected categorically BEFORE the
+      // per-id `notebook(id)` / `breadcrumbs(id)` enrichment loop runs.
+      // Nothing is read, nothing is truncated, no id byte leaks.
+      if (ids.length > MAX_LIST_NOTEBOOKS) {
+        throw projectionError("Notesnook read-only projection: notebook hierarchy is too large");
+      }
+      const summaries: Array<{
+        readonly id: string;
+        readonly title: string;
+        readonly parentId?: string;
+        readonly dateCreated?: number;
+        readonly dateModified?: number;
+      }> = [];
+      for (const id of ids) {
+        const notebook = await callThrough(
+          notebookFn,
+          [id],
+          "Notesnook read-only projection: notebooks.notebook rejected",
+        );
+        const summary = coerceUpstreamNotebookToSummary(notebook);
+        if (summary === undefined || summary.id !== id) {
+          throw projectionError("Notesnook read-only projection: notebook record is invalid");
+        }
+        const parentId = await readNotebookParentId(breadcrumbsFn, id, summary);
+        summaries.push(parentId === undefined ? summary : { ...summary, parentId });
+      }
+      const enumerated = new Set(summaries.map((summary) => summary.id));
+      for (const summary of summaries) {
+        if (summary.parentId !== undefined && !enumerated.has(summary.parentId)) {
+          throw projectionError(
+            "Notesnook read-only projection: notebook parent is not enumerated",
+          );
+        }
       }
       return summaries as never;
     },
@@ -1036,6 +1095,67 @@ async function readFilteredSelectorIds(selector: unknown, label: string): Promis
     for (const value of resolved) {
       if (typeof value !== "string" || value.length === 0) continue;
       ids.push(value);
+    }
+    return ids;
+  });
+}
+
+/**
+ * STRICT counterpart of {@link readFilteredSelectorIds} for the complete
+ * notebook hierarchy and root-absence confirmation.  The tolerant reader maps
+ * a synchronous `null`/`undefined` to `[]` and silently drops malformed
+ * ids, so an unavailable index is indistinguishable from an empty vault.
+ * Here the `ids` function must exist, return a real thenable that resolves to
+ * an array, and every element must be a non-empty string with no duplicates.
+ * A genuinely empty array is valid.  Failures are fixed-message projection
+ * errors that carry no cause and no id/value.
+ */
+async function readStrictSelectorIds(selector: unknown, label: string): Promise<string[]> {
+  let fn: unknown;
+  try {
+    fn = (selector as Record<string, unknown>).ids;
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label} getter threw`);
+  }
+  if (typeof fn !== "function") {
+    throw projectionError(`Notesnook read-only projection: ${label} is unavailable`);
+  }
+  let raw: unknown;
+  try {
+    raw = (fn as () => unknown).call(selector);
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label} threw synchronously`);
+  }
+  let isThenable = false;
+  try {
+    isThenable =
+      raw !== null &&
+      raw !== undefined &&
+      typeof raw === "object" &&
+      typeof (raw as { then?: unknown }).then === "function";
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label} then getter threw`);
+  }
+  if (!isThenable) {
+    throw projectionError(`Notesnook read-only projection: ${label} did not return a thenable`);
+  }
+  return callThenable(raw as PromiseLike<unknown>, label, (resolved) => {
+    if (!Array.isArray(resolved)) {
+      throw projectionError(`Notesnook read-only projection: ${label} did not resolve to an array`);
+    }
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    try {
+      for (const value of resolved) {
+        if (typeof value !== "string" || value.length === 0 || seen.has(value)) {
+          throw projectionError(`Notesnook read-only projection: ${label} returned invalid ids`);
+        }
+        seen.add(value);
+        ids.push(value);
+      }
+    } catch (error) {
+      if (isNotesnookReadOnlyProjectionError(error)) throw error;
+      throw projectionError(`Notesnook read-only projection: ${label} returned invalid ids`);
     }
     return ids;
   });

@@ -87,6 +87,13 @@ function createFakeRealCoreModule(
      * `db.relations.from({ id, type: "notebook" }, "note").has(noteId)`.
      */
     relationOnlyMembership?: boolean;
+    /** Explicit notebook set: enumerated ids, per-id records, optional breadcrumbs. */
+    hierarchy?: Readonly<{
+      ids: string[];
+      records: Record<string, unknown>;
+      breadcrumbs?: (id: string) => Promise<unknown>;
+      failIds?: string[];
+    }>;
   }> = {},
 ): NotesnookRealCoreModule {
   const relationOnly = options.relationOnlyMembership === true;
@@ -96,11 +103,14 @@ function createFakeRealCoreModule(
   const emptySearchResults = {
     ids: async () => [] as string[],
   };
+  const hierarchy = options.hierarchy;
   const emptyNotebookIds = {
     ids: async () =>
-      (options.notebookLookupFailure || options.pathDiagnosticMembershipFailure
-        ? [options.pathDiagnosticMembershipFailure ? "general-id" : "broken-id"]
-        : []) as string[],
+      (hierarchy !== undefined
+        ? hierarchy.ids
+        : options.notebookLookupFailure || options.pathDiagnosticMembershipFailure
+          ? [options.pathDiagnosticMembershipFailure ? "general-id" : "broken-id"]
+          : []) as string[],
   };
   const ctor = vi.fn(function FakeDatabaseCtor() {
     return {
@@ -132,7 +142,22 @@ function createFakeRealCoreModule(
       },
       notebooks: {
         all: emptyNotebookIds,
+        ...(hierarchy !== undefined
+          ? hierarchy.breadcrumbs === undefined
+            ? {}
+            : { breadcrumbs: hierarchy.breadcrumbs }
+          : options.pathDiagnosticMembershipFailure
+            ? {
+                // Real core always provides breadcrumbs; the strict settings
+                // hierarchy requires them.
+                breadcrumbs: async (id: string) => [{ id, title: "General" }],
+              }
+            : {}),
         notebook: async (id: string) => {
+          if (hierarchy !== undefined) {
+            if (hierarchy.failIds?.includes(id)) throw new Error("notebook lookup failed");
+            return hierarchy.records[id];
+          }
           if (options.notebookLookupFailure) throw new Error("notebook lookup failed");
           if (options.pathDiagnosticMembershipFailure && id === "general-id") {
             return { id, title: "General", dateEdited: 1 };
@@ -398,6 +423,136 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
       } finally {
         rmSync(tempCredentialsDir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("notebook hierarchy for settings uses only the strict source", () => {
+    const ROOT = { id: "nb-root", title: "Root", dateEdited: 11 };
+    const CHILD = { id: "nb-child", title: "Child", dateEdited: 22 };
+    const nestedBreadcrumbs = async (id: string) =>
+      id === "nb-root"
+        ? [{ id: "nb-root", title: "Root" }]
+        : [
+            { id: "nb-root", title: "Root" },
+            { id: "nb-child", title: "Child" },
+          ];
+    const records = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      "nb-root": ROOT,
+      "nb-child": CHILD,
+      ...overrides,
+    });
+
+    async function withRuntime(
+      hierarchy: NonNullable<
+        NonNullable<Parameters<typeof createFakeRealCoreModule>[0]>["hierarchy"]
+      >,
+      body: (runtime: ServiceRuntime) => Promise<void>,
+    ): Promise<void> {
+      const state = newState();
+      const tempCredentialsDir = mkdtempSync(join(tmpdir(), "nookbridge-stage-5-service-strict-"));
+      writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+        mode: 0o600,
+      });
+      const keys = createSystemdCredentialKeyStore({ credentialsDirectory: tempCredentialsDir });
+      let runtime: ServiceRuntime | undefined;
+      try {
+        runtime = await createProductionServiceRuntime({
+          stateDir: state.stateDir,
+          keys,
+          injectedModule: createFakeRealCoreModule({ hierarchy }),
+        });
+        await body(runtime);
+      } finally {
+        if (runtime) await runtime.cleanup();
+        rmSync(tempCredentialsDir, { recursive: true, force: true });
+      }
+    }
+
+    it("returns a proven nested hierarchy and resolves live paths from it", async () => {
+      await withRuntime(
+        { ids: ["nb-root", "nb-child"], records: records(), breadcrumbs: nestedBreadcrumbs },
+        async (runtime) => {
+          await expect(runtime.listNotebooksForSettings!()).resolves.toEqual([
+            { id: "nb-root", title: "Root", dateModified: 11 },
+            { id: "nb-child", title: "Child", dateModified: 22, parentId: "nb-root" },
+          ]);
+          await expect(runtime.resolveNotebookPath!("nb-child")).resolves.toBe("Root/Child");
+        },
+      );
+    });
+
+    it("fails closed when breadcrumbs are absent, never falling back to root-only titles", async () => {
+      await withRuntime({ ids: ["nb-root", "nb-child"], records: records() }, async (runtime) => {
+        await expect(runtime.listNotebooksForSettings!()).rejects.toThrow(
+          /notebook hierarchy listing failed/i,
+        );
+        await expect(runtime.resolveNotebookPath!("nb-child")).rejects.toThrow(
+          /notebook hierarchy listing failed/i,
+        );
+        // The ordinary listing is untouched: titles still list, which is exactly
+        // the raw fallback the settings hierarchy must not use.
+        await expect(runtime.listNotebooks()).resolves.toHaveLength(2);
+      });
+    });
+
+    it("fails closed when breadcrumbs reject", async () => {
+      await withRuntime(
+        {
+          ids: ["nb-root", "nb-child"],
+          records: records(),
+          breadcrumbs: async () => {
+            throw new Error("breadcrumb secret");
+          },
+        },
+        async (runtime) => {
+          const failure = await runtime.listNotebooksForSettings!().catch((e: unknown) => e);
+          expect(String(failure)).toMatch(/notebook hierarchy listing failed/i);
+          expect(String(failure)).not.toContain("breadcrumb secret");
+        },
+      );
+    });
+
+    it("fails closed when an enumerated notebook is unavailable or missing", async () => {
+      await withRuntime(
+        {
+          ids: ["nb-root", "nb-child"],
+          records: records(),
+          breadcrumbs: nestedBreadcrumbs,
+          failIds: ["nb-child"],
+        },
+        async (runtime) => {
+          await expect(runtime.listNotebooksForSettings!()).rejects.toThrow(
+            /notebook hierarchy listing failed/i,
+          );
+        },
+      );
+      await withRuntime(
+        {
+          ids: ["nb-root", "nb-child"],
+          records: { "nb-root": ROOT },
+          breadcrumbs: nestedBreadcrumbs,
+        },
+        async (runtime) => {
+          await expect(runtime.listNotebooksForSettings!()).rejects.toThrow(
+            /notebook hierarchy listing failed/i,
+          );
+        },
+      );
+    });
+
+    it("fails closed when an enumerated notebook is malformed", async () => {
+      await withRuntime(
+        {
+          ids: ["nb-root", "nb-child"],
+          records: records({ "nb-child": { id: "nb-child", dateEdited: 22 } }),
+          breadcrumbs: nestedBreadcrumbs,
+        },
+        async (runtime) => {
+          await expect(runtime.listNotebooksForSettings!()).rejects.toThrow(
+            /notebook hierarchy listing failed/i,
+          );
+        },
+      );
     });
   });
 

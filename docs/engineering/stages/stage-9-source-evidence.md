@@ -193,7 +193,7 @@ names.
   tools. `nookctl doctor` reports zero failures and two expected warnings.
 - One explicitly authorized global sync returned `synced` in one attempt;
   read-back returned `pendingSync=false` and `hasUnsyncedChanges=false`.
-- The protected `Vault-locked-note canary` remains visible by title.
+- The protected `Vault-locked-note canary` remains visible by title. *(Historical pre-S2 observation from the then-deployed build; it predates the S2 discovery-visibility implementation, which suppresses locked-note titles from discovery.)*
 - No note mutation, destructive probe, or live failure injection was used for
   this rollout.
 

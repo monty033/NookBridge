@@ -198,8 +198,19 @@ export interface NotesnookReadOnlyDatabase {
     force?: boolean;
   }) => Promise<boolean>;
   readonly listNotebooks: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
-  /** Full, hierarchy-proven enumeration reserved for boot-time policy indexing. */
+  /**
+   * Tolerant enumeration kept for the exact-path/delete seams: it falls back to
+   * root-only summaries when breadcrumbs are absent or fail and skips notebooks
+   * it cannot read.  NOT a complete hierarchy; never use it for policy paths.
+   */
   readonly listNotebooksWithParents?: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
+  /**
+   * STRICT, complete, hierarchy-proven enumeration for settings/policy paths and
+   * discovery visibility.  Requires breadcrumbs; every enumerated id must yield
+   * a valid notebook and a valid parent result, otherwise it throws a redacted
+   * categorical projection error.  Never falls back and never skips.
+   */
+  readonly listNotebooksWithParentsStrict?: () => Promise<NotesnookReadOnlyNotebookSummary[]>;
   readonly listNotes: () => Promise<NotesnookReadOnlyNoteMetadata[]>;
   /** Search-indexed note candidates used by the exact-path delete resolver. */
   readonly findNotesByTitle?: (title: string) => Promise<NotesnookReadOnlyNoteMetadata[]>;

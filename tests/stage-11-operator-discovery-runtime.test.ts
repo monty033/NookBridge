@@ -4,6 +4,7 @@ import {
   createOperatorHandleRegistry,
 } from "../src/service/operator-discovery-runtime.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
+import type { DiscoveryVisibility } from "../src/service/discovery-visibility.js";
 
 const PEER_A: OperatorPeer = Object.freeze({
   uid: 1001,
@@ -15,6 +16,26 @@ const PEER_B: OperatorPeer = Object.freeze({
   gid: 100,
   groups: ["nookbridge-operators"],
 });
+
+/**
+ * A `DiscoveryVisibility` double whose answers deliberately DISAGREE with
+ * the raw service surface stubbed into the same runtime.  With both wired,
+ * the labels that come back can only have come from the filter.
+ */
+function visibilityDouble(
+  options: Readonly<{
+    readonly listNotes: DiscoveryVisibility["listNotes"];
+    readonly searchHits: DiscoveryVisibility["searchHits"];
+  }>,
+): DiscoveryVisibility {
+  return {
+    listNotes: options.listNotes,
+    searchHits: options.searchHits,
+    filterNotebooks: async <T extends Readonly<{ id: string }>>(
+      notebooks: ReadonlyArray<T>,
+    ): Promise<ReadonlyArray<T>> => Object.freeze([...notebooks]),
+  };
+}
 
 describe("daemon operator discovery runtime", () => {
   it("expires opaque handles after their configured TTL", () => {
@@ -102,6 +123,81 @@ describe("daemon operator discovery runtime", () => {
     } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
     const page = await runtime.search({ query: "n", limit: 10 });
     expect(page.notes.map((note) => note.label)).toEqual(["Note"]);
+  });
+
+  it("browses through the supplied visibility filter instead of the raw listing", async () => {
+    // S2b: when a DiscoveryVisibility argument is supplied, every operator
+    // browse title is decided by the filter.  The raw read-only listing is
+    // stubbed with deliberately different rows and must not be consulted.
+    const rawCalls: string[] = [];
+    const runtime = createOperatorDiscoveryRuntime(
+      {
+        readOnly: {
+          listNotes: async () => {
+            rawCalls.push("listNotes");
+            return [
+              { id: "raw-hidden-1", title: "Raw hidden one" },
+              { id: "raw-hidden-2", title: "Raw hidden two" },
+            ];
+          },
+        },
+      } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0],
+      undefined,
+      visibilityDouble({
+        listNotes: async () => [
+          { id: "filtered-id-1", title: "Filtered one" },
+          { id: "filtered-id-2", title: "Filtered two" },
+        ],
+        searchHits: async () => [],
+      }),
+    );
+    const first = await runtime.browse({ limit: 1 });
+    expect(rawCalls).toEqual([]);
+    expect(first.notes).toHaveLength(1);
+    expect(first.notes[0]?.label).toBe("Filtered one");
+    expect(first.notes[0]?.handle).not.toContain("filtered-id-1");
+    expect(first.next).toMatch(/^cur_/);
+    const second = await runtime.browse({
+      ...(first.next === null ? {} : { cursor: first.next }),
+      limit: 1,
+    });
+    expect(second.notes[0]?.label).toBe("Filtered two");
+    expect(second.next).toBeNull();
+  });
+
+  it("searches through the supplied visibility filter and drops notebook hits", async () => {
+    // S2b: a supplied filter overrides the raw search, the query is forwarded
+    // to it, and notebook hits still never become operator notes.
+    const rawCalls: string[] = [];
+    const queries: string[] = [];
+    const runtime = createOperatorDiscoveryRuntime(
+      {
+        readOnly: {
+          search: async () => {
+            rawCalls.push("search");
+            return [
+              { id: "raw-hidden-note", title: "Raw hidden note", source: "note" },
+              { id: "raw-hidden-notebook", title: "Raw hidden notebook", source: "notebook" },
+            ];
+          },
+        },
+      } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0],
+      undefined,
+      visibilityDouble({
+        listNotes: async () => [],
+        searchHits: async (query: string) => {
+          queries.push(query);
+          return [
+            { id: "filtered-notebook-1", title: "Filtered notebook", source: "notebook" },
+            { id: "filtered-note-1", title: "Filtered note", source: "note" },
+          ];
+        },
+      }),
+    );
+    const page = await runtime.search({ query: "n", limit: 10 });
+    expect(rawCalls).toEqual([]);
+    expect(queries).toEqual(["n"]);
+    expect(page.notes.map((note) => note.label)).toEqual(["Filtered note"]);
   });
 
   it("mints an opaque handle instead of leaking the raw id of a created note", async () => {

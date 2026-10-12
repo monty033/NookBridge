@@ -31,7 +31,7 @@ NixOS host:
   `nookctl doctor` reports zero failures.
 - The explicitly authorized global sync completed in one attempt;
   `pendingSync=false` and `hasUnsyncedChanges=false` on read-back.
-- The protected `Vault-locked-note canary` remains visible by title.
+- The protected `Vault-locked-note canary` remains visible by title. *(Historical pre-S2 observation from the then-deployed build; it predates the S2 discovery-visibility implementation, which suppresses locked-note titles from discovery.)*
 
 This closes the implementation/deployment/reconciliation workstream only. It
 does not close the broader production-MVP release gate. The remaining

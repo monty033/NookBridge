@@ -66,7 +66,8 @@ describe("nookd operator wiring", () => {
       })),
       readOnly: Object.freeze({
         listNotes: vi.fn(async () => [{ id: NOTE_ID, title: "Probe" }]),
-        search: vi.fn(async () => []),
+        listNotebooks: vi.fn(async () => [{ id: NOTEBOOK_ID }]),
+        search: vi.fn(async () => [{ id: NOTE_ID, title: "Probe", source: "note" as const }]),
         noteMetadata: vi.fn(async () => ({
           id: NOTE_ID,
           title: "Probe",
@@ -74,6 +75,12 @@ describe("nookd operator wiring", () => {
           notebookId: NOTEBOOK_ID,
         })),
         readNoteLockState,
+        findNoteIdsByNotebook: vi.fn(async () => [NOTE_ID]),
+        // Direct-holder proof: the note is directly in NOTEBOOK_ID.
+        hasNoteInNotebook: vi.fn(
+          async (notebookId: string, noteId: string) =>
+            notebookId === NOTEBOOK_ID && noteId === NOTE_ID,
+        ),
         readOperatorNoteContent: vi.fn(async () => "{}"),
       }) as never,
     });
@@ -132,6 +139,58 @@ describe("nookd operator wiring", () => {
   });
 });
 
+describe("nookd operator discovery visibility (S2c)", () => {
+  it("hides denied notebook titles from production-wired browse and search", async () => {
+    const wiring = await startWiredNookd({
+      noteNotebookId: RESTRICTED_NOTEBOOK_ID,
+      settingsText: S2C_SETTINGS_TEXT,
+    });
+    try {
+      const browse = await wiring.operator.handle(
+        { id: "browse-hidden", method: "notes.browse", params: {} } as never,
+        OPERATOR,
+      );
+      expect(browse).toMatchObject({ ok: true, result: { notes: [] } });
+
+      const search = await wiring.operator.handle(
+        {
+          id: "search-hidden",
+          method: "notes.search-operator",
+          params: { query: "Probe" },
+        } as never,
+        OPERATOR,
+      );
+      expect(search).toMatchObject({ ok: true, result: { notes: [] } });
+      expect(wiring.findNoteIdsByNotebook).toHaveBeenCalledWith(RESTRICTED_NOTEBOOK_ID);
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+
+  it("fails closed rather than falling back to raw discovery without membership lookup", async () => {
+    const wiring = await startWiredNookd({ omitMembershipLookup: true });
+    try {
+      const browse = await wiring.operator.handle(
+        { id: "browse-no-membership", method: "notes.browse", params: {} } as never,
+        OPERATOR,
+      );
+      expect(browse).toMatchObject({ ok: true, result: { notes: [] } });
+      const search = await wiring.operator.handle(
+        {
+          id: "search-no-membership",
+          method: "notes.search-operator",
+          params: { query: "Probe" },
+        } as never,
+        OPERATOR,
+      );
+      expect(search).toMatchObject({ ok: true, result: { notes: [] } });
+      expect(wiring.listNotes).toHaveBeenCalled();
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // S1b — notebook policy, create authorization, and peer-scoped handles.
 // ---------------------------------------------------------------------------
@@ -152,6 +211,11 @@ const S1B_SETTINGS_TEXT = JSON.stringify({
   version: 1,
   defaults: { read: true, edit: true, create: true, delete: false },
   overrides: [{ notebooks: [DENIED_NOTEBOOK_PATH], edit: false, create: false }],
+});
+const S2C_SETTINGS_TEXT = JSON.stringify({
+  version: 1,
+  defaults: { read: true, edit: true, create: false, delete: false },
+  overrides: [{ notebooks: [DENIED_NOTEBOOK_PATH], read: false }],
 });
 
 /** Notebook id -> settings notebook path, exactly as the daemon resolves it. */
@@ -175,6 +239,8 @@ type WiredOperator = NonNullable<StartNookdServerOptions["operator"]>;
 type WiringOverrides = Readonly<{
   /** The notebook the probed note lives in; drives notebook policy. */
   readonly noteNotebookId?: string;
+  readonly omitMembershipLookup?: boolean;
+  readonly settingsText?: string;
 }>;
 
 /**
@@ -201,6 +267,14 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
     notebookId: noteNotebookId,
   }));
   const listNotes = vi.fn(async () => [{ id: NOTE_ID, title: "Probe" }]);
+  const findNoteIdsByNotebook = vi.fn(async (notebookId: string) =>
+    notebookId === noteNotebookId ? [NOTE_ID] : [],
+  );
+  // Direct-holder proof: non-recursive fixture, so the note is directly in its notebook.
+  const hasNoteInNotebook = vi.fn(
+    async (notebookId: string, noteId: string) =>
+      notebookId === noteNotebookId && noteId === NOTE_ID,
+  );
   const readOperatorNoteContent = vi.fn(async () => NOTE_CONTENT);
   const resolveNotebookPath = vi.fn(async (notebookId: string) => NOTEBOOK_PATHS[notebookId]);
   const listNotebooksForSettings = vi.fn(async () => [
@@ -215,9 +289,11 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
     noteMetadata,
     readOnly: Object.freeze({
       listNotes,
-      search: vi.fn(async () => []),
+      listNotebooks: vi.fn(async () => [{ id: OPEN_NOTEBOOK_ID }, { id: RESTRICTED_NOTEBOOK_ID }]),
+      search: vi.fn(async () => [{ id: NOTE_ID, title: "Probe", source: "note" as const }]),
       noteMetadata,
       readNoteLockState,
+      ...(overrides.omitMembershipLookup ? {} : { findNoteIdsByNotebook, hasNoteInNotebook }),
       readOperatorNoteContent,
     }) as never,
   });
@@ -225,7 +301,7 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
     loadConfig: vi.fn((_: string): LoadServiceConfigResult => ({ ok: true, config: CONFIG })),
     createKeyStore: vi.fn(() => productionKeys),
     createRuntime: vi.fn(async () => runtime),
-    readSettingsFile: vi.fn(() => S1B_SETTINGS_TEXT),
+    readSettingsFile: vi.fn(() => overrides.settingsText ?? S1B_SETTINGS_TEXT),
     startServer: vi.fn(
       async (_options: StartNookdServerOptions): Promise<NookdServerHandle> => ({
         socketPath: CONFIG.socketPath,
@@ -239,7 +315,16 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
   const serverOptions = vi.mocked(factories.startServer).mock.calls[0]?.[0];
   const operator = serverOptions?.operator;
   if (operator === undefined) throw new Error("operator endpoint was not wired");
-  return { handle, operator, runtime, readNoteLockState, noteMetadata, resolveNotebookPath };
+  return {
+    handle,
+    operator,
+    runtime,
+    readNoteLockState,
+    noteMetadata,
+    resolveNotebookPath,
+    listNotes,
+    findNoteIdsByNotebook,
+  };
 }
 
 /** The single handle a one-note browse mints for `peer`. */
@@ -379,9 +464,11 @@ describe("nookd operator wiring (S1b)", () => {
       // Peer A mints the handle; a browse is the only way a client gets one.
       const noteHandle = await browseHandle(wiring.operator, OPERATOR, "browse-peer-a");
 
-      // Peer B tries to resolve it through the same captured handler.  The
+      // Peer B tries to resolve it through the same captured handler. The
       // handler maps a failed handle resolution to a categorical not_found
       // envelope rather than throwing, so that is what is asserted.
+      wiring.readNoteLockState.mockClear();
+      wiring.noteMetadata.mockClear();
       const foreignView = await wiring.operator.handle(
         { id: "view-peer-b", method: "notes.get-view", params: { id: noteHandle } } as never,
         OTHER_OPERATOR,

@@ -709,7 +709,9 @@ snapshots.
 - **Reconciliation:** one explicitly authorized global sync returned `synced`
   in one attempt; read-back returned `pendingSync=false` and
   `hasUnsyncedChanges=false`; the protected `Vault-locked-note canary` remains
-  visible by title.
+  visible by title. *(Historical pre-S2 observation from the then-deployed
+  build; it predates the S2 discovery-visibility implementation, which
+  suppresses locked-note titles from discovery.)*
 - **Scope:** no mutation, destructive probe, red-team probe, recovery drill,
   or live failure injection was performed in this reconciliation. The broader
   Stage 9 security and release gates remain unchanged and open.

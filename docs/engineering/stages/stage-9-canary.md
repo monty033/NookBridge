@@ -151,7 +151,9 @@ recorded in the current implementation-plan and source-evidence addenda.
 
 Read-only post-deployment checks confirmed that all three services are active,
 the MCP surface exposes nine tools, `nookctl doctor` has zero failures, and the
-protected `Vault-locked-note canary` remains visible. One explicitly authorized
+protected `Vault-locked-note canary` remains visible. *(Historical pre-S2
+observation from the then-deployed build; it predates the S2 discovery-visibility
+implementation, which suppresses locked-note titles from discovery.)* One explicitly authorized
 global sync returned `synced` in one attempt; subsequent status returned
 `pendingSync=false` and `hasUnsyncedChanges=false`.
 

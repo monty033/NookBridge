@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { decodeNoteDocumentNative } from "../core/note-document-native.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import type { ServiceRuntime } from "./service-runtime.js";
+import type { DiscoveryVisibility } from "./discovery-visibility.js";
 import type {
   OperatorDiscoveryPage,
   OperatorDiscoveryRuntime,
@@ -87,12 +88,18 @@ export function createOperatorHandleRegistry(
 export function createOperatorDiscoveryRuntime(
   service: ServiceRuntime,
   registry: OperatorHandleRegistry = createOperatorHandleRegistry(),
+  visibility?: DiscoveryVisibility,
 ): OperatorDiscoveryRuntime {
   const cursors = new Map<string, CursorState>();
 
   return {
+    // Callers that omit this optional filter retain the legacy raw projection;
+    // the production `nookd` composition always supplies discovery visibility.
     browse: async (params, peer) => {
-      const notes = await service.readOnly.listNotes();
+      const notes =
+        visibility === undefined
+          ? await service.readOnly.listNotes()
+          : await visibility.listNotes();
       return page(
         notes.map((note) => ({ id: note.id, title: note.title })),
         params,
@@ -101,7 +108,10 @@ export function createOperatorDiscoveryRuntime(
       );
     },
     search: async (params, peer) => {
-      const hits = await service.readOnly.search(params.query);
+      const hits =
+        visibility === undefined
+          ? await service.readOnly.search(params.query)
+          : await visibility.searchHits(params.query);
       return page(
         hits
           .filter((hit) => hit.source === "note")

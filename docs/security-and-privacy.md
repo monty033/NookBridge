@@ -42,6 +42,15 @@ self-hosted deployments: access is managed via Notesnook's own per-note Vault
 lock and the deployment's permission settings, not by withholding content
 from every caller.
 
+Discovery is filtered separately from content reads. Production discovery —
+`notesnook_search_notes`, notebook listing, and operator `browse`/`search` —
+must suppress Vault-locked note titles and titles belonging to read-denied
+notebooks before any result leaves the daemon, so a locked or denied note
+cannot be enumerated by name. This is the S2 discovery-visibility security
+requirement and holds independently of deployment state. Known-ID lock
+protections are unchanged: reading a locked note by identifier returns
+metadata with `contentStatus: "locked"` and never its content.
+
 If an MCP client sends retrieved note content to a cloud model or another
 external service, that disclosure is outside NookBridge's local encryption and
 Unix-socket protections. Configure the client and its model/provider according

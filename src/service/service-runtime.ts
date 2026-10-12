@@ -320,7 +320,11 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     }
   };
 
-  const listNotebooksForSettingsSource = readOnly.listNotebooksWithParents;
+  // Policy paths and discovery visibility use ONLY the strict, complete
+  // hierarchy.  The tolerant `listNotebooksWithParents` (root-only fallback,
+  // skipped records) is deliberately never consulted here: if the strict source
+  // is unavailable, startup and every snapshot fail closed.
+  const listNotebooksForSettingsSource = readOnly.listNotebooksWithParentsStrict;
   const listNotebooksForSettings =
     listNotebooksForSettingsSource === undefined
       ? undefined
