@@ -392,7 +392,9 @@ nix-config PR #338 merge `c1a702cc`.
 
 The current rollout performed only read-only health checks plus one explicitly
 authorized global sync. Services remained healthy, sync read-back was clean,
-and the protected locked-note canary remained visible. No new red-team,
+and the protected locked-note canary remained visible. *(Historical pre-S2
+observation from the then-deployed build; it predates the S2 discovery-visibility
+implementation, which suppresses locked-note titles from discovery.)* No new red-team,
 mutation, destructive, outsider-identity, recovery, or failure-injection probe
 was performed, so this reconciliation does not change the Stage 9 release
 decision or close any outstanding red-team gate.

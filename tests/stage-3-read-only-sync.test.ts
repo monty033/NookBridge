@@ -665,6 +665,69 @@ describe("Stage 3 production projection and sync gate", () => {
       ).rejects.toThrow();
     });
 
+    describe("notebook id enumeration is strict for root confirmation", () => {
+      it("still confirms root for a genuinely empty, valid notebook list", async () => {
+        const meta = await rootDb((db) => {
+          db.notebooks.all = { ids: async () => [] };
+        }).noteMetadata("conflict-note");
+        expect(meta).toMatchObject({ notebookAbsenceConfirmed: true });
+      });
+
+      it.each<[string, unknown]>([
+        ["resolves to undefined", { ids: async () => undefined }],
+        ["resolves to null", { ids: async () => null }],
+        ["returns null synchronously", { ids: () => null }],
+        ["is missing", {}],
+        ["resolves to a non-array", { ids: async () => "nb-1" }],
+        ["contains an empty string", { ids: async () => ["nb-1", ""] }],
+        ["contains a non-string", { ids: async () => ["nb-1", 3] }],
+        ["contains a duplicate", { ids: async () => ["nb-1", "nb-1"] }],
+        [
+          "rejects",
+          {
+            ids: async () => {
+              throw new Error("ids secret");
+            },
+          },
+        ],
+      ])("never confirms root (and fails categorically) when ids %s", async (_label, all) => {
+        // Only the root-confirming path (no notebook claim) is reachable here.
+        const failure = await rootDb((db) => {
+          db.notebooks.all = all;
+        })
+          .noteMetadata("conflict-note")
+          .then(
+            (meta) => meta,
+            (error: unknown) => error,
+          );
+        expect(failure).not.toHaveProperty("notebookAbsenceConfirmed");
+        expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+        expect(String(failure)).not.toMatch(/secret|nb-1/);
+      });
+
+      it("does not confirm root when ids become unavailable after a valid hierarchy snapshot", async () => {
+        const db = createFakeLiveDatabase({
+          noteSearchIds: ["conflict-note"],
+          notebookSearchIds: [],
+          breadcrumbs: async (id: string) => [{ id, title: "Work" }],
+        });
+        const readOnly = flattenLiveDatabaseToReadOnly(db as NotesnookLiveDatabase);
+        await expect(readOnly.listNotebooksWithParentsStrict!()).resolves.toHaveLength(1);
+        await expect(readOnly.noteMetadata("conflict-note")).resolves.toMatchObject({
+          notebookAbsenceConfirmed: true,
+        });
+        // The notebook index becomes unavailable AFTER the valid snapshot.
+        // Synchronous null is the shape the tolerant reader mapped to "empty vault".
+        (db.notebooks as unknown as { all: { ids: () => unknown } }).all.ids = () => null;
+        const afterwards = await readOnly.noteMetadata("conflict-note").then(
+          (meta) => meta,
+          (error: unknown) => error,
+        );
+        expect(afterwards).not.toHaveProperty("notebookAbsenceConfirmed");
+        expect(isNotesnookReadOnlyProjectionError(afterwards)).toBe(true);
+      });
+    });
+
     it("does not confirm when no membership source exists", async () => {
       const meta = await rootDb((db) => {
         delete db.relations;
@@ -1266,6 +1329,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "lastSynced",
       "listNotebooks",
       "listNotebooksWithParents",
+      "listNotebooksWithParentsStrict",
       "listNotes",
       "noteContentDiagnostic",
       "noteMetadata",
@@ -1472,6 +1536,285 @@ describe("Stage 3 production projection and sync gate", () => {
     await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
       { id: "nb-1", title: "Work", dateModified: 11 },
     ]);
+  });
+
+  describe("listNotebooksWithParentsStrict", () => {
+    type NotebookStub = { id: string; title: string; dateEdited: number };
+    const ROOT: NotebookStub = { id: "nb-root", title: "Root", dateEdited: 11 };
+    const CHILD: NotebookStub = { id: "nb-child", title: "Child", dateEdited: 22 };
+    const nestedBreadcrumbs = async (id: string) => {
+      if (id === "nb-root") return [{ id: "nb-root", title: "Root" }];
+      if (id === "nb-child") {
+        return [
+          { id: "nb-root", title: "Root" },
+          { id: "nb-child", title: "Child" },
+        ];
+      }
+      return [];
+    };
+    /** A fake core whose notebook set and per-id lookup are fully controlled. */
+    const hierarchyDatabase = (
+      lookup: (id: string) => Promise<unknown>,
+      ids: string[] = ["nb-root", "nb-child"],
+      options: Parameters<typeof createFakeLiveDatabase>[0] = { breadcrumbs: nestedBreadcrumbs },
+    ) => {
+      const database = createFakeLiveDatabase(options);
+      const notebooks = database.notebooks as unknown as {
+        all: { ids: () => Promise<string[]> };
+        notebook: (id: string) => Promise<unknown>;
+      };
+      notebooks.all = { ids: async () => ids };
+      notebooks.notebook = lookup;
+      return flattenLiveDatabaseToReadOnly(database);
+    };
+    const knownNotebooks = async (id: string): Promise<unknown> =>
+      id === "nb-root" ? ROOT : id === "nb-child" ? CHILD : undefined;
+    const expectCategorical = async (promise: Promise<unknown>, leak: string) => {
+      const failure = await promise.catch((error: unknown) => error);
+      expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+      expect(String(failure)).not.toContain(leak);
+    };
+
+    it("is exposed by the flattened read-only projection", () => {
+      const readOnly = flattenLiveDatabaseToReadOnly(createFakeLiveDatabase());
+      expect(typeof readOnly.listNotebooksWithParentsStrict).toBe("function");
+    });
+
+    it("returns a valid nested hierarchy with proven parent ids", async () => {
+      const readOnly = hierarchyDatabase(knownNotebooks);
+      await expect(readOnly.listNotebooksWithParentsStrict!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+        { id: "nb-child", title: "Child", dateModified: 22, parentId: "nb-root" },
+      ]);
+    });
+
+    it("rejects when notebooks.breadcrumbs is absent (legacy falls back to root-only)", async () => {
+      const readOnly = hierarchyDatabase(knownNotebooks, ["nb-root", "nb-child"], {});
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "nb-");
+      // The tolerant legacy method keeps its fallback on the very same database.
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+        { id: "nb-child", title: "Child", dateModified: 22 },
+      ]);
+    });
+
+    it("rejects when notebooks.breadcrumbs rejects (legacy falls back to root-only)", async () => {
+      const readOnly = hierarchyDatabase(knownNotebooks, ["nb-root", "nb-child"], {
+        breadcrumbsThrows: true,
+      });
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "breadcrumb failure");
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+        { id: "nb-child", title: "Child", dateModified: 22 },
+      ]);
+    });
+
+    it("rejects when breadcrumbs fail only for a later notebook (no mid-enumeration fallback)", async () => {
+      const readOnly = hierarchyDatabase(knownNotebooks, ["nb-root", "nb-child"], {
+        breadcrumbs: async (id: string) => {
+          if (id === "nb-child") throw new Error("later breadcrumb failure");
+          return [{ id: "nb-root", title: "Root" }];
+        },
+      });
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "later breadcrumb");
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+        { id: "nb-child", title: "Child", dateModified: 22 },
+      ]);
+    });
+
+    it("rejects when an enumerated notebook is unavailable (legacy skips it)", async () => {
+      const lookup = async (id: string): Promise<unknown> => {
+        if (id === "nb-child") throw new Error("unavailable notebook secret");
+        return knownNotebooks(id);
+      };
+      const readOnly = hierarchyDatabase(lookup);
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "unavailable notebook");
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+      ]);
+    });
+
+    it("rejects when an enumerated notebook is missing (legacy skips it)", async () => {
+      const lookup = async (id: string): Promise<unknown> =>
+        id === "nb-child" ? undefined : knownNotebooks(id);
+      const readOnly = hierarchyDatabase(lookup);
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "nb-child");
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual([
+        { id: "nb-root", title: "Root", dateModified: 11 },
+      ]);
+    });
+
+    it.each<[string, unknown]>([
+      ["a non-object record", "not-an-object"],
+      ["a record without a title", { id: "nb-child", dateEdited: 22 }],
+      ["a record with an empty id", { id: "", title: "Child", dateEdited: 22 }],
+      ["a record with a different id", { id: "nb-other", title: "Child", dateEdited: 22 }],
+    ])("rejects a malformed entry: %s (legacy skips it)", async (_label, malformed) => {
+      const lookup = async (id: string): Promise<unknown> =>
+        id === "nb-child" ? malformed : knownNotebooks(id);
+      const readOnly = hierarchyDatabase(lookup);
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "nb-other");
+      await expect(readOnly.listNotebooksWithParents!()).resolves.toEqual(
+        expect.arrayContaining([{ id: "nb-root", title: "Root", dateModified: 11 }]),
+      );
+    });
+
+    it.each<[string, (id: string) => Promise<unknown>]>([
+      ["an empty breadcrumb list", async () => []],
+      ["a non-array breadcrumb result", async () => "nope"],
+      [
+        "breadcrumbs that do not end at the notebook",
+        async () => [{ id: "nb-someone-else", title: "Else" }],
+      ],
+    ])("rejects invalid breadcrumbs: %s", async (_label, breadcrumbs) => {
+      const readOnly = hierarchyDatabase(knownNotebooks, ["nb-root", "nb-child"], {
+        breadcrumbs: breadcrumbs as never,
+      });
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "nb-someone-else");
+    });
+
+    it("rejects a parent that is not itself an enumerated notebook", async () => {
+      const readOnly = hierarchyDatabase(knownNotebooks, ["nb-child"], {
+        breadcrumbs: nestedBreadcrumbs,
+      });
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "nb-root");
+    });
+
+    describe("notebook id enumeration is validated strictly", () => {
+      const withIds = (all: unknown) => {
+        const database = createFakeLiveDatabase({ breadcrumbs: nestedBreadcrumbs });
+        const notebooks = database.notebooks as unknown as {
+          all: unknown;
+          notebook: (id: string) => Promise<unknown>;
+        };
+        notebooks.all = all;
+        notebooks.notebook = knownNotebooks;
+        return flattenLiveDatabaseToReadOnly(database);
+      };
+
+      it.each<[string, unknown]>([
+        ["ids resolves to undefined", { ids: async () => undefined }],
+        ["ids resolves to null", { ids: async () => null }],
+        ["ids returns undefined synchronously", { ids: () => undefined }],
+        ["ids returns null synchronously", { ids: () => null }],
+        ["ids is missing", {}],
+        ["ids is not a function", { ids: "nb-root" }],
+        ["ids returns a non-thenable array", { ids: () => ["nb-root", "nb-child"] }],
+        ["ids resolves to a non-array", { ids: async () => "nb-root" }],
+        ["ids resolves to an object", { ids: async () => ({ length: 1, 0: "nb-root" }) }],
+        [
+          "ids throws synchronously",
+          {
+            ids: () => {
+              throw new Error("sync-secret");
+            },
+          },
+        ],
+        [
+          "ids rejects",
+          {
+            ids: async () => {
+              throw new Error("reject-secret");
+            },
+          },
+        ],
+      ])("rejects with a categorical error when %s", async (_label, all) => {
+        const failure = await withIds(all).listNotebooksWithParentsStrict!().catch(
+          (error: unknown) => error,
+        );
+        expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+        expect(String(failure)).not.toMatch(/secret|nb-root/);
+      });
+
+      it.each<[string, unknown[]]>([
+        ["an empty string", ["nb-root", ""]],
+        ["a number", ["nb-root", 7]],
+        ["null", ["nb-root", null]],
+        ["undefined", ["nb-root", undefined]],
+        ["an object", ["nb-root", { id: "nb-child" }]],
+        ["a duplicate id", ["nb-root", "nb-child", "nb-root"]],
+      ])("rejects instead of skipping a malformed element: %s", async (_label, ids) => {
+        const failure = await withIds({ ids: async () => ids })
+          .listNotebooksWithParentsStrict!().catch((error: unknown) => error);
+        expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+        expect(String(failure)).not.toMatch(/nb-root|nb-child|\[object/);
+      });
+
+      it("accepts a genuinely empty, valid notebook list", async () => {
+        await expect(
+          withIds({ ids: async () => [] }).listNotebooksWithParentsStrict!(),
+        ).resolves.toEqual([]);
+      });
+
+      it("keeps the tolerant listNotebooks behavior on the same malformed data", async () => {
+        await expect(withIds({ ids: () => null }).listNotebooks()).resolves.toEqual([]);
+        await expect(
+          withIds({ ids: async () => ["nb-root", "", 7, null] }).listNotebooks(),
+        ).resolves.toEqual([expect.objectContaining({ id: "nb-root" })]);
+      });
+    });
+
+    it("rejects when the notebook id enumeration itself fails", async () => {
+      const database = createFakeLiveDatabase({ breadcrumbs: nestedBreadcrumbs });
+      (database.notebooks as unknown as { all: unknown }).all = {
+        ids: async () => {
+          throw new Error("enumeration secret");
+        },
+      };
+      const readOnly = flattenLiveDatabaseToReadOnly(database);
+      await expectCategorical(readOnly.listNotebooksWithParentsStrict!(), "enumeration secret");
+    });
+
+    it("rejects an oversized notebook id array before any per-id enrichment", async () => {
+      // Availability bound for the strict hierarchy path.  257 valid-looking
+      // ids exceed the published cap, so the enumeration must be rejected
+      // categorically BEFORE any `notebooks.notebook(id)` or
+      // `notebooks.breadcrumbs(id)` call runs, and the failure must never
+      // become a silently truncated (partial, policy-unsafe) hierarchy.
+      const oversizedIds = Array.from({ length: 257 }, (_, index) => `nb-oversized-${index}`);
+      const notebookLookups: string[] = [];
+      const breadcrumbLookups: string[] = [];
+      const database = createFakeLiveDatabase({
+        breadcrumbs: async (id: string) => {
+          breadcrumbLookups.push(id);
+          return [{ id, title: "Oversized" }];
+        },
+      });
+      const notebooks = database.notebooks as unknown as {
+        all: { ids: () => Promise<string[]> };
+        notebook: (id: string) => Promise<unknown>;
+      };
+      notebooks.all = { ids: async () => oversizedIds };
+      notebooks.notebook = async (id: string) => {
+        notebookLookups.push(id);
+        return { id, title: "Oversized", dateEdited: 5 };
+      };
+      const readOnly = flattenLiveDatabaseToReadOnly(database);
+
+      const failure = await readOnly.listNotebooksWithParentsStrict!().catch(
+        (error: unknown) => error,
+      );
+      expect(isNotesnookReadOnlyProjectionError(failure)).toBe(true);
+      // The rejection carries no id bytes from the rejected enumeration.
+      expect(String(failure)).not.toContain("nb-oversized-");
+      // Neither the notebook detail lookup nor the breadcrumb lookup may run:
+      // the cap is enforced before the enrichment loop is entered.
+      expect(notebookLookups).toEqual([]);
+      expect(breadcrumbLookups).toEqual([]);
+    });
+
+    it("still enumerates a notebook id array exactly at the published cap", async () => {
+      // The cap is a rejection boundary, not a truncation boundary: 256 ids
+      // remain a complete, fully enriched hierarchy.
+      const cappedIds = Array.from({ length: 256 }, (_, index) => `nb-cap-${index}`);
+      const readOnly = hierarchyDatabase(
+        async (id: string) => ({ id, title: "Capped", dateEdited: 5 }),
+        cappedIds,
+        { breadcrumbs: async (id: string) => [{ id, title: "Capped" }] },
+      );
+      await expect(readOnly.listNotebooksWithParentsStrict!()).resolves.toHaveLength(256);
+    });
   });
 
   it("redacts hostile upstream metadata failures", async () => {

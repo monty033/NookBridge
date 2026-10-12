@@ -455,13 +455,13 @@ Bridge permissions are configuration, not agent data. Production policy files/op
 
 ## 4.8 Private Vault behavior
 
-Private Vault unlocking is out of scope for the MVP, but encountering locked notes during normal list/search/read operations is **not** undefined behavior. Notesnook documents that locked-note content is excluded from the search index while locked notes can still be found by title, and opening/editing a locked note requires the Vault password. <sup>\[R23\]</sup>
+Private Vault unlocking is out of scope for the MVP, but encountering locked notes during normal list/search/read operations is **not** undefined behavior. Notesnook documents that locked-note content is excluded from the search index and that the desktop client can still find a locked note by title, and opening/editing a locked note requires the Vault password. <sup>\[R23\]</sup> NookBridge production discovery must be deliberately stricter than the desktop client and must not surface locked-note titles.
 
 MVP behavior:
 
-- `listNotes` may return locked-note metadata/title with `locked: true`, subject to normal policy.
-- `searchNotes` may return a locked note only through metadata/title matching; it must not return body snippets/content while locked.
-- `getNote`, `updateNote`, and `appendNote` on a locked note return a structured `vault_locked` error.
+- Production discovery (`listNotes`, `searchNotes`, and operator `browse`/`search`) **must suppress locked-note titles**: a locked note is not returned by title or metadata, and no body snippet/content is returned. Titles governed by a read-denied notebook must be suppressed the same way.
+- Discovery must fail closed: if the lock state, notebook hierarchy, note membership, or policy decision for an item cannot be resolved, that item is withheld rather than surfaced.
+- Known-ID lock protections are unchanged: `getNote`, `updateNote`, and `appendNote` on a locked note return a structured `vault_locked` error.
 - The bridge does not ask Hermes for a Vault password, store a Vault password, automatically unlock the Vault, or expose Vault creation/unlock/delete methods through RPC/MCP.
 - A future Vault feature requires its own security design, credential-lifecycle review, and red-team suite.
 
@@ -563,7 +563,7 @@ Objective: prove the central claim: the headless client participates in real Not
 - Use Notesnook content helpers to return text/Markdown views only after the read-only content and locked-note scenarios pass, while retaining canonical content internally.
 - Return stable identifiers, organizational metadata, `dateModified`, sync state, and a revision token for later writes.
 - Detect and expose conflicted notes rather than silently choosing a side.
-- Implement the Section 4.8 locked-note/Vault semantics: title-only discoverability when locked, no body snippet/content leakage, and structured `vault_locked` errors for body reads/mutations.
+- Implement the Section 4.8 locked-note/Vault semantics: production discovery suppresses locked-note titles and read-denied notebook titles, no body snippet/content leakage, and structured `vault_locked` errors for body reads/mutations.
 - Add a filesystem test confirming that reading/searching does not materialize a plaintext note corpus on disk.
 
 | **Gate 3 scenario** | **Pass condition** |
@@ -572,7 +572,7 @@ Objective: prove the central claim: the headless client participates in real Not
 | Search | Known title/body keywords return expected note IDs without creating a plaintext side index. |
 | Restart + sync | Restart, fetch changes made while offline, and return them correctly. |
 | Conflict visibility | Generate a two-device conflict; bridge identifies it and does not silently resolve it. |
-| Locked note | Locked note can be identified by permitted metadata/title behavior without body leakage; `getNote` returns `vault_locked`. |
+| Locked note | Locked-note titles are suppressed from production discovery with no body leakage; `getNote` returns `vault_locked`. (The historical Stage 3 live receipt below predates this suppression.) |
 
 **Security checkpoint S3:** LLM red-team attempts to locate decrypted note bodies in state directories, temp directories, logs, process arguments, and crash outputs. Only explicitly requested content in process responses/memory is acceptable.
 
@@ -754,7 +754,7 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 | `notesnook_status` | Read | Auth state, local DB health, last sync, pending changes, conflicts count; no secrets. |
 | `notesnook_sync` | Side effect | Requests synchronization through `SyncCoordinator`; scheduling/backoff/limits still apply. Treat as approval-worthy initially. |
 | `notesnook_list_notebooks` | Read | IDs, titles, hierarchy metadata as needed. |
-| `notesnook_search_notes` | Read | Query + optional notebook/tag filters + limit/cursor; bounded snippets rather than bulk bodies. Locked Vault notes are title/metadata-only. |
+| `notesnook_search_notes` | Read | Query + optional notebook/tag filters + limit/cursor; bounded snippets rather than bulk bodies. Title/metadata hits for locked Vault notes are suppressed during discovery; known-ID reads remain separately protected by `notesnook_get_note` and may return metadata with `contentStatus: "locked"`, never content. |
 | `notesnook_get_note` | Read | ID; returns metadata, revision, and (when `contentStatus: "ok"`) a bounded decoded Markdown view. Raw canonical form is not default; locked Vault notes return `contentStatus: "locked"` with metadata only — content is never read for a note whose metadata already reports `locked`. SHIPPED. |
 | `notesnook_create_note` | Write | Title, Markdown/HTML, optional notebook/tags. |
 | `notesnook_append_note` | Write | ID, expectedRevision, Markdown fragment. |
@@ -966,7 +966,7 @@ The first Docker artifact should be a minimal image plus a documented Compose ex
 - Large note and result pagination/response-size behavior.
 - Notes in nested/multiple organizational constructs, to inform later ACL semantics.
 - Service restart while Hermes proxy remains available/reconnects cleanly.
-- Locked Private Vault note: title-only discovery behavior is preserved while body reads/mutations fail with `vault_locked` and no body leakage.
+- Locked Private Vault note: production discovery suppresses the locked note's title and body while body reads/mutations fail with `vault_locked` and no body leakage.
 - Rapid sequence of small writes: sync requests are coalesced/serialized and upstream request volume stays within configured policy.
 - Simulated upstream throttling/429 and transient failures: backoff honors server guidance when available and does not busy-loop.
 - Corrupted local DB snapshot: startup fails closed, state is not overwritten, `doctor` diagnoses the condition, and recovery/resync follows the documented path.
@@ -1261,7 +1261,7 @@ Because Hermes uses cloud models, content it is authorized to read may be sent t
 | Sync conflicts | Agent and user edit same note. | Optimistic revision; core conflict detection; no auto-resolution. |
 | Sync amplification/throttling | Agent loops writes/sync faster than a human client and triggers upstream throttling or local resource abuse. | SyncCoordinator coalescing, minimum interval, single-flight sync, Retry-After/backoff/jitter, bounded retries, RT-10. |
 | Local DB corruption | Disk/full/crash/native failure can make local encrypted state unreadable or strand unsynced writes. | Fail closed; preserve/quarantine damaged state; `doctor`/recovery procedure; corruption drill; never promise unrecoverable local-write recovery without evidence. |
-| Private Vault leakage | Normal search/list paths could accidentally disclose locked content. | Title-only locked-note behavior; `vault_locked` body operations; dedicated fixtures/red-team checks. |
+| Private Vault leakage | Normal search/list paths could accidentally disclose locked content. | Locked-note title suppression in production discovery; `vault_locked` body operations; dedicated fixtures/red-team checks. |
 | Plaintext artifact regression | New logs/index/cache/export creates secondary unencrypted note corpus. | Canary scans, no export mirror, review new persistence features, recurring red team. |
 | Malicious note content | Agent may be prompted to exceed intended task. | Bridge treats content as data; hard permissions; no rendering/execution; LLM red-team prompt-injection tests. |
 | Cloud-model disclosure | Authorized reads may be sent to model provider. | Targeted retrieval, bounded results, optional future notebook/note ACLs, explicit documentation. |
@@ -2595,7 +2595,7 @@ historical evidence above.
 - One explicitly authorized global sync completed with `status=synced`, one
   attempt, and `pendingSync=false`.
 - A fresh read-only status returned `hasUnsyncedChanges=false`.
-- The protected `Vault-locked-note canary` remains visible by title.
+- The protected `Vault-locked-note canary` remains visible by title. *(Historical pre-S2 observation from the then-deployed build; it predates the S2 discovery-visibility implementation, which suppresses locked-note titles from discovery.)*
 - No note mutation, destructive probe, or live failure injection was used in
   this rollout.
 
