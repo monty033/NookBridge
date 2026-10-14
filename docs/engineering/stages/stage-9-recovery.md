@@ -33,6 +33,13 @@ transport capabilities.
   identifiers, occupied rollback destinations, and incomplete quarantine entries
   fail closed.  A symlinked or non-directory quarantine root also fails closed
   before any move, for both reinitialize and rollback.
+- Quarantine manifests carry one of three statuses: `incomplete` (member moves
+  in progress), `initializing` (every original member has moved and fresh
+  members are being created), and `complete`.  Reinitialize resumes an
+  `incomplete` or `initializing` checkpoint; an `initializing` checkpoint is
+  resumed only when every member is recorded as moved and present in the entry.
+  Rollback refuses an `initializing` checkpoint outright, and refuses any entry
+  with a manifest member missing, before any move.
 - `--approve-reinitialize` is required for the quarantine path.
 - The original database is preserved by a restrictive, same-filesystem,
   no-copy/no-clobber move into `.recovery-quarantine/<opaque-id>/`; it is never

@@ -112,6 +112,15 @@ const moveHook = vi.hoisted(() => ({
 }));
 
 /**
+ * Fails fresh-state creation for the member whose path ends with `failOn`.
+ * Used to crash initialization after an earlier member already exists.  Unset
+ * in every other test.
+ */
+const freshInitHook = vi.hoisted(() => ({
+  failOn: undefined as string | undefined,
+}));
+
+/**
  * Env snapshots the parser receives from the CLI.  Recorded only; the wrapper
  * below passes every call through unchanged.  Guard C1 reads it to prove a
  * forbidden carrier value never reaches the parser input.
@@ -157,8 +166,18 @@ vi.mock("../src/operator/recover-local-state.js", async (importOriginal) => {
 vi.mock("../src/storage/sqlite-storage.js", async (importOriginal) => {
   const actual = await importOriginal<typeof SqliteModule>();
   const fs = await import("node:fs");
+  // Pass-through subclass: throws only for the member named by `freshInitHook`.
+  class HookedSqliteStorage extends actual.SqliteStorage {
+    constructor(opts: SqliteModule.SqliteStorageOptions) {
+      if (freshInitHook.failOn !== undefined && opts.dbPath.endsWith(freshInitHook.failOn)) {
+        throw new Error("injected fresh-state initialization failure");
+      }
+      super(opts);
+    }
+  }
   return {
     ...actual,
+    SqliteStorage: HookedSqliteStorage,
     inspectEncryptedSqlite: (options: { dbPath: string; key: string }) => {
       probeHook.onProbe?.();
       const wal = `${options.dbPath}-wal`;
@@ -2506,6 +2525,26 @@ describe("T4 — bundle rollback (RED)", () => {
           // notesnook-logs.db is deliberately missing.
         },
       },
+      {
+        name: "initializing checkpoint (fresh init interrupted after every move)",
+        setup: (stateDir, id) => {
+          const entry = join(quarantineRoot(stateDir), id);
+          mkdirSync(entry, { recursive: true, mode: 0o700 });
+          writeFileSync(
+            join(entry, MANIFEST_NAME),
+            JSON.stringify({
+              version: 1,
+              id,
+              status: "initializing",
+              items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+            }),
+            { mode: 0o600 },
+          );
+          for (const member of BUNDLE_MEMBERS) {
+            writeFileSync(join(entry, member), "preserved");
+          }
+        },
+      },
     ];
 
     for (const testCase of cases) {
@@ -2982,5 +3021,94 @@ describe("M — reinitialize integrity probe", () => {
     // The probe must agree with the production opener's verdict; identity
     // escaping (M35) would make the probe disagree.
     expect(result.result.kind).toBe(productionOpens ? "healthy" : "corrupt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review blockers (Luna, 90d2bea): a crash during fresh-state initialization
+// must stay resumable, and a quarantine entry name must be an opaque id.
+// ---------------------------------------------------------------------------
+
+describe("bundle reinitialize — initialization checkpoint and entry name", () => {
+  afterEach(() => {
+    freshInitHook.failOn = undefined;
+  });
+
+  it("a fresh-state failure leaves a resumable checkpoint, and a rerun completes it", async () => {
+    const root = mkRoot("nookbridge-bundle-init-resume-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+
+    // Fail the second member's creation, after the first fresh member exists
+    // at its source path.
+    freshInitHook.failOn = "notesnook.db";
+    let first;
+    try {
+      first = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    } finally {
+      freshInitHook.failOn = undefined;
+    }
+    expect(first.kind).toBe("error");
+    if (first.kind !== "error") return;
+    expect(first.exitCode).toBe(3);
+
+    const qRoot = quarantineRoot(stateDir);
+    const ids = readdirSync(qRoot);
+    expect(ids).toHaveLength(1);
+    const id = ids[0]!;
+    const entry = join(qRoot, id);
+
+    // The crashed run must not leave a `complete` checkpoint behind.
+    const interrupted = JSON.parse(readFileSync(join(entry, MANIFEST_NAME), "utf8")) as {
+      status?: unknown;
+    };
+    expect(interrupted.status).toBe("initializing");
+    // The originals are preserved in the entry, byte-for-byte.
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+
+    // The rerun resumes the same checkpoint instead of refusing it.
+    const second = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(second.kind).toBe("reinitialized");
+    if (second.kind !== "reinitialized") return;
+    expect(second.quarantineId).toBe(id);
+    const finished = JSON.parse(readFileSync(join(entry, MANIFEST_NAME), "utf8")) as {
+      status?: unknown;
+    };
+    expect(finished.status).toBe("complete");
+  });
+
+  it("refuses a quarantine entry whose name is not an opaque id", async () => {
+    const root = mkRoot("nookbridge-bundle-bad-entry-name-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const badId = "not-an-opaque-id";
+    plantIncompleteEntry(stateDir, badId, {
+      version: 1,
+      id: badId,
+      status: "incomplete",
+      items: [
+        { name: "nookbridge-storage.db", state: "pending" },
+        { name: "notesnook.db", state: "pending" },
+        { name: "notesnook-logs.db", state: "pending" },
+      ],
+    });
+    const before = snapshotRegularFileHashes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    // The malformed name never reaches the operator output.
+    expect(JSON.stringify(result)).not.toContain(badId);
+    expect(snapshotRegularFileHashes(stateDir)).toEqual(before);
   });
 });

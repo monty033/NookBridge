@@ -156,7 +156,7 @@ export type BundleManifestItem = Readonly<{ name: string; state: "pending" | "mo
 export type BundleManifest = Readonly<{
   version: number;
   id: string;
-  status: "incomplete" | "complete";
+  status: "incomplete" | "initializing" | "complete";
   items: readonly BundleManifestItem[];
 }>;
 
@@ -716,9 +716,21 @@ function quarantineAndReinitialize(
   }
 
   // Reconcile and move each planned artefact exactly once.
+  //
+  // An `initializing` checkpoint is written only after every member has moved.
+  // A crashed initialization may have left fresh residue at a source path, so
+  // the source is not reconciled here.  Each destination must still hold the
+  // preserved original.
+  const initializing = manifest.status === "initializing";
   for (const item of manifest.items) {
     const source = join(stateDir, item.name);
     const destination = join(entry, item.name);
+    if (initializing) {
+      if (item.state !== "moved" || !isRegularFile(destination)) {
+        return error(2, "refusing inconsistent quarantine state");
+      }
+      continue;
+    }
     const verdict = reconcileItem(source, destination, item.state);
     if (verdict === "inconsistent") {
       return error(2, "refusing inconsistent quarantine state");
@@ -740,7 +752,12 @@ function quarantineAndReinitialize(
     }
   }
 
-  manifest = { ...manifest, status: "complete" };
+  // Mark the checkpoint `initializing` before fresh members are created.  A
+  // crash or failure here can leave fresh residue at a source path, so resume
+  // skips source reconciliation for this status.  The entry stays resumable:
+  // every member is already moved, and `complete` is written only after
+  // initialization succeeds.
+  manifest = { ...manifest, status: "initializing" };
   if (!writeManifest(entry, manifest)) {
     return error(3, "failed to record recovery manifest");
   }
@@ -757,6 +774,11 @@ function quarantineAndReinitialize(
     }
   } catch {
     return error(3, "failed to initialize fresh state");
+  }
+
+  manifest = { ...manifest, status: "complete" };
+  if (!writeManifest(entry, manifest)) {
+    return error(3, "failed to record recovery manifest");
   }
 
   return { kind: "reinitialized", quarantineId };
@@ -1052,6 +1074,12 @@ function scanQuarantine(quarantineDir: string): ScanResult {
   }
 
   const id = remaining[0]!;
+  // The entry name is the quarantine identifier.  Validate it before it is
+  // joined, resumed, or returned, so arbitrary directory text never reaches the
+  // output.
+  if (!QUARANTINE_ID_PATTERN.test(id)) {
+    return { kind: "error", error: error(2, "refusing quarantine collision") };
+  }
   const entry = join(quarantineDir, id);
   try {
     if (!lstatSync(entry).isDirectory()) {
@@ -1109,7 +1137,11 @@ function readIncompleteManifest(entry: string, expectedId: string): BundleManife
   const candidate = parsed as Record<string, unknown>;
   if (candidate.version !== BUNDLE_MANIFEST_VERSION) return undefined;
   if (candidate.id !== expectedId) return undefined;
-  if (candidate.status !== "incomplete") return undefined;
+  // Resume accepts an unfinished checkpoint: `incomplete` (moves in progress)
+  // or `initializing` (every member moved, fresh members being created).  A
+  // `complete` entry is not resumed.
+  const status = candidate.status;
+  if (status !== "incomplete" && status !== "initializing") return undefined;
   if (!Array.isArray(candidate.items)) return undefined;
 
   const seen = new Set<string>();
@@ -1135,7 +1167,7 @@ function readIncompleteManifest(entry: string, expectedId: string): BundleManife
   return {
     version: BUNDLE_MANIFEST_VERSION,
     id: expectedId,
-    status: "incomplete",
+    status,
     items,
   };
 }
