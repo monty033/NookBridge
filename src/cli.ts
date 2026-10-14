@@ -27,7 +27,7 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 
 import { runDoctor } from "./doctor/doctor.js";
@@ -58,6 +58,7 @@ import {
 } from "./core/notesnook-conflict-admin.js";
 import { createStdioPrompt } from "./auth/secret-input.js";
 import {
+  formatBundleRecoveryHelp,
   formatRecoverCommandResult,
   formatRecoverLocalStateHelp,
   parseRecoverLocalStateCommand,
@@ -570,11 +571,23 @@ async function runRecover(args: Args): Promise<number> {
     process.stdout.write(formatRecoverLocalStateHelp());
     return 0;
   }
+  if (parsed.command.kind === "bundle-help") {
+    process.stdout.write(formatBundleRecoveryHelp());
+    return 0;
+  }
 
   const effectiveStateDir = resolve(
     stateDir ?? environment["NOOKBRIDGE_STATE_DIR"] ?? join(process.cwd(), "var/state"),
   );
   const dbPath = resolve(join(effectiveStateDir, "nookbridge.db"));
+  // The production bundle path reads its key from the systemd credential
+  // slot only; it never touches the development key file.  The directory is
+  // resolved from the environment because that is the systemd contract, and
+  // the key itself never leaves the credential reader.
+  const isBundle = parsed.command.subcommand === "bundle";
+  const credentialsDirectory = isBundle
+    ? resolveCredentialsDirectory(environment["CREDENTIALS_DIRECTORY"])
+    : undefined;
   const dbKey =
     parsed.command.kind === "inspect" || parsed.command.kind === "reinitialize"
       ? readExistingKeyWithoutMutation(resolve(join(effectiveStateDir, ".d/db.key")))
@@ -585,9 +598,22 @@ async function runRecover(args: Args): Promise<number> {
     stateDir: effectiveStateDir,
     dbPath,
     ...(dbKey === undefined ? {} : { dbKey }),
+    ...(credentialsDirectory === undefined ? {} : { credentialsDirectory }),
   });
   process.stdout.write(`${formatRecoverCommandResult(result)}\n`);
   return result.kind === "error" ? result.exitCode : 0;
+}
+
+/**
+ * Project the systemd `$CREDENTIALS_DIRECTORY` value from the safe env
+ * snapshot.  Only the directory is returned; the credential value is read
+ * later, read-only, by the systemd credential backend.  A non-absolute or
+ * empty value is treated as absent so a malformed environment cannot widen
+ * the credential path.
+ */
+function resolveCredentialsDirectory(value: string | undefined): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return isAbsolute(value) ? value : undefined;
 }
 
 /** Read an existing development key without mkdir/chmod or following links. */
@@ -931,6 +957,9 @@ const FORBIDDEN_ENV_CARRIERS = new Set([
   "NOOKCTL_PASSWORD",
   "NOOKCTL_MFA",
   "NOOKCTL_TOKEN",
+  "NOOKBRIDGE_DB_KEY",
+  "NOOKBRIDGE_DATABASE_KEY",
+  "NOOKBRIDGE_DB_PASSWORD",
 ]);
 
 function readSafeEnvSnapshot(): Record<string, string | undefined> {

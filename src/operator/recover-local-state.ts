@@ -15,6 +15,12 @@
  *     `inspectEncryptedSqlite`, which is documented as read-only.
  *   - Mutation is gated by the EXACT argv flag `--approve-reinitialize`.
  *     The flag must appear on the same invocation as `reinitialize`.
+ *   - The production database bundle path (`bundle inspect` /
+ *     `bundle reinitialize`) additionally requires the D2
+ *     `--accept-unsynced-loss` flag and reads its key only from the
+ *     systemd `$CREDENTIALS_DIRECTORY/nookbridge-db-key` slot.  It is
+ *     implemented in `./recover-bundle.ts` and shares the quarantine
+ *     primitives in `./recover-quarantine.ts`.
  *   - Credentials, keys, bodies, content, and identifier-shaped argv
  *     values are rejected by the parser before any state touch.
  *     Forbidden env carriers fail closed on presence alone (values
@@ -35,23 +41,28 @@
  *     the operator's real state.
  */
 
-import { randomBytes } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  linkSync,
-  lstatSync,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  rmdirSync,
-  unlinkSync,
-} from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { lockFileExists } from "../config/lock.js";
 import { normaliseStateDir } from "../config/state-dir.js";
 import { SqliteStorage, inspectEncryptedSqlite } from "../storage/sqlite-storage.js";
+import {
+  inspectProductionBundle,
+  readProductionBundleKey,
+  reinitializeProductionBundle,
+  rollbackProductionBundle,
+  type BundleInspection,
+} from "./recover-bundle.js";
+import {
+  QUARANTINE_DIR_MODE,
+  QUARANTINE_ENTRY_MODE,
+  QUARANTINE_ID_PATTERN,
+  QUARANTINE_RELATIVE_DIR,
+  makeQuarantineId,
+  moveNoReplace,
+  safeRmQuarantineEntry,
+} from "./recover-quarantine.js";
 
 // ---------------------------------------------------------------------------
 // Public gate names.
@@ -64,6 +75,14 @@ import { SqliteStorage, inspectEncryptedSqlite } from "../storage/sqlite-storage
 
 export const APPROVE_REINITIALIZE_FLAG = "--approve-reinitialize" as const;
 export const APPROVE_ROLLBACK_FLAG = "--approve-rollback" as const;
+
+/**
+ * Decision D2 — the separate explicit acceptance required, IN ADDITION to
+ * `--approve-reinitialize`, before the production database bundle is
+ * quarantined and reinitialized.  Accepting it states that unsynced local
+ * changes in the quarantined bundle will be lost.
+ */
+export const ACCEPT_UNSYNCED_LOSS_FLAG = "--accept-unsynced-loss" as const;
 
 // ---------------------------------------------------------------------------
 // Forbidden carriers.
@@ -117,15 +136,41 @@ const FORBIDDEN_ENV_VARS: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Bundle-only forbidden carriers.
+//
+// These are NOT part of the shared lists on purpose: the development single
+// database path must refuse exactly what upstream/main refuses.  They are
+// enforced only inside the `bundle` parse branch, where the production key is
+// read from the systemd credential slot.
+// ---------------------------------------------------------------------------
+
+const BUNDLE_FORBIDDEN_ARG_FLAGS: readonly string[] = ["--key"];
+
+const BUNDLE_FORBIDDEN_ENV_VARS: readonly string[] = [
+  "NOOKBRIDGE_DB_KEY",
+  "NOOKBRIDGE_DATABASE_KEY",
+  "NOOKBRIDGE_DB_PASSWORD",
+  "ACCEPT_UNSYNCED_LOSS",
+];
+
+// ---------------------------------------------------------------------------
 // Subcommand shapes.
 // ---------------------------------------------------------------------------
 
-export type RecoverSubcommand = "help" | "inspect" | "reinitialize" | "rollback";
+export type RecoverSubcommand = "help" | "inspect" | "reinitialize" | "rollback" | "bundle";
 
 export type ParsedRecoverCommand =
   | Readonly<{ kind: "help"; subcommand: "help" }>
   | Readonly<{ kind: "inspect"; subcommand: "inspect" }>
   | Readonly<{ kind: "reinitialize"; subcommand: "reinitialize" }>
+  | Readonly<{ kind: "bundle-help"; subcommand: "bundle" }>
+  | Readonly<{ kind: "bundle-inspect"; subcommand: "bundle" }>
+  | Readonly<{ kind: "bundle-reinitialize"; subcommand: "bundle" }>
+  | Readonly<{
+      kind: "bundle-rollback";
+      subcommand: "bundle";
+      quarantineId: string;
+    }>
   | Readonly<{
       kind: "rollback";
       subcommand: "rollback";
@@ -156,6 +201,7 @@ export type RecoveryInspection = Readonly<
 export type RunRecoverCommandResult =
   | Readonly<{ kind: "help"; text: string }>
   | Readonly<{ kind: "inspection"; result: RecoveryInspection }>
+  | Readonly<{ kind: "bundle-inspection"; result: BundleInspection }>
   | Readonly<{ kind: "reinitialized"; quarantineId: string }>
   | Readonly<{ kind: "rolled-back"; quarantineId: string }>
   | Readonly<{ kind: "error"; message: string; exitCode: 2 | 3 }>;
@@ -178,23 +224,13 @@ export type RunRecoverLocalStateOptions = Readonly<{
   dbPath: string;
   /** Optional key for the decrypt probe; never echoed. */
   dbKey?: string;
+  /**
+   * Systemd `$CREDENTIALS_DIRECTORY` for the production bundle path only.
+   * The bundle reads its key from `<credentialsDirectory>/nookbridge-db-key`;
+   * the directory is never the key and is never echoed.
+   */
+  credentialsDirectory?: string;
 }>;
-
-// ---------------------------------------------------------------------------
-// Quarantine layout.
-//
-// The quarantine directory lives at `<stateDir>/.recovery-quarantine/`
-// and is exclusively owned by this module.  Each accepted quarantine
-// creates `<quarantineDir>/<opaque-id>/`, into which the current
-// on-disk artefacts are renamed bit-for-bit.  The opaque id is
-// `<8-hex>-<sequence>` and is the ONLY handle the operator receives
-// for later rollback.  We never expose the absolute path.
-// ---------------------------------------------------------------------------
-
-const QUARANTINE_RELATIVE_DIR = ".recovery-quarantine" as const;
-const QUARANTINE_DIR_MODE = 0o700;
-const QUARANTINE_ENTRY_MODE = 0o700;
-const QUARANTINE_ID_PATTERN = /^[a-f0-9]{8}-[a-z0-9]{12,13}$/;
 
 // ---------------------------------------------------------------------------
 // Parser.
@@ -286,6 +322,97 @@ export function parseRecoverLocalStateCommand(
         }
         return { kind: "parsed", command: { kind: "reinitialize", subcommand: "reinitialize" } };
       }
+      case "bundle": {
+        // Bundle-only credential carriers, enforced here rather than in the
+        // shared lists so the development path keeps upstream/main refusals.
+        // Values are never read; presence alone fails closed with the same
+        // categorical message the shared parser uses.
+        for (const name of BUNDLE_FORBIDDEN_ENV_VARS) {
+          if (name in env) {
+            return {
+              kind: "error",
+              exitCode: 2,
+              message:
+                "refusing to read credentials from the environment; use an interactive TTY prompt",
+            };
+          }
+        }
+        for (const argument of stringArgv) {
+          const forbidden = BUNDLE_FORBIDDEN_ARG_FLAGS.find(
+            (candidate) => argument === candidate || argument.startsWith(`${candidate}=`),
+          );
+          if (forbidden !== undefined) {
+            return {
+              kind: "error",
+              exitCode: 2,
+              message:
+                "refusing to read credentials from a CLI flag; use an interactive TTY prompt",
+            };
+          }
+        }
+
+        const actionRaw = stringArgv[1];
+        const action = actionRaw === undefined ? undefined : actionRaw.toLowerCase();
+        if (action === "help") {
+          if (stringArgv.length !== 2) return invalidParseInput();
+          return { kind: "parsed", command: { kind: "bundle-help", subcommand: "bundle" } };
+        }
+        if (action === "inspect") {
+          if (stringArgv.length !== 2) return invalidParseInput();
+          return { kind: "parsed", command: { kind: "bundle-inspect", subcommand: "bundle" } };
+        }
+        if (action === "reinitialize") {
+          // D2: BOTH the exact `--approve-reinitialize` flag AND the
+          // separate unsynced-loss acknowledgment are required.  Either one
+          // missing (or repeated as a substitute) is a categorical refusal.
+          const flags = stringArgv.slice(2);
+          const approveCount = flags.filter((flag) => flag === APPROVE_REINITIALIZE_FLAG).length;
+          const acknowledgeCount = flags.filter(
+            (flag) => flag === ACCEPT_UNSYNCED_LOSS_FLAG,
+          ).length;
+          if (flags.length !== 2 || approveCount !== 1 || acknowledgeCount !== 1) {
+            return {
+              kind: "error",
+              exitCode: 2,
+              message: `nookctl recover-local-state bundle reinitialize requires ${APPROVE_REINITIALIZE_FLAG} ${ACCEPT_UNSYNCED_LOSS_FLAG}`,
+            };
+          }
+          return {
+            kind: "parsed",
+            command: { kind: "bundle-reinitialize", subcommand: "bundle" },
+          };
+        }
+        if (action === "rollback") {
+          // Exactly `bundle rollback --approve-rollback <id>`: one flag, one
+          // opaque id.  A missing, repeated, or extra flag is a categorical
+          // refusal; the id reuses the existing opaque-id validator.
+          if (stringArgv.length !== 4 || stringArgv[2] !== APPROVE_ROLLBACK_FLAG) {
+            return {
+              kind: "error",
+              exitCode: 2,
+              message: `nookctl recover-local-state bundle rollback requires ${APPROVE_ROLLBACK_FLAG} <id>`,
+            };
+          }
+          const id = stringArgv[3];
+          if (typeof id !== "string" || id.length === 0 || !QUARANTINE_ID_PATTERN.test(id)) {
+            return {
+              kind: "error",
+              exitCode: 2,
+              message: "nookctl recover-local-state bundle rollback: refusing opaque identifier",
+            };
+          }
+          return {
+            kind: "parsed",
+            command: { kind: "bundle-rollback", subcommand: "bundle", quarantineId: id },
+          };
+        }
+        return {
+          kind: "error",
+          exitCode: 2,
+          message:
+            "nookctl recover-local-state: unknown bundle subcommand; use `nookctl recover-local-state bundle help`",
+        };
+      }
       case "rollback": {
         const idx = stringArgv.indexOf(APPROVE_ROLLBACK_FLAG);
         if (stringArgv.length !== 3 || idx !== 1) {
@@ -375,9 +502,66 @@ export async function runRecoverLocalState(
       return runInspect(normalized);
     case "reinitialize":
       return runReinitialize(normalized);
+    case "bundle-help":
+      return { kind: "help", text: formatBundleRecoveryHelp() };
+    case "bundle-inspect":
+      return runBundleInspect(normalized);
+    case "bundle-reinitialize":
+      return runBundleReinitialize(normalized);
+    case "bundle-rollback":
+      return runBundleRollback(normalized, command.quarantineId);
     case "rollback":
       return runRollback(normalized, command.quarantineId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Production bundle dispatch.
+//
+// The bundle shares the categorical state-root validation but reads its key
+// from the injected systemd credential directory instead of a development
+// key file.  Inspection is delegated to the read-only bundle probe;
+// reinitialization delegates to the bundle mutation, which owns the
+// exclusive lock for its whole duration.
+// ---------------------------------------------------------------------------
+
+function runBundleInspect(options: RunRecoverLocalStateOptions): RunRecoverCommandResult {
+  const root = validateStateRoot(options.stateDir);
+  if (root.kind === "error") return root.error;
+  const key = readProductionBundleKey(options.credentialsDirectory);
+  return {
+    kind: "bundle-inspection",
+    result: inspectProductionBundle(root.stateDir, key),
+  };
+}
+
+function runBundleReinitialize(options: RunRecoverLocalStateOptions): RunRecoverCommandResult {
+  const root = validateStateRoot(options.stateDir);
+  if (root.kind === "error") return root.error;
+  const result = reinitializeProductionBundle({
+    stateDir: root.stateDir,
+    ...(options.credentialsDirectory === undefined
+      ? {}
+      : { credentialsDirectory: options.credentialsDirectory }),
+  });
+  if (result.kind === "error") {
+    return { kind: "error", exitCode: result.exitCode, message: result.message };
+  }
+  return { kind: "reinitialized", quarantineId: result.quarantineId };
+}
+
+function runBundleRollback(
+  options: RunRecoverLocalStateOptions,
+  quarantineId: string,
+): RunRecoverCommandResult {
+  const root = validateStateRoot(options.stateDir);
+  if (root.kind === "error") return root.error;
+  // Rollback reads no key and takes no credentials directory.
+  const result = rollbackProductionBundle({ stateDir: root.stateDir, quarantineId });
+  if (result.kind === "error") {
+    return { kind: "error", exitCode: result.exitCode, message: result.message };
+  }
+  return { kind: "rolled-back", quarantineId: result.quarantineId };
 }
 
 function normalizeOptions(options: RunRecoverLocalStateOptions): RunRecoverLocalStateOptions {
@@ -403,6 +587,12 @@ function normalizeOptions(options: RunRecoverLocalStateOptions): RunRecoverLocal
     if (value !== undefined && typeof value !== "string") throw new Error("invalid options");
   }
   if (options.dbKey !== undefined && typeof options.dbKey !== "string") {
+    throw new Error("invalid options");
+  }
+  if (
+    options.credentialsDirectory !== undefined &&
+    typeof options.credentialsDirectory !== "string"
+  ) {
     throw new Error("invalid options");
   }
   return options;
@@ -829,55 +1019,14 @@ function validateDbPath(dbPath: string, stateDir: string): DbPathValidation {
 }
 
 // ---------------------------------------------------------------------------
-// Quarantine helpers.
-// ---------------------------------------------------------------------------
-
-function makeQuarantineId(): string {
-  // 8 hex + `-` + 12 base36 chars — opaque, no path components, no
-  // carrier-shaped values.  The base36 suffix avoids collisions
-  // within the same nanosecond; we don't need cryptographic strength
-  // here, just uniqueness inside the fixed state directory.
-  const hex = randomBytes(4).toString("hex");
-  const seq = randomBytes(8).readBigUInt64BE(0).toString(36).padStart(12, "0");
-  return `${hex}-${seq}`;
-}
-
-function safeRmQuarantineEntry(path: string): void {
-  try {
-    rmSync(path, { force: true });
-  } catch {
-    /* best-effort */
-  }
-}
-
-/** Move a regular file without copying or replacing an existing destination. */
-function moveNoReplace(source: string, destination: string): boolean {
-  let linked = false;
-  try {
-    linkSync(source, destination);
-    linked = true;
-    unlinkSync(source);
-    return true;
-  } catch {
-    if (linked) {
-      try {
-        unlinkSync(destination);
-      } catch {
-        /* preserve both links rather than risking data loss */
-      }
-    }
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Help.
 // ---------------------------------------------------------------------------
 
 /**
- * Render the human-readable help text.  The text deliberately states
- * the read-only default, the exact approval flag, the credential
- * boundary, and the rollback identifier format.
+ * Render the human-readable help text.  Byte-for-byte identical to
+ * upstream/main: the production bundle help lives in
+ * {@link formatBundleRecoveryHelp} so this text is unchanged for the
+ * development single-database path.
  */
 export function formatRecoverLocalStateHelp(): string {
   return [
@@ -910,6 +1059,39 @@ export function formatRecoverLocalStateHelp(): string {
   ].join("\n");
 }
 
+/**
+ * Render the production database-bundle help.  Kept separate from the
+ * development/local help so the non-bundle help text stays byte-identical
+ * to upstream/main.
+ */
+export function formatBundleRecoveryHelp(): string {
+  return [
+    "nookctl recover-local-state bundle — production database-bundle recovery",
+    "",
+    "Usage:",
+    "  nookctl recover-local-state bundle help                         show this help",
+    "  nookctl recover-local-state bundle inspect [--state-dir <path>] read-only production database-bundle inspection",
+    `  nookctl recover-local-state bundle reinitialize ${APPROVE_REINITIALIZE_FLAG} ${ACCEPT_UNSYNCED_LOSS_FLAG}`,
+    "                                                                quarantine the production database bundle and reinitialize",
+    `  nookctl recover-local-state bundle rollback ${APPROVE_ROLLBACK_FLAG} <id> [--state-dir <path>]`,
+    "                                                                restore the preserved bundle without copy or clobber",
+    "",
+    "Options:",
+    "  --state-dir <path>    state directory to operate on (default: $NOOKBRIDGE_STATE_DIR)",
+    "",
+    "Safety contract:",
+    "  Bundle inspection is read-only.  Bundle reinitialize quarantines the",
+    "  production database bundle (nookbridge-storage.db, notesnook.db,",
+    "  notesnook-logs.db and their -wal/-shm sidecars) as ONE unit and then",
+    `  reinitializes; it additionally requires ${ACCEPT_UNSYNCED_LOSS_FLAG}:`,
+    "  accepting it states that unsynced local changes in the quarantined",
+    "  bundle will be lost.  The bundle key is read only from the systemd",
+    "  credential slot $CREDENTIALS_DIRECTORY/nookbridge-db-key; it is never",
+    "  taken from argv or env, never echoed, and never logged.",
+    "",
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // CLI-facing formatting.
 // ---------------------------------------------------------------------------
@@ -925,6 +1107,8 @@ export function formatRecoverCommandResult(result: RunRecoverCommandResult): str
       return result.text;
     case "inspection":
       return formatInspection(result.result);
+    case "bundle-inspection":
+      return formatBundleInspection(result.result);
     case "reinitialized":
       return `nookctl recover-local-state: fresh state initialized; original state quarantined (id=${result.quarantineId})`;
     case "rolled-back":
@@ -944,5 +1128,22 @@ function formatInspection(inspection: RecoveryInspection): string {
       return "nookctl recover-local-state: database is corrupt";
     case "locked":
       return "nookctl recover-local-state: state is currently locked";
+  }
+}
+
+function formatBundleInspection(inspection: BundleInspection): string {
+  switch (inspection.kind) {
+    case "healthy":
+      return "nookctl recover-local-state: production database bundle is healthy";
+    case "missing":
+      return "nookctl recover-local-state: production database bundle is missing";
+    case "partial":
+      return "nookctl recover-local-state: production database bundle is partial";
+    case "corrupt":
+      return "nookctl recover-local-state: production database bundle is corrupt";
+    case "locked":
+      return "nookctl recover-local-state: production database bundle is currently locked";
+    case "indeterminate":
+      return "nookctl recover-local-state: production database bundle state is indeterminate";
   }
 }
