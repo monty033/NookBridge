@@ -73,6 +73,7 @@ import {
 import { QUARANTINE_ID_PATTERN } from "../src/operator/recover-quarantine.js";
 import { SqliteStorage, inspectEncryptedSqlite } from "../src/storage/sqlite-storage.js";
 import type * as SqliteModule from "../src/storage/sqlite-storage.js";
+import type * as CryptoModule from "node:crypto";
 import type * as QuarantineModule from "../src/operator/recover-quarantine.js";
 import type * as LocalStateModule from "../src/operator/recover-local-state.js";
 
@@ -139,6 +140,19 @@ vi.mock("../src/operator/recover-quarantine.js", async (importOriginal) => {
       moveHook.beforeMove?.(source, destination);
       return actual.moveNoReplace(source, destination);
     },
+  };
+});
+
+// Random draws are real unless a test arms `randomHook.fixed`, which makes the
+// manifest temporary's name predictable for the exclusive-create regression.
+const randomHook = vi.hoisted(() => ({ fixed: false }));
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof CryptoModule>();
+  return {
+    ...actual,
+    randomBytes: (size: number): Buffer =>
+      randomHook.fixed ? Buffer.alloc(size, 0xab) : actual.randomBytes(size),
   };
 });
 
@@ -510,8 +524,8 @@ describe("bundle reinitialize — atomic three-member quarantine", () => {
   it("refuses a partial bundle and leaves it untouched", async () => {
     const root = mkRoot("nookbridge-bundle-partial-refuse-");
     const { stateDir, credentialsDir } = buildBundleFixture(root);
-    const removedBytes = readFileSync(join(stateDir, "notesnook.db"));
     rmSync(join(stateDir, "notesnook.db"));
+    const before = snapshotTreeWithInodes(stateDir);
 
     const result = await runBundle(
       ["bundle", "reinitialize", APPROVE, ACK],
@@ -524,8 +538,8 @@ describe("bundle reinitialize — atomic three-member quarantine", () => {
     expect(result.exitCode).toBe(2);
     expect(result.message.toLowerCase()).toContain("partial");
     expect(existsSync(quarantineRoot(stateDir))).toBe(false);
-    expect(readFileSync(join(stateDir, "nookbridge-storage.db")).length).toBeGreaterThan(0);
-    void removedBytes;
+    // Every remaining file keeps its exact bytes and inode, not just a length.
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
   });
 
   it("emits categorical output with no paths, keys, or member names", async () => {
@@ -1815,8 +1829,8 @@ describe("L — inspect state lock", () => {
     expect(healthyResult).toEqual({ kind: "healthy" });
     expect(existsSync(lockPath(healthy.stateDir))).toBe(false);
 
-    // (b) probe error: current inspect has no catch around the probe, so the
-    // error propagates; pin that behavior and require the lock to be gone.
+    // (b) probe error: a probe that throws becomes a categorical result, never
+    // an exception, and the lock is still released.
     const errorRoot = mkRoot("nookbridge-bundle-lock-probe-error-");
     const errored = buildWalBundleFixture(errorRoot);
     let armed = true;
@@ -1827,13 +1841,9 @@ describe("L — inspect state lock", () => {
       }
     };
 
-    let caught: unknown;
-    try {
-      inspectProductionBundle(errored.stateDir, errored.key);
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(Error);
+    expect(inspectProductionBundle(errored.stateDir, errored.key)).toEqual({
+      kind: "indeterminate",
+    });
     expect(existsSync(lockPath(errored.stateDir))).toBe(false);
   });
 
@@ -3110,5 +3120,462 @@ describe("bundle reinitialize — initialization checkpoint and entry name", () 
     // The malformed name never reaches the operator output.
     expect(JSON.stringify(result)).not.toContain(badId);
     expect(snapshotRegularFileHashes(stateDir)).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-9 review round 3 — manifest inventory, manifest symlinks, probe failures.
+// ---------------------------------------------------------------------------
+
+describe("bundle recovery — review round 3 regressions", () => {
+  it("resume refuses a stray sidecar before fresh state is created", async () => {
+    const root = mkRoot("nookbridge-bundle-stray-resume-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "5a1ab1e5-0123456789ab";
+    // Every member already moved: the crash happened during fresh-state creation,
+    // where resume skips the probe and goes straight to initialization.
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    writeFileSync(
+      join(entry, MANIFEST_NAME),
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "initializing",
+        items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+      }),
+      { mode: 0o600 },
+    );
+    // A leftover WAL would pair with the fresh database created on resume.
+    writeFileSync(join(stateDir, "notesnook.db-wal"), Buffer.from("stale-wal-from-a-crash"));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    // Nothing was created beside the stray sidecar; the snapshot is unchanged.
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("rollback refuses an entry that preserves a sidecar the manifest does not list", async () => {
+    const root = mkRoot("nookbridge-bundle-rb-unlisted-entry-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "0ddba11c-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    writeFileSync(join(entry, "notesnook.db-wal"), Buffer.from("preserved-wal-not-listed"));
+    writeFileSync(
+      join(entry, MANIFEST_NAME),
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "complete",
+        items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+      }),
+      { mode: 0o600 },
+    );
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(["bundle", "rollback", ROLLBACK, id], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe(ROLLBACK_INCOMPLETE);
+    // No success with a preserved sidecar left behind: nothing moved.
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("rollback refuses when an unlisted sidecar sits in the state root beside the restored state", async () => {
+    const root = mkRoot("nookbridge-bundle-rb-stray-root-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+
+    clearFreshMembers(stateDir);
+    writeFileSync(join(stateDir, "notesnook.db-wal"), Buffer.from("stray-wal"));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "rollback", ROLLBACK, reinit.quarantineId],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe(ROLLBACK_OCCUPIED);
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("a manifest write never follows a link planted at the old fixed temporary name", async () => {
+    const root = mkRoot("nookbridge-bundle-manifest-symlink-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const outside = join(root, "outside-target.txt");
+    writeFileSync(outside, "OUTSIDE-ORIGINAL", { mode: 0o600 });
+    let planted = false;
+    moveHook.beforeMove = (_source, destination) => {
+      if (planted) return;
+      planted = true;
+      // The old writer used `${manifest}.tmp` inside the entry; plant a link there.
+      symlinkSync(outside, join(destination, "..", `${MANIFEST_NAME}.tmp`));
+    };
+
+    try {
+      await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    } finally {
+      moveHook.beforeMove = undefined;
+    }
+
+    expect(planted).toBe(true);
+    expect(readFileSync(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+  });
+
+  it("resume sweeps a manifest temporary left by a crash and completes", async () => {
+    const root = mkRoot("nookbridge-bundle-manifest-residue-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const id = "5e1f1e57-0123456789ab";
+    const entry = plantIncompleteEntry(
+      stateDir,
+      id,
+      {
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+          { name: "notesnook-logs.db", state: "pending" },
+        ],
+      },
+      "nookbridge-storage.db",
+    );
+    const residue = join(entry, `${MANIFEST_NAME}.4242.0123456789abcdef.tmp`);
+    writeFileSync(residue, "half-written-manifest", { mode: 0o600 });
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("reinitialized");
+    if (result.kind !== "reinitialized") return;
+    expect(result.quarantineId).toBe(id);
+    expect(existsSync(residue)).toBe(false);
+    expect(readFileSync(join(entry, "notesnook.db")).equals(memberBytes["notesnook.db"]!)).toBe(
+      true,
+    );
+  });
+
+  it("resume refuses an entry that holds a file the manifest does not list", async () => {
+    const root = mkRoot("nookbridge-bundle-entry-unlisted-resume-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "e7a1e5c0-0123456789ab";
+    const entry = plantIncompleteEntry(
+      stateDir,
+      id,
+      {
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+          { name: "notesnook-logs.db", state: "pending" },
+        ],
+      },
+      "nookbridge-storage.db",
+    );
+    writeFileSync(join(entry, "notesnook.db-wal"), Buffer.from("unlisted-preserved-wal"));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("a crash that left only a manifest temporary is swept and the entry starts fresh", async () => {
+    const root = mkRoot("nookbridge-bundle-temp-only-entry-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const id = "7e11e11e-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    writeFileSync(join(entry, `${MANIFEST_NAME}.4242.0123456789abcdef.tmp`), "half-written", {
+      mode: 0o600,
+    });
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("reinitialized");
+    if (result.kind !== "reinitialized") return;
+    expect(result.quarantineId).not.toBe(id);
+    expect(existsSync(entry)).toBe(false);
+    expect(
+      readFileSync(join(quarantineRoot(stateDir), result.quarantineId, "notesnook.db")).equals(
+        memberBytes["notesnook.db"]!,
+      ),
+    ).toBe(true);
+  });
+
+  it("rollback sweeps a manifest temporary left in a complete entry and restores it", async () => {
+    const root = mkRoot("nookbridge-bundle-rb-temp-residue-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const id = "5e1f1e58-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    writeFileSync(
+      join(entry, MANIFEST_NAME),
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "complete",
+        items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+      }),
+      { mode: 0o600 },
+    );
+    writeFileSync(join(entry, `${MANIFEST_NAME}.9.0123456789abcdef.tmp`), "residue", {
+      mode: 0o600,
+    });
+
+    const result = await runBundle(["bundle", "rollback", ROLLBACK, id], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("rolled-back");
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(stateDir, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  it("resume refuses a symlinked manifest rather than following it", async () => {
+    const root = mkRoot("nookbridge-bundle-symlink-manifest-resume-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const id = "5e1f1e55-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    renameSync(join(stateDir, "nookbridge-storage.db"), join(entry, "nookbridge-storage.db"));
+    const outsideManifest = join(root, "outside-manifest.json");
+    writeFileSync(
+      outsideManifest,
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+          { name: "notesnook-logs.db", state: "pending" },
+        ],
+      }),
+    );
+    symlinkSync(outsideManifest, join(entry, MANIFEST_NAME));
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(readFileSync(join(stateDir, "notesnook.db")).equals(memberBytes["notesnook.db"]!)).toBe(
+      true,
+    );
+  });
+
+  it("rollback refuses a symlinked manifest rather than following it", async () => {
+    const root = mkRoot("nookbridge-bundle-symlink-manifest-rb-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "5e1f1e56-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    const outsideManifest = join(root, "outside-manifest.json");
+    writeFileSync(
+      outsideManifest,
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "complete",
+        items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+      }),
+    );
+    symlinkSync(outsideManifest, join(entry, MANIFEST_NAME));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(["bundle", "rollback", ROLLBACK, id], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.message).toBe(ROLLBACK_INCOMPLETE);
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("reinitialize turns a probe failure into a categorical refusal and mutates nothing", async () => {
+    const root = mkRoot("nookbridge-bundle-probe-throws-reinit-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const before = snapshotTreeWithInodes(stateDir);
+    probeHook.onProbe = () => {
+      throw new Error("probe boom");
+    };
+
+    try {
+      const result = await runBundle(
+        ["bundle", "reinitialize", APPROVE, ACK],
+        stateDir,
+        credentialsDir,
+      );
+      expect(result.kind).toBe("error");
+      if (result.kind !== "error") return;
+      expect(result.exitCode).toBe(2);
+      expect(result.message).toBe("refusing unprobeable production database bundle");
+    } finally {
+      probeHook.onProbe = undefined;
+    }
+
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-9 mutation survivors: manifest temporary naming, exclusive create, and the
+// resume sweep.  Each test is load-bearing for one mutant in the driver.
+// ---------------------------------------------------------------------------
+
+describe("bundle manifest temporaries — naming, exclusive create, sweep", () => {
+  it("a manifest write does not depend on the old fixed temporary name being free", async () => {
+    const root = mkRoot("nookbridge-bundle-stray-fixed-name-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    let stray: string | undefined;
+    moveHook.beforeMove = (_source, destination) => {
+      if (stray !== undefined) return;
+      // Occupy the old predictable name inside the entry before the next manifest write.
+      stray = join(destination, "..", `${MANIFEST_NAME}.tmp`);
+      writeFileSync(stray, "STRAY-AT-OLD-NAME", { mode: 0o600 });
+    };
+
+    let result: Awaited<ReturnType<typeof runBundle>> | undefined;
+    try {
+      result = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    } finally {
+      moveHook.beforeMove = undefined;
+    }
+
+    expect(stray).toBeDefined();
+    expect(result?.kind).toBe("reinitialized");
+    expect(readFileSync(stray!, "utf8")).toBe("STRAY-AT-OLD-NAME");
+  });
+
+  it("a manifest temporary is created exclusively: a link at its exact name is never followed", async () => {
+    const root = mkRoot("nookbridge-bundle-temp-exclusive-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const outside = join(root, "outside-target.txt");
+    writeFileSync(outside, "OUTSIDE-ORIGINAL", { mode: 0o600 });
+    // Every random draw is fixed, so the temporary's exact name is known in advance.
+    const tempName = `${MANIFEST_NAME}.${process.pid}.${"ab".repeat(8)}.tmp`;
+    randomHook.fixed = true;
+    let planted = false;
+    moveHook.beforeMove = (_source, destination) => {
+      if (planted) return;
+      planted = true;
+      // The first manifest temporary was already renamed away, so this name is free
+      // for a link.  The next manifest write must refuse it rather than follow it.
+      symlinkSync(outside, join(destination, "..", tempName));
+    };
+
+    let result: Awaited<ReturnType<typeof runBundle>> | undefined;
+    try {
+      result = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    } finally {
+      moveHook.beforeMove = undefined;
+      randomHook.fixed = false;
+    }
+
+    expect(planted).toBe(true);
+    expect(readFileSync(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+    expect(result?.kind).toBe("error");
+    if (result?.kind !== "error") return;
+    expect(result.exitCode).toBe(3);
+    expect(result.message).toBe("failed to record recovery manifest");
+  });
+
+  it("resume never unlinks a symlink named like a manifest temporary", async () => {
+    const root = mkRoot("nookbridge-bundle-temp-symlink-sweep-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "5e1f1e58-0123456789ab";
+    const entry = plantIncompleteEntry(
+      stateDir,
+      id,
+      {
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+          { name: "notesnook-logs.db", state: "pending" },
+        ],
+      },
+      "nookbridge-storage.db",
+    );
+    const outside = join(root, "outside-target.txt");
+    writeFileSync(outside, "OUTSIDE-ORIGINAL", { mode: 0o600 });
+    const link = join(entry, `${MANIFEST_NAME}.4242.0123456789abcdef.tmp`);
+    symlinkSync(outside, link);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe("refusing inconsistent quarantine state");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
   });
 });

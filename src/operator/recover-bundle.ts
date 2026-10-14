@@ -33,12 +33,14 @@
  *     name, or upstream error is ever echoed.
  */
 
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   constants,
   copyFileSync,
   existsSync,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -299,6 +301,10 @@ export function inspectProductionBundle(
       if (probe.statuses[member] !== "healthy") return { kind: "corrupt" };
     }
     return { kind: "healthy" };
+  } catch {
+    // Inspection is categorical and read-only: an unexpected failure during the
+    // copy or probe is "indeterminate", never an exception that escapes.
+    return { kind: "indeterminate" };
   } finally {
     // 8. Release only the lock file this call still owns.
     releaseIfOwned(stateDir, fd, lockIno, record);
@@ -634,6 +640,18 @@ export function reinitializeProductionBundle(
     if (presence === "missing" && scan.kind !== "resume") {
       return error(2, "production database bundle is missing");
     }
+    // A resumed checkpoint may name only the artefacts it moved.  A stray
+    // sidecar left in the root would pair with fresh state, and an unlisted
+    // file in the entry would be stranded, so refuse before anything runs.
+    if (scan.kind === "resume") {
+      const listed = new Set(scan.manifest.items.map((item) => item.name));
+      if (
+        hasUnlistedStateSidecar(stateDir, listed) ||
+        hasUnlistedEntryArtefact(join(quarantineDir, scan.id), listed)
+      ) {
+        return error(2, "refusing inconsistent quarantine state");
+      }
+    }
 
     // A resumed run re-probes each pending member still in the state root.
     // A member an earlier run already moved is inside the entry, and one a
@@ -651,7 +669,12 @@ export function reinitializeProductionBundle(
             )
         : [...PRODUCTION_BUNDLE_MEMBERS];
     if (probeMembers.length > 0) {
-      const probe = probeBundleCopyUnderLock(stateDir, key, probeMembers);
+      let probe: BundleCopyProbe;
+      try {
+        probe = probeBundleCopyUnderLock(stateDir, key, probeMembers);
+      } catch {
+        return error(2, "refusing unprobeable production database bundle");
+      }
       if (probe.kind !== "probed") {
         return error(2, "refusing unprobeable production database bundle");
       }
@@ -866,6 +889,7 @@ function restoreBundleEntry(
   }
   if (!stat.isDirectory()) return rollbackError(2, ROLLBACK_UNKNOWN);
 
+  removeManifestTemporaries(entry);
   const manifest = readRollbackManifest(entry, quarantineId);
   if (manifest === undefined) return rollbackError(2, ROLLBACK_INCOMPLETE);
 
@@ -878,6 +902,13 @@ function restoreBundleEntry(
   }
 
   const plan = restorePlan(manifest);
+
+  // Every file in the entry, and every sidecar left in the state root, must be
+  // named by the manifest.  An unlisted entry file would be stranded by a
+  // successful restore; an unlisted sidecar would pair with a restored database.
+  const listed = new Set(manifest.items.map((item) => item.name));
+  if (hasUnlistedEntryArtefact(entry, listed)) return rollbackError(2, ROLLBACK_INCOMPLETE);
+  if (hasUnlistedStateSidecar(stateDir, listed)) return rollbackError(2, ROLLBACK_OCCUPIED);
 
   // Refuse before any mutation if a destination is already occupied.  The
   // existing file is never displaced.
@@ -924,6 +955,8 @@ function restorePlan(manifest: BundleManifest): string[] {
 function readRollbackManifest(entry: string, expectedId: string): BundleManifest | undefined {
   let raw: string;
   try {
+    // A symlinked manifest is never followed: it is not a checkpoint we wrote.
+    if (!isRegularFile(join(entry, BUNDLE_MANIFEST_FILENAME))) return undefined;
     raw = readFileSync(join(entry, BUNDLE_MANIFEST_FILENAME), "utf8");
   } catch {
     return undefined;
@@ -1053,6 +1086,7 @@ function scanQuarantine(quarantineDir: string): ScanResult {
       return { kind: "error", error: error(2, "refusing quarantine collision") };
     }
     if (!stat.isDirectory()) continue;
+    removeManifestTemporaries(candidate);
     let contents: string[];
     try {
       contents = readdirSync(candidate);
@@ -1102,17 +1136,37 @@ function scanQuarantine(quarantineDir: string): ScanResult {
 
 function writeManifest(entry: string, manifest: BundleManifest): boolean {
   const target = join(entry, BUNDLE_MANIFEST_FILENAME);
-  const temporary = `${target}.tmp`;
+  // A random name, created exclusively: `wx` never follows a symlink, so a link
+  // planted at a predictable name cannot redirect this write out of quarantine.
+  const temporary = join(
+    entry,
+    `${BUNDLE_MANIFEST_FILENAME}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
+  );
+  let fd: number | undefined;
+  let created = false;
   try {
-    writeFileSync(temporary, JSON.stringify(manifest), { mode: 0o600 });
-    chmodSync(temporary, 0o600);
+    fd = openSync(temporary, "wx", 0o600);
+    created = true;
+    writeFileSync(fd, JSON.stringify(manifest));
+    fchmodSync(fd, 0o600);
+    closeSync(fd);
+    fd = undefined;
     renameSync(temporary, target);
     return true;
   } catch {
-    try {
-      if (existsSync(temporary)) unlinkSync(temporary);
-    } catch {
-      /* best-effort */
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        /* best-effort */
+      }
     }
     return false;
   }
@@ -1121,6 +1175,8 @@ function writeManifest(entry: string, manifest: BundleManifest): boolean {
 function readIncompleteManifest(entry: string, expectedId: string): BundleManifest | undefined {
   let raw: string;
   try {
+    // A symlinked manifest is never followed: it is not a checkpoint we wrote.
+    if (!isRegularFile(join(entry, BUNDLE_MANIFEST_FILENAME))) return undefined;
     raw = readFileSync(join(entry, BUNDLE_MANIFEST_FILENAME), "utf8");
   } catch {
     return undefined;
@@ -1244,6 +1300,63 @@ function isRegularFile(path: string): boolean {
     return stat.isFile() && !stat.isSymbolicLink();
   } catch {
     return false;
+  }
+}
+
+/**
+ * True when a SQLite sidecar of any bundle member is in the state root but not
+ * named by the manifest.  Such a file would pair with fresh or restored state.
+ * A sidecar that cannot be inspected counts as present (fail closed).
+ */
+function hasUnlistedStateSidecar(stateDir: string, listed: ReadonlySet<string>): boolean {
+  for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
+      const name = `${member}${suffix}`;
+      if (!listed.has(name) && pathEntryExists(join(stateDir, name))) return true;
+    }
+  }
+  return false;
+}
+
+/** Name pattern of a manifest temporary written by `writeManifest`. */
+const MANIFEST_TEMPORARY_PATTERN = /^recovery-manifest\.json\.\d+\.[0-9a-f]{16}\.tmp$/;
+
+/**
+ * Remove manifest temporaries left by a crash inside `writeManifest`.  Only a
+ * regular file matching the exact temporary pattern is removed; a symlink or
+ * any other name is left in place, so the unlisted-artefact check still refuses
+ * it.  Runs under the state lock.  Never throws.
+ */
+function removeManifestTemporaries(entry: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(entry);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!MANIFEST_TEMPORARY_PATTERN.test(name)) continue;
+    const path = join(entry, name);
+    try {
+      const stat = lstatSync(path);
+      if (stat.isFile() && !stat.isSymbolicLink()) unlinkSync(path);
+    } catch {
+      /* left in place: the unlisted-artefact check refuses it */
+    }
+  }
+}
+
+/**
+ * True when the entry holds any file the manifest does not name, apart from the
+ * manifest itself.  An unreadable entry counts as unlisted (fail closed).
+ */
+function hasUnlistedEntryArtefact(entry: string, listed: ReadonlySet<string>): boolean {
+  try {
+    return readdirSync(entry).some(
+      (name) => name !== BUNDLE_MANIFEST_FILENAME && !listed.has(name),
+    );
+  } catch {
+    return true;
   }
 }
 
