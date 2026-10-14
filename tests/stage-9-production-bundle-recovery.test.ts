@@ -604,6 +604,111 @@ function backdate(path: string): void {
   utimesSync(path, past, past);
 }
 
+// ---------------------------------------------------------------------------
+// P1-9 review fixes: inspect takes the lock before reading presence; a crash
+// after every member moved is resumable; a symlinked quarantine root is refused.
+// ---------------------------------------------------------------------------
+
+describe("bundle review fixes — lock order and quarantine root", () => {
+  it("inspect reports locked, not partial, while a live holder owns the lock", () => {
+    const root = mkRoot("nookbridge-bundle-inspect-lock-first-");
+    const { stateDir, key } = buildBundleFixture(root);
+    // A mutation mid-move leaves a partial root.  An unlocked read would report
+    // it as partial; the lock must be taken before presence is read.
+    rmSync(join(stateDir, "notesnook.db"));
+    writeFileSync(lockPath(stateDir), `${process.pid}\n`, { mode: 0o600 });
+
+    const result = inspectProductionBundle(stateDir, key);
+
+    expect(result.kind).toBe("locked");
+    expect(readFileSync(lockPath(stateDir), "utf8")).toBe(`${process.pid}\n`);
+  });
+
+  it("reinitialize resumes a checkpoint in which every member already moved", async () => {
+    const root = mkRoot("nookbridge-bundle-resume-all-moved-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const id = "c0ffee00-0123456789ab";
+    const entry = plantIncompleteEntry(stateDir, id, {
+      version: 1,
+      id,
+      status: "incomplete",
+      items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+    });
+    // A crash after the last member move leaves an empty state root.
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("reinitialized");
+    if (result.kind !== "reinitialized") return;
+    expect(result.quarantineId).toBe(id);
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
+      expect(existsSync(join(stateDir, member))).toBe(true);
+    }
+  });
+
+  it("reinitialize refuses a symlinked quarantine root and moves nothing outside", async () => {
+    const root = mkRoot("nookbridge-bundle-symlink-quarantine-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    const outside = mkRoot("nookbridge-bundle-symlink-quarantine-target-");
+    symlinkSync(outside, quarantineRoot(stateDir));
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(stateDir, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it("rollback refuses a symlinked quarantine root and restores nothing from outside", async () => {
+    const root = mkRoot("nookbridge-bundle-rollback-symlink-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const outside = mkRoot("nookbridge-bundle-rollback-symlink-target-");
+    const id = "decade00-0123456789ab";
+    const entry = join(outside, id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(entry, MANIFEST_NAME),
+      JSON.stringify({
+        version: 1,
+        id,
+        status: "complete",
+        items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+      }),
+      { mode: 0o600 },
+    );
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    symlinkSync(outside, quarantineRoot(stateDir));
+
+    const result = await runBundle(["bundle", "rollback", ROLLBACK, id], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    for (const member of BUNDLE_MEMBERS) {
+      expect(existsSync(join(stateDir, member))).toBe(false);
+      expect(existsSync(join(entry, member))).toBe(true);
+    }
+  });
+});
+
 describe("bundle reinitialize — crash checkpoints", () => {
   it("resumes an incomplete checkpoint instead of guessing", async () => {
     const root = mkRoot("nookbridge-bundle-resume-");

@@ -249,23 +249,18 @@ export function inspectProductionBundle(
   stateDir: string,
   key: string | undefined,
 ): BundleInspection {
-  // 1. Read-only presence check first, before creating anything, so a
-  //    nonexistent state directory still reports "missing".
-  const initialPresence = memberPresence(stateDir);
-  if (initialPresence === "missing") return { kind: "missing" };
-  if (initialPresence === "partial") return { kind: "partial" };
-  if (initialPresence === "unsafe") return { kind: "corrupt" };
-
-  // 2. The key is required before taking the lock.
-  if (typeof key !== "string" || key.length === 0) return { kind: "indeterminate" };
-
-  // 3. Acquire atomically.  Any existing lock file — live or stale — refuses;
-  //    nothing is reclaimed and nothing is unlinked here.
+  // 1. Acquire atomically FIRST.  Presence is never read before the lock: a
+  //    mutation mid-move leaves a transient partial root, and an unlocked read
+  //    would report that instead of "locked".  Any existing lock file — live
+  //    or stale — refuses; nothing is reclaimed and nothing is unlinked here.
   let fd: number;
   try {
     fd = openSync(lockPath(stateDir), "wx", 0o600);
   } catch (error) {
-    if ((error as { code?: string }).code === "EEXIST") return { kind: "locked" };
+    const code = (error as { code?: string }).code;
+    if (code === "EEXIST") return { kind: "locked" };
+    // A nonexistent state directory has nothing to inspect.
+    if (code === "ENOENT") return { kind: "missing" };
     // Any other failure to create the lock is unsafe to proceed past.
     return { kind: "indeterminate" };
   }
@@ -293,6 +288,9 @@ export function inspectProductionBundle(
     if (presence === "missing") return { kind: "missing" };
     if (presence === "partial") return { kind: "partial" };
     if (presence === "unsafe") return { kind: "corrupt" };
+
+    // The key is required before any copy is made.
+    if (typeof key !== "string" || key.length === 0) return { kind: "indeterminate" };
 
     const probe = probeBundleCopyUnderLock(stateDir, key);
     if (probe.kind === "missing") return { kind: "missing" };
@@ -603,7 +601,6 @@ export function reinitializeProductionBundle(
   }
 
   const presence = memberPresence(stateDir);
-  if (presence === "missing") return error(2, "production database bundle is missing");
   if (presence === "unsafe") return error(2, "refusing unsafe production database bundle");
 
   // Exclusive ownership: refuse while a live holder exists, and hold the
@@ -614,6 +611,12 @@ export function reinitializeProductionBundle(
   const release = tryAcquireLock(stateDir);
   if (!release) return error(2, "state directory is currently locked by another process");
   try {
+    // A symlinked or non-directory quarantine root would redirect every move
+    // outside the state root.  Refuse before the scan touches anything.
+    if (quarantineRootUnsafe(stateDir)) {
+      return error(2, "refusing unsafe quarantine root");
+    }
+
     // Scan under the lock.  This also removes empty leftover entry
     // directories recursively, so a failed move cannot block the next run.
     const quarantineDir = join(stateDir, QUARANTINE_RELATIVE_DIR);
@@ -625,6 +628,11 @@ export function reinitializeProductionBundle(
     // resumable checkpoint explains it.
     if (presence === "partial" && scan.kind !== "resume") {
       return error(2, "refusing partial production database bundle");
+    }
+    // An empty root is "missing" unless a resumable checkpoint shows that a
+    // crash moved every member: then the checkpoint is resumed, not refused.
+    if (presence === "missing" && scan.kind !== "resume") {
+      return error(2, "production database bundle is missing");
     }
 
     // A resumed run re-probes each pending member still in the state root.
@@ -808,6 +816,11 @@ export function rollbackProductionBundle(options: RollbackBundleOptions): Bundle
     return rollbackError(2, "state directory is currently locked by another process");
   }
   try {
+    // A symlinked or non-directory quarantine root would make the entry resolve
+    // outside the state root.  Refuse before anything is moved.
+    if (quarantineRootUnsafe(stateDir)) {
+      return rollbackError(2, "refusing unsafe quarantine root");
+    }
     return restoreBundleEntry(stateDir, entry, options.quarantineId);
   } finally {
     try {
@@ -1199,6 +1212,21 @@ function isRegularFile(path: string): boolean {
     return stat.isFile() && !stat.isSymbolicLink();
   } catch {
     return false;
+  }
+}
+
+/**
+ * True when the quarantine root exists but is not a real directory: a symlink
+ * (including a dangling one, which `existsSync` reports as absent), or any
+ * other non-directory.  An absent root is safe; the mutation creates it.
+ */
+function quarantineRootUnsafe(stateDir: string): boolean {
+  try {
+    const stat = lstatSync(join(stateDir, QUARANTINE_RELATIVE_DIR));
+    return stat.isSymbolicLink() || !stat.isDirectory();
+  } catch (err) {
+    // Absent is safe; any other failure to inspect the root fails closed.
+    return (err as { code?: string }).code !== "ENOENT";
   }
 }
 

@@ -31,7 +31,8 @@ transport capabilities.
   paths must remain inside the state root.
 - Active lock files, missing/unsafe state, quarantine collisions, unsafe
   identifiers, occupied rollback destinations, and incomplete quarantine entries
-  fail closed.
+  fail closed.  A symlinked or non-directory quarantine root also fails closed
+  before any move, for both reinitialize and rollback.
 - `--approve-reinitialize` is required for the quarantine path.
 - The original database is preserved by a restrictive, same-filesystem,
   no-copy/no-clobber move into `.recovery-quarantine/<opaque-id>/`; it is never
