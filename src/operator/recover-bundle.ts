@@ -33,6 +33,7 @@
  *     name, or upstream error is ever echoed.
  */
 
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -256,9 +257,9 @@ function hasAnyStateSidecar(stateDir: string): boolean {
  * The whole copy-and-probe runs under the single-instance lock so a gateway
  * cannot start mid-inspect.  The lock is taken with an exclusive `wx` create
  * (never `tryAcquireLock`, which reclaims dead holders) and any pre-existing
- * lock file — live or stale — refuses the inspect.  The lock is released on
- * every path, but only while the file is still the exact one this call
- * created.
+ * lock file — live or stale — refuses the inspect.  The lock file is removed on
+ * every path, but only while it is still the exact one this call created; if
+ * that removal fails, the result is `indeterminate`.
  *
  * `key` is optional: with it, each present member is probed; without it the
  * result is categorical and indeterminate rather than an unhealthy guess.
@@ -286,49 +287,70 @@ export function inspectProductionBundle(
   // The holder record, verified at release.  lock.ts's holder reader accepts
   // a pid-only record (the optional start-time line is omitted here).
   const record = `${process.pid}\n`;
-  let lockIno: number | undefined;
-  // Ownership is proven by the inode, but release also verifies the holder
-  // record when it was written.  A record that never made it to disk must not
-  // be required at release, or this call would leave an unreclaimable lock.
-  let recordWritten = false;
+  // What release needs to prove the lock file is still this call's.  Filled in
+  // as the lock is recorded; an unset inode means ownership was never proven.
+  const held: HeldInspectLock = { lockIno: undefined, recordWritten: false };
 
-  // 6. Everything after acquire runs inside ONE outer try/finally.
+  let result: BundleInspection;
   try {
-    // 5. Record ownership of the file just created.
-    lockIno = fstatSync(fd).ino;
-
-    // 4. The holder record is REQUIRED, not best-effort: inspect is read-only
-    //    and must not proceed without it.  A failed write is not swallowed;
-    //    it becomes "indeterminate" below, and the finally still releases the
-    //    lock this call created.
-    writeSync(fd, record, 0, "utf8");
-    recordWritten = true;
-
-    // 7. A mutation may have changed the state between step 1 and the
-    //    acquire, so re-run the presence check under the lock.
-    const presence = memberPresence(stateDir);
-    if (presence === "missing") return { kind: "missing" };
-    if (presence === "partial") return { kind: "partial" };
-    if (presence === "unsafe") return { kind: "corrupt" };
-
-    // The key is required before any copy is made.
-    if (typeof key !== "string" || key.length === 0) return { kind: "indeterminate" };
-
-    const probe = probeBundleCopyUnderLock(stateDir, key);
-    if (probe.kind === "missing") return { kind: "missing" };
-    if (probe.kind === "corrupt") return { kind: "corrupt" };
-    for (const member of PRODUCTION_BUNDLE_MEMBERS) {
-      if (probe.statuses[member] !== "healthy") return { kind: "corrupt" };
-    }
-    return { kind: "healthy" };
+    result = inspectWhileHeld(stateDir, key, fd, record, held);
   } catch {
     // Inspection is categorical and read-only: an unexpected failure during the
     // copy or probe is "indeterminate", never an exception that escapes.
-    return { kind: "indeterminate" };
-  } finally {
-    // 8. Release only the lock file this call still owns.
-    releaseIfOwned(stateDir, fd, lockIno, record, recordWritten);
+    result = { kind: "indeterminate" };
   }
+  // 8. Release only the lock file this call still owns.  If that removal fails,
+  //    the file is left for an operator, so the result cannot be trusted.
+  const released = releaseIfOwned(stateDir, fd, held.lockIno, record, held.recordWritten);
+  return released ? result : { kind: "indeterminate" };
+}
+
+/** Lock facts the release step needs, recorded while the lock is held. */
+interface HeldInspectLock {
+  lockIno: number | undefined;
+  recordWritten: boolean;
+}
+
+/**
+ * Steps 5–7: everything after the lock is acquired.  Throws on an unexpected
+ * failure; the caller turns that into "indeterminate".
+ */
+function inspectWhileHeld(
+  stateDir: string,
+  key: string | undefined,
+  fd: number,
+  record: string,
+  held: HeldInspectLock,
+): BundleInspection {
+  // 5. Record ownership of the file just created.
+  held.lockIno = fstatSync(fd).ino;
+
+  // 4. The holder record is REQUIRED, not best-effort: inspect is read-only
+  //    and must not proceed without it.  A short write counts as a failed
+  //    write, so the caller reports "indeterminate".
+  const written = writeSync(fd, record, 0, "utf8");
+  if (written !== Buffer.byteLength(record, "utf8")) {
+    throw new Error("short write of the inspect holder record");
+  }
+  held.recordWritten = true;
+
+  // 7. A mutation may have changed the state between step 1 and the acquire,
+  //    so re-run the presence check under the lock.
+  const presence = memberPresence(stateDir);
+  if (presence === "missing") return { kind: "missing" };
+  if (presence === "partial") return { kind: "partial" };
+  if (presence === "unsafe") return { kind: "corrupt" };
+
+  // The key is required before any copy is made.
+  if (typeof key !== "string" || key.length === 0) return { kind: "indeterminate" };
+
+  const probe = probeBundleCopyUnderLock(stateDir, key);
+  if (probe.kind === "missing") return { kind: "missing" };
+  if (probe.kind === "corrupt") return { kind: "corrupt" };
+  for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    if (probe.statuses[member] !== "healthy") return { kind: "corrupt" };
+  }
+  return { kind: "healthy" };
 }
 
 /** Three-way read-only classification of one copied member. */
@@ -463,12 +485,15 @@ function escapeReinitKey(key: string): string {
 }
 
 /**
- * Verify ownership and remove the lock file BEFORE closing the fd.  Keeping
- * the fd open pins the inode, so it cannot be freed and reused between the
- * identity check and the unlink.  The lock file is removed only while it is
- * still the exact file this call created: same inode, and — when the holder
- * record was actually written — the same record.  A foreign or replaced lock
- * file is left in place.  Never throws.
+ * Remove this call's lock file, then close the fd.  Keeping the fd open pins
+ * the inode, so no other file can take its number while this call holds it.
+ * The file is removed only while it is still the exact file this call created:
+ * same inode, and, when the holder record was written, the same record.  A
+ * foreign or replaced file is not ours and is left in place.
+ *
+ * Returns false only when this call's own lock file could not be removed, or
+ * when its ownership was never proven, so the caller must not report a clean
+ * result.  Never throws.
  */
 function releaseIfOwned(
   stateDir: string,
@@ -476,21 +501,30 @@ function releaseIfOwned(
   lockIno: number | undefined,
   record: string,
   recordWritten: boolean,
-): void {
+): boolean {
   try {
-    if (lockIno !== undefined) {
-      const path = lockPath(stateDir);
-      const stat = statSync(path);
-      if (
-        stat.isFile() &&
-        stat.ino === lockIno &&
-        (!recordWritten || readFileSync(path, "utf8") === record)
-      ) {
-        unlinkSync(path);
-      }
+    // Ownership was never proven, so the file cannot be removed safely.
+    if (lockIno === undefined) {
+      return false;
     }
+    const path = lockPath(stateDir);
+    const stat = statSync(path, { throwIfNoEntry: false });
+    // Already gone: nothing of this call's remains.
+    if (stat === undefined) {
+      return true;
+    }
+    // Replaced by something else: not ours to remove, and not a leftover.
+    if (!stat.isFile() || stat.ino !== lockIno) {
+      return true;
+    }
+    if (recordWritten && readFileSync(path, "utf8") !== record) {
+      return true;
+    }
+    unlinkSync(path);
+    return true;
   } catch {
-    /* ENOENT, or any other failure: leave the lock file alone */
+    // Reading or removing our own lock file failed, so it may still be there.
+    return false;
   } finally {
     try {
       closeSync(fd);

@@ -20,6 +20,7 @@ import { Buffer } from "node:buffer";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   openSync,
   readFileSync,
   statSync,
@@ -32,7 +33,7 @@ import process from "node:process";
 import { normaliseStateDir } from "./state-dir.js";
 
 /** Backing field for in-process lock holders. */
-const HELD: Map<string, { fd: number; path: string }> = new Map();
+const HELD: Map<string, { fd: number; path: string; ino: number }> = new Map();
 
 export function lockPath(stateDir: string): string {
   return join(normaliseStateDir(stateDir), "nookbridge.lock");
@@ -167,6 +168,27 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
       return null;
     }
   }
+  // The inode is the proof of ownership at release.  Without it, release could
+  // not tell this file from a replacement, so the acquisition is refused.  The
+  // file was created by this attempt moments ago, so it is removed by path
+  // here.  With no fd identity there is no stronger proof available, so a
+  // replacement inside that window cannot be detected.
+  let ino: number;
+  try {
+    ino = fstatSync(fd).ino;
+  } catch {
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+    try {
+      unlinkSync(canonical);
+    } catch {
+      /* already gone */
+    }
+    return null;
+  }
   // Record the holder so an operator examining the state dir can identify it,
   // and so a later start can tell a dead holder from a live one.  The start
   // time is what makes reclaiming a reused pid safe.  We never write the
@@ -181,7 +203,7 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
   } catch {
     // best-effort metadata
   }
-  HELD.set(canonical, { fd, path: canonical });
+  HELD.set(canonical, { fd, path: canonical, ino });
   return () => releaseLock(stateDir);
 }
 
@@ -224,17 +246,23 @@ export function releaseLock(stateDir: string): boolean {
   if (!held) {
     return false;
   }
+  // Remove the file only while it is still the one this process created.  A
+  // foreign or replaced file belongs to someone else and stays.  The check and
+  // the unlink are two calls with no atomic form in Node's fs API, so a
+  // replacement made in that gap is not detected.  The open fd pins the inode,
+  // so no other file can carry its number while this process holds it.
   try {
-    closeSync(held.fd);
-  } catch {
-    /* already closed */
-  }
-  try {
-    if (existsSync(canonical)) {
+    const stat = statSync(canonical, { throwIfNoEntry: false });
+    if (stat !== undefined && stat.isFile() && stat.ino === held.ino) {
       unlinkSync(canonical);
     }
   } catch {
     /* file may already be gone; the in-process record is the truth */
+  }
+  try {
+    closeSync(held.fd);
+  } catch {
+    /* already closed */
   }
   HELD.delete(canonical);
   return true;

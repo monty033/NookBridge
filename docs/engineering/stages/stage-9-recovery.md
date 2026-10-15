@@ -84,7 +84,7 @@ Verified behavior (source and focused tests):
   "refusing unprobeable production database bundle" (exit code 2). A failure to
   create the private copy directory, write its owner record, or copy a member
   or sidecar returns `corrupt` to inspect and the same categorical refusal
-  (exit code 2) to reinitialize. In every case the lock is still released.
+  (exit code 2) to reinitialize. Inspect removes its own lock file when it can prove the file is its own. If that removal fails, inspect returns `indeterminate` and leaves the file for an operator.
 - Reinitialize resumes an `initializing` checkpoint only when every member is
   recorded as moved and present in the entry. Rollback refuses an
   `initializing` checkpoint and any entry with a manifest member missing.

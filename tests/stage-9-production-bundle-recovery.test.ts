@@ -160,7 +160,11 @@ vi.mock("node:crypto", async (importOriginal) => {
 // Fails exactly one `writeSync` (the lock holder record) when armed.  Armed
 // only immediately before an inspect call, so fixture construction is
 // unaffected.  Cleared in the L block's ``afterEach``.
-const lockWriteFault = vi.hoisted(() => ({ failNextWrite: false }));
+const lockWriteFault = vi.hoisted(() => ({
+  failNextWrite: false,
+  shortNextWrite: false,
+  failUnlinkPath: undefined as string | undefined,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof FsModule>();
@@ -171,7 +175,21 @@ vi.mock("node:fs", async (importOriginal) => {
         lockWriteFault.failNextWrite = false;
         throw new Error("holder write boom");
       }
+      if (lockWriteFault.shortNextWrite) {
+        lockWriteFault.shortNextWrite = false;
+        return 0;
+      }
       return actual.writeSync(...args);
+    },
+    // Fails only the removal of the armed lock path; every other unlink is real.
+    unlinkSync: (...args: Parameters<typeof actual.unlinkSync>): void => {
+      if (
+        lockWriteFault.failUnlinkPath !== undefined &&
+        String(args[0]) === lockWriteFault.failUnlinkPath
+      ) {
+        throw Object.assign(new Error("unlink boom"), { code: "EIO" });
+      }
+      return actual.unlinkSync(...args);
     },
   };
 });
@@ -1865,6 +1883,8 @@ describe("L — inspect state lock", () => {
   afterEach(() => {
     probeHook.onProbe = undefined;
     lockWriteFault.failNextWrite = false;
+    lockWriteFault.shortNextWrite = false;
+    lockWriteFault.failUnlinkPath = undefined;
   });
 
   it("L1 — inspect holds the state lock while it probes the copy", () => {
@@ -1978,6 +1998,37 @@ describe("L — inspect state lock", () => {
     // A later inspect must not inherit the failed run's lock and report
     // "locked" forever: the lock file must have been released.
     expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "healthy" });
+  });
+
+  it("L16 — a short holder-record write is a failed write: indeterminate and no lock file", () => {
+    const root = mkRoot("nookbridge-bundle-lock-short-write-");
+    const { stateDir, key } = buildWalBundleFixture(root);
+
+    // The write reports fewer bytes than the record.  A truncated holder
+    // record is a failed write, not a recorded one.
+    lockWriteFault.shortNextWrite = true;
+
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "indeterminate" });
+    expect(existsSync(lockPath(stateDir))).toBe(false);
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "healthy" });
+  });
+
+  it("L17 — a lock file that cannot be removed makes inspect indeterminate and stays for an operator", () => {
+    const root = mkRoot("nookbridge-bundle-lock-unlink-fault-");
+    const { stateDir, key } = buildWalBundleFixture(root);
+
+    // The probe is healthy; only removing this call's own lock file fails.
+    lockWriteFault.failUnlinkPath = lockPath(stateDir);
+    try {
+      expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "indeterminate" });
+      expect(existsSync(lockPath(stateDir))).toBe(true);
+    } finally {
+      lockWriteFault.failUnlinkPath = undefined;
+    }
+
+    // The leftover lock is visible to the next inspect as a held lock.
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "locked" });
+    rmSync(lockPath(stateDir), { force: true });
   });
 
   // L6 — the cross-process guarantee rests on the atomic "wx" create, so this
