@@ -345,6 +345,7 @@ function inspectWhileHeld(
   const probe = probeBundleCopyUnderLock(stateDir, key);
   if (probe.kind === "missing") return { kind: "missing" };
   if (probe.kind === "corrupt") return { kind: "corrupt" };
+  if (probe.kind === "indeterminate") return { kind: "indeterminate" };
   for (const member of PRODUCTION_BUNDLE_MEMBERS) {
     if (probe.statuses[member] !== "healthy") return { kind: "corrupt" };
   }
@@ -358,7 +359,8 @@ type MemberReinitStatus = "healthy" | "readable-corrupt" | "unreadable";
 type BundleCopyProbe =
   | Readonly<{ kind: "missing" }>
   | Readonly<{ kind: "corrupt" }>
-  | Readonly<{ kind: "probed"; statuses: Record<string, MemberReinitStatus> }>;
+  | Readonly<{ kind: "probed"; statuses: Record<string, MemberReinitStatus> }>
+  | Readonly<{ kind: "indeterminate" }>;
 
 /**
  * Copy the bundle members (and their present sidecars) into a private temp
@@ -386,50 +388,80 @@ function probeBundleCopyUnderLock(
     return { kind: "corrupt" };
   }
 
+  let probe: BundleCopyProbe;
   try {
-    chmodSync(tempDir, 0o700);
-    // Owner record: lets a later run sweep this copy if we crash.  A failed
-    // write fails closed (the finally removes the copy dir).
-    try {
-      writeFileSync(join(tempDir, "owner.pid"), String(process.pid), {
-        mode: 0o600,
-        flag: "wx",
-      });
-    } catch {
-      return { kind: "corrupt" };
-    }
-
-    const statuses: Record<string, MemberReinitStatus> = {};
-    for (const member of members) {
-      const original = join(stateDir, member);
-      // A missing member is never copied and keeps its existing mapping.
-      if (!pathEntryExists(original)) return { kind: "missing" };
-
-      const copy = join(tempDir, member);
-      if (!copyRegularFile(original, copy)) return { kind: "corrupt" };
-
-      for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
-        const sidecar = join(stateDir, `${member}${suffix}`);
-        if (!pathEntryExists(sidecar)) continue;
-        if (!copyRegularFile(sidecar, join(tempDir, `${member}${suffix}`))) {
-          return { kind: "corrupt" };
-        }
-      }
-
-      // Preserve the original read-only probe call so the inspect seam (the
-      // mocked `inspectEncryptedSqlite`) still fires at its current point.
-      // Its collapsed result is not used for the three-way status below.
-      inspectEncryptedSqlite({ dbPath: copy, key });
-      statuses[member] = classifyMemberForReinit(copy, key);
-    }
-    return { kind: "probed", statuses };
-  } finally {
-    try {
-      rmSync(tempDir, { recursive: true, force: true });
-    } catch {
-      /* best-effort: the copy is private and disposable */
-    }
+    probe = probeCopiedMembers(stateDir, key, members, tempDir);
+  } catch (err) {
+    // A throw leaves the copy for the stale-copy sweep.  The throw propagates
+    // to the caller's categorical refusal.
+    removePrivateCopy(tempDir);
+    throw err;
   }
+  // A copy that cannot be removed is not a clean probe.  The probe is discarded,
+  // so no healthy result and no reinitialize can proceed past a private copy of
+  // the bundle left in tmpdir().
+  return removePrivateCopy(tempDir) ? probe : { kind: "indeterminate" };
+}
+
+/**
+ * Chmod, owner-record, copy, and classify the members of one private copy.
+ * The caller owns `tempDir` and removes it.
+ */
+function probeCopiedMembers(
+  stateDir: string,
+  key: string,
+  members: readonly string[],
+  tempDir: string,
+): BundleCopyProbe {
+  chmodSync(tempDir, 0o700);
+  // Owner record: lets a later run sweep this copy if we crash.  A failed
+  // write fails closed.
+  try {
+    writeFileSync(join(tempDir, "owner.pid"), String(process.pid), {
+      mode: 0o600,
+      flag: "wx",
+    });
+  } catch {
+    return { kind: "corrupt" };
+  }
+
+  const statuses: Record<string, MemberReinitStatus> = {};
+  for (const member of members) {
+    const original = join(stateDir, member);
+    // A missing member is never copied and keeps its existing mapping.
+    if (!pathEntryExists(original)) return { kind: "missing" };
+
+    const copy = join(tempDir, member);
+    if (!copyRegularFile(original, copy)) return { kind: "corrupt" };
+
+    for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
+      const sidecar = join(stateDir, `${member}${suffix}`);
+      if (!pathEntryExists(sidecar)) continue;
+      if (!copyRegularFile(sidecar, join(tempDir, `${member}${suffix}`))) {
+        return { kind: "corrupt" };
+      }
+    }
+
+    // Preserve the original read-only probe call so the inspect seam (the
+    // mocked `inspectEncryptedSqlite`) still fires at its current point.
+    // Its collapsed result is not used for the three-way status below.
+    inspectEncryptedSqlite({ dbPath: copy, key });
+    statuses[member] = classifyMemberForReinit(copy, key);
+  }
+  return { kind: "probed", statuses };
+}
+
+/**
+ * Remove a private copy directory.  Returns `true` only when it is gone.
+ * Never throws.
+ */
+function removePrivateCopy(tempDir: string): boolean {
+  try {
+    rmSync(tempDir, { recursive: true, force: true });
+  } catch {
+    /* checked below */
+  }
+  return !existsSync(tempDir);
 }
 
 /**
@@ -1005,9 +1037,12 @@ function restoreBundleEntry(
   }
   if (!stat.isDirectory()) return rollbackError(2, ROLLBACK_UNKNOWN);
 
-  removeManifestTemporaries(entry);
+  // Read the manifest before sweeping.  Temporaries are removed only from a
+  // valid checkpoint; an unrecognised entry keeps every file, so the refusal
+  // below sees it.
   const manifest = readRollbackManifest(entry, quarantineId);
   if (manifest === undefined) return rollbackError(2, ROLLBACK_INCOMPLETE);
+  removeManifestTemporaries(entry);
 
   // Every artefact the manifest names must be present in the entry as a
   // regular file; a missing member (or sidecar) is an incomplete entry.
@@ -1176,7 +1211,9 @@ type ResolvedQuarantineScan =
  * identifier, so a traversal id or any other name is refused untouched.
  */
 export function removeBundleQuarantineEntry(stateDir: string, id: string): boolean {
-  if (!QUARANTINE_ID_PATTERN.test(id)) {
+  // A symlinked or non-directory quarantine root is refused, so a direct caller
+  // cannot reach a child in another directory through it.
+  if (!QUARANTINE_ID_PATTERN.test(id) || quarantineRootUnsafe(stateDir)) {
     return false;
   }
   const target = join(stateDir, QUARANTINE_RELATIVE_DIR, id);

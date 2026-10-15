@@ -74,7 +74,10 @@ Verified behavior (source and focused tests):
   a lock after an operator deletes a live one, our release can rename that lock
   aside, and a third process can acquire before it is linked back. This residual
   window is accepted and not closed by this change. If restoration fails, the file
-  remains under a `.release-*` name for an operator to inspect.
+  remains under a `.release-*` name for an operator to inspect. A holder-record
+  write that fails or is short removes its own lock file when it can. If that
+  removal fails, the file stays at the lock path and acquisition still refuses
+  until an operator clears it. No code path guarantees that file is removed.
 - Each probe copies members into a per-run directory created with `mkdtemp` and
   set to mode `0700`. Its owner record is written exclusively (`wx`, `0600`).
   The startup sweep runs under the lock at each probe (inspect or
@@ -98,7 +101,7 @@ Verified behavior (source and focused tests):
   "refusing unprobeable production database bundle" (exit code 2). A failure to
   create the private copy directory, write its owner record, or copy a member
   or sidecar returns `corrupt` to inspect and the same categorical refusal
-  (exit code 2) to reinitialize. Inspect removes its own lock file when it can prove the file is its own. If that removal fails, inspect returns `indeterminate` and leaves the file for an operator.
+  (exit code 2) to reinitialize. Inspect removes its own lock file when it can prove the file is its own. If that removal fails, inspect returns `indeterminate` and leaves the file for an operator. Inspect also removes its private copy directory. If that removal fails, inspect returns `indeterminate`, and reinitialize refuses with the same categorical error, because a copy of the bundle would remain in `tmpdir()`.
 - Reinitialize resumes an `initializing` checkpoint only when every member is
   recorded as moved and present in the entry. Rollback refuses an
   `initializing` checkpoint and any entry with a manifest member missing.

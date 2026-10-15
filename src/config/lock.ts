@@ -164,6 +164,10 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     written = -1;
   }
   if (written !== pidBuf.length) {
+    // Removal is best-effort.  Its outcome is not consumed: if the file
+    // remains (at the lock path or under a `.release-*` name), this function
+    // still returns null, so acquisition fails closed until an operator clears
+    // it.  No path reclaims it.  The stage-9 doc states this residue path.
     releaseOwnedLockFile(canonical, ino, undefined);
     try {
       closeSync(fd);

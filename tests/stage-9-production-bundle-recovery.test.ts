@@ -164,6 +164,8 @@ const lockWriteFault = vi.hoisted(() => ({
   failNextWrite: false,
   shortNextWrite: false,
   failUnlinkPath: undefined as string | undefined,
+  rmSyncFailPrefix: undefined as string | undefined,
+  rmSyncFailed: [] as string[],
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -192,6 +194,18 @@ vi.mock("node:fs", async (importOriginal) => {
         throw Object.assign(new Error("unlink boom"), { code: "EIO" });
       }
       return actual.unlinkSync(...args);
+    },
+    // Fails removal of paths under the armed prefix only.  Every other rm is real.
+    rmSync: (...args: Parameters<typeof actual.rmSync>): void => {
+      const path = String(args[0]);
+      if (
+        lockWriteFault.rmSyncFailPrefix !== undefined &&
+        path.startsWith(lockWriteFault.rmSyncFailPrefix)
+      ) {
+        lockWriteFault.rmSyncFailed.push(path);
+        throw Object.assign(new Error("rm boom"), { code: "EIO" });
+      }
+      return actual.rmSync(...args);
     },
   };
 });
@@ -3900,5 +3914,56 @@ describe("review round 3 — temporaries in an unrecognised entry", () => {
     expect(readFileSync(temporary, "utf8")).toBe("half-written");
     expect(readFileSync(join(entry, "stray"), "utf8")).toBe("unlisted");
     expect(existsSync(entry)).toBe(true);
+  });
+});
+
+describe("review round 4 — rollback, direct removal, copy cleanup", () => {
+  it("rollback leaves a manifest temporary in an entry with no valid manifest untouched", async () => {
+    const root = mkRoot("nookbridge-bundle-rollback-temp-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "abadcafe-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    const temporary = join(entry, `${MANIFEST_NAME}.4242.0123456789abcdef.tmp`);
+    writeFileSync(temporary, "half-written", { mode: 0o600 });
+
+    const result = await runBundle(["bundle", "rollback", ROLLBACK, id], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.exitCode).toBe(2);
+    expect(readFileSync(temporary, "utf8")).toBe("half-written");
+  });
+
+  it("refuses a direct removal through a symlinked quarantine root", () => {
+    const root = mkRoot("nookbridge-bundle-rm-symlink-root-");
+    const outside = mkRoot("nookbridge-bundle-rm-symlink-outside-");
+    const id = "abadcafe-0123456789ab";
+    mkdirSync(join(outside, id, "nested"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(outside, id, "nested", "keep"), "keep");
+    symlinkSync(outside, quarantineRoot(root));
+
+    expect(removeBundleQuarantineEntry(root, id)).toBe(false);
+    expect(readFileSync(join(outside, id, "nested", "keep"), "utf8")).toBe("keep");
+  });
+
+  it("reports indeterminate when the private inspect copy cannot be removed", async () => {
+    const root = mkRoot("nookbridge-bundle-inspect-rmfail-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const before = snapshotTree(stateDir);
+    lockWriteFault.rmSyncFailed = [];
+    lockWriteFault.rmSyncFailPrefix = join(tmpdir(), "nookbridge-bundle-inspect-");
+
+    const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir).finally(() => {
+      lockWriteFault.rmSyncFailPrefix = undefined;
+    });
+
+    // Remove the private copy the injected fault kept on disk.
+    for (const path of lockWriteFault.rmSyncFailed) rmSync(path, { recursive: true, force: true });
+    lockWriteFault.rmSyncFailed = [];
+
+    expect(result.kind).toBe("bundle-inspection");
+    if (result.kind !== "bundle-inspection") return;
+    expect(result.result.kind).toBe("indeterminate");
+    expect(snapshotTree(stateDir)).toEqual(before);
   });
 });
