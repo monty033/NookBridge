@@ -449,6 +449,46 @@ describe("bundle inspect — read-only categorical probe", () => {
 // Property 2 + property 5 — atomic bundle quarantine.
 // ---------------------------------------------------------------------------
 
+describe("bundle presence — orphan SQLite sidecar with no main database", () => {
+  for (const suffix of SIDECAR_SUFFIXES) {
+    it(`inspect reports an orphan ${suffix} as partial and mutates nothing`, async () => {
+      const root = mkRoot("nookbridge-bundle-orphan-inspect-");
+      const { stateDir, credentialsDir } = buildBundleFixture(root);
+      for (const member of BUNDLE_MEMBERS) rmSync(join(stateDir, member));
+      writeFileSync(join(stateDir, `notesnook.db${suffix}`), Buffer.from("orphan-sidecar"));
+      const before = snapshotTree(stateDir);
+
+      const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+
+      expect(result.kind).toBe("bundle-inspection");
+      if (result.kind !== "bundle-inspection") return;
+      expect(result.result.kind).toBe("partial");
+      expect(snapshotTree(stateDir)).toEqual(before);
+    });
+
+    it(`reinitialize refuses an orphan ${suffix} as a partial bundle and mutates nothing`, async () => {
+      const root = mkRoot("nookbridge-bundle-orphan-reinit-");
+      const { stateDir, credentialsDir } = buildBundleFixture(root);
+      for (const member of BUNDLE_MEMBERS) rmSync(join(stateDir, member));
+      writeFileSync(join(stateDir, `notesnook.db${suffix}`), Buffer.from("orphan-sidecar"));
+      const before = snapshotTree(stateDir);
+
+      const result = await runBundle(
+        ["bundle", "reinitialize", APPROVE, ACK],
+        stateDir,
+        credentialsDir,
+      );
+
+      expect(result.kind).toBe("error");
+      if (result.kind !== "error") return;
+      expect(result.exitCode).toBe(2);
+      expect(result.message).toBe("refusing partial production database bundle");
+      expect(existsSync(quarantineRoot(stateDir))).toBe(false);
+      expect(snapshotTree(stateDir)).toEqual(before);
+    });
+  }
+});
+
 describe("bundle reinitialize — atomic three-member quarantine", () => {
   it("quarantines all three members and reinitializes a fresh bundle", async () => {
     const root = mkRoot("nookbridge-bundle-quarantine-");

@@ -78,13 +78,18 @@ Verified behavior (source and focused tests):
   recorded owner pid is no longer alive.
 - Copies use `lstat` and refuse symlinks and non-regular files. The owner-file
   check rejects symlinks.
-- A probe failure becomes the categorical `indeterminate` result, and the lock
-  is still released.
+- A probe that throws becomes the categorical `indeterminate` result. A failure
+  to create the private copy directory, write its owner record, or copy a
+  member or sidecar returns `corrupt`. In both cases the lock is still
+  released.
 - Reinitialize resumes an `initializing` checkpoint only when every member is
   recorded as moved and present in the entry. Rollback refuses an
   `initializing` checkpoint and any entry with a manifest member missing.
 - Rollback and resume refuse unlisted sidecars in the state root or in an
   entry, and refuse symlinked manifests.
+- A `-wal` or `-shm` sidecar with no main database file is an orphan, not an
+  empty root. Inspect reports it as `partial`, and reinitialize refuses it
+  before any move. Only a resumable checkpoint can explain a partial state.
 - Manifest writes use random-named temporaries created exclusively (`wx`, no
   symlink following). Resume and rollback sweep manifest temporaries left by a
   crash, and never unlink a symlink that has that name.

@@ -222,9 +222,25 @@ function memberPresence(stateDir: string): MemberPresence {
       return "unsafe";
     }
   }
-  if (present === 0) return "missing";
+  // A SQLite sidecar with no main database file is an orphan, not an empty
+  // root: it would pair with fresh state, so it is a partial bundle.
+  if (present === 0) return hasAnyStateSidecar(stateDir) ? "partial" : "missing";
   if (present === PRODUCTION_BUNDLE_MEMBERS.length) return "complete";
   return "partial";
+}
+
+/**
+ * True when any SQLite sidecar of a bundle member is present in the state root.
+ * Uses lstat semantics via `pathEntryExists`, so a symlink or an uninspectable
+ * entry also counts (fail closed).
+ */
+function hasAnyStateSidecar(stateDir: string): boolean {
+  for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
+      if (pathEntryExists(join(stateDir, `${member}${suffix}`))) return true;
+    }
+  }
+  return false;
 }
 
 /**
