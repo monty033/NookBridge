@@ -82,11 +82,14 @@ Verified behavior (source and focused tests):
   `nookbridge-bundle-inspect-*` directory only when all of these hold: it is
   owned by the current uid, is not a symlink, is older than one hour, and its
   recorded owner pid is no longer alive.
-- Member copies open each source with `O_NOFOLLOW` and check the opened
-  descriptor with `fstat`, so a symlink or non-regular file is refused at open.
-  A preliminary `lstat` presence check is not tied to that inode. Inspect
-  assumes no non-cooperating writer swaps a member between the check and the
-  open; it does not detect such a swap. The owner-file check rejects symlinks.
+- Member and sidecar copies open each source with `O_NOFOLLOW | O_NONBLOCK`
+  and check the opened descriptor with `fstat`, so a symlink, FIFO, or other
+  non-regular file is refused at open and never blocks the open. A preliminary
+  `lstat` presence check is not tied to that inode. Inspect assumes no
+  non-cooperating writer swaps a member or sidecar between the check and the
+  open, or alters one in place during the copy. It does not detect either, so a
+  copy taken during such a write could mix two states. The owner-file check
+  rejects symlinks.
 - For inspect, a probe that throws becomes the categorical `indeterminate`
   result. Reinitialize never returns `indeterminate`: a probe that throws, or a
   copy that cannot be classified, refuses with the categorical error

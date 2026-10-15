@@ -1324,7 +1324,7 @@ describe("quarantine removal regression — recursive removal result", () => {
     mkdirSync(remnant, { recursive: true, mode: 0o700 });
     expect(existsSync(remnant)).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(remnant);
+    const removed = removeBundleQuarantineEntry(quarantineRoot(root), "abadcafe-0123456789ab");
 
     expect(removed).toBe(true);
     expect(existsSync(remnant)).toBe(false);
@@ -1337,7 +1337,7 @@ describe("quarantine removal regression — recursive removal result", () => {
     writeFileSync(join(remnant, "nested", "deeper", "leftover"), "stale");
     expect(existsSync(join(remnant, "nested", "deeper", "leftover"))).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(remnant);
+    const removed = removeBundleQuarantineEntry(quarantineRoot(root), "abadcafe-0123456789ab");
 
     expect(removed).toBe(true);
     expect(existsSync(remnant)).toBe(false);
@@ -1353,8 +1353,12 @@ describe("quarantine removal regression — recursive removal result", () => {
     const named = join(quarantineRoot(root), "entry");
     mkdirSync(named, { recursive: true, mode: 0o700 });
 
-    expect(removeBundleQuarantineEntry(outside)).toBe(false);
-    expect(removeBundleQuarantineEntry(named)).toBe(false);
+    // A foreign root, a traversal id, and a non-identifier name are all refused.
+    expect(removeBundleQuarantineEntry(root, "abadcafe-0123456789ab")).toBe(false);
+    expect(removeBundleQuarantineEntry(quarantineRoot(root), "../abadcafe-0123456789ab")).toBe(
+      false,
+    );
+    expect(removeBundleQuarantineEntry(quarantineRoot(root), "entry")).toBe(false);
 
     expect(readFileSync(join(outside, "nested", "keep"), "utf8")).toBe("keep");
     expect(existsSync(named)).toBe(true);
@@ -1599,7 +1603,7 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
       { mode: 0o600 },
     );
 
-    discardEmptyEntry(entry);
+    discardEmptyEntry(quarantineRoot(stateDir), oldId);
 
     // Observable result: the manifest-only leftover is gone.
     expect(existsSync(entry)).toBe(false);
@@ -1619,17 +1623,65 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
   it("never discards an entry that preserves member bytes", () => {
     const root = mkRoot("nookbridge-bundle-discard-preserved-");
     const stateDir = join(root, "state");
-    const entry = join(stateDir, "entry");
+    const id = "abadcafe-0123456789ab";
+    const entry = join(quarantineRoot(stateDir), id);
     mkdirSync(entry, { recursive: true, mode: 0o700 });
     chmodSync(entry, 0o700);
     writeFileSync(join(entry, MANIFEST_NAME), "{}");
     writeFileSync(join(entry, "nookbridge-storage.db"), "preserved-bytes");
 
-    discardEmptyEntry(entry);
+    discardEmptyEntry(quarantineRoot(stateDir), id);
 
     expect(existsSync(entry)).toBe(true);
     expect(existsSync(join(entry, "nookbridge-storage.db"))).toBe(true);
     expect(readFileSync(join(entry, "nookbridge-storage.db"), "utf8")).toBe("preserved-bytes");
+  });
+});
+
+describe("review round 2 — FIFO sidecar and scan ordering", () => {
+  it("inspect refuses a FIFO sidecar at open and never blocks", () => {
+    const root = mkRoot("nookbridge-bundle-fifo-inspect-");
+    const { stateDir, key } = buildBundleFixture(root);
+    expect(spawnSync("mkfifo", [join(stateDir, "notesnook.db-wal")]).status).toBe(0);
+
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "corrupt" });
+    expect(existsSync(lockPath(stateDir))).toBe(false);
+  });
+
+  it("reinitialize refuses a FIFO sidecar before any member moves", async () => {
+    const root = mkRoot("nookbridge-bundle-fifo-reinit-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    expect(spawnSync("mkfifo", [join(stateDir, "notesnook.db-wal")]).status).toBe(0);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    for (const member of BUNDLE_MEMBERS) {
+      expect(existsSync(join(stateDir, member))).toBe(true);
+    }
+  });
+
+  it("the scan leaves a malformed entry and its temporary file untouched", async () => {
+    const root = mkRoot("nookbridge-bundle-scan-order-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const malformed = join(quarantineRoot(stateDir), "entry");
+    mkdirSync(malformed, { recursive: true, mode: 0o700 });
+    const temporary = join(malformed, "recovery-manifest.json.123.0123456789abcdef.tmp");
+    writeFileSync(temporary, "partial", { mode: 0o600 });
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    expect(readFileSync(temporary, "utf8")).toBe("partial");
+    expect(existsSync(malformed)).toBe(true);
   });
 });
 

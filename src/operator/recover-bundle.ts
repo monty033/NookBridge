@@ -56,12 +56,12 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 import Database from "better-sqlite3-multiple-ciphers";
 
-import { lockPath, releaseOwnedLockFile, tryAcquireLock } from "../config/lock.js";
+import { holderRecord, lockPath, releaseOwnedLockFile, tryAcquireLock } from "../config/lock.js";
 import { normaliseStateDir } from "../config/state-dir.js";
 import {
   NOOKBRIDGE_DB_KEY_LABEL,
@@ -282,9 +282,9 @@ export function inspectProductionBundle(
     return { kind: "indeterminate" };
   }
 
-  // The holder record, verified at release.  lock.ts's holder reader accepts
-  // a pid-only record (the optional start-time line is omitted here).
-  const record = `${process.pid}\n`;
+  // The holder record, verified at release.  The same formatter the acquire
+  // path uses writes it, so every lock file has one record format.
+  const record = holderRecord();
   // What release needs to prove the lock file is still this call's.  Filled in
   // as the lock is recorded; an unset inode means ownership was never proven.
   const held: HeldInspectLock = { lockIno: undefined, recordWritten: false };
@@ -630,6 +630,9 @@ function hasUnsafeBundleEntry(stateDir: string): boolean {
  * Copy a regular file without following a symlink. Returns `false` for a
  * symlink, a non-regular file, or a failed copy so the caller can fail closed.
  * Exclusive destination creation ensures the private copy is never overwritten.
+ *
+ * The source is opened `O_NONBLOCK`, so a FIFO or device is refused at open
+ * instead of stalling it; the type check then runs on the opened descriptor.
  */
 function copyRegularFile(source: string, destination: string): boolean {
   let sourceFd: number | undefined;
@@ -637,7 +640,7 @@ function copyRegularFile(source: string, destination: string): boolean {
   let destinationCreated = false;
   let succeeded = false;
   try {
-    sourceFd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    sourceFd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     if (!fstatSync(sourceFd).isFile()) return false;
     destinationFd = openSync(
       destination,
@@ -836,7 +839,7 @@ function quarantineAndReinitialize(
       items: planBundleItems(stateDir).map((name) => ({ name, state: "pending" as const })),
     };
     if (!writeManifest(entry, manifest)) {
-      discardEmptyEntry(entry);
+      discardEmptyEntry(quarantineDir, quarantineId);
       return error(3, "failed to record recovery manifest");
     }
   }
@@ -863,7 +866,7 @@ function quarantineAndReinitialize(
     }
     if (verdict === "move") {
       if (!moveNoReplace(source, destination)) {
-        discardEmptyEntry(entry);
+        discardEmptyEntry(quarantineDir, quarantineId);
         return error(3, "failed to quarantine the original state");
       }
       manifest = withItemState(manifest, item.name, "moved");
@@ -1044,7 +1047,7 @@ function restoreBundleEntry(
   }
 
   // Consume the entry using the bundle cleanup convention.
-  discardEmptyEntry(entry);
+  discardEmptyEntry(join(stateDir, QUARANTINE_RELATIVE_DIR), quarantineId);
   return { kind: "rolled-back", quarantineId };
 }
 
@@ -1165,24 +1168,22 @@ type ResolvedQuarantineScan =
  * semantics, so the bundle owns this recursive variant.  This is the ONLY
  * place the bundle deletes a quarantine path.
  *
- * Containment: only a path whose name is a quarantine identifier and whose
- * parent is the quarantine directory is removed.  Any other path is refused
- * untouched, so a direct caller cannot delete an arbitrary tree.
+ * Containment: the target is `<quarantineDir>/<id>`, derived here.  The id must
+ * be a quarantine identifier and the directory must be the quarantine root.  A
+ * caller cannot name an arbitrary path, so a traversal id is refused untouched.
  */
-export function removeBundleQuarantineEntry(path: string): boolean {
-  const resolved = resolve(path);
-  if (
-    !QUARANTINE_ID_PATTERN.test(basename(resolved)) ||
-    basename(dirname(resolved)) !== QUARANTINE_RELATIVE_DIR
-  ) {
-    return !existsSync(resolved);
+export function removeBundleQuarantineEntry(quarantineDir: string, id: string): boolean {
+  const root = resolve(quarantineDir);
+  if (!QUARANTINE_ID_PATTERN.test(id) || basename(root) !== QUARANTINE_RELATIVE_DIR) {
+    return false;
   }
+  const target = join(root, id);
   try {
-    rmSync(resolved, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
   } catch {
     /* fall through to the authoritative existence check */
   }
-  return !existsSync(resolved);
+  return !existsSync(target);
 }
 
 function scanQuarantine(quarantineDir: string): ScanResult {
@@ -1199,6 +1200,9 @@ function scanQuarantine(quarantineDir: string): ScanResult {
   // they cannot block later runs.  A directory that still preserves state
   // is never touched.  This runs under the exclusive lock.
   for (const name of initial) {
+    // Only a quarantine identifier is cleaned.  Anything else is left in place,
+    // untouched, so the refusal below sees it.
+    if (!QUARANTINE_ID_PATTERN.test(name)) continue;
     const candidate = join(quarantineDir, name);
     let stat;
     try {
@@ -1214,7 +1218,7 @@ function scanQuarantine(quarantineDir: string): ScanResult {
     } catch {
       return { kind: "error", error: error(2, "refusing quarantine collision") };
     }
-    if (contents.length === 0) removeBundleQuarantineEntry(candidate);
+    if (contents.length === 0) removeBundleQuarantineEntry(quarantineDir, name);
   }
 
   let remaining: string[];
@@ -1507,10 +1511,12 @@ function quarantineRootUnsafe(stateDir: string): boolean {
  * fixture (the only reliable link(2) failure, a non-writable entry, also
  * blocks the recursive removal).
  */
-export function discardEmptyEntry(entry: string): void {
+export function discardEmptyEntry(quarantineDir: string, id: string): void {
+  if (!QUARANTINE_ID_PATTERN.test(id)) return;
   try {
+    const entry = join(quarantineDir, id);
     const contents = readdirSync(entry).filter((name) => name !== BUNDLE_MANIFEST_FILENAME);
-    if (contents.length === 0) removeBundleQuarantineEntry(entry);
+    if (contents.length === 0) removeBundleQuarantineEntry(quarantineDir, id);
   } catch {
     /* best-effort */
   }

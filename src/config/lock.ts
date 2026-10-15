@@ -107,6 +107,15 @@ function readStartTimeTicks(pid: number): string | null {
 }
 
 /**
+ * The holder record for `pid`: "<pid>\n<starttime-or-empty>\n".  Every writer
+ * of the lock file uses this one format.  Diagnostic only; no path reclaims a
+ * lock on the basis of it.
+ */
+export function holderRecord(pid: number = process.pid): string {
+  return `${pid}\n${readStartTimeTicks(pid) ?? ""}\n`;
+}
+
+/**
  * Try to acquire the single-instance lock for `stateDir`.  Returns a
  * release function on success or `null` when another process (or
  * another call in this process) already holds it.
@@ -147,7 +156,7 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     return null;
   }
   // Holder record: pid, then start time.  Diagnostic only; no path reclaims on it.
-  const pidBuf = Buffer.from(`${process.pid}\n${readStartTimeTicks(process.pid) ?? ""}\n`, "utf8");
+  const pidBuf = Buffer.from(holderRecord(), "utf8");
   let written: number;
   try {
     written = writeSync(fd, pidBuf, 0, pidBuf.length, 0);
