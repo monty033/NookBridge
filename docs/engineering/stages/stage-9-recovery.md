@@ -82,8 +82,11 @@ Verified behavior (source and focused tests):
   `nookbridge-bundle-inspect-*` directory only when all of these hold: it is
   owned by the current uid, is not a symlink, is older than one hour, and its
   recorded owner pid is no longer alive.
-- Copies use `lstat` and refuse symlinks and non-regular files. The owner-file
-  check rejects symlinks.
+- Member copies open each source with `O_NOFOLLOW` and check the opened
+  descriptor with `fstat`, so a symlink or non-regular file is refused at open.
+  A preliminary `lstat` presence check is not tied to that inode. Inspect
+  assumes no non-cooperating writer swaps a member between the check and the
+  open; it does not detect such a swap. The owner-file check rejects symlinks.
 - For inspect, a probe that throws becomes the categorical `indeterminate`
   result. Reinitialize never returns `indeterminate`: a probe that throws, or a
   copy that cannot be classified, refuses with the categorical error
@@ -111,14 +114,15 @@ Verified behavior (source and focused tests):
   `--accept-unsynced-loss`. The second flag acknowledges that unsynced local
   state will be discarded. It is refused alone or alongside unrelated flags.
 
-Test and mutation evidence (candidate tree):
+Test and mutation evidence (this commit's tree):
 
-- Stage-9 recovery suite: 107/107 passing. This includes regression tests for
+- `tests/stage-9-production-bundle-recovery.test.ts`: 118/118 passing. This includes regression tests for
   sidecar inventory, symlinked manifests, probe failure, a partial bundle
-  snapshot (bytes and inodes), and manifest temporary naming.
+  snapshot (bytes and inodes), manifest temporary naming, and quarantine-remover
+  containment.
 - Scratch mutation driver (not committed): 14 targeted mutants of
-  `recover-bundle.ts`, 14/14 killed. The source was restored and its SHA
-  verified.
+  `recover-bundle.ts`, 14/14 killed, on an earlier candidate. It was not re-run
+  on this tree; the mutation evidence is therefore stale for the current code.
 
 Not proven by this slice: SQLCipher error classification on real encrypted
 state, WAL behavior under real crashes, filesystem durability, runtime races,

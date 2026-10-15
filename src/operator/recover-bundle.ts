@@ -56,7 +56,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 import Database from "better-sqlite3-multiple-ciphers";
@@ -502,7 +502,9 @@ function releaseIfOwned(
   try {
     if (lockIno === undefined) return false;
     const outcome = releaseOwnedLockFile(
-      lockPath(stateDir), lockIno, recordWritten ? record : undefined,
+      lockPath(stateDir),
+      lockIno,
+      recordWritten ? record : undefined,
     );
     return outcome === "released";
   } finally {
@@ -608,10 +610,17 @@ function sweepStaleInspectCopies(root: string): void {
 
 function hasUnsafeBundleEntry(stateDir: string): boolean {
   for (const member of PRODUCTION_BUNDLE_MEMBERS) {
-    for (const path of [join(stateDir, member), ...BUNDLE_SIDECAR_SUFFIXES.map((suffix) => join(stateDir, `${member}${suffix}`))]) {
+    for (const path of [
+      join(stateDir, member),
+      ...BUNDLE_SIDECAR_SUFFIXES.map((suffix) => join(stateDir, `${member}${suffix}`)),
+    ]) {
       if (!pathEntryExists(path)) continue;
-      try { const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) return true; }
-      catch { return true; }
+      try {
+        const stat = lstatSync(path);
+        if (!stat.isFile() || stat.isSymbolicLink()) return true;
+      } catch {
+        return true;
+      }
     }
   }
   return false;
@@ -630,7 +639,11 @@ function copyRegularFile(source: string, destination: string): boolean {
   try {
     sourceFd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
     if (!fstatSync(sourceFd).isFile()) return false;
-    destinationFd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    destinationFd = openSync(
+      destination,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
     destinationCreated = true;
     const buffer = Buffer.alloc(64 * 1024);
     while (true) {
@@ -649,9 +662,24 @@ function copyRegularFile(source: string, destination: string): boolean {
   } catch {
     return false;
   } finally {
-    if (sourceFd !== undefined) try { closeSync(sourceFd); } catch { /* best-effort */ }
-    if (destinationFd !== undefined) try { closeSync(destinationFd); } catch { /* best-effort */ }
-    if (destinationCreated && !succeeded) try { unlinkSync(destination); } catch { /* best-effort */ }
+    if (sourceFd !== undefined)
+      try {
+        closeSync(sourceFd);
+      } catch {
+        /* best-effort */
+      }
+    if (destinationFd !== undefined)
+      try {
+        closeSync(destinationFd);
+      } catch {
+        /* best-effort */
+      }
+    if (destinationCreated && !succeeded)
+      try {
+        unlinkSync(destination);
+      } catch {
+        /* best-effort */
+      }
   }
 }
 
@@ -1136,14 +1164,25 @@ type ResolvedQuarantineScan =
  * (`safeRmQuarantineEntry`) deliberately keeps its non-recursive upstream
  * semantics, so the bundle owns this recursive variant.  This is the ONLY
  * place the bundle deletes a quarantine path.
+ *
+ * Containment: only a path whose name is a quarantine identifier and whose
+ * parent is the quarantine directory is removed.  Any other path is refused
+ * untouched, so a direct caller cannot delete an arbitrary tree.
  */
 export function removeBundleQuarantineEntry(path: string): boolean {
+  const resolved = resolve(path);
+  if (
+    !QUARANTINE_ID_PATTERN.test(basename(resolved)) ||
+    basename(dirname(resolved)) !== QUARANTINE_RELATIVE_DIR
+  ) {
+    return !existsSync(resolved);
+  }
   try {
-    rmSync(path, { recursive: true, force: true });
+    rmSync(resolved, { recursive: true, force: true });
   } catch {
     /* fall through to the authoritative existence check */
   }
-  return !existsSync(path);
+  return !existsSync(resolved);
 }
 
 function scanQuarantine(quarantineDir: string): ScanResult {

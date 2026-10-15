@@ -95,15 +95,17 @@ describe("Stage 1 — releaseLock removes only the lock file it created", () => 
     }
   });
 
-  it("leaves no lock file behind when acquisition cannot prove ownership of the file it created", () => {
+  it("keeps an unverified lock file in place when acquisition cannot prove ownership of it", () => {
     const dir = freshDir();
     fstatFault.failNext = true;
 
     expect(tryAcquireLock(dir)).toBeNull();
 
-    // The file was created by this attempt and nothing records it as held, so
-    // it must not be left to wedge the next start.
-    expect(existsSync(lockPath(dir))).toBe(false);
+    // Ownership is unprovable, so the file is not unlinked by path: a path
+    // unlink could delete another holder's lock.  It stays on disk and the
+    // next start refuses against it until an operator clears it.
+    expect(existsSync(lockPath(dir))).toBe(true);
+    expect(tryAcquireLock(dir)).toBeNull();
   });
 
   it("still reports the in-process release as completed", () => {

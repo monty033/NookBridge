@@ -703,7 +703,11 @@ describe("bundle reinitialize — exclusive ownership", () => {
     // Fail the first write, which is the lock's holder record.  Nothing has
     // moved yet, so the failure must leave the state exactly as it was.
     lockWriteFault.failNextWrite = true;
-    const first = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    const first = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
     lockWriteFault.failNextWrite = false;
 
     expect(first.kind).toBe("error");
@@ -717,7 +721,11 @@ describe("bundle reinitialize — exclusive ownership", () => {
       expect(readFileSync(join(stateDir, member)).equals(memberBytes[member]!)).toBe(true);
     }
 
-    const retry = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    const retry = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
     expect(retry.kind).toBe("reinitialized");
   });
 
@@ -742,7 +750,11 @@ describe("bundle reinitialize — exclusive ownership", () => {
     // The member-presence check refuses this before the initializing branch
     // runs.  The check placed before the status write and before the
     // fresh-member loop is not reached by this deterministic setup.
-    const result = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
 
     expect(result.kind).toBe("error");
     if (result.kind !== "error") return;
@@ -1308,8 +1320,8 @@ describe("quarantine collision — a preserved entry still refuses", () => {
 describe("quarantine removal regression — recursive removal result", () => {
   it("returns true and removes an empty directory remnant", () => {
     const root = mkRoot("nookbridge-bundle-rm-result-empty-");
-    const remnant = join(root, "entry");
-    mkdirSync(remnant, { mode: 0o700 });
+    const remnant = join(quarantineRoot(root), "abadcafe-0123456789ab");
+    mkdirSync(remnant, { recursive: true, mode: 0o700 });
     expect(existsSync(remnant)).toBe(true);
 
     const removed = removeBundleQuarantineEntry(remnant);
@@ -1320,7 +1332,7 @@ describe("quarantine removal regression — recursive removal result", () => {
 
   it("returns true and removes a nested remnant recursively", () => {
     const root = mkRoot("nookbridge-bundle-rm-result-nested-");
-    const remnant = join(root, "entry");
+    const remnant = join(quarantineRoot(root), "abadcafe-0123456789ab");
     mkdirSync(join(remnant, "nested", "deeper"), { recursive: true, mode: 0o700 });
     writeFileSync(join(remnant, "nested", "deeper", "leftover"), "stale");
     expect(existsSync(join(remnant, "nested", "deeper", "leftover"))).toBe(true);
@@ -1329,6 +1341,23 @@ describe("quarantine removal regression — recursive removal result", () => {
 
     expect(removed).toBe(true);
     expect(existsSync(remnant)).toBe(false);
+  });
+
+  it("refuses to remove a path that is not a quarantine entry, and leaves its bytes intact", () => {
+    const root = mkRoot("nookbridge-bundle-rm-refuse-");
+    // A directory outside the quarantine root, even one with a valid-looking name.
+    const outside = join(root, "abadcafe-0123456789ab");
+    mkdirSync(join(outside, "nested"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(outside, "nested", "keep"), "keep");
+    // A plain directory whose name is not a quarantine identifier.
+    const named = join(quarantineRoot(root), "entry");
+    mkdirSync(named, { recursive: true, mode: 0o700 });
+
+    expect(removeBundleQuarantineEntry(outside)).toBe(false);
+    expect(removeBundleQuarantineEntry(named)).toBe(false);
+
+    expect(readFileSync(join(outside, "nested", "keep"), "utf8")).toBe("keep");
+    expect(existsSync(named)).toBe(true);
   });
 
   it("removes an empty remnant at the bundle quarantine target so reinitialize proceeds", async () => {

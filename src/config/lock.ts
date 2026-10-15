@@ -35,7 +35,7 @@ import process from "node:process";
 import { normaliseStateDir } from "./state-dir.js";
 
 /** Backing field for in-process lock holders. */
-const HELD: Map<string, { fd: number; path: string; ino: number }> = new Map();
+const HELD: Map<string, { fd: number; path: string; ino: number; record: string }> = new Map();
 
 export function lockPath(stateDir: string): string {
   return join(normaliseStateDir(stateDir), "nookbridge.lock");
@@ -60,13 +60,29 @@ export function releaseOwnedLockFile(
   }
   try {
     const stat = lstatSync(detached);
-    const matches = stat.isFile() && !stat.isSymbolicLink() && stat.ino === expectedIno &&
+    const matches =
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      stat.ino === expectedIno &&
       (expectedRecord === undefined || readFileSync(detached, "utf8") === expectedRecord);
-    if (matches) { unlinkSync(detached); return "released"; }
-    try { linkSync(detached, path); unlinkSync(detached); } catch { /* keep detached */ }
+    if (matches) {
+      unlinkSync(detached);
+      return "released";
+    }
+    try {
+      linkSync(detached, path);
+      unlinkSync(detached);
+    } catch {
+      /* keep detached */
+    }
     return "foreign";
   } catch {
-    try { linkSync(detached, path); unlinkSync(detached); } catch { /* keep detached */ }
+    try {
+      linkSync(detached, path);
+      unlinkSync(detached);
+    } catch {
+      /* keep detached */
+    }
     return "foreign";
   }
 }
@@ -114,12 +130,11 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
   } catch {
     return null;
   }
-  // The inode is the proof of ownership at release.  Without it, release could
-  // not tell this file from a replacement, so the acquisition is refused.  When
-  // fstat fails there is no identity to verify, so the file this attempt just
-  // created is removed by path (as before).  Residual window: a replacement
-  // between the wx create and this unlink cannot be detected.  The existing
-  // stage-1-release-ownership test pins this cleanup.
+  // The inode is the proof of ownership at release.  Without it this process
+  // cannot tell its file from a replacement, so acquisition is refused.  The
+  // file is left in place and is NOT unlinked by path: a path unlink could
+  // delete another holder's lock.  The next start refuses against it, and an
+  // operator clears it like any other stale lock.
   let ino: number;
   try {
     ino = fstatSync(fd).ino;
@@ -129,23 +144,26 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     } catch {
       /* already closed */
     }
-    try {
-      unlinkSync(canonical);
-    } catch {
-      /* already gone */
-    }
     return null;
   }
   // Holder record: pid, then start time.  Diagnostic only; no path reclaims on it.
   const pidBuf = Buffer.from(`${process.pid}\n${readStartTimeTicks(process.pid) ?? ""}\n`, "utf8");
   let written: number;
-  try { written = writeSync(fd, pidBuf, 0, pidBuf.length, 0); } catch { written = -1; }
+  try {
+    written = writeSync(fd, pidBuf, 0, pidBuf.length, 0);
+  } catch {
+    written = -1;
+  }
   if (written !== pidBuf.length) {
     releaseOwnedLockFile(canonical, ino, undefined);
-    try { closeSync(fd); } catch { /* already closed */ }
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
     return null;
   }
-  HELD.set(canonical, { fd, path: canonical, ino });
+  HELD.set(canonical, { fd, path: canonical, ino, record: pidBuf.toString("utf8") });
   return () => releaseLock(stateDir);
 }
 
@@ -184,7 +202,7 @@ export function releaseLock(stateDir: string): boolean {
   if (!held) {
     return false;
   }
-  releaseOwnedLockFile(canonical, held.ino, undefined);
+  releaseOwnedLockFile(canonical, held.ino, held.record);
   try {
     closeSync(held.fd);
   } catch {
