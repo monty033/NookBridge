@@ -5,12 +5,12 @@
  * later start is refused against, forever, until an operator deletes the
  * file by hand — the service never comes back on its own.
  *
- * These tests pin the recovery contract: a holder that is provably gone is
- * reclaimed, and a holder that is still alive is never stolen.
+ * These tests pin the recovery contract: every existing lock fails closed,
+ * regardless of whether its holder is alive.
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { lockFileExists, lockPath, releaseLock, tryAcquireLock } from "../src/config/lock.js";
 
-describe("Stage 1 — single-instance lock: stale-holder recovery", () => {
+describe("Stage 1 — single-instance lock: fail-closed stale locks", () => {
   const dirs: string[] = [];
   const children: ChildProcess[] = [];
 
@@ -55,15 +55,16 @@ describe("Stage 1 — single-instance lock: stale-holder recovery", () => {
     return child;
   }
 
-  it("reclaims a lock left behind by a holder that is gone", () => {
+  it("refuses a lock left behind by a holder that is gone", () => {
     const dir = freshDir();
     writeFileSync(lockPath(dir), `${deadPid()}\n`);
 
     const release = tryAcquireLock(dir);
 
-    expect(release).not.toBeNull();
-    release?.();
-    expect(lockFileExists(dir)).toBe(false);
+    expect(release).toBeNull();
+    expect(existsSync(lockPath(dir))).toBe(true);
+    expect(lockFileExists(dir)).toBe(true);
+    expect(readFileSync(lockPath(dir), "utf8")).toBeTruthy();
   });
 
   it("refuses a lock whose holder is still alive", () => {
@@ -91,37 +92,37 @@ describe("Stage 1 — single-instance lock: stale-holder recovery", () => {
     expect(tryAcquireLock(dir)).toBeNull();
   });
 
-  it("reclaims an unidentified lock file once no live holder can still be writing it", () => {
+  it("refuses an old unidentified lock file", () => {
     const dir = freshDir();
     const path = lockPath(dir);
     writeFileSync(path, "");
     const old = new Date(Date.now() - 120_000);
     utimesSync(path, old, old);
 
-    const release = tryAcquireLock(dir);
-
-    expect(release).not.toBeNull();
-    release?.();
+    expect(tryAcquireLock(dir)).toBeNull();
+    expect(lockFileExists(dir)).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe("");
   });
 
-  it("reclaims a lock whose recorded pid was reused by a different process", () => {
+  it("refuses a lock whose recorded pid was reused by a different process", () => {
     const dir = freshDir();
     const holder = liveProcess();
     // The pid is alive, but the recorded start time is not that process's.
     writeFileSync(lockPath(dir), `${holder.pid}\n999999999\n`);
 
-    const release = tryAcquireLock(dir);
-
-    expect(release).not.toBeNull();
-    release?.();
+    const path = lockPath(dir);
+    expect(tryAcquireLock(dir)).toBeNull();
+    expect(existsSync(path)).toBe(true);
+    expect(lockFileExists(dir)).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe(`${holder.pid}\n999999999\n`);
   });
 
-  it("reports no active holder for a stale lock and one for a live holder", () => {
+  it("reports any existing stale lock as present", () => {
     const dir = freshDir();
     const path = lockPath(dir);
 
     writeFileSync(path, `${deadPid()}\n`);
-    expect(lockFileExists(dir)).toBe(false);
+    expect(lockFileExists(dir)).toBe(true);
 
     const holder = liveProcess();
     writeFileSync(path, `${holder.pid}\n`);

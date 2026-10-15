@@ -9,21 +9,23 @@
  * against the same state (used by the doctor diagnostic, which opens
  * the DB to verify it can be decrypted).
  *
- * The lock file records the PID that acquired it, plus the holder's process
- * start time; on `releaseLock` we unlink the file.  A holder that dies
+ * The lock file records the PID and start time of the acquiring process. On
+ * `releaseLock` the file is renamed aside and removed only when its inode and
+ * record still match (see `releaseOwnedLockFile`). A holder that dies
  * without releasing — SIGKILL, OOM kill, power loss — would otherwise leave
- * a file that every later start is refused against, forever, so a holder
- * that is provably gone is reclaimed instead.
+ * a file that every later start is refused against until an operator removes it by hand.
  */
 
 import { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
 import {
   closeSync,
-  existsSync,
+  linkSync,
+  lstatSync,
   fstatSync,
   openSync,
   readFileSync,
-  statSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -40,40 +42,40 @@ export function lockPath(stateDir: string): string {
 }
 
 /**
- * A lock file whose holder cannot be identified is only treated as stale once
- * it is older than this.  Acquisition creates the file before writing the
- * holder's pid, so a start that landed inside that window would otherwise
- * steal a lock a live process is in the middle of taking — and two processes
- * owning the same database is worse than a delayed start.
+ * Node has no atomic conditional unlink. Rename first isolates the current
+ * directory entry, then inode/record verification decides whether it is ours.
+ * We never unlink a file we have not first isolated and identified. Stale
+ * files are removed only by an operator, never by this code.
  */
-const UNIDENTIFIED_LOCK_GRACE_MS = 5_000;
-
-interface LockHolder {
-  readonly pid: number;
-  /** Boot-relative start time of the holder, when the file records one. */
-  readonly startTimeTicks: string | null;
-}
-
-function readLockHolder(path: string): LockHolder | null {
-  let raw: string;
+export function releaseOwnedLockFile(
+  path: string,
+  expectedIno: number,
+  expectedRecord: string | undefined,
+): "released" | "gone" | "foreign" {
+  const detached = `${path}.release-${randomBytes(8).toString("hex")}`;
   try {
-    raw = readFileSync(path, "utf8");
+    renameSync(path, detached);
+  } catch (error) {
+    return (error as { code?: string }).code === "ENOENT" ? "gone" : "foreign";
+  }
+  try {
+    const stat = lstatSync(detached);
+    const matches = stat.isFile() && !stat.isSymbolicLink() && stat.ino === expectedIno &&
+      (expectedRecord === undefined || readFileSync(detached, "utf8") === expectedRecord);
+    if (matches) { unlinkSync(detached); return "released"; }
+    try { linkSync(detached, path); unlinkSync(detached); } catch { /* keep detached */ }
+    return "foreign";
   } catch {
-    return null;
+    try { linkSync(detached, path); unlinkSync(detached); } catch { /* keep detached */ }
+    return "foreign";
   }
-  const [firstLine = "", secondLine = ""] = raw.trim().split("\n");
-  const pid = Number.parseInt(firstLine, 10);
-  if (!Number.isSafeInteger(pid) || pid <= 0) {
-    return null;
-  }
-  const recorded = secondLine.trim();
-  return { pid, startTimeTicks: recorded === "" ? null : recorded };
 }
 
 /**
  * Field 22 (`starttime`) of `/proc/<pid>/stat`, in clock ticks since boot.
  * The `comm` field can contain spaces and parentheses, so parse from the last
- * `)`; the fields after it begin at index 0 for field 3.
+ * `)`; the fields after it begin at index 0 for field 3.  Diagnostic only: no
+ * code path reclaims a lock on the basis of it.
  */
 function readStartTimeTicks(pid: number): string | null {
   try {
@@ -89,53 +91,6 @@ function readStartTimeTicks(pid: number): string | null {
 }
 
 /**
- * Whether the lock file at `path` was left behind by a holder that is gone.
- *
- * Only positive evidence of death counts: a pid that no longer exists
- * (`ESRCH`), or a live pid whose recorded start time differs from the process
- * now holding that pid (a reused pid).  Anything else — an unreadable file,
- * `EPERM` because the holder belongs to another user, a live pid with a
- * matching start time, an unidentified file inside the grace window — is an
- * active holder, and is left alone.
- */
-function isLockHolderGone(path: string): boolean {
-  const holder = readLockHolder(path);
-  if (holder === null) {
-    try {
-      return Date.now() - statSync(path).mtimeMs >= UNIDENTIFIED_LOCK_GRACE_MS;
-    } catch {
-      return false;
-    }
-  }
-  if (holder.pid === process.pid) {
-    return false;
-  }
-  try {
-    process.kill(holder.pid, 0);
-  } catch (error) {
-    return (error as { code?: string }).code === "ESRCH";
-  }
-  if (holder.startTimeTicks === null) {
-    return false;
-  }
-  const live = readStartTimeTicks(holder.pid);
-  return live !== null && live !== holder.startTimeTicks;
-}
-
-/** Remove the lock file when, and only when, its holder is provably gone. */
-function reclaimStaleLock(path: string): boolean {
-  if (!isLockHolderGone(path)) {
-    return false;
-  }
-  try {
-    unlinkSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Try to acquire the single-instance lock for `stateDir`.  Returns a
  * release function on success or `null` when another process (or
  * another call in this process) already holds it.
@@ -144,9 +99,7 @@ function reclaimStaleLock(path: string): boolean {
  *
  *   1. In-process double-acquire is caught by the HELD map.
  *   2. Cross-process acquire is caught by `wx` (write, fail if exists).
- *   3. A holder that died without releasing leaves the file behind; that lock
- *      is reclaimed when its holder is provably gone, and only then, so a live
- *      holder is never stolen.
+ *   3. Any pre-existing lock file, stale or live, refuses acquisition.
  */
 export function tryAcquireLock(stateDir: string): (() => void) | null {
   const path = lockPath(stateDir);
@@ -159,20 +112,14 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
   try {
     fd = openSync(canonical, "wx", 0o600);
   } catch {
-    if (!reclaimStaleLock(canonical)) {
-      return null;
-    }
-    try {
-      fd = openSync(canonical, "wx", 0o600);
-    } catch {
-      return null;
-    }
+    return null;
   }
   // The inode is the proof of ownership at release.  Without it, release could
-  // not tell this file from a replacement, so the acquisition is refused.  The
-  // file was created by this attempt moments ago, so it is removed by path
-  // here.  With no fd identity there is no stronger proof available, so a
-  // replacement inside that window cannot be detected.
+  // not tell this file from a replacement, so the acquisition is refused.  When
+  // fstat fails there is no identity to verify, so the file this attempt just
+  // created is removed by path (as before).  Residual window: a replacement
+  // between the wx create and this unlink cannot be detected.  The existing
+  // stage-1-release-ownership test pins this cleanup.
   let ino: number;
   try {
     ino = fstatSync(fd).ino;
@@ -189,19 +136,14 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     }
     return null;
   }
-  // Record the holder so an operator examining the state dir can identify it,
-  // and so a later start can tell a dead holder from a live one.  The start
-  // time is what makes reclaiming a reused pid safe.  We never write the
-  // secret key.
-  try {
-    const pidBuf = Buffer.from(
-      `${process.pid}\n${readStartTimeTicks(process.pid) ?? ""}\n`,
-      "utf8",
-    );
-    // Synchronous write via fs.writeSync through the fd.
-    writeSync(fd, pidBuf, 0, pidBuf.length, 0);
-  } catch {
-    // best-effort metadata
+  // Holder record: pid, then start time.  Diagnostic only; no path reclaims on it.
+  const pidBuf = Buffer.from(`${process.pid}\n${readStartTimeTicks(process.pid) ?? ""}\n`, "utf8");
+  let written: number;
+  try { written = writeSync(fd, pidBuf, 0, pidBuf.length, 0); } catch { written = -1; }
+  if (written !== pidBuf.length) {
+    releaseOwnedLockFile(canonical, ino, undefined);
+    try { closeSync(fd); } catch { /* already closed */ }
+    return null;
   }
   HELD.set(canonical, { fd, path: canonical, ino });
   return () => releaseLock(stateDir);
@@ -223,20 +165,16 @@ export function isLocked(stateDir: string): boolean {
  * positive result as authoritative for "another process is currently
  * using this state directory" and refuse mutation accordingly.
  *
- * A lock file whose holder is provably gone does not count: otherwise a
- * single crash would wedge every read and recovery path until an operator
- * deleted the file by hand.  This function never removes anything.
+ * Every existing lock file counts, regardless of holder age or liveness.
+ * This function never removes anything; errors fail closed.
  */
 export function lockFileExists(stateDir: string): boolean {
   const canonical = resolve(lockPath(stateDir));
   try {
-    if (!existsSync(canonical)) {
-      return false;
-    }
-    return !isLockHolderGone(canonical);
-  } catch {
-    // Unknown filesystem state is unsafe for mutation; fail closed.
+    lstatSync(canonical);
     return true;
+  } catch (error) {
+    return (error as { code?: string }).code !== "ENOENT";
   }
 }
 
@@ -246,19 +184,7 @@ export function releaseLock(stateDir: string): boolean {
   if (!held) {
     return false;
   }
-  // Remove the file only while it is still the one this process created.  A
-  // foreign or replaced file belongs to someone else and stays.  The check and
-  // the unlink are two calls with no atomic form in Node's fs API, so a
-  // replacement made in that gap is not detected.  The open fd pins the inode,
-  // so no other file can carry its number while this process holds it.
-  try {
-    const stat = statSync(canonical, { throwIfNoEntry: false });
-    if (stat !== undefined && stat.isFile() && stat.ino === held.ino) {
-      unlinkSync(canonical);
-    }
-  } catch {
-    /* file may already be gone; the in-process record is the truth */
-  }
+  releaseOwnedLockFile(canonical, held.ino, undefined);
   try {
     closeSync(held.fd);
   } catch {

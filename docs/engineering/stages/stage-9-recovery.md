@@ -29,9 +29,10 @@ transport capabilities.
   state inspection or mutation.
 - State roots must be canonical, existing, non-symlink directories; database
   paths must remain inside the state root.
-- Active lock files, missing/unsafe state, quarantine collisions, unsafe
+- Any existing lock file, including a stale lock, missing/unsafe state, quarantine collisions, unsafe
   identifiers, occupied rollback destinations, and incomplete quarantine entries
-  fail closed.  A symlinked or non-directory quarantine root also fails closed
+  fail closed. A stale lock requires an operator to confirm no daemon is running and remove
+  `nookbridge.lock` by hand; inspect never reclaims it. A symlinked or non-directory quarantine root also fails closed
   before any move, for both reinitialize and rollback.
 - Quarantine manifests carry one of three statuses: `incomplete` (member moves
   in progress), `initializing` (every original member has moved and fresh
@@ -67,8 +68,13 @@ Verified behavior (source and focused tests):
 - One exclusive state lock (`openSync(..., "wx")`) is taken before inspect
   reads member presence and is held across the private copy and probe. A held
   lock is reported as `locked`. Inspect never reclaims a lock file, live or
-  stale. On release it removes only the lock file it created, and only when
-  that file still matches its own inode, and its holder record when one was written.
+  stale. On release it renames the lock file aside, then removes it only when its inode
+  and holder record still match what was written; a non-matching file is linked
+  back. This narrows the release race but is not atomic: a new holder can create
+  a lock after an operator deletes a live one, our release can rename that lock
+  aside, and a third process can acquire before it is linked back. This residual
+  window is accepted and not closed by this change. If restoration fails, the file
+  remains under a `.release-*` name for an operator to inspect.
 - Each probe copies members into a per-run directory created with `mkdtemp` and
   set to mode `0700`. Its owner record is written exclusively (`wx`, `0600`).
   The startup sweep runs under the lock at each probe (inspect or

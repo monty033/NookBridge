@@ -181,11 +181,13 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return actual.writeSync(...args);
     },
-    // Fails only the removal of the armed lock path; every other unlink is real.
+    // Fails every removal under the armed lock path: the shared name and the
+    // detached `.release-*` names that release isolates before it unlinks.
+    // Every other unlink is real.
     unlinkSync: (...args: Parameters<typeof actual.unlinkSync>): void => {
       if (
         lockWriteFault.failUnlinkPath !== undefined &&
-        String(args[0]) === lockWriteFault.failUnlinkPath
+        String(args[0]).startsWith(lockWriteFault.failUnlinkPath)
       ) {
         throw Object.assign(new Error("unlink boom"), { code: "EIO" });
       }
@@ -668,11 +670,13 @@ describe("bundle reinitialize — exclusive ownership", () => {
     }
   });
 
-  it("does not trust a stale lock file alone; the holder is provably gone", async () => {
+  it("refuses a stale lock file and preserves it", async () => {
     const root = mkRoot("nookbridge-bundle-lock-stale-");
-    const { stateDir, credentialsDir } = buildBundleFixture(root);
-    // A pid far above pid_max is provably not alive (ESRCH).
-    writeFileSync(lockPath(stateDir), "2147483646\n");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+    // A pid far above pid_max is not alive (ESRCH). Even so, a stale lock fails
+    // closed: nothing reclaims it, and an operator removes it by hand.
+    const staleContents = "2147483646\n";
+    writeFileSync(lockPath(stateDir), staleContents);
 
     const result = await runBundle(
       ["bundle", "reinitialize", APPROVE, ACK],
@@ -680,8 +684,72 @@ describe("bundle reinitialize — exclusive ownership", () => {
       credentialsDir,
     );
 
-    expect(result.kind).toBe("reinitialized");
-    // The lock is released after the mutation.
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message.toLowerCase()).toContain("locked");
+    expect(existsSync(lockPath(stateDir))).toBe(true);
+    expect(readFileSync(lockPath(stateDir), "utf8")).toBe(staleContents);
+    expect(existsSync(quarantineRoot(stateDir))).toBe(false);
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(stateDir, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+  });
+
+  it("T-B1 refuses when the holder record cannot be written, leaves no lock, and retries cleanly", async () => {
+    const root = mkRoot("nookbridge-bundle-lock-holder-write-");
+    const { stateDir, credentialsDir, memberBytes } = buildBundleFixture(root);
+
+    // Fail the first write, which is the lock's holder record.  Nothing has
+    // moved yet, so the failure must leave the state exactly as it was.
+    lockWriteFault.failNextWrite = true;
+    const first = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    lockWriteFault.failNextWrite = false;
+
+    expect(first.kind).toBe("error");
+    if (first.kind !== "error") return;
+    expect(first.exitCode).toBe(2);
+    // The lock path reports the refusal, so the injected fault hit the holder write.
+    expect(first.message.toLowerCase()).toContain("locked");
+    expect(existsSync(lockPath(stateDir))).toBe(false);
+    expect(existsSync(quarantineRoot(stateDir))).toBe(false);
+    for (const member of BUNDLE_MEMBERS) {
+      expect(readFileSync(join(stateDir, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+
+    const retry = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+    expect(retry.kind).toBe("reinitialized");
+  });
+
+  it("T-B5 refuses an initializing checkpoint whose member path is a symlink and writes nothing through it", async () => {
+    const root = mkRoot("nookbridge-bundle-initializing-symlink-");
+    const outside = mkRoot("nookbridge-bundle-initializing-outside-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const id = "5e1f1e59-0123456789ab";
+    const entry = plantIncompleteEntry(stateDir, id, {
+      version: 1,
+      id,
+      status: "initializing",
+      items: BUNDLE_MEMBERS.map((name) => ({ name, state: "moved" })),
+    });
+    for (const member of BUNDLE_MEMBERS) {
+      renameSync(join(stateDir, member), join(entry, member));
+    }
+    const outsideFile = join(outside, "target.db");
+    writeFileSync(outsideFile, "outside-bytes", { mode: 0o600 });
+    symlinkSync(outsideFile, join(stateDir, BUNDLE_MEMBERS[0]));
+
+    // The member-presence check refuses this before the initializing branch
+    // runs.  The check placed before the status write and before the
+    // fresh-member loop is not reached by this deterministic setup.
+    const result = await runBundle(["bundle", "reinitialize", APPROVE, ACK], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe("refusing unsafe production database bundle");
+    expect(readFileSync(outsideFile, "utf8")).toBe("outside-bytes");
+    expect(lstatSync(join(stateDir, BUNDLE_MEMBERS[0])).isSymbolicLink()).toBe(true);
     expect(existsSync(lockPath(stateDir))).toBe(false);
   });
 });
@@ -1948,7 +2016,7 @@ describe("L — inspect state lock", () => {
     const root = mkRoot("nookbridge-bundle-lock-stale-");
     const { stateDir, key } = buildWalBundleFixture(root);
 
-    // A child that has already exited gives a provably dead PID.
+    // A child that has already exited gives a dead PID.
     const child = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
     const deadPid = child.pid;
     expect(typeof deadPid).toBe("number");
@@ -1967,6 +2035,20 @@ describe("L — inspect state lock", () => {
     expect(snapshotRegularFileHashes(stateDir)).toEqual(before);
   });
 
+  it("T-B6 — inspect refuses a symlinked main member and never reads its target", () => {
+    const root = mkRoot("nookbridge-bundle-inspect-main-symlink-");
+    const outside = mkRoot("nookbridge-bundle-inspect-main-outside-");
+    const { stateDir, key } = buildWalBundleFixture(root);
+    const target = join(outside, "target.db");
+    writeFileSync(target, "outside-bytes", { mode: 0o600 });
+    rmSync(join(stateDir, "notesnook.db"));
+    symlinkSync(target, join(stateDir, "notesnook.db"));
+
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "corrupt" });
+    expect(readFileSync(target, "utf8")).toBe("outside-bytes");
+    expect(existsSync(lockPath(stateDir))).toBe(false);
+  });
+
   it("L5 — inspect releases only a lock file it still owns", () => {
     const root = mkRoot("nookbridge-bundle-lock-foreign-");
     const { stateDir, key } = buildWalBundleFixture(root);
@@ -1979,7 +2061,9 @@ describe("L — inspect state lock", () => {
       }
     };
 
-    inspectProductionBundle(stateDir, key);
+    // The holder record changed under the same inode, so the release cannot be
+    // proved and inspect must report indeterminate, not healthy.
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "indeterminate" });
 
     expect(existsSync(lockPath(stateDir))).toBe(true);
     expect(readFileSync(lockPath(stateDir), "utf8")).toBe(foreign);

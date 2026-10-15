@@ -19,9 +19,8 @@
  *   - The key is read from the systemd `$CREDENTIALS_DIRECTORY/nookbridge-db-key`
  *     slot only — never argv, never env, never logs.  The caller injects the
  *     directory; this module never reads `process.env` itself.
- *   - A live single-instance lock refuses mutation, and the lock is held for
- *     the whole mutation.  A stale lock file alone is not trusted: a provably
- *     dead holder is reclaimed by the shared lock module.
+ *   - Any existing single-instance lock refuses mutation; stale locks fail closed
+ *     until an operator confirms no daemon is running and removes the file by hand.
  *   - A manifest is written into the quarantine entry BEFORE the first move.
  *     Every move records its checkpoint.  A rerun resumes an incomplete
  *     checkpoint or refuses; it never guesses.
@@ -39,7 +38,6 @@ import {
   chmodSync,
   closeSync,
   constants,
-  copyFileSync,
   existsSync,
   fchmodSync,
   fstatSync,
@@ -49,6 +47,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -62,7 +61,7 @@ import process from "node:process";
 
 import Database from "better-sqlite3-multiple-ciphers";
 
-import { lockPath, tryAcquireLock } from "../config/lock.js";
+import { lockPath, releaseOwnedLockFile, tryAcquireLock } from "../config/lock.js";
 import { normaliseStateDir } from "../config/state-dir.js";
 import {
   NOOKBRIDGE_DB_KEY_LABEL,
@@ -255,9 +254,8 @@ function hasAnyStateSidecar(stateDir: string): boolean {
  * `finally` block.  The originals stay byte-identical with identical names.
  *
  * The whole copy-and-probe runs under the single-instance lock so a gateway
- * cannot start mid-inspect.  The lock is taken with an exclusive `wx` create
- * (never `tryAcquireLock`, which reclaims dead holders) and any pre-existing
- * lock file — live or stale — refuses the inspect.  The lock file is removed on
+ * cannot start mid-inspect. The lock is acquired with exclusive `wx`; any
+ * pre-existing lock file, live or stale, refuses inspect. The lock is removed on
  * every path, but only while it is still the exact one this call created; if
  * that removal fails, the result is `indeterminate`.
  *
@@ -491,9 +489,8 @@ function escapeReinitKey(key: string): string {
  * same inode, and, when the holder record was written, the same record.  A
  * foreign or replaced file is not ours and is left in place.
  *
- * Returns false only when this call's own lock file could not be removed, or
- * when its ownership was never proven, so the caller must not report a clean
- * result.  Never throws.
+ * Returns false whenever release cannot be proved, including a missing or
+ * replaced lock file, so the caller must not report a clean result. Never throws.
  */
 function releaseIfOwned(
   stateDir: string,
@@ -503,28 +500,11 @@ function releaseIfOwned(
   recordWritten: boolean,
 ): boolean {
   try {
-    // Ownership was never proven, so the file cannot be removed safely.
-    if (lockIno === undefined) {
-      return false;
-    }
-    const path = lockPath(stateDir);
-    const stat = statSync(path, { throwIfNoEntry: false });
-    // Already gone: nothing of this call's remains.
-    if (stat === undefined) {
-      return true;
-    }
-    // Replaced by something else: not ours to remove, and not a leftover.
-    if (!stat.isFile() || stat.ino !== lockIno) {
-      return true;
-    }
-    if (recordWritten && readFileSync(path, "utf8") !== record) {
-      return true;
-    }
-    unlinkSync(path);
-    return true;
-  } catch {
-    // Reading or removing our own lock file failed, so it may still be there.
-    return false;
+    if (lockIno === undefined) return false;
+    const outcome = releaseOwnedLockFile(
+      lockPath(stateDir), lockIno, recordWritten ? record : undefined,
+    );
+    return outcome === "released";
   } finally {
     try {
       closeSync(fd);
@@ -626,19 +606,52 @@ function sweepStaleInspectCopies(root: string): void {
   }
 }
 
+function hasUnsafeBundleEntry(stateDir: string): boolean {
+  for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    for (const path of [join(stateDir, member), ...BUNDLE_SIDECAR_SUFFIXES.map((suffix) => join(stateDir, `${member}${suffix}`))]) {
+      if (!pathEntryExists(path)) continue;
+      try { const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) return true; }
+      catch { return true; }
+    }
+  }
+  return false;
+}
+
 /**
- * Copy a regular file without following a symlink.  Returns `false` for a
+ * Copy a regular file without following a symlink. Returns `false` for a
  * symlink, a non-regular file, or a failed copy so the caller can fail closed.
- * `COPYFILE_EXCL` guarantees the private copy directory is never overwritten.
+ * Exclusive destination creation ensures the private copy is never overwritten.
  */
 function copyRegularFile(source: string, destination: string): boolean {
+  let sourceFd: number | undefined;
+  let destinationFd: number | undefined;
+  let destinationCreated = false;
+  let succeeded = false;
   try {
-    const stat = lstatSync(source);
-    if (!stat.isFile() || stat.isSymbolicLink()) return false;
-    copyFileSync(source, destination, constants.COPYFILE_EXCL);
+    sourceFd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!fstatSync(sourceFd).isFile()) return false;
+    destinationFd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    destinationCreated = true;
+    const buffer = Buffer.alloc(64 * 1024);
+    while (true) {
+      const count = readSync(sourceFd, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      let offset = 0;
+      while (offset < count) offset += writeSync(destinationFd, buffer, offset, count - offset);
+    }
+    // Close the destination before reporting success.  A failed close means the
+    // copy is not known to be complete, so it is removed and the call fails.
+    const copiedFd = destinationFd;
+    destinationFd = undefined;
+    closeSync(copiedFd);
+    succeeded = true;
     return true;
   } catch {
     return false;
+  } finally {
+    if (sourceFd !== undefined) try { closeSync(sourceFd); } catch { /* best-effort */ }
+    if (destinationFd !== undefined) try { closeSync(destinationFd); } catch { /* best-effort */ }
+    if (destinationCreated && !succeeded) try { unlinkSync(destination); } catch { /* best-effort */ }
   }
 }
 
@@ -673,11 +686,9 @@ export function reinitializeProductionBundle(
   const presence = memberPresence(stateDir);
   if (presence === "unsafe") return error(2, "refusing unsafe production database bundle");
 
-  // Exclusive ownership: refuse while a live holder exists, and hold the
-  // lock for the WHOLE mutation — the quarantine scan, the empty-remnant
-  // cleanup, the moves, and the fresh-state initialization.  A provably-dead
-  // holder's stale file is reclaimed inside `tryAcquireLock`, so the lock
-  // file alone is never trusted.
+  // Exclusive ownership: any existing lock file, stale or live, fails closed.
+  // An operator must confirm no daemon is running and remove a stale file by hand.
+  // Hold the lock for the WHOLE mutation — scan, cleanup, moves, and initialization.
   const release = tryAcquireLock(stateDir);
   if (!release) return error(2, "state directory is currently locked by another process");
   try {
@@ -839,6 +850,10 @@ function quarantineAndReinitialize(
     }
   }
 
+  // SqliteStorage opens members by path, so it cannot request no-follow creation.
+  // While holding the lock, this check narrows (but cannot eliminate) the race.
+  if (hasUnsafeBundleEntry(stateDir)) return error(2, "refusing unsafe production database bundle");
+
   // Mark the checkpoint `initializing` before fresh members are created.  A
   // crash or failure here can leave fresh residue at a source path, so resume
   // skips source reconciliation for this status.  The entry stays resumable:
@@ -849,7 +864,10 @@ function quarantineAndReinitialize(
     return error(3, "failed to record recovery manifest");
   }
 
+  // SqliteStorage opens members by path, so it cannot request no-follow creation.
+  // While holding the lock, this check narrows (but cannot eliminate) the race.
   // Initialize fresh encrypted members so the service can start and resync.
+  if (hasUnsafeBundleEntry(stateDir)) return error(2, "refusing unsafe production database bundle");
   try {
     for (const member of PRODUCTION_BUNDLE_MEMBERS) {
       const fresh = new SqliteStorage({
