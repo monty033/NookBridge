@@ -1324,7 +1324,7 @@ describe("quarantine removal regression — recursive removal result", () => {
     mkdirSync(remnant, { recursive: true, mode: 0o700 });
     expect(existsSync(remnant)).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(quarantineRoot(root), "abadcafe-0123456789ab");
+    const removed = removeBundleQuarantineEntry(root, "abadcafe-0123456789ab");
 
     expect(removed).toBe(true);
     expect(existsSync(remnant)).toBe(false);
@@ -1337,31 +1337,38 @@ describe("quarantine removal regression — recursive removal result", () => {
     writeFileSync(join(remnant, "nested", "deeper", "leftover"), "stale");
     expect(existsSync(join(remnant, "nested", "deeper", "leftover"))).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(quarantineRoot(root), "abadcafe-0123456789ab");
+    const removed = removeBundleQuarantineEntry(root, "abadcafe-0123456789ab");
 
     expect(removed).toBe(true);
     expect(existsSync(remnant)).toBe(false);
   });
 
-  it("refuses to remove a path that is not a quarantine entry, and leaves its bytes intact", () => {
+  it("removes only the quarantine child, and refuses a traversal or non-identifier id", () => {
     const root = mkRoot("nookbridge-bundle-rm-refuse-");
-    // A directory outside the quarantine root, even one with a valid-looking name.
-    const outside = join(root, "abadcafe-0123456789ab");
-    mkdirSync(join(outside, "nested"), { recursive: true, mode: 0o700 });
-    writeFileSync(join(outside, "nested", "keep"), "keep");
-    // A plain directory whose name is not a quarantine identifier.
+    const id = "abadcafe-0123456789ab";
+    // A real quarantine child under this state root.
+    const child = join(quarantineRoot(root), id);
+    mkdirSync(join(child, "nested"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(child, "nested", "keep"), "keep");
+    // A non-identifier directory in the same quarantine root.
     const named = join(quarantineRoot(root), "entry");
     mkdirSync(named, { recursive: true, mode: 0o700 });
+    // A second state root with a valid child at the same name. The remover must
+    // never reach it through the first root.
+    const other = mkRoot("nookbridge-bundle-rm-other-");
+    const foreign = join(quarantineRoot(other), id);
+    mkdirSync(foreign, { recursive: true, mode: 0o700 });
+    writeFileSync(join(foreign, "keep"), "foreign");
 
-    // A foreign root, a traversal id, and a non-identifier name are all refused.
-    expect(removeBundleQuarantineEntry(root, "abadcafe-0123456789ab")).toBe(false);
-    expect(removeBundleQuarantineEntry(quarantineRoot(root), "../abadcafe-0123456789ab")).toBe(
-      false,
-    );
-    expect(removeBundleQuarantineEntry(quarantineRoot(root), "entry")).toBe(false);
-
-    expect(readFileSync(join(outside, "nested", "keep"), "utf8")).toBe("keep");
+    expect(removeBundleQuarantineEntry(root, `../${id}`)).toBe(false);
+    expect(removeBundleQuarantineEntry(root, "entry")).toBe(false);
+    expect(existsSync(child)).toBe(true);
     expect(existsSync(named)).toBe(true);
+
+    expect(removeBundleQuarantineEntry(root, id)).toBe(true);
+    expect(existsSync(child)).toBe(false);
+    expect(existsSync(named)).toBe(true);
+    expect(readFileSync(join(foreign, "keep"), "utf8")).toBe("foreign");
   });
 
   it("removes an empty remnant at the bundle quarantine target so reinitialize proceeds", async () => {
@@ -1603,7 +1610,7 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
       { mode: 0o600 },
     );
 
-    discardEmptyEntry(quarantineRoot(stateDir), oldId);
+    discardEmptyEntry(stateDir, oldId);
 
     // Observable result: the manifest-only leftover is gone.
     expect(existsSync(entry)).toBe(false);
@@ -1630,7 +1637,7 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
     writeFileSync(join(entry, MANIFEST_NAME), "{}");
     writeFileSync(join(entry, "nookbridge-storage.db"), "preserved-bytes");
 
-    discardEmptyEntry(quarantineRoot(stateDir), id);
+    discardEmptyEntry(stateDir, id);
 
     expect(existsSync(entry)).toBe(true);
     expect(existsSync(join(entry, "nookbridge-storage.db"))).toBe(true);
@@ -3869,5 +3876,29 @@ describe("bundle manifest temporaries — naming, exclusive create, sweep", () =
     expect(result.message).toBe("refusing inconsistent quarantine state");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readFileSync(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+  });
+});
+
+describe("review round 3 — temporaries in an unrecognised entry", () => {
+  it("reinitialize leaves a manifest temporary in an unrecognised entry untouched", async () => {
+    const root = mkRoot("nookbridge-bundle-temp-unlisted-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const entry = join(quarantineRoot(stateDir), "abadcafe-0123456789ab");
+    mkdirSync(entry, { recursive: true, mode: 0o700 });
+    chmodSync(entry, 0o700);
+    const temporary = join(entry, `${MANIFEST_NAME}.4242.0123456789abcdef.tmp`);
+    writeFileSync(temporary, "half-written", { mode: 0o600 });
+    writeFileSync(join(entry, "stray"), "unlisted", { mode: 0o600 });
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    expect(readFileSync(temporary, "utf8")).toBe("half-written");
+    expect(readFileSync(join(entry, "stray"), "utf8")).toBe("unlisted");
+    expect(existsSync(entry)).toBe(true);
   });
 });

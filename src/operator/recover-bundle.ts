@@ -56,7 +56,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 import Database from "better-sqlite3-multiple-ciphers";
@@ -631,8 +631,11 @@ function hasUnsafeBundleEntry(stateDir: string): boolean {
  * symlink, a non-regular file, or a failed copy so the caller can fail closed.
  * Exclusive destination creation ensures the private copy is never overwritten.
  *
- * The source is opened `O_NONBLOCK`, so a FIFO or device is refused at open
- * instead of stalling it; the type check then runs on the opened descriptor.
+ * The source is opened with `O_NOFOLLOW`, which refuses a symlink at open.
+ * `O_NONBLOCK` keeps an open of a FIFO from waiting for a writer.  The type
+ * check runs on the opened descriptor and refuses a FIFO or other non-regular
+ * file.  The code does not establish that opening every special file is
+ * non-blocking.
  */
 function copyRegularFile(source: string, destination: string): boolean {
   let sourceFd: number | undefined;
@@ -732,7 +735,7 @@ export function reinitializeProductionBundle(
     // Scan under the lock.  This also removes empty leftover entry
     // directories recursively, so a failed move cannot block the next run.
     const quarantineDir = join(stateDir, QUARANTINE_RELATIVE_DIR);
-    const scan = scanQuarantine(quarantineDir);
+    const scan = scanQuarantine(stateDir);
     if (scan.kind === "error") return scan.error;
 
     // A crash mid-quarantine legitimately leaves a partial state root with an
@@ -839,7 +842,7 @@ function quarantineAndReinitialize(
       items: planBundleItems(stateDir).map((name) => ({ name, state: "pending" as const })),
     };
     if (!writeManifest(entry, manifest)) {
-      discardEmptyEntry(quarantineDir, quarantineId);
+      discardEmptyEntry(stateDir, quarantineId);
       return error(3, "failed to record recovery manifest");
     }
   }
@@ -866,7 +869,7 @@ function quarantineAndReinitialize(
     }
     if (verdict === "move") {
       if (!moveNoReplace(source, destination)) {
-        discardEmptyEntry(quarantineDir, quarantineId);
+        discardEmptyEntry(stateDir, quarantineId);
         return error(3, "failed to quarantine the original state");
       }
       manifest = withItemState(manifest, item.name, "moved");
@@ -1047,7 +1050,7 @@ function restoreBundleEntry(
   }
 
   // Consume the entry using the bundle cleanup convention.
-  discardEmptyEntry(join(stateDir, QUARANTINE_RELATIVE_DIR), quarantineId);
+  discardEmptyEntry(stateDir, quarantineId);
   return { kind: "rolled-back", quarantineId };
 }
 
@@ -1168,16 +1171,15 @@ type ResolvedQuarantineScan =
  * semantics, so the bundle owns this recursive variant.  This is the ONLY
  * place the bundle deletes a quarantine path.
  *
- * Containment: the target is `<quarantineDir>/<id>`, derived here.  The id must
- * be a quarantine identifier and the directory must be the quarantine root.  A
- * caller cannot name an arbitrary path, so a traversal id is refused untouched.
+ * Containment: the target is `<stateDir>/.recovery-quarantine/<id>`, derived
+ * here.  The caller supplies the state root.  The id must be a quarantine
+ * identifier, so a traversal id or any other name is refused untouched.
  */
-export function removeBundleQuarantineEntry(quarantineDir: string, id: string): boolean {
-  const root = resolve(quarantineDir);
-  if (!QUARANTINE_ID_PATTERN.test(id) || basename(root) !== QUARANTINE_RELATIVE_DIR) {
+export function removeBundleQuarantineEntry(stateDir: string, id: string): boolean {
+  if (!QUARANTINE_ID_PATTERN.test(id)) {
     return false;
   }
-  const target = join(root, id);
+  const target = join(stateDir, QUARANTINE_RELATIVE_DIR, id);
   try {
     rmSync(target, { recursive: true, force: true });
   } catch {
@@ -1186,7 +1188,8 @@ export function removeBundleQuarantineEntry(quarantineDir: string, id: string): 
   return !existsSync(target);
 }
 
-function scanQuarantine(quarantineDir: string): ScanResult {
+function scanQuarantine(stateDir: string): ScanResult {
+  const quarantineDir = join(stateDir, QUARANTINE_RELATIVE_DIR);
   if (!existsSync(quarantineDir)) return { kind: "fresh" };
 
   let initial: string[];
@@ -1211,14 +1214,26 @@ function scanQuarantine(quarantineDir: string): ScanResult {
       return { kind: "error", error: error(2, "refusing quarantine collision") };
     }
     if (!stat.isDirectory()) continue;
-    removeManifestTemporaries(candidate);
+    let names: string[];
+    try {
+      names = readdirSync(candidate);
+    } catch {
+      return { kind: "error", error: error(2, "refusing quarantine collision") };
+    }
+    // Temporaries are swept only from a valid checkpoint, or from an entry that
+    // holds nothing but temporaries (a crash before the manifest was renamed in).
+    // Any other entry keeps its files untouched, so the refusal below sees it.
+    const temporaryOnly = names.every((n) => MANIFEST_TEMPORARY_PATTERN.test(n));
+    if (temporaryOnly || readIncompleteManifest(candidate, name) !== undefined) {
+      removeManifestTemporaries(candidate);
+    }
     let contents: string[];
     try {
       contents = readdirSync(candidate);
     } catch {
       return { kind: "error", error: error(2, "refusing quarantine collision") };
     }
-    if (contents.length === 0) removeBundleQuarantineEntry(quarantineDir, name);
+    if (contents.length === 0) removeBundleQuarantineEntry(stateDir, name);
   }
 
   let remaining: string[];
@@ -1511,12 +1526,12 @@ function quarantineRootUnsafe(stateDir: string): boolean {
  * fixture (the only reliable link(2) failure, a non-writable entry, also
  * blocks the recursive removal).
  */
-export function discardEmptyEntry(quarantineDir: string, id: string): void {
+export function discardEmptyEntry(stateDir: string, id: string): void {
   if (!QUARANTINE_ID_PATTERN.test(id)) return;
   try {
-    const entry = join(quarantineDir, id);
+    const entry = join(stateDir, QUARANTINE_RELATIVE_DIR, id);
     const contents = readdirSync(entry).filter((name) => name !== BUNDLE_MANIFEST_FILENAME);
-    if (contents.length === 0) removeBundleQuarantineEntry(quarantineDir, id);
+    if (contents.length === 0) removeBundleQuarantineEntry(stateDir, id);
   } catch {
     /* best-effort */
   }

@@ -82,9 +82,11 @@ Verified behavior (source and focused tests):
   `nookbridge-bundle-inspect-*` directory only when all of these hold: it is
   owned by the current uid, is not a symlink, is older than one hour, and its
   recorded owner pid is no longer alive.
-- Member and sidecar copies open each source with `O_NOFOLLOW | O_NONBLOCK`
-  and check the opened descriptor with `fstat`, so a symlink, FIFO, or other
-  non-regular file is refused at open and never blocks the open. A preliminary
+- Member and sidecar copies open each source with `O_NOFOLLOW`, which refuses a
+  symlink at open, and `O_NONBLOCK`, which keeps an open of a FIFO from waiting
+  for a writer. The opened descriptor is then checked with `fstat`, which refuses
+  a FIFO or other non-regular file. The code does not establish that opening every
+  special file is non-blocking. A preliminary
   `lstat` presence check is not tied to that inode. Inspect assumes no
   non-cooperating writer swaps a member or sidecar between the check and the
   open, or alters one in place during the copy. It does not detect either, so a
