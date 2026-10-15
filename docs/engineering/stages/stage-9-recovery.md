@@ -68,7 +68,7 @@ Verified behavior (source and focused tests):
   reads member presence and is held across the private copy and probe. A held
   lock is reported as `locked`. Inspect never reclaims a lock file, live or
   stale. On release it removes only the lock file it created, and only when
-  that file still matches its own inode and holder record.
+  that file still matches its own inode, and its holder record when one was written.
 - Each probe copies members into a per-run directory created with `mkdtemp` and
   set to mode `0700`. Its owner record is written exclusively (`wx`, `0600`).
   The startup sweep runs under the lock at each probe (inspect or
@@ -78,10 +78,13 @@ Verified behavior (source and focused tests):
   recorded owner pid is no longer alive.
 - Copies use `lstat` and refuse symlinks and non-regular files. The owner-file
   check rejects symlinks.
-- A probe that throws becomes the categorical `indeterminate` result. A failure
-  to create the private copy directory, write its owner record, or copy a
-  member or sidecar returns `corrupt`. In both cases the lock is still
-  released.
+- For inspect, a probe that throws becomes the categorical `indeterminate`
+  result. Reinitialize never returns `indeterminate`: a probe that throws, or a
+  copy that cannot be classified, refuses with the categorical error
+  "refusing unprobeable production database bundle" (exit code 2). A failure to
+  create the private copy directory, write its owner record, or copy a member
+  or sidecar returns `corrupt` to inspect and the same categorical refusal
+  (exit code 2) to reinitialize. In every case the lock is still released.
 - Reinitialize resumes an `initializing` checkpoint only when every member is
   recorded as moved and present in the entry. Rollback refuses an
   `initializing` checkpoint and any entry with a manifest member missing.

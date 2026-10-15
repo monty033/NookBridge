@@ -76,6 +76,7 @@ import type * as SqliteModule from "../src/storage/sqlite-storage.js";
 import type * as CryptoModule from "node:crypto";
 import type * as QuarantineModule from "../src/operator/recover-quarantine.js";
 import type * as LocalStateModule from "../src/operator/recover-local-state.js";
+import type * as FsModule from "node:fs";
 
 /**
  * G2 probe recorder.  `vi.hoisted` runs before imports so the `vi.mock`
@@ -153,6 +154,25 @@ vi.mock("node:crypto", async (importOriginal) => {
     ...actual,
     randomBytes: (size: number): Buffer =>
       randomHook.fixed ? Buffer.alloc(size, 0xab) : actual.randomBytes(size),
+  };
+});
+
+// Fails exactly one `writeSync` (the lock holder record) when armed.  Armed
+// only immediately before an inspect call, so fixture construction is
+// unaffected.  Cleared in the L block's ``afterEach``.
+const lockWriteFault = vi.hoisted(() => ({ failNextWrite: false }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsModule>();
+  return {
+    ...actual,
+    writeSync: (...args: Parameters<typeof actual.writeSync>): number => {
+      if (lockWriteFault.failNextWrite) {
+        lockWriteFault.failNextWrite = false;
+        throw new Error("holder write boom");
+      }
+      return actual.writeSync(...args);
+    },
   };
 });
 
@@ -1844,6 +1864,7 @@ describe("L — inspect state lock", () => {
 
   afterEach(() => {
     probeHook.onProbe = undefined;
+    lockWriteFault.failNextWrite = false;
   });
 
   it("L1 — inspect holds the state lock while it probes the copy", () => {
@@ -1942,6 +1963,21 @@ describe("L — inspect state lock", () => {
 
     expect(existsSync(lockPath(stateDir))).toBe(true);
     expect(readFileSync(lockPath(stateDir), "utf8")).toBe(foreign);
+  });
+
+  it("L15 — a failed holder-record write returns indeterminate and leaves no lock file", () => {
+    const root = mkRoot("nookbridge-bundle-lock-write-fault-");
+    const { stateDir, key } = buildWalBundleFixture(root);
+
+    // Fail only the holder-record write, after the fixture is fully built.
+    lockWriteFault.failNextWrite = true;
+
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "indeterminate" });
+    expect(existsSync(lockPath(stateDir))).toBe(false);
+
+    // A later inspect must not inherit the failed run's lock and report
+    // "locked" forever: the lock file must have been released.
+    expect(inspectProductionBundle(stateDir, key)).toEqual({ kind: "healthy" });
   });
 
   // L6 — the cross-process guarantee rests on the atomic "wx" create, so this

@@ -287,18 +287,22 @@ export function inspectProductionBundle(
   // a pid-only record (the optional start-time line is omitted here).
   const record = `${process.pid}\n`;
   let lockIno: number | undefined;
+  // Ownership is proven by the inode, but release also verifies the holder
+  // record when it was written.  A record that never made it to disk must not
+  // be required at release, or this call would leave an unreclaimable lock.
+  let recordWritten = false;
 
   // 6. Everything after acquire runs inside ONE outer try/finally.
   try {
     // 5. Record ownership of the file just created.
     lockIno = fstatSync(fd).ino;
 
-    // 4. Best-effort holder record; ownership is tracked by the inode above.
-    try {
-      writeSync(fd, record, 0, "utf8");
-    } catch {
-      /* best-effort metadata */
-    }
+    // 4. The holder record is REQUIRED, not best-effort: inspect is read-only
+    //    and must not proceed without it.  A failed write is not swallowed;
+    //    it becomes "indeterminate" below, and the finally still releases the
+    //    lock this call created.
+    writeSync(fd, record, 0, "utf8");
+    recordWritten = true;
 
     // 7. A mutation may have changed the state between step 1 and the
     //    acquire, so re-run the presence check under the lock.
@@ -323,7 +327,7 @@ export function inspectProductionBundle(
     return { kind: "indeterminate" };
   } finally {
     // 8. Release only the lock file this call still owns.
-    releaseIfOwned(stateDir, fd, lockIno, record);
+    releaseIfOwned(stateDir, fd, lockIno, record, recordWritten);
   }
 }
 
@@ -459,30 +463,40 @@ function escapeReinitKey(key: string): string {
 }
 
 /**
- * Close the lock fd, then remove the lock file only while it is still the
- * exact file this call created: same inode AND same holder record.  A foreign
- * or replaced lock file is left in place.  Never throws.
+ * Verify ownership and remove the lock file BEFORE closing the fd.  Keeping
+ * the fd open pins the inode, so it cannot be freed and reused between the
+ * identity check and the unlink.  The lock file is removed only while it is
+ * still the exact file this call created: same inode, and — when the holder
+ * record was actually written — the same record.  A foreign or replaced lock
+ * file is left in place.  Never throws.
  */
 function releaseIfOwned(
   stateDir: string,
   fd: number,
   lockIno: number | undefined,
   record: string,
+  recordWritten: boolean,
 ): void {
   try {
-    closeSync(fd);
-  } catch {
-    /* already closed */
-  }
-  if (lockIno === undefined) return;
-  try {
-    const path = lockPath(stateDir);
-    const stat = statSync(path);
-    if (!stat.isFile() || stat.ino !== lockIno) return;
-    if (readFileSync(path, "utf8") !== record) return;
-    unlinkSync(path);
+    if (lockIno !== undefined) {
+      const path = lockPath(stateDir);
+      const stat = statSync(path);
+      if (
+        stat.isFile() &&
+        stat.ino === lockIno &&
+        (!recordWritten || readFileSync(path, "utf8") === record)
+      ) {
+        unlinkSync(path);
+      }
+    }
   } catch {
     /* ENOENT, or any other failure: leave the lock file alone */
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
   }
 }
 
