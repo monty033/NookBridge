@@ -47,7 +47,7 @@ export function lockPath(stateDir: string): string {
  * We never unlink a file we have not first isolated and identified. Stale
  * files are removed only by an operator, never by this code.
  */
-export function releaseOwnedLockFile(
+function releaseOwnedLockFile(
   path: string,
   expectedIno: number,
   expectedRecord: string | undefined,
@@ -92,6 +92,106 @@ export function releaseOwnedLockFile(
     }
     return "foreign";
   }
+}
+
+/**
+ * Facts a held inspect lock needs to prove ownership at release.  The holder
+ * record and inode are captured by {@link acquireInspectLock}; the caller never
+ * supplies either, so it cannot release a file this acquisition did not create.
+ */
+export interface InspectLockHandle {
+  /** The holder record written for this lock, in the shared format. */
+  readonly record: string;
+  /** True when the full holder record was written; false on a short/failed write. */
+  readonly recordWritten: boolean;
+  /**
+   * Release the lock file only while it is still this handle's: the same inode,
+   * and, when a full holder record was written, the same record.  Closes the
+   * file descriptor.  Returns `"released"`, `"gone"` (no file at the path), or
+   * `"foreign"` (a replacement this handle does not own, left in place).
+   */
+  release(): "released" | "gone" | "foreign";
+}
+
+/** Outcome of {@link acquireInspectLock}. */
+export type InspectLockAcquire =
+  | Readonly<{ kind: "acquired"; handle: InspectLockHandle }>
+  | Readonly<{ kind: "locked" }>
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "indeterminate" }>;
+
+/**
+ * Acquire the single-instance lock for the read-only inspect path and return a
+ * handle that owns its inode and holder record.
+ *
+ * This is deliberately separate from {@link tryAcquireLock}: inspect must not
+ * enter the in-process `HELD` cache (a diagnostic may legitimately hold the
+ * lock while inspect runs), and it must refuse — never reclaim — any existing
+ * lock file, live or stale.  The exclusive `wx` create is the atomic gate; an
+ * `EEXIST` is a held lock, `ENOENT` a missing state directory, and any other
+ * create failure is indeterminate.
+ *
+ * The holder record is REQUIRED: a short or failed write still yields a handle
+ * (`recordWritten === false`) so the caller can release the file it created,
+ * but it must not proceed with the record unproven.
+ */
+export function acquireInspectLock(stateDir: string): InspectLockAcquire {
+  const path = lockPath(stateDir);
+  // Atomic, exclusive create; an existing file — live or stale — refuses.
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", 0o600);
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "EEXIST") return { kind: "locked" };
+    // A nonexistent state directory has nothing to inspect.
+    if (code === "ENOENT") return { kind: "missing" };
+    // Any other failure to create the lock is unsafe to proceed past.
+    return { kind: "indeterminate" };
+  }
+
+  // The inode is the proof of ownership at release.  Without it no release can
+  // be proved, so the file is left for an operator and the fd is closed.
+  let ino: number;
+  try {
+    ino = fstatSync(fd).ino;
+  } catch {
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+    return { kind: "indeterminate" };
+  }
+
+  // Holder record: the same one format the acquire path uses.  A short write is
+  // a failed write, not a recorded one.
+  const record = holderRecord();
+  const recordBuf = Buffer.from(record, "utf8");
+  let written: number;
+  try {
+    written = writeSync(fd, recordBuf, 0, recordBuf.length, 0);
+  } catch {
+    written = -1;
+  }
+  const recordWritten = written === recordBuf.length;
+
+  const handle: InspectLockHandle = {
+    record,
+    recordWritten,
+    release: (): "released" | "gone" | "foreign" => {
+      try {
+        return releaseOwnedLockFile(path, ino, recordWritten ? record : undefined);
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      }
+    },
+  };
+  return { kind: "acquired", handle };
 }
 
 /**

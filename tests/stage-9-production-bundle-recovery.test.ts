@@ -65,11 +65,7 @@ import {
   parseRecoverLocalStateCommand,
   runRecoverLocalState,
 } from "../src/operator/recover-local-state.js";
-import {
-  discardEmptyEntry,
-  inspectProductionBundle,
-  removeBundleQuarantineEntry,
-} from "../src/operator/recover-bundle.js";
+import { inspectProductionBundle } from "../src/operator/recover-bundle.js";
 import { QUARANTINE_ID_PATTERN } from "../src/operator/recover-quarantine.js";
 import { SqliteStorage, inspectEncryptedSqlite } from "../src/storage/sqlite-storage.js";
 import type * as SqliteModule from "../src/storage/sqlite-storage.js";
@@ -1332,40 +1328,56 @@ describe("quarantine collision — a preserved entry still refuses", () => {
 // ---------------------------------------------------------------------------
 
 describe("quarantine removal regression — recursive removal result", () => {
-  it("returns true and removes an empty directory remnant", () => {
+  it("removes an empty directory remnant so reinitialize proceeds", async () => {
     const root = mkRoot("nookbridge-bundle-rm-result-empty-");
-    const remnant = join(quarantineRoot(root), "abadcafe-0123456789ab");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const remnant = join(quarantineRoot(stateDir), "abadcafe-0123456789ab");
     mkdirSync(remnant, { recursive: true, mode: 0o700 });
     expect(existsSync(remnant)).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(root, "abadcafe-0123456789ab");
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
 
-    expect(removed).toBe(true);
+    // Observable result: the empty remnant is gone and the run proceeds.
+    expect(result.kind).toBe("reinitialized");
     expect(existsSync(remnant)).toBe(false);
   });
 
-  it("returns true and removes a nested remnant recursively", () => {
+  it("preserves a nested leftover and refuses rather than deleting preserved content", async () => {
     const root = mkRoot("nookbridge-bundle-rm-result-nested-");
-    const remnant = join(quarantineRoot(root), "abadcafe-0123456789ab");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const remnant = join(quarantineRoot(stateDir), "abadcafe-0123456789ab");
     mkdirSync(join(remnant, "nested", "deeper"), { recursive: true, mode: 0o700 });
     writeFileSync(join(remnant, "nested", "deeper", "leftover"), "stale");
     expect(existsSync(join(remnant, "nested", "deeper", "leftover"))).toBe(true);
 
-    const removed = removeBundleQuarantineEntry(root, "abadcafe-0123456789ab");
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
 
-    expect(removed).toBe(true);
-    expect(existsSync(remnant)).toBe(false);
+    // The bundle scan removes a leftover entry only when it is empty.  A
+    // nested remnant that is not a valid checkpoint is left untouched and
+    // refuses the run, so a recursive sweep never deletes preserved bytes.
+    expect(result.kind).toBe("error");
+    expect(existsSync(remnant)).toBe(true);
+    expect(readFileSync(join(remnant, "nested", "deeper", "leftover"), "utf8")).toBe("stale");
   });
 
-  it("removes only the quarantine child, and refuses a traversal or non-identifier id", () => {
+  it("removes only the quarantine child, and refuses a traversal or non-identifier id", async () => {
     const root = mkRoot("nookbridge-bundle-rm-refuse-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
     const id = "abadcafe-0123456789ab";
     // A real quarantine child under this state root.
-    const child = join(quarantineRoot(root), id);
+    const child = join(quarantineRoot(stateDir), id);
     mkdirSync(join(child, "nested"), { recursive: true, mode: 0o700 });
     writeFileSync(join(child, "nested", "keep"), "keep");
     // A non-identifier directory in the same quarantine root.
-    const named = join(quarantineRoot(root), "entry");
+    const named = join(quarantineRoot(stateDir), "entry");
     mkdirSync(named, { recursive: true, mode: 0o700 });
     // A second state root with a valid child at the same name. The remover must
     // never reach it through the first root.
@@ -1374,12 +1386,37 @@ describe("quarantine removal regression — recursive removal result", () => {
     mkdirSync(foreign, { recursive: true, mode: 0o700 });
     writeFileSync(join(foreign, "keep"), "foreign");
 
-    expect(removeBundleQuarantineEntry(root, `../${id}`)).toBe(false);
-    expect(removeBundleQuarantineEntry(root, "entry")).toBe(false);
+    // A traversal id is refused before the quarantine root is consulted.
+    const traversal = await runBundle(
+      ["bundle", "rollback", ROLLBACK, `../${id}`],
+      stateDir,
+      credentialsDir,
+    );
+    expect(traversal.kind).toBe("error");
+    if (traversal.kind === "error") {
+      expect(traversal.message).toContain("opaque identifier");
+    }
+
+    // A non-identifier directory is not a checkpoint: the scan leaves it (and
+    // the preserving child) in place and refuses.
+    const refused = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(refused.kind).toBe("error");
     expect(existsSync(child)).toBe(true);
     expect(existsSync(named)).toBe(true);
 
-    expect(removeBundleQuarantineEntry(root, id)).toBe(true);
+    // Once the valid child is empty, the scan removes it recursively while the
+    // non-identifier entry stays and the other state root is untouched.
+    rmSync(join(child, "nested"), { recursive: true, force: true });
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(result.kind).toBe("error");
     expect(existsSync(child)).toBe(false);
     expect(existsSync(named)).toBe(true);
     expect(readFileSync(join(foreign, "keep"), "utf8")).toBe("foreign");
@@ -1605,32 +1642,30 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
   it("removes a manifest-only leftover so the next reinitialize starts fresh", async () => {
     const root = mkRoot("nookbridge-bundle-discard-");
     const { stateDir, credentialsDir } = buildBundleFixture(root);
-    const oldId = "abadcafe-0123456789ab";
-    const entry = join(quarantineRoot(stateDir), oldId);
-    mkdirSync(entry, { recursive: true, mode: 0o700 });
-    chmodSync(entry, 0o700);
-    writeFileSync(
-      join(entry, MANIFEST_NAME),
-      JSON.stringify({
-        version: 1,
-        id: oldId,
-        status: "incomplete",
-        items: [
-          { name: "nookbridge-storage.db", state: "pending" },
-          { name: "notesnook.db", state: "pending" },
-          { name: "notesnook-logs.db", state: "pending" },
-        ],
-      }),
-      { mode: 0o600 },
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
     );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+    const entry = join(quarantineRoot(stateDir), reinit.quarantineId);
 
-    discardEmptyEntry(stateDir, oldId);
-
-    // Observable result: the manifest-only leftover is gone.
+    // Free the fresh destinations, then restore the preserved members.  After
+    // the last move the entry holds only the recovery manifest, so the cleanup
+    // branch removes it instead of leaving a resumable-looking leftover.
+    clearFreshMembers(stateDir);
+    const rolled = await runBundle(
+      ["bundle", "rollback", ROLLBACK, reinit.quarantineId],
+      stateDir,
+      credentialsDir,
+    );
+    expect(rolled.kind).toBe("rolled-back");
     expect(existsSync(entry)).toBe(false);
 
     // Observable outcome: the next reinitialize starts FRESH (new id), not a
-    // resume of the leftover checkpoint.
+    // resume of the consumed leftover checkpoint.
     const result = await runBundle(
       ["bundle", "reinitialize", APPROVE, ACK],
       stateDir,
@@ -1638,12 +1673,12 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
     );
     expect(result.kind).toBe("reinitialized");
     if (result.kind !== "reinitialized") return;
-    expect(result.quarantineId).not.toBe(oldId);
+    expect(result.quarantineId).not.toBe(reinit.quarantineId);
   });
 
-  it("never discards an entry that preserves member bytes", () => {
+  it("never discards an entry that preserves member bytes", async () => {
     const root = mkRoot("nookbridge-bundle-discard-preserved-");
-    const stateDir = join(root, "state");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
     const id = "abadcafe-0123456789ab";
     const entry = join(quarantineRoot(stateDir), id);
     mkdirSync(entry, { recursive: true, mode: 0o700 });
@@ -1651,8 +1686,15 @@ describe("T2 — extra entry cleanup (discardEmptyEntry)", () => {
     writeFileSync(join(entry, MANIFEST_NAME), "{}");
     writeFileSync(join(entry, "nookbridge-storage.db"), "preserved-bytes");
 
-    discardEmptyEntry(stateDir, id);
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
 
+    // An entry that preserves member bytes is not a manifest-only leftover:
+    // the scan refuses and leaves every byte in place.
+    expect(result.kind).toBe("error");
     expect(existsSync(entry)).toBe(true);
     expect(existsSync(join(entry, "nookbridge-storage.db"))).toBe(true);
     expect(readFileSync(join(entry, "nookbridge-storage.db"), "utf8")).toBe("preserved-bytes");
@@ -3934,15 +3976,24 @@ describe("review round 4 — rollback, direct removal, copy cleanup", () => {
     expect(readFileSync(temporary, "utf8")).toBe("half-written");
   });
 
-  it("refuses a direct removal through a symlinked quarantine root", () => {
+  it("refuses a mutation through a symlinked quarantine root", async () => {
     const root = mkRoot("nookbridge-bundle-rm-symlink-root-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
     const outside = mkRoot("nookbridge-bundle-rm-symlink-outside-");
     const id = "abadcafe-0123456789ab";
     mkdirSync(join(outside, id, "nested"), { recursive: true, mode: 0o700 });
     writeFileSync(join(outside, id, "nested", "keep"), "keep");
-    symlinkSync(outside, quarantineRoot(root));
+    rmSync(quarantineRoot(stateDir), { recursive: true, force: true });
+    symlinkSync(outside, quarantineRoot(stateDir));
 
-    expect(removeBundleQuarantineEntry(root, id)).toBe(false);
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toBe("refusing unsafe quarantine root");
     expect(readFileSync(join(outside, id, "nested", "keep"), "utf8")).toBe("keep");
   });
 

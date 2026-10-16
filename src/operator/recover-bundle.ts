@@ -61,7 +61,7 @@ import process from "node:process";
 
 import Database from "better-sqlite3-multiple-ciphers";
 
-import { holderRecord, lockPath, releaseOwnedLockFile, tryAcquireLock } from "../config/lock.js";
+import { acquireInspectLock, tryAcquireLock } from "../config/lock.js";
 import { normaliseStateDir } from "../config/state-dir.js";
 import {
   NOOKBRIDGE_DB_KEY_LABEL,
@@ -270,68 +270,41 @@ export function inspectProductionBundle(
   //    mutation mid-move leaves a transient partial root, and an unlocked read
   //    would report that instead of "locked".  Any existing lock file — live
   //    or stale — refuses; nothing is reclaimed and nothing is unlinked here.
-  let fd: number;
-  try {
-    fd = openSync(lockPath(stateDir), "wx", 0o600);
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    if (code === "EEXIST") return { kind: "locked" };
-    // A nonexistent state directory has nothing to inspect.
-    if (code === "ENOENT") return { kind: "missing" };
-    // Any other failure to create the lock is unsafe to proceed past.
-    return { kind: "indeterminate" };
-  }
-
-  // The holder record, verified at release.  The same formatter the acquire
-  // path uses writes it, so every lock file has one record format.
-  const record = holderRecord();
-  // What release needs to prove the lock file is still this call's.  Filled in
-  // as the lock is recorded; an unset inode means ownership was never proven.
-  const held: HeldInspectLock = { lockIno: undefined, recordWritten: false };
+  //    The shared handle does the exclusive create, the fstat, and the holder
+  //    record write, and owns the only way to release what it created.
+  const acquired = acquireInspectLock(stateDir);
+  if (acquired.kind === "locked") return { kind: "locked" };
+  if (acquired.kind === "missing") return { kind: "missing" };
+  if (acquired.kind === "indeterminate") return { kind: "indeterminate" };
+  const handle = acquired.handle;
 
   let result: BundleInspection;
-  try {
-    result = inspectWhileHeld(stateDir, key, fd, record, held);
-  } catch {
-    // Inspection is categorical and read-only: an unexpected failure during the
-    // copy or probe is "indeterminate", never an exception that escapes.
+  if (!handle.recordWritten) {
+    // The holder record is REQUIRED, not best-effort: inspect is read-only and
+    // must not proceed without it.  A short or failed write is indeterminate,
+    // and the caller still releases the file this call created.
     result = { kind: "indeterminate" };
+  } else {
+    try {
+      result = inspectWhileHeld(stateDir, key);
+    } catch {
+      // Inspection is categorical and read-only: an unexpected failure during
+      // the copy or probe is "indeterminate", never an exception that escapes.
+      result = { kind: "indeterminate" };
+    }
   }
-  // 8. Release only the lock file this call still owns.  If that removal fails,
-  //    the file is left for an operator, so the result cannot be trusted.
-  const released = releaseIfOwned(stateDir, fd, held.lockIno, record, held.recordWritten);
-  return released ? result : { kind: "indeterminate" };
-}
-
-/** Lock facts the release step needs, recorded while the lock is held. */
-interface HeldInspectLock {
-  lockIno: number | undefined;
-  recordWritten: boolean;
+  // 8. Release only the lock file this call still owns.  If that removal is not
+  //    proven, the file is left for an operator, so the result cannot be trusted.
+  const outcome = handle.release();
+  return outcome === "released" ? result : { kind: "indeterminate" };
 }
 
 /**
- * Steps 5–7: everything after the lock is acquired.  Throws on an unexpected
- * failure; the caller turns that into "indeterminate".
+ * Step 7 and the categorical probe checks: everything after the lock and
+ * holder record are established.  Throws on an unexpected failure; the caller
+ * turns that into "indeterminate".
  */
-function inspectWhileHeld(
-  stateDir: string,
-  key: string | undefined,
-  fd: number,
-  record: string,
-  held: HeldInspectLock,
-): BundleInspection {
-  // 5. Record ownership of the file just created.
-  held.lockIno = fstatSync(fd).ino;
-
-  // 4. The holder record is REQUIRED, not best-effort: inspect is read-only
-  //    and must not proceed without it.  A short write counts as a failed
-  //    write, so the caller reports "indeterminate".
-  const written = writeSync(fd, record, 0, "utf8");
-  if (written !== Buffer.byteLength(record, "utf8")) {
-    throw new Error("short write of the inspect holder record");
-  }
-  held.recordWritten = true;
-
+function inspectWhileHeld(stateDir: string, key: string | undefined): BundleInspection {
   // 7. A mutation may have changed the state between step 1 and the acquire,
   //    so re-run the presence check under the lock.
   const presence = memberPresence(stateDir);
@@ -512,40 +485,6 @@ function classifyMemberForReinit(copyPath: string, key: string): MemberReinitSta
  */
 function escapeReinitKey(key: string): string {
   return key.replace(/["\\]/g, "");
-}
-
-/**
- * Remove this call's lock file, then close the fd.  Keeping the fd open pins
- * the inode, so no other file can take its number while this call holds it.
- * The file is removed only while it is still the exact file this call created:
- * same inode, and, when the holder record was written, the same record.  A
- * foreign or replaced file is not ours and is left in place.
- *
- * Returns false whenever release cannot be proved, including a missing or
- * replaced lock file, so the caller must not report a clean result. Never throws.
- */
-function releaseIfOwned(
-  stateDir: string,
-  fd: number,
-  lockIno: number | undefined,
-  record: string,
-  recordWritten: boolean,
-): boolean {
-  try {
-    if (lockIno === undefined) return false;
-    const outcome = releaseOwnedLockFile(
-      lockPath(stateDir),
-      lockIno,
-      recordWritten ? record : undefined,
-    );
-    return outcome === "released";
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      /* already closed */
-    }
-  }
 }
 
 /**
@@ -1210,7 +1149,7 @@ type ResolvedQuarantineScan =
  * here.  The caller supplies the state root.  The id must be a quarantine
  * identifier, so a traversal id or any other name is refused untouched.
  */
-export function removeBundleQuarantineEntry(stateDir: string, id: string): boolean {
+function removeBundleQuarantineEntry(stateDir: string, id: string): boolean {
   // A symlinked or non-directory quarantine root is refused, so a direct caller
   // cannot reach a child in another directory through it.
   if (!QUARANTINE_ID_PATTERN.test(id) || quarantineRootUnsafe(stateDir)) {
@@ -1556,14 +1495,11 @@ function quarantineRootUnsafe(stateDir: string): boolean {
  * Remove an entry only when it preserves nothing.  If any member/sidecar was
  * already moved into it, the preserved bytes are left in place for a resume.
  *
- * Called on a fresh-run manifest-write failure and on a first-move failure:
- * in both cases the entry holds at most the recovery manifest, so it must not
- * be left behind.  Exported so the branch can be tested directly; a
- * deterministic end-to-end move failure cannot be provoked from a temp
- * fixture (the only reliable link(2) failure, a non-writable entry, also
- * blocks the recursive removal).
+ * Called on a fresh-run manifest-write failure and on a first-move failure,
+ * and at the end of a successful rollback: in each case the entry holds at
+ * most the recovery manifest, so it must not be left behind.
  */
-export function discardEmptyEntry(stateDir: string, id: string): void {
+function discardEmptyEntry(stateDir: string, id: string): void {
   if (!QUARANTINE_ID_PATTERN.test(id)) return;
   try {
     const entry = join(stateDir, QUARANTINE_RELATIVE_DIR, id);

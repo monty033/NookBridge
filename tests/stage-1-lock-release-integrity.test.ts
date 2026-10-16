@@ -1,14 +1,6 @@
 import { Buffer } from "node:buffer";
 import type * as FsModule from "node:fs";
-import {
-  lstatSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,7 +21,7 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-import { lockPath, releaseLock, releaseOwnedLockFile, tryAcquireLock } from "../src/config/lock.js";
+import { acquireInspectLock, lockPath, releaseLock, tryAcquireLock } from "../src/config/lock.js";
 
 describe("Stage 1 — lock release integrity", () => {
   const dirs: string[] = [];
@@ -57,28 +49,36 @@ describe("Stage 1 — lock release integrity", () => {
 
   it("removes a matching inode and record", () => {
     const dir = freshDir();
-    const path = lockPath(dir);
-    const record = "12345\n\n";
-    writeFileSync(path, record);
-    const ino = lstatSync(path).ino;
-    expect(releaseOwnedLockFile(path, ino, record)).toBe("released");
+    const acquired = acquireInspectLock(dir);
+    expect(acquired.kind).toBe("acquired");
+    if (acquired.kind !== "acquired") return;
+    expect(acquired.handle.release()).toBe("released");
     expect(readdirSync(dir).filter((name) => name.includes(".release-"))).toEqual([]);
   });
 
   it("preserves the file when the expected record differs", () => {
     const dir = freshDir();
     const path = lockPath(dir);
-    const record = "12345\n\n";
-    writeFileSync(path, record);
-    const ino = lstatSync(path).ino;
+    const acquired = acquireInspectLock(dir);
+    expect(acquired.kind).toBe("acquired");
+    if (acquired.kind !== "acquired") return;
+    // Replace the holder record under the same inode, so the inode matches but
+    // the record does not and ownership cannot be proved.
+    writeFileSync(path, "wrong record");
     const bytes = readFileSync(path);
-    expect(releaseOwnedLockFile(path, ino, "wrong record")).toBe("foreign");
+    expect(acquired.handle.release()).toBe("foreign");
     expect(readFileSync(path)).toEqual(bytes);
   });
 
   it("returns gone for an absent path", () => {
     const dir = freshDir();
-    expect(releaseOwnedLockFile(join(dir, "absent"), 1, undefined)).toBe("gone");
+    const path = lockPath(dir);
+    const acquired = acquireInspectLock(dir);
+    expect(acquired.kind).toBe("acquired");
+    if (acquired.kind !== "acquired") return;
+    // Remove the file out from under the handle: release finds nothing to detach.
+    unlinkSync(path);
+    expect(acquired.handle.release()).toBe("gone");
     expect(readdirSync(dir).filter((name) => name.includes(".release-"))).toEqual([]);
   });
 
