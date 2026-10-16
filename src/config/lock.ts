@@ -111,6 +111,8 @@ export interface InspectLockHandle {
    * and, when a full holder record was written, the same record.  Closes the
    * file descriptor.  Returns `"released"`, `"gone"` (no file at the path), or
    * `"foreign"` (a replacement this handle does not own, left in place).
+   * One-shot: only the first call acts.  Any later call returns `"foreign"` and
+   * touches nothing, so a stale handle cannot release a newer inspect lock.
    */
   release(): "released" | "gone" | "foreign";
 }
@@ -178,10 +180,16 @@ export function acquireInspectLock(stateDir: string): InspectLockAcquire {
   }
   const recordWritten = written === recordBuf.length;
 
+  // One-shot: the first release attempt is the only one that acts.  A retained
+  // handle called again after a later acquisition must not re-run the rename
+  // against that newer lock, so later calls touch nothing and report "foreign".
+  let spent = false;
   const handle: InspectLockHandle = {
     record,
     recordWritten,
     release: (): "released" | "gone" | "foreign" => {
+      if (spent) return "foreign";
+      spent = true;
       try {
         return releaseOwnedLockFile(path, ino, recordWritten ? record : undefined);
       } finally {

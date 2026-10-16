@@ -80,6 +80,26 @@ describe("Stage 1 — lock release integrity", () => {
     expect(() => lstatSync(path)).toThrow();
   });
 
+  it("a stale inspect handle cannot release a lock acquired later", () => {
+    const dir = freshDir();
+    const path = lockPath(dir);
+    const first = acquireInspectLock(dir);
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    expect(first.handle.release()).toBe("released");
+    const second = acquireInspectLock(dir);
+    expect(second.kind).toBe("acquired");
+    if (second.kind !== "acquired") return;
+    const bytes = readFileSync(path);
+    // The stale handle is spent: it must not touch the newer lock file.
+    expect(first.handle.release()).toBe("foreign");
+    expect(readFileSync(path)).toEqual(bytes);
+    expect(readdirSync(dir).filter((name) => name.includes(".release-"))).toEqual([]);
+    // The newer handle still owns and releases its own lock.
+    expect(second.handle.release()).toBe("released");
+    expect(() => lstatSync(path)).toThrow();
+  });
+
   it("preserves the file when the expected record differs", () => {
     const dir = freshDir();
     const path = lockPath(dir);
