@@ -17,7 +17,7 @@ const baseEnv = {
 };
 
 async function scratch(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "nookbridge-editor-test-"));
+  return mkdtemp(join("/tmp", "nbk-editor-"));
 }
 
 function editor(code: string): string {

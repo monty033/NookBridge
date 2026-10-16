@@ -41,6 +41,7 @@ import {
 } from "./rpc-protocol.js";
 import {
   startOperatorSocketServer,
+  UNIX_SOCKET_PATH_MAX_BYTES,
   type StartOperatorSocketServerOptions,
   type OperatorSocketServerHandle,
 } from "./operator-socket-server.js";
@@ -629,6 +630,9 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     path.resolve(options.socketPath) !== options.socketPath
   ) {
     throw nookdServerError("nookd socket path must be absolute");
+  }
+  if (Buffer.byteLength(options.socketPath) > UNIX_SOCKET_PATH_MAX_BYTES) {
+    throw nookdServerError("nookd socket path is too long");
   }
   if (
     typeof options.runtime !== "object" ||

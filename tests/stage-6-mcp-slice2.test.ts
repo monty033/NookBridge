@@ -10,7 +10,6 @@
 import { Buffer } from "node:buffer";
 import { createServer, type Server } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,7 +25,7 @@ const serverHandles: NookdServerHandle[] = [];
 const fakeServers: Server[] = [];
 
 function temporarySocketPath(prefix: string): string {
-  const directory = mkdtempSync(join(tmpdir(), prefix));
+  const directory = mkdtempSync(join("/tmp", prefix));
   temporaryDirectories.push(directory);
   return join(directory, "nookd.sock");
 }
