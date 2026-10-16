@@ -52,7 +52,14 @@ export function releaseOwnedLockFile(
   expectedIno: number,
   expectedRecord: string | undefined,
 ): "released" | "gone" | "foreign" {
-  const detached = `${path}.release-${randomBytes(8).toString("hex")}`;
+  // Token generation runs before any rename.  A failure leaves the file at
+  // `path`, so it is reported as foreign, not gone.
+  let detached: string;
+  try {
+    detached = `${path}.release-${randomBytes(8).toString("hex")}`;
+  } catch {
+    return "foreign";
+  }
   try {
     renameSync(path, detached);
   } catch (error) {
@@ -168,7 +175,11 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     // remains (at the lock path or under a `.release-*` name), this function
     // still returns null, so acquisition fails closed until an operator clears
     // it.  No path reclaims it.  The stage-9 doc states this residue path.
-    releaseOwnedLockFile(canonical, ino, undefined);
+    try {
+      releaseOwnedLockFile(canonical, ino, undefined);
+    } catch {
+      /* best-effort: a throw here must not escape; the caller still gets null */
+    }
     try {
       closeSync(fd);
     } catch {

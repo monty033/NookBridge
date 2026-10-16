@@ -76,8 +76,10 @@ Verified behavior (source and focused tests):
   window is accepted and not closed by this change. If restoration fails, the file
   remains under a `.release-*` name for an operator to inspect. A holder-record
   write that fails or is short removes its own lock file when it can. If that
-  removal fails, the file stays at the lock path and acquisition still refuses
-  until an operator clears it. No code path guarantees that file is removed.
+  removal fails, the file stays at the lock path and blocks acquisition until an
+  operator clears it. A file left under a `.release-*` name is not at the lock path
+  and does not block a later acquisition; an operator must inspect it. No code path
+  guarantees that either file is removed.
 - Each probe copies members into a per-run directory created with `mkdtemp` and
   set to mode `0700`. Its owner record is written exclusively (`wx`, `0600`).
   The startup sweep runs under the lock at each probe (inspect or
