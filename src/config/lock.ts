@@ -35,7 +35,9 @@ import process from "node:process";
 import { normaliseStateDir } from "./state-dir.js";
 
 /** Backing field for in-process lock holders. */
-const HELD: Map<string, { fd: number; path: string; ino: number; record: string }> = new Map();
+type HeldLock = { fd: number; path: string; ino: number; record: string };
+
+const HELD: Map<string, HeldLock> = new Map();
 
 export function lockPath(stateDir: string): string {
   return join(normaliseStateDir(stateDir), "nookbridge.lock");
@@ -287,8 +289,12 @@ export function tryAcquireLock(stateDir: string): (() => void) | null {
     }
     return null;
   }
-  HELD.set(canonical, { fd, path: canonical, ino, record: pidBuf.toString("utf8") });
-  return () => releaseLock(stateDir);
+  const entry: HeldLock = { fd, path: canonical, ino, record: pidBuf.toString("utf8") };
+  HELD.set(canonical, entry);
+  // The release closure is bound to this acquisition's entry, not to the
+  // directory. After a release and a later re-acquire, an old closure finds a
+  // different entry in HELD and does nothing, so it cannot release a newer lock.
+  return () => releaseAcquisition(canonical, entry);
 }
 
 /** Return whether the current process currently holds the lock. */
@@ -324,6 +330,18 @@ export function releaseLock(stateDir: string): boolean {
   const canonical = resolve(lockPath(stateDir));
   const held = HELD.get(canonical);
   if (!held) {
+    return false;
+  }
+  return releaseAcquisition(canonical, held);
+}
+
+/**
+ * Release one specific acquisition. Does nothing unless `held` is still the
+ * entry in HELD for `canonical`, so a stale release capability cannot free a
+ * lock acquired later.
+ */
+function releaseAcquisition(canonical: string, held: HeldLock): boolean {
+  if (HELD.get(canonical) !== held) {
     return false;
   }
   releaseOwnedLockFile(canonical, held.ino, held.record);

@@ -1,6 +1,14 @@
 import { Buffer } from "node:buffer";
 import type * as FsModule from "node:fs";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -54,6 +62,22 @@ describe("Stage 1 — lock release integrity", () => {
     if (acquired.kind !== "acquired") return;
     expect(acquired.handle.release()).toBe("released");
     expect(readdirSync(dir).filter((name) => name.includes(".release-"))).toEqual([]);
+  });
+
+  it("a stale release closure cannot release a lock acquired later", () => {
+    const dir = freshDir();
+    const path = lockPath(dir);
+    const first = tryAcquireLock(dir);
+    expect(first).not.toBeNull();
+    first?.();
+    const second = tryAcquireLock(dir);
+    expect(second).not.toBeNull();
+    // The old closure must not touch the new acquisition.
+    first?.();
+    expect(lstatSync(path).isFile()).toBe(true);
+    expect(tryAcquireLock(dir)).toBeNull();
+    second?.();
+    expect(() => lstatSync(path)).toThrow();
   });
 
   it("preserves the file when the expected record differs", () => {
