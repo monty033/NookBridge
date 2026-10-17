@@ -4,7 +4,6 @@ import { once } from "node:events";
 import { Buffer } from "node:buffer";
 import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -91,7 +90,7 @@ async function fixture(
   search: NookdServerRuntime["search"],
   options: Omit<Parameters<typeof startNookdServer>[0], "socketPath" | "runtime"> = {},
 ): Promise<{ handle: NookdServerHandle; socketPath: string }> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-stage7-slice2-"));
+  const directory = await mkdtemp(path.join("/tmp", "nbk-stage7-slice2-"));
   directories.push(directory);
   const socketPath = path.join(directory, "nookbridge.sock");
   const runtime: NookdServerRuntime = Object.freeze({ search, cleanup: async () => undefined });
@@ -133,7 +132,7 @@ async function readFrame(socket: net.Socket): Promise<RpcResponseEnvelope> {
 async function invalidOption(
   option: Omit<Parameters<typeof startNookdServer>[0], "socketPath" | "runtime">,
 ): Promise<void> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-stage7-invalid-"));
+  const directory = await mkdtemp(path.join("/tmp", "nbk-stage7-invalid-"));
   directories.push(directory);
   const runtime: NookdServerRuntime = Object.freeze({
     search: async () => [],
@@ -174,7 +173,7 @@ describe("hostile input validators", () => {
   });
 
   it("captures stateful startup getters once before validation", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-stage7-capture-"));
+    const directory = await mkdtemp(path.join("/tmp", "nbk-stage7-capture-"));
     directories.push(directory);
     const socketPath = path.join(directory, "nookbridge.sock");
     let socketPathReads = 0;

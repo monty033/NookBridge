@@ -29,9 +29,18 @@ transport capabilities.
   state inspection or mutation.
 - State roots must be canonical, existing, non-symlink directories; database
   paths must remain inside the state root.
-- Active lock files, missing/unsafe state, quarantine collisions, unsafe
+- Any existing lock file, including a stale lock, missing/unsafe state, quarantine collisions, unsafe
   identifiers, occupied rollback destinations, and incomplete quarantine entries
-  fail closed.
+  fail closed. A stale lock requires an operator to confirm no daemon is running and remove
+  `nookbridge.lock` by hand; inspect never reclaims it. A symlinked or non-directory quarantine root also fails closed
+  before any move, for both reinitialize and rollback.
+- Quarantine manifests carry one of three statuses: `incomplete` (member moves
+  in progress), `initializing` (every original member has moved and fresh
+  members are being created), and `complete`.  Reinitialize resumes an
+  `incomplete` or `initializing` checkpoint; an `initializing` checkpoint is
+  resumed only when every member is recorded as moved and present in the entry.
+  Rollback refuses an `initializing` checkpoint outright, and refuses any entry
+  with a manifest member missing, before any move.
 - `--approve-reinitialize` is required for the quarantine path.
 - The original database is preserved by a restrictive, same-filesystem,
   no-copy/no-clobber move into `.recovery-quarantine/<opaque-id>/`; it is never
@@ -45,6 +54,90 @@ transport capabilities.
 - The focused recovery suite exercises inspection, approval ordering,
   quarantine preservation/mode, fresh-state initialization, rollback,
   collision handling, parser carrier rejection, and CLI dispatch.
+
+## P1-9 Phase 1 — production bundle recovery (source, 2026-10-14)
+
+Branch `feat/production-bundle-recovery-20261013`, local only. Not pushed; no
+PR. This is source behavior for the production database bundle
+(`nookbridge-storage.db`, `notesnook.db`, `notesnook-logs.db`, with WAL/SHM
+sidecars). It does not include a VM drill, privileged state, or live Notesnook
+access.
+
+Verified behavior (source and focused tests):
+
+- One exclusive state lock (`openSync(..., "wx")`) is taken before inspect
+  reads member presence and is held across the private copy and probe. A held
+  lock is reported as `locked`. Inspect never reclaims a lock file, live or
+  stale. On release it renames the lock file aside, then removes it only when its inode
+  and holder record still match what was written; a non-matching file is linked
+  back. This narrows the release race but is not atomic: a new holder can create
+  a lock after an operator deletes a live one, our release can rename that lock
+  aside, and a third process can acquire before it is linked back. This residual
+  window is accepted and not closed by this change. If restoration fails, the file
+  remains under a `.release-*` name for an operator to inspect. A holder-record
+  write that fails or is short removes its own lock file when it can. If that
+  removal fails, the file stays at the lock path and blocks acquisition until an
+  operator clears it. A file left under a `.release-*` name is not at the lock path
+  and does not block a later acquisition; an operator must inspect it. No code path
+  guarantees that either file is removed.
+- Each probe copies members into a per-run directory created with `mkdtemp` and
+  set to mode `0700`. Its owner record is written exclusively (`wx`, `0600`).
+  The startup sweep runs under the lock at each probe (inspect or
+  reinitialize), not at process start. It removes a
+  `nookbridge-bundle-inspect-*` directory only when all of these hold: it is
+  owned by the current uid, is not a symlink, is older than one hour, and its
+  recorded owner pid is no longer alive.
+- Member and sidecar copies open each source with `O_NOFOLLOW`, which refuses a
+  symlink at open, and `O_NONBLOCK`, which keeps an open of a FIFO from waiting
+  for a writer. The opened descriptor is then checked with `fstat`, which refuses
+  a FIFO or other non-regular file. The code does not establish that opening every
+  special file is non-blocking. A preliminary
+  `lstat` presence check is not tied to that inode. Inspect assumes no
+  non-cooperating writer swaps a member or sidecar between the check and the
+  open, or alters one in place during the copy. It does not detect either, so a
+  copy taken during such a write could mix two states. The owner-file check
+  rejects symlinks.
+- For inspect, a probe that throws becomes the categorical `indeterminate`
+  result. Reinitialize never returns `indeterminate`: a probe that throws, or a
+  copy that cannot be classified, refuses with the categorical error
+  "refusing unprobeable production database bundle" (exit code 2). A failure to
+  create the private copy directory, write its owner record, or copy a member
+  or sidecar returns `corrupt` to inspect and the same categorical refusal
+  (exit code 2) to reinitialize. Inspect removes its own lock file when it can prove the file is its own. If that removal fails, inspect returns `indeterminate` and leaves the file for an operator. Inspect also removes its private copy directory. If that removal fails, inspect returns `indeterminate`, and reinitialize refuses with the same categorical error, because a copy of the bundle would remain in `tmpdir()`.
+- Reinitialize resumes an `initializing` checkpoint only when every member is
+  recorded as moved and present in the entry. Rollback refuses an
+  `initializing` checkpoint and any entry with a manifest member missing.
+- Rollback and resume refuse unlisted sidecars in the state root or in an
+  entry, and refuse symlinked manifests.
+- A `-wal` or `-shm` sidecar with no main database file is an orphan, not an
+  empty root. Inspect reports it as `partial`, and reinitialize refuses it
+  before any move. Only a resumable checkpoint can explain a partial state.
+- Manifest writes use random-named temporaries created exclusively (`wx`, no
+  symlink following). Resume and rollback sweep manifest temporaries left by a
+  crash, and never unlink a symlink that has that name.
+- If a restore move fails, rollback undoes its own completed moves. If that
+  undo also fails, it returns `ROLLBACK_PARTIAL` (exit 3).
+- `NOOKBRIDGE_DATABASE_KEY` is a forbidden bundle carrier. Its presence fails
+  closed, and its value is never read or copied into the parser snapshot. The
+  CLI forwards `CREDENTIALS_DIRECTORY` only when it is absolute.
+- `bundle reinitialize` requires both `--approve-reinitialize` and
+  `--accept-unsynced-loss`. The second flag acknowledges that unsynced local
+  state will be discarded. It is refused alone or alongside unrelated flags.
+
+Test and mutation evidence (this commit's tree):
+
+- `tests/stage-9-production-bundle-recovery.test.ts`: 118/118 passing. This includes regression tests for
+  sidecar inventory, symlinked manifests, probe failure, a partial bundle
+  snapshot (bytes and inodes), manifest temporary naming, and quarantine-remover
+  containment.
+- Scratch mutation driver (not committed): 14 targeted mutants of
+  `recover-bundle.ts`, 14/14 killed, on an earlier candidate. It was not re-run
+  on this tree; the mutation evidence is therefore stale for the current code.
+
+Not proven by this slice: SQLCipher error classification on real encrypted
+state, WAL behavior under real crashes, filesystem durability, runtime races,
+the clean NixOS VM drill, privileged production recovery, post-recovery policy
+checks, or resync. Those remain open, as listed below.
 
 ## Remaining release gates
 

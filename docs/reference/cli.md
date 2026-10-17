@@ -15,7 +15,7 @@ version's help for exact syntax and availability.
 | `notes` | Bounded browse, search, get, edit, and undo operations. | Search/content arrive through bounded stdin; edit and undo require `--approve-edit`. |
 | `tree` | Bounded notebook/filetree navigation. | Opaque handles and cursors only. |
 | `settings` | Inspect and validate settings. | Nix-managed installs reject CLI edits; change deployment configuration instead. |
-| `recover-local-state` | Inspect, quarantine/reinitialize, or roll back damaged state. | Default is read-only; mutation requires the exact approval flag and must be operator-reviewed. |
+| `recover-local-state` | Inspect, quarantine/reinitialize, or roll back damaged state. | Default is read-only; mutation requires the exact approval flag and must be operator-reviewed. `bundle reinitialize` also requires `--accept-unsynced-loss`, which acknowledges that unsynced local state is discarded. |
 
 ## Input rules
 

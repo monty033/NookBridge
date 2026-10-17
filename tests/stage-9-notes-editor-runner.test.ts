@@ -1,8 +1,8 @@
-import { chmod, mkdtemp, readFile, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   MAX_EDITOR_MARKDOWN_BYTES,
   NotesEditorError,
@@ -16,9 +16,19 @@ const baseEnv = {
   LANG: "C.UTF-8",
 };
 
+// Short roots keep editor command strings under the 256-character cap. Track
+// every root so the suite removes them, not just the runner's own subdirectory.
+const createdRoots: string[] = [];
+
 async function scratch(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "nookbridge-editor-test-"));
+  const root = await mkdtemp(join("/tmp", "nbk-editor-"));
+  createdRoots.push(root);
+  return root;
 }
+
+afterAll(async () => {
+  await Promise.all(createdRoots.map((root) => rm(root, { recursive: true, force: true })));
+});
 
 function editor(code: string): string {
   return `${node} -e ${JSON.stringify(code)}`;

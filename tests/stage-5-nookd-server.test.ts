@@ -2,7 +2,7 @@
 
 import { once } from "node:events";
 import { Buffer } from "node:buffer";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,10 @@ import {
   type NookdServerRuntime,
 } from "../src/service/nookd-server.js";
 import { runNookdCli } from "../src/nookd.js";
+import {
+  startOperatorSocketServer,
+  UNIX_SOCKET_PATH_MAX_BYTES,
+} from "../src/service/operator-socket-server.js";
 
 const handles: NookdServerHandle[] = [];
 const tempDirectories: string[] = [];
@@ -38,7 +42,7 @@ async function fixture(
     shutdownTimeoutMs?: number;
   } = {},
 ): Promise<{ handle: NookdServerHandle; socketPath: string; cleanup: ReturnType<typeof vi.fn> }> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-server-"));
+  const directory = await mkdtemp(path.join("/tmp", "nbk-"));
   tempDirectories.push(directory);
   const socketPath = path.join(directory, "nookbridge.sock");
   const cleanup = vi.fn(async () => undefined);
@@ -301,7 +305,7 @@ describe("nookd Unix socket server", () => {
       startNookdServer({ socketPath: "relative.sock", runtime, installSignalHandlers: false }),
     ).rejects.toThrow("absolute");
 
-    const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-existing-"));
+    const directory = await mkdtemp(path.join("/tmp", "nbk-existing-"));
     tempDirectories.push(directory);
     const existing = path.join(directory, "existing");
     await (await import("node:fs/promises")).mkdir(existing);
@@ -355,6 +359,67 @@ describe("nookd Unix socket server", () => {
     }
   });
 
+  it("rejects a socket path longer than the Unix socket limit without creating a socket", async () => {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-limit-"));
+    tempDirectories.push(directory);
+    const stem = "s".repeat(UNIX_SOCKET_PATH_MAX_BYTES + 1 - Buffer.byteLength(directory) - 1);
+    const socketPath = path.join(directory, stem);
+    expect(Buffer.byteLength(socketPath)).toBe(UNIX_SOCKET_PATH_MAX_BYTES + 1);
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: async () => [],
+      cleanup: async () => undefined,
+    });
+
+    await expect(
+      startNookdServer({ socketPath, runtime, installSignalHandlers: false }),
+    ).rejects.toThrow("nookd socket path is too long");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("starts and accepts a connection at exactly the Unix socket path limit", async () => {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-limit-"));
+    tempDirectories.push(directory);
+    const stem = "s".repeat(UNIX_SOCKET_PATH_MAX_BYTES - Buffer.byteLength(directory) - 1);
+    const socketPath = path.join(directory, stem);
+    expect(Buffer.byteLength(socketPath)).toBe(UNIX_SOCKET_PATH_MAX_BYTES);
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: async (query: string) => [{ title: `hit:${query}` }],
+      cleanup: async () => undefined,
+    });
+
+    const handle = await startNookdServer({ socketPath, runtime, installSignalHandlers: false });
+    handles.push(handle);
+
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("limit", "needle"));
+    const response = await readFrame(socket);
+
+    expect(response).toMatchObject({ id: "limit", ok: true });
+    socket.destroy();
+  });
+
+  it("rejects an operator socket path longer than the Unix socket limit", async () => {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-op-limit-"));
+    tempDirectories.push(directory);
+    const stem = "o".repeat(UNIX_SOCKET_PATH_MAX_BYTES + 1 - Buffer.byteLength(directory) - 1);
+    const socketPath = path.join(directory, stem);
+    expect(Buffer.byteLength(socketPath)).toBe(UNIX_SOCKET_PATH_MAX_BYTES + 1);
+
+    await expect(
+      startOperatorSocketServer({
+        socketPath,
+        socketPathRoot: directory,
+        authorize: (method) => ({ allowed: true, method }),
+        handle: async (request) => ({
+          id: request.id,
+          ok: true,
+          result: { kind: "operation-list", handles: [] },
+        }),
+      }),
+    ).rejects.toThrow("operator socket path is too long");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
   /**
    * Regression: `validateOptions` builds its normalized result as a
    * hand-written whitelist. When `operator` was omitted from that list the
@@ -364,7 +429,7 @@ describe("nookd Unix socket server", () => {
    * calling `startOperatorSocketServer` directly, bypassing `validateOptions`.
    */
   it("starts the configured operator endpoint alongside the service socket", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "nookd-server-operator-"));
+    const directory = await mkdtemp(path.join("/tmp", "nbk-operator-"));
     tempDirectories.push(directory);
     const socketPath = path.join(directory, "nookbridge.sock");
     const operatorSocketPath = path.join(directory, "operator.sock");
@@ -379,7 +444,7 @@ describe("nookd Unix socket server", () => {
       installSignalHandlers: false,
       operator: {
         socketPath: operatorSocketPath,
-        socketPathRoot: os.tmpdir(),
+        socketPathRoot: directory,
         resolvePeer: () => ({
           uid: process.getuid?.() ?? 0,
           gid: process.getgid?.() ?? 0,

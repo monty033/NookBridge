@@ -21,6 +21,17 @@ const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES = 65_536;
 const DEFAULT_SOCKET_MODE = 0o660;
 const SOCKET_ROOT = "/run/nookbridge";
+
+/**
+ * Conservative maximum byte length for a Unix socket path.
+ *
+ * Chosen below the `sun_path` limits of common platforms rather than equal to
+ * any one of them: macOS allows 104 bytes including the terminator, and the
+ * Linux kernel accepts 108, but on this host a 109-byte path silently binds
+ * without creating a socket file, so the guard must sit below that edge.
+ */
+export const UNIX_SOCKET_PATH_MAX_BYTES = 103;
+
 /**
  * The token shape accepted for a peer's group entry: a POSIX group name as
  * resolved by the credential helper, or the numeric id it falls back to when
@@ -273,6 +284,8 @@ function validateSocketPath(value: string, testRoot?: string): string {
     !value.startsWith(`${root}/`)
   )
     throw new Error("operator socket path is invalid");
+  if (Buffer.byteLength(value) > UNIX_SOCKET_PATH_MAX_BYTES)
+    throw new Error("operator socket path is too long");
   return value;
 }
 
