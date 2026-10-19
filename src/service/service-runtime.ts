@@ -661,70 +661,12 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
   const lockedNoteProof =
     resolveNotePath === undefined || updateNote === undefined || deleteNote === undefined
       ? undefined
-      : async (path: ExactNotePathInput): Promise<RpcLockedNoteProofResult> => {
-          let pathBytes: number;
-          try {
-            pathBytes = exactNotePathBytes(path);
-          } catch {
-            pathBytes = 0;
-          }
-          const report = {
-            kind: "locked_note_proof" as const,
-            pathBytes,
-            read: "service_unavailable" as RpcLockedNoteProofResult["read"],
-            update: "service_unavailable" as RpcLockedNoteProofResult["update"],
-            delete: "service_unavailable" as RpcLockedNoteProofResult["delete"],
-          };
-          let resolution: ExactNotePathResolution;
-          try {
-            parseExactNotePath(path);
-            resolution = await resolveNotePath(path);
-          } catch (error) {
-            if (error instanceof ExactNotePathError && error.code === "not_found") {
-              return Object.freeze({
-                ...report,
-                read: "not_found",
-                update: "not_found",
-                delete: "not_found",
-              });
-            }
-            return Object.freeze(report);
-          }
-
-          try {
-            report.read =
-              (await proofReadNoteLockState(resolution.id)) === "locked" ? "vault_locked" : "ok";
-          } catch (error) {
-            report.read = isVaultLockedReadProofError(error)
-              ? "vault_locked"
-              : "service_unavailable";
-          }
-          const pinned = resolution.pinned === true;
-          try {
-            await updateNote({
-              id: resolution.id,
-              expectedRevision: resolution.expectedRevision as NotesnookRevisionToken,
-              patch: { pinned },
-            });
-            report.update = "ok";
-          } catch (error) {
-            report.update = isVaultLockedWriteProofError(error)
-              ? "vault_locked"
-              : "service_unavailable";
-          }
-          try {
-            await deleteNote({
-              id: resolution.id,
-              expectedRevision: resolution.expectedRevision as NotesnookRevisionToken,
-            });
-            report.delete = "ok";
-          } catch (error) {
-            report.delete = isVaultLockedWriteProofError(error)
-              ? "vault_locked"
-              : "service_unavailable";
-          }
-          return Object.freeze(report);
-        };
+      : createLockedNoteProof({
+          resolveNotePath,
+          readNoteLockState: proofReadNoteLockState,
+          updateNote,
+          deleteNote,
+        });
 
   const remoteSync = core.handle.remoteSync;
   const requestSync =
@@ -881,6 +823,103 @@ function pathDiagnosticReport(
     ...unavailableContentDiagnostic(),
     ...diagnostic,
   });
+}
+
+export type LockedNoteProofDeps = Readonly<{
+  resolveNotePath: (path: ExactNotePathInput) => Promise<ExactNotePathResolution>;
+  readNoteLockState: (id: string) => Promise<"locked" | "unlocked">;
+  updateNote: (command: UpdateNoteCommand) => Promise<unknown>;
+  deleteNote: (command: DeleteNoteCommand) => Promise<unknown>;
+}>;
+
+const PROOF_REVISION_PATTERN = /^rev_[0-9a-f]{32}$/;
+
+/** A well-formed revision guaranteed to differ from `revision` (last hex digit changed). */
+function mismatchedProofRevision(revision: string): NotesnookRevisionToken | undefined {
+  if (!PROOF_REVISION_PATTERN.test(revision)) return undefined;
+  const last = revision.slice(-1);
+  return `${revision.slice(0, -1)}${last === "0" ? "1" : "0"}` as NotesnookRevisionToken;
+}
+
+/**
+ * Builds the locked-note proof.  The proof must never mutate a note: an
+ * unlocked target reports update/delete as `permission_denied` without calling
+ * a mutator, and a locked target is probed only with a deliberately
+ * mismatched revision, so even an unexpectedly successful probe cannot apply.
+ */
+export function createLockedNoteProof(
+  deps: LockedNoteProofDeps,
+): (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult> {
+  return async (path) => {
+    let pathBytes: number;
+    try {
+      pathBytes = exactNotePathBytes(path);
+    } catch {
+      pathBytes = 0;
+    }
+    const report = {
+      kind: "locked_note_proof" as const,
+      pathBytes,
+      read: "service_unavailable" as RpcLockedNoteProofResult["read"],
+      update: "service_unavailable" as RpcLockedNoteProofResult["update"],
+      delete: "service_unavailable" as RpcLockedNoteProofResult["delete"],
+    };
+    let resolution: ExactNotePathResolution;
+    try {
+      parseExactNotePath(path);
+      resolution = await deps.resolveNotePath(path);
+    } catch (error) {
+      if (error instanceof ExactNotePathError && error.code === "not_found") {
+        return Object.freeze({
+          ...report,
+          read: "not_found",
+          update: "not_found",
+          delete: "not_found",
+        });
+      }
+      return Object.freeze(report);
+    }
+
+    let isLocked: boolean;
+    try {
+      isLocked = (await deps.readNoteLockState(resolution.id)) === "locked";
+    } catch (error) {
+      if (!isVaultLockedReadProofError(error)) return Object.freeze(report);
+      isLocked = true;
+    }
+    if (!isLocked) {
+      return Object.freeze({
+        ...report,
+        read: "ok",
+        update: "permission_denied",
+        delete: "permission_denied",
+      });
+    }
+
+    report.read = "vault_locked";
+    const probeRevision = mismatchedProofRevision(resolution.expectedRevision);
+    if (probeRevision === undefined) return Object.freeze(report);
+
+    try {
+      await deps.updateNote({
+        id: resolution.id,
+        expectedRevision: probeRevision,
+        patch: { pinned: resolution.pinned === true },
+      });
+      report.update = "ok";
+    } catch (error) {
+      report.update = isVaultLockedWriteProofError(error) ? "vault_locked" : "service_unavailable";
+    }
+    if (report.update !== "vault_locked") return Object.freeze(report);
+
+    try {
+      await deps.deleteNote({ id: resolution.id, expectedRevision: probeRevision });
+      report.delete = "ok";
+    } catch (error) {
+      report.delete = isVaultLockedWriteProofError(error) ? "vault_locked" : "service_unavailable";
+    }
+    return Object.freeze(report);
+  };
 }
 
 function isVaultLockedReadProofError(error: unknown): boolean {
