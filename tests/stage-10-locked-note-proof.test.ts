@@ -121,7 +121,10 @@ import {
   createProductionServiceRuntime,
   type ServiceRuntime,
 } from "../src/service/service-runtime.js";
-import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
+import {
+  ExactNotePathError,
+  type ExactNotePathErrorCode,
+} from "../src/service/exact-note-path-resolver.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createCustomServicePolicy } from "../src/service/service-policy.js";
 import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credential-keystore.js";
@@ -338,6 +341,46 @@ describe("D4-2 — unresolved exact path", () => {
     expect(d.updateNote).toHaveBeenCalledTimes(0);
     expect(d.deleteNote).toHaveBeenCalledTimes(0);
   });
+});
+
+describe("D4-4 — every exact-path error code maps to a closed proof result", () => {
+  // A Record keyed by ExactNotePathErrorCode makes the table exhaustive at
+  // compile time: adding a resolver code without deciding its proof mapping
+  // fails the typecheck instead of silently falling through to a generic case.
+  const expectations: Readonly<
+    Record<ExactNotePathErrorCode, "not_found" | "service_unavailable">
+  > = {
+    invalid_path: "service_unavailable",
+    not_found: "not_found",
+    ambiguous: "service_unavailable",
+    source_unavailable: "service_unavailable",
+  };
+
+  it.each(
+    Object.entries(expectations) as Array<
+      [ExactNotePathErrorCode, "not_found" | "service_unavailable"]
+    >,
+  )(
+    "%s maps to %s for read, update, and delete with zero mutator calls",
+    async (code, expected) => {
+      const d = deps("unlocked", {
+        resolveNotePath: vi.fn(async () => {
+          throw new ExactNotePathError(code);
+        }),
+      });
+      const r = await createLockedNoteProof(d)(PROOF_PATH);
+      expect(r).toEqual({
+        kind: "locked_note_proof",
+        pathBytes: Buffer.byteLength(PROOF_PATH),
+        read: expected,
+        update: expected,
+        delete: expected,
+      });
+      expect(d.readNoteLockState).toHaveBeenCalledTimes(0);
+      expect(d.updateNote).toHaveBeenCalledTimes(0);
+      expect(d.deleteNote).toHaveBeenCalledTimes(0);
+    },
+  );
 });
 
 describe("D4-2 — vault-locked read refusal branch", () => {
