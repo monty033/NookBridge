@@ -81,6 +81,18 @@ function encodeFrame(payload: object): Uint8Array {
 // Policy surface — readOnly denies notes.create.
 // ---------------------------------------------------------------------------
 
+const RWND = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.path_diagnostic",
+  "notes.sync",
+] as const;
+
 describe("service policy — readOnly continues to deny notes.create", () => {
   it("denies notes.create under readOnly with the closed categorical reason", () => {
     const decision: ServicePolicyDecision = authorizeServiceMethod(
@@ -123,8 +135,14 @@ describe("service policy — readWriteNoDelete admits notes.create and the four 
     expect(decision).toEqual({ allowed: true, method: "notes.create" });
   });
 
-  it("allows notes.delete when the settings policy admits delete", () => {
+  it("refuses notes.delete under readWriteNoDelete", () => {
     const policy = createReadWriteNoDeleteServicePolicy();
+    const decision = authorizeServiceMethod(policy, "notes.delete");
+    expect(decision).toEqual({ allowed: false, reason: "permission_denied" });
+  });
+
+  it("allows notes.delete when an explicit custom allowlist includes it", () => {
+    const policy = createCustomServicePolicy([...RWND, "notes.delete"]);
     const decision = authorizeServiceMethod(policy, "notes.delete");
     expect(decision).toEqual({ allowed: true, method: "notes.delete" });
   });

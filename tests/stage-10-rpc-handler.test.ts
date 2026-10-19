@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildNotebookIndex } from "../src/settings/notebook-index.js";
 import type { SettingsOperation } from "../src/settings/settings-types.js";
 import {
+  createCustomServicePolicy,
   createReadWriteNoDeleteServicePolicy,
   type ServicePolicySettingsContext,
 } from "../src/service/service-policy.js";
@@ -17,6 +18,18 @@ import type {
   CreateNoteResult,
   UpdateNoteResult,
 } from "../src/core/notesnook-write-adapter.js";
+
+const RWND = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.path_diagnostic",
+  "notes.sync",
+] as const;
 
 const REVISION = "rev_0123456789abcdef0123456789abcdef";
 
@@ -327,7 +340,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     const response = await handleRpcRequest(
       request("notes.delete", { path: "Personal/Projects/Roadmap" }),
       makeRuntime({ resolveNotePath, deleteNote }),
-      createReadWriteNoDeleteServicePolicy(evaluator),
+      createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
     expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
@@ -336,6 +349,26 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     ]);
     expect(resolveNotePath).not.toHaveBeenCalled();
     expect(deleteNote).not.toHaveBeenCalled();
+  });
+
+  it("refuses notes.delete under readWriteNoDelete before settings, resolving or mutating (P-1)", async () => {
+    const { calls, evaluator } = makeEvaluator(true);
+    const resolveNotePath = vi.fn(async () => {
+      throw new Error("delete resolver must not run after policy denial");
+    });
+    const deleteNote = vi.fn(async () => {
+      throw new Error("delete mutation must not run after policy denial");
+    });
+    const response = await handleRpcRequest(
+      request("notes.delete", { path: "Personal/Projects/Roadmap" }),
+      makeRuntime({ resolveNotePath, deleteNote }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(resolveNotePath).not.toHaveBeenCalled();
+    expect(deleteNote).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
   });
 
   it("passes explicit notebook and slash-containing title context to authorization", async () => {
@@ -351,7 +384,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     const response = await handleRpcRequest(
       request("notes.delete", { notebookPath: "Personal/Projects", noteTitle: "Roadmap/A" }),
       makeRuntime({ resolveNotePath, deleteNote }),
-      createReadWriteNoDeleteServicePolicy(evaluator),
+      createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
     expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
@@ -377,7 +410,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     const response = await handleRpcRequest(
       request("notes.delete", { path: "General/Bernie Test Locked" }),
       makeRuntime({ resolveNotePath, deleteNote }),
-      createReadWriteNoDeleteServicePolicy(evaluator),
+      createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
     expect(response).toMatchObject({ ok: false, error: { code: "vault_locked" } });
@@ -408,7 +441,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     const response = await handleRpcRequest(
       request("notes.delete", { path: "Roadmap" }),
       makeRuntime({ resolveNotePath, deleteNote }),
-      createReadWriteNoDeleteServicePolicy(evaluator),
+      createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
     expect(response).toMatchObject({ ok: true, result: { kind: "delete", id: "note-1" } });
