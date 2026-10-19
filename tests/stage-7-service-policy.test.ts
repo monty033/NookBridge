@@ -40,6 +40,7 @@ import {
   SERVICE_POLICY_PROFILES,
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
+  createCustomServicePolicy,
   createReadWriteNoDeleteServicePolicy,
   isServicePolicyProfile,
   type ServicePolicy,
@@ -252,6 +253,42 @@ describe("service policy — outbound sync admission", () => {
     expect(authorizeServiceMethod(createReadOnlyServicePolicy(), "notes.sync")).toEqual({
       allowed: false,
       reason: "permission_denied",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P-1 — readWriteNoDelete must not admit notes.delete.
+// ---------------------------------------------------------------------------
+
+const RWND = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.path_diagnostic",
+  "notes.sync",
+] as const;
+
+describe("service policy — readWriteNoDelete excludes delete (P-1)", () => {
+  it("readWriteNoDelete excludes notes.delete and denies it categorically", () => {
+    const policy = createReadWriteNoDeleteServicePolicy();
+    expect(policy.allowedMethods).not.toContain("notes.delete");
+    expect(Array.from(policy.allowedMethods)).toEqual([...RWND]);
+    expect(authorizeServiceMethod(policy, "notes.delete")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+  });
+
+  it("admits notes.delete only through an explicit custom allowlist", () => {
+    const policy = createCustomServicePolicy([...RWND, "notes.delete"]);
+    expect(authorizeServiceMethod(policy, "notes.delete")).toEqual({
+      allowed: true,
+      method: "notes.delete",
     });
   });
 });

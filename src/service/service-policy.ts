@@ -40,9 +40,9 @@
  *     literals — `"readOnly"`, `"readWriteNoDelete"`, and
  *     `"custom"`.  The `readOnly` allowlist is exactly the four
  *     read methods in published order.  The historical
- *     `readWriteNoDelete` profile admits the four reads plus the
- *     bounded create, append, update, delete, and sync methods;
- *     notebook-scoped settings provide the delete decision.  The
+ *     `readWriteNoDelete` profile admits the reads plus the
+ *     bounded create, append, update and sync methods; delete is
+ *     available only through an explicit custom allowlist.  The
  *     `custom` allowlist is the configured subset of the same closed
  *     method universe.  Any future widening requires an explicit
  *     decision-record amendment.
@@ -163,7 +163,6 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
-    "notes.delete",
     "notes.path_diagnostic",
     "notes.sync",
   ];

@@ -102,6 +102,18 @@ const makeStubEvaluator = (
  * so this exercises the evaluator wiring on the canonical
  * readWriteNoDelete shape.
  */
+const RWND = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.path_diagnostic",
+  "notes.sync",
+] as const;
+
 const makePolicyWithEvaluator = (
   evaluator: (
     op: SettingsOperation,
@@ -253,7 +265,9 @@ describe("service policy — evaluator with an allowed decision", () => {
 describe("service policy — evaluator with a denied decision", () => {
   it("preserves the evaluator when the server narrows the policy", () => {
     const { calls, evaluator } = makeStubEvaluator({ allowed: false });
-    const narrowed = narrowServicePolicy(makePolicyWithEvaluator(evaluator));
+    const narrowed = narrowServicePolicy(
+      createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
+    );
 
     expect(narrowed).toBeDefined();
     expect(

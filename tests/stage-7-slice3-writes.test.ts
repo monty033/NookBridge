@@ -484,6 +484,18 @@ describe("rpc protocol — bounded append/update result shapes", () => {
 // Service policy — append/update admissions.
 // ---------------------------------------------------------------------------
 
+const RWND = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.path_diagnostic",
+  "notes.sync",
+] as const;
+
 describe("service policy — append/update admissions", () => {
   it("readWriteNoDelete admits notes.append and notes.update", () => {
     const policy = createReadWriteNoDeleteServicePolicy();
@@ -491,8 +503,8 @@ describe("service policy — append/update admissions", () => {
     expect(authorizeServiceMethod(policy, "notes.update").allowed).toBe(true);
   });
 
-  it("readWriteNoDelete admits notes.delete", () => {
-    const policy = createReadWriteNoDeleteServicePolicy();
+  it("custom allowlist with notes.delete admits notes.delete", () => {
+    const policy = createCustomServicePolicy([...RWND, "notes.delete"]);
     expect(authorizeServiceMethod(policy, "notes.delete")).toEqual({
       allowed: true,
       method: "notes.delete",
