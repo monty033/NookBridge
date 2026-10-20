@@ -2564,4 +2564,77 @@ describe("R2b — write-ahead intent precedes existing-note mutations", () => {
       expect((coordinator as unknown as { recordIntent?: unknown }).recordIntent).toBeUndefined();
     },
   );
+
+  // Opus review B1: every real-coordinator case above proves the marker is
+  // KEPT. Without these, a release that silently fails (wrong `this`,
+  // identity mismatch) would pass the suite and orphan an intent per
+  // optimistic-concurrency failure until the queue refuses writes.
+  it.each(OPS)(
+    "4b. %s: a nothing-mutated code releases the intent on a real coordinator",
+    async (op) => {
+      const { store } = memoryStore();
+      const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+      const events: string[] = [];
+      const adapter = stubAdapterFor(
+        op,
+        () => {
+          throw new NotesnookWriteContractError("stale_revision");
+        },
+        events,
+      );
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+      expect(await codeOf(() => run(composition, op))).toBe("stale_revision");
+
+      expect(pendingOf(real)).toEqual([]);
+      // The release must reach the store too, not just in-memory state.
+      const restarted = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+      expect(pendingOf(restarted)).toEqual([]);
+    },
+  );
+
+  it.each(OPS)("4c. %s: releasing keeps an unrelated intent on a real coordinator", async (op) => {
+    const { store } = memoryStore();
+    const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+    real.recordIntent({ operation: op, noteId: OTHER_NOTE_ID });
+    const events: string[] = [];
+    const adapter = stubAdapterFor(
+      op,
+      () => {
+        throw new NotesnookWriteContractError("conflict");
+      },
+      events,
+    );
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+    expect(await codeOf(() => run(composition, op))).toBe("conflict");
+
+    expect(pendingOf(real)).toEqual([expect.objectContaining({ noteId: OTHER_NOTE_ID })]);
+  });
+
+  // Opus review B2: the token-shape guards were reachable but untested —
+  // deleting them would have passed the suite.
+  describe.each(OPS)("%s: a malformed intent token refuses the mutation", (op) => {
+    const cases: ReadonlyArray<readonly [string, () => unknown]> = [
+      ["a thenable", () => Promise.resolve({ operation: op, noteId: NOTE_ID, sequence: 1 })],
+      ["a primitive", () => 42],
+      ["null", () => null],
+      [
+        "a mismatched operation",
+        () => ({ operation: op === "update" ? "delete" : "update", noteId: NOTE_ID, sequence: 1 }),
+      ],
+      ["a mismatched note id", () => ({ operation: op, noteId: OTHER_NOTE_ID, sequence: 1 })],
+    ];
+
+    it.each(cases)("%s", async (_label, make) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({ intent: { events, onRecordIntent: make } });
+      const adapter = stubAdapterFor(op, () => goodResult(op), events);
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+      expect(adapter.commands).toHaveLength(0);
+      expect(coordinator.receipts).toHaveLength(0);
+    });
+  });
 });
