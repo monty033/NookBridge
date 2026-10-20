@@ -76,8 +76,19 @@ export type OperatorAuthorizer = (
   request?: RpcRequest,
 ) => Promise<OperatorPolicyDecision>;
 
+/**
+ * Reads that return or preview a specific note's content.  Like mutations they
+ * must name a target that resolves for the peer and sits in a notebook whose
+ * policy explicitly allows the read; a root-level note has no notebook and is
+ * always refused.  Reads never consult lock state.
+ */
+export const OPERATOR_TARGET_READ_METHODS: ReadonlyArray<OperatorMethod> = Object.freeze([
+  "notes.get-view",
+  "notes.edit-preimage",
+]);
+
 export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): OperatorAuthorizer {
-  return async (method, peer, request) => {
+  const decide: OperatorAuthorizer = async (method, peer, request) => {
     const context = peerToAuthorizationContext(peer) as OperatorAuthorizationContext & {
       noteLockState?: OperatorNoteLockState;
       notebookPolicy?: OperatorNotebookPolicy;
@@ -119,7 +130,23 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
         return { allowed: false, reason: "permission_denied" };
       }
     }
+    if (OPERATOR_TARGET_READ_METHODS.includes(method)) {
+      if (!(await requestTargetKnown(deps, request, peer, method))) {
+        return { allowed: false, reason: "permission_denied" };
+      }
+      if (notebookPolicy === undefined) {
+        return { allowed: false, reason: "permission_denied" };
+      }
+    }
     return authorizeOperatorMethod(createOperatorPolicy(evaluateOperatorRequest), method, context);
+  };
+  return async (method, peer, request) => {
+    try {
+      return await decide(method, peer, request);
+    } catch {
+      // A dependency that throws or rejects is a refusal, never a rejection.
+      return { allowed: false, reason: "permission_denied" };
+    }
   };
 }
 
