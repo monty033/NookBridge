@@ -243,13 +243,18 @@ export function bindNotesnookWriteRuntime(
     let contentLocked: boolean | undefined;
     try {
       const contentResult = await safeCall(() => snapshot.content.findByNoteId(safeId));
-      contentLocked =
-        contentResult !== undefined && contentResult !== null && typeof contentResult === "object"
-          ? readOptionalLockedMarker(contentResult)
-          : undefined;
-    } catch (error) {
-      contentLocked =
-        isNotesnookWriteContractError(error) && error.code === "vault_locked" ? true : undefined;
+      if (contentResult === undefined || contentResult === null) {
+        contentLocked = undefined;
+      } else if (typeof contentResult === "object") {
+        contentLocked = readOptionalLockedMarker(contentResult);
+      } else {
+        // Indeterminate lock state fails closed.
+        contentLocked = true;
+      }
+    } catch {
+      // Vault-locked, lookup failure, or malformed marker: the lock state
+      // cannot be shown to be unlocked, so report locked.
+      contentLocked = true;
     }
     return mapNote(noteResult, safeId, contentLocked ?? explicitLocked);
   };
@@ -956,9 +961,6 @@ function mapContent(value: unknown, requestedNoteId: string): NotesnookWriteStor
  */
 function readOptionalLockedMarker(record: object): boolean | undefined {
   const property = readOwnProperty(record, "locked", "invalid_input");
-  if (!property.present) return undefined;
-  const value = property.value;
-  if (value === undefined) return undefined;
   let dataIsCipher = false;
   try {
     const recordValue = record as Record<string, unknown>;
@@ -976,6 +978,9 @@ function readOptionalLockedMarker(record: object): boolean | undefined {
     throw wiringError("invalid_input");
   }
   if (dataIsCipher) return true;
+  if (!property.present) return undefined;
+  const value = property.value;
+  if (value === undefined) return undefined;
   if (typeof value !== "boolean") throw wiringError("invalid_input");
   return value;
 }
