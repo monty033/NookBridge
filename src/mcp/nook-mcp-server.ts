@@ -14,11 +14,10 @@
  *     status, notebook-listing, and note-metadata tools plus create, append,
  *     and update. No delete tool exists.
  *   - The search tool input schema is a fixed JSON Schema for
- *     `{ query: string, limit?: number }`. `limit` is optional
- *     and is documented as currently ignored because the
- *     underlying Stage 5 RPC does not support a caller-provided
- *     limit (this is captured in `docs/stage-6-mcp-proxy.md`).
- *     The Stage 5 RPC contract is unchanged in this slice.
+ *     `{ query: string, limit?: number }`. `limit` is optional;
+ *     the proxy applies it to the title-only result set, keeping
+ *     the daemon's order. The Stage 5 RPC contract remains
+ *     `{ query }` and is unchanged in this slice.
  *   - The tool callback validates the input shape and bounds
  *     BEFORE invoking the socket client. A hostile or empty
  *     query never reaches the daemon.
@@ -114,10 +113,9 @@ export const NOOK_MCP_MAX_TAGS = 16;
 export const NOOK_MCP_MAX_REVISION_BYTES = 36;
 export const NOOK_MCP_MAX_NOTE_PATH_BYTES = 512;
 
-/** Maximum `limit` we will ever accept, even if a future Stage 6
- *  slice grows the underlying RPC to support one.  Today `limit`
- *  is documented as ignored; we still bound it so a future code
- *  path cannot be widened to an unbounded slice by accident. */
+/** Maximum `limit` we will ever accept.  The proxy applies the
+ *  bound to the title-only result set itself; the underlying RPC
+ *  stays `{ query }`. */
 export const NOOK_MCP_MAX_LIMIT = 64;
 
 function isSafeIdentifier(value: string): boolean {
@@ -200,8 +198,7 @@ const SEARCH_TOOL_DEFINITION = Object.freeze({
         type: "integer",
         description:
           "Optional upper bound on the number of returned titles. " +
-          "Currently ignored by the underlying service; documented in " +
-          "docs/stage-6-mcp-proxy.md.",
+          "Applied by the proxy in the daemon's order; the query is sent unchanged.",
         minimum: 1,
         maximum: NOOK_MCP_MAX_LIMIT,
       }),
@@ -487,7 +484,7 @@ const searchInputSchema = {
     .min(1)
     .max(NOOK_MCP_MAX_LIMIT)
     .optional()
-    .describe("Optional upper bound on returned titles (currently ignored)."),
+    .describe("Optional upper bound on returned titles, applied in the daemon's order."),
 };
 
 const emptyInputSchema = {};
@@ -1456,9 +1453,10 @@ async function invokeSearch(
   }
   try {
     if (result.envelope.result.kind !== "search") return toMcpErrorResult("service_unavailable");
+    const notes = result.envelope.result.notes.map((note) => ({ title: note.title }));
     const payload = {
       kind: "search",
-      notes: result.envelope.result.notes.map((note) => ({ title: note.title })),
+      notes: normalised.limit === undefined ? notes : notes.slice(0, normalised.limit),
     };
     return {
       content: [
@@ -1502,6 +1500,7 @@ async function callToolDirectly(
 interface NormalisedSearchInput {
   readonly ok: true;
   readonly query: string;
+  readonly limit?: number;
 }
 interface NormalisedSearchFailure {
   readonly ok: false;
@@ -1530,9 +1529,8 @@ function normaliseSearchInput(input: SearchInput): NormalisedSearchInput | Norma
   if (Buffer.byteLength(trimmed, "utf8") > NOOK_MCP_MAX_QUERY_BYTES) {
     return { ok: false, code: "invalid_request" };
   }
-  // `limit` is intentionally accepted in the input schema (so a
-  // future Stage 6 slice can wire it through without a schema
-  // break) but currently ignored; see docs/stage-6-mcp-proxy.md.
+  // `limit` is optional; the proxy applies it to the returned
+  // title-only hits after validation. The daemon RPC stays `{ query }`.
   const limit = (input as { limit?: unknown }).limit;
   if (
     limit !== undefined &&
@@ -1543,7 +1541,7 @@ function normaliseSearchInput(input: SearchInput): NormalisedSearchInput | Norma
   ) {
     return { ok: false, code: "invalid_request" };
   }
-  return { ok: true, query: trimmed };
+  return { ok: true, query: trimmed, ...(typeof limit === "number" ? { limit } : {}) };
 }
 
 /**
