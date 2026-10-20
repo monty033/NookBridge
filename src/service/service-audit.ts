@@ -44,6 +44,7 @@ export type ServiceAuditOutcome =
   | "sync_failed"
   | "vault_locked"
   | "not_found"
+  | "local_sync_marker_failed"
   | "timeout"
   | "admission_rejected"
   | "budget_exceeded";
@@ -84,6 +85,7 @@ export const SERVICE_AUDIT_OUTCOMES = objectFreeze([
   "sync_failed",
   "vault_locked",
   "not_found",
+  "local_sync_marker_failed",
   "timeout",
   "admission_rejected",
   "budget_exceeded",

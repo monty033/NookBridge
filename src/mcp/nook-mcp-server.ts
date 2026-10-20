@@ -705,7 +705,8 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       NOOK_MCP_CREATE_NOTE_TOOL_NAME,
       {
         title: "Create note",
-        description: "Create a bounded note.",
+        description:
+          "Create a bounded note. On local_sync_marker_failed the note exists locally, so do not retry the create.",
         inputSchema: createNoteInputSchema,
         annotations: CREATE_NOTE_TOOL_DEFINITION.annotations as ToolAnnotations,
       },
@@ -1572,6 +1573,8 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
       return "vault_locked";
     case "not_found":
       return "not_found";
+    case "local_sync_marker_failed":
+      return "local_sync_marker_failed";
     case "service_unavailable":
       return "service_unavailable";
     default:

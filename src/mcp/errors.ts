@@ -51,6 +51,7 @@ export type NookMcpErrorCode =
   | "stale_revision"
   | "conflict"
   | "not_found"
+  | "local_sync_marker_failed"
   | "unknown_tool";
 
 /** Update-tool-only categorical reasons; never used on the shared RPC envelope. */
@@ -82,6 +83,7 @@ const NOOK_MCP_ERROR_MESSAGES: Readonly<Record<NookMcpErrorCode, string>> = Obje
   stale_revision: "Stale revision",
   conflict: "Conflict",
   not_found: "Not found",
+  local_sync_marker_failed: "Local change committed; sync intent not persisted",
   unknown_tool: "Unknown tool",
 });
 
