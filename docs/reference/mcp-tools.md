@@ -56,6 +56,12 @@ For the operator CLI, categorical reason display is currently specific to
 back to `service_unavailable` for unknown values. This does not change other
 `nookctl notes` command formatting.
 
+`local_sync_marker_failed` means the local write committed but its sync intent
+was not persisted ("Local change committed; sync intent not persisted"). The
+change exists locally, so do not retry the write: a retried
+`notesnook_create_note` would create a duplicate note. The same code is used at
+every layer (RPC, audit outcome, socket client, MCP).
+
 Write operations use optimistic revision checks. A stale revision, conflict,
 locked Vault, unavailable service, or failed synchronization is an outcome to
 handle explicitly; the proxy does not automatically resolve conflicts or retry

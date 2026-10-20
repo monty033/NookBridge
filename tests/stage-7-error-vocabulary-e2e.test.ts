@@ -14,10 +14,12 @@
  */
 
 import { Buffer } from "node:buffer";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { URL, fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -36,9 +38,12 @@ import { createCustomServicePolicy, type ServicePolicy } from "../src/service/se
 import { createProductionServiceRuntime } from "../src/service/service-runtime.js";
 import {
   RPC_ERROR_MESSAGES,
+  serializeRpcResponse,
   type RpcErrorCode,
   type RpcRequest,
 } from "../src/service/rpc-protocol.js";
+import { buildServiceAuditRecord, type ServiceAuditRecord } from "../src/service/service-audit.js";
+import { createLogger } from "../src/logging/logger.js";
 import {
   NotesnookWriteContractError,
   type NotesnookWriteErrorCode,
@@ -120,7 +125,7 @@ const T1_EXPECTED: Record<NotesnookWriteErrorCode, Triple> = {
   conflict: same("conflict"),
   vault_locked: same("vault_locked"),
   sync_failed: same("sync_failed"),
-  local_sync_marker_failed: same("service_unavailable"),
+  local_sync_marker_failed: same("local_sync_marker_failed"),
 };
 const WRITE_CODES = Object.keys(T1_EXPECTED) as NotesnookWriteErrorCode[];
 
@@ -134,6 +139,7 @@ const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
   sync_failed: "sync_failed",
   vault_locked: "vault_locked",
   not_found: "not_found",
+  local_sync_marker_failed: "local_sync_marker_failed",
 };
 const RPC_CODES = Object.keys(RPC_TO_MCP) as RpcErrorCode[];
 
@@ -145,26 +151,17 @@ const LAYER_LABELS = {
 
 /**
  * Rows whose categorical origin is knowingly degraded to `service_unavailable`
- * at L3. Owner: R2d. `local_sync_marker_failed` means the local write committed
- * but its sync intent was not persisted; no closed RPC category covers that yet,
- * so every method reports `service_unavailable`. Remove these rows when R2d
- * assigns one. Any other categorical row that degrades fails the check.
+ * at L3. Owner: R2d. Empty since R2d: `local_sync_marker_failed` now has its own
+ * RPC code, so no categorical origin may surface as `service_unavailable`.
+ * Any categorical row that degrades fails the check.
  */
-const KNOWN_DEGRADATIONS: ReadonlySet<string> = new Set<string>([
-  "T1 local_sync_marker_failed create",
-  "T1 local_sync_marker_failed append",
-  "T1 local_sync_marker_failed update",
-  "T1 local_sync_marker_failed delete",
-]);
+const KNOWN_DEGRADATIONS: ReadonlySet<string> = new Set<string>();
 
 /**
- * Guards the set above against silent shrinkage: deriving it from
- * `WRITE_METHODS` would let a dropped method quietly reduce the allowlist and
- * with it the coverage the equal-set assertion depends on.
+ * Guards the set above against silent growth: the pinning test binds it to
+ * this list, so a new allowlisted row needs a deliberate edit in both places.
  */
-const EXPECTED_DEGRADATION_ROWS = WRITE_METHODS.map(
-  (method) => `T1 local_sync_marker_failed ${method}`,
-);
+const EXPECTED_DEGRADATION_ROWS: readonly string[] = [];
 
 /**
  * Where a row's error started. `categorical` is any contract or RPC code other
@@ -632,5 +629,122 @@ describe("degradation detection", () => {
       .map(([rowId]) => rowId)
       .sort();
     expect(degraded).toEqual([...KNOWN_DEGRADATIONS].sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2d — audit and wire contract for local_sync_marker_failed.
+// ---------------------------------------------------------------------------
+
+const FIXED_MARKER_MESSAGE = "Local change committed; sync intent not persisted";
+
+describe("R2d — audit and wire contract", () => {
+  it("(a) audits the rpc.response.sent outcome as local_sync_marker_failed", async () => {
+    const records: ServiceAuditRecord[] = [];
+    const auditLogger = createLogger({
+      sink: (line) => {
+        const parsed = JSON.parse(line) as ServiceAuditRecord & { component?: string };
+        if (parsed.component === "service_audit") records.push(parsed);
+      },
+    });
+    const dir = mkdtempSync("/tmp/nbk-");
+    const socketPath = join(dir, "nookd.sock");
+    const handle = await startNookdServer({
+      socketPath,
+      runtime: injectedRuntime(new NotesnookWriteContractError("local_sync_marker_failed")),
+      policy: createCustomServicePolicy(POLICY_METHODS),
+      installSignalHandlers: false,
+      auditLogger,
+    });
+    try {
+      const client = new NookdSocketClient({ socketPath });
+      const result = await client.createNote({ title: TITLE, content: CONTENT });
+      expect(result).toMatchObject({ ok: false, code: "local_sync_marker_failed" });
+      for (let i = 0; i < 50 && !records.some((r) => r.event === "rpc.response.sent"); i += 1) {
+        await delay(10);
+      }
+    } finally {
+      await handle.shutdown();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const sent = records.filter((record) => record.event === "rpc.response.sent");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.outcome).toBe("local_sync_marker_failed");
+    expect(() =>
+      buildServiceAuditRecord({
+        event: "rpc.response.sent",
+        outcome: "local_sync_marker_failed",
+        method: "notes.create",
+        requestIdEcho: true,
+        latencyMs: 1,
+        peerCredentials: "self",
+      }),
+    ).not.toThrow();
+  });
+
+  it("(b) serializeRpcResponse accepts only the fixed message for the code", () => {
+    const envelope = (message: string) => ({
+      id: "r2d-1",
+      ok: false as const,
+      error: { code: "local_sync_marker_failed" as const, message },
+    });
+    expect(RPC_ERROR_MESSAGES.local_sync_marker_failed).toBe(FIXED_MARKER_MESSAGE);
+    expect(() =>
+      serializeRpcResponse(envelope(RPC_ERROR_MESSAGES.local_sync_marker_failed)),
+    ).not.toThrow();
+    expect(() => serializeRpcResponse(envelope("Service unavailable"))).toThrow();
+  });
+
+  it("(c) the MCP create error names the code and carries the fixed message, no leaks", async () => {
+    await withHarness(
+      injectedRuntime(new NotesnookWriteContractError("local_sync_marker_failed")),
+      async (h) => {
+        const result = await h.server.callTool(NOOK_MCP_CREATE_NOTE_TOOL_NAME, {
+          title: TITLE,
+          content: CONTENT,
+        });
+        expect(result.isError).toBe(true);
+        const block = result.content[0];
+        if (block?.type !== "text") throw new Error("no text block");
+        expect(JSON.parse(block.text)).toMatchObject({
+          code: "local_sync_marker_failed",
+          message: FIXED_MARKER_MESSAGE,
+        });
+        const serialized = JSON.stringify(result);
+        expect(serialized).not.toContain("SECRET");
+        expect(serialized).not.toContain("CANARY");
+      },
+    );
+  });
+
+  it("(d) an unknown envelope code still degrades to service_unavailable at L2", async () => {
+    const daemon = await startEnvelopeDaemon("made_up_code" as RpcErrorCode);
+    try {
+      const client = new NookdSocketClient({ socketPath: daemon.socketPath });
+      const result = await client.createNote({ title: TITLE, content: CONTENT });
+      expect(result).toMatchObject({ ok: false, code: "service_unavailable" });
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("(e) the MCP tool list is 9 tools with unchanged input schemas", () => {
+    const client = new NookdSocketClient({ socketPath: "/tmp/nbk-never-used.sock" });
+    const { tools } = buildNookMcpServer({ client });
+    const baseline = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./fixtures/mcp-input-schemas-pre-r2d.json", import.meta.url)),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(tools).toHaveLength(9);
+    expect(Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]))).toEqual(
+      baseline,
+    );
+  });
+
+  it("documents the code and the do-not-retry rule", () => {
+    const docs = readFileSync("docs/reference/mcp-tools.md", "utf8");
+    expect(docs).toContain("local_sync_marker_failed");
   });
 });

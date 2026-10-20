@@ -1,0 +1,206 @@
+{
+  "notesnook_search_notes": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search query string. Must be non-empty after trimming and within the published byte budget.",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Optional upper bound on the number of returned titles. Applied by the proxy in the daemon's order; the query is sent unchanged.",
+        "minimum": 1,
+        "maximum": 64
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "notesnook_status": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "notesnook_list_notebooks": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "notesnook_get_note": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "notebookPath": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "noteTitle": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "notesnook_create_note": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "content": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "notebookId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "listKind": {
+        "type": "string",
+        "enum": ["simple-checklist", "task-list"],
+        "description": "Optional Notesnook list intent.  Omit to default to `simple-checklist` (backward compatible)."
+      }
+    },
+    "required": ["title", "content"],
+    "additionalProperties": false
+  },
+  "notesnook_append_note": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "markdownFragment": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "expectedRevision": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36
+      },
+      "listKind": {
+        "type": "string",
+        "enum": ["simple-checklist", "task-list"],
+        "description": "Optional Notesnook list intent.  Omit to default to `simple-checklist` (backward compatible)."
+      }
+    },
+    "required": ["id", "markdownFragment", "expectedRevision"],
+    "additionalProperties": false
+  },
+  "notesnook_update_note": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "expectedRevision": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36
+      },
+      "patch": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 7,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "notebookId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "tags": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "favorite": {
+            "type": "boolean"
+          },
+          "listKind": {
+            "type": "string",
+            "enum": ["simple-checklist", "task-list"],
+            "description": "Optional Notesnook list intent applied when the patch also rewrites `content`."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "required": ["id", "expectedRevision", "patch"],
+    "additionalProperties": false
+  },
+  "notesnook_delete_note": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "description": "Existing slash-delimited notebook hierarchy and note title form."
+      },
+      "notebookPath": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "description": "Notebook hierarchy path used with noteTitle."
+      },
+      "noteTitle": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "description": "Exact title; may contain '/' when supplied separately."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "notesnook_sync": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  }
+}

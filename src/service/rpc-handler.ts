@@ -809,7 +809,7 @@ const WRITE_ERROR_TO_RPC: Readonly<Record<NotesnookWriteErrorCode, RpcErrorCode>
   conflict: "conflict",
   vault_locked: "vault_locked",
   sync_failed: "sync_failed",
-  local_sync_marker_failed: "service_unavailable",
+  local_sync_marker_failed: "local_sync_marker_failed",
 });
 
 function isRevisionToken(value: string | undefined): value is string {
@@ -2275,7 +2275,8 @@ function buildErrorEnvelope(
     | "conflict"
     | "sync_failed"
     | "vault_locked"
-    | "not_found",
+    | "not_found"
+    | "local_sync_marker_failed",
 ): RpcAnyResponseEnvelope {
   const messages = {
     invalid_request: "Invalid request",
@@ -2286,6 +2287,7 @@ function buildErrorEnvelope(
     sync_failed: "Sync failed",
     vault_locked: "Vault locked",
     not_found: "Not found",
+    local_sync_marker_failed: "Local change committed; sync intent not persisted",
   } as const;
   const message = messages[code];
 
