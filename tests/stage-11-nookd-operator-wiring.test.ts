@@ -239,6 +239,12 @@ type WiredOperator = NonNullable<StartNookdServerOptions["operator"]>;
 type WiringOverrides = Readonly<{
   /** The notebook the probed note lives in; drives notebook policy. */
   readonly noteNotebookId?: string;
+  /**
+   * Probe a note the projection confirms belongs to no notebook.  The S2a
+   * filter only shows such a note through `notebookAbsenceConfirmed`, so the
+   * fixture must both omit `notebookId` and report no membership.
+   */
+  readonly rootLevel?: boolean;
   readonly omitMembershipLookup?: boolean;
   readonly settingsText?: string;
 }>;
@@ -259,21 +265,21 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
   // Fake read seams; the note's notebook is the knob under test.  readOnly is
   // cast `as never`, so the compiler does not check its shape.
   const noteNotebookId = overrides.noteNotebookId ?? OPEN_NOTEBOOK_ID;
+  const rootLevel = overrides.rootLevel === true;
   const readNoteLockState = vi.fn(async () => "unlocked" as const);
-  const noteMetadata = vi.fn(async () => ({
-    id: NOTE_ID,
-    title: "Probe",
-    revision: "rev-1",
-    notebookId: noteNotebookId,
-  }));
+  const noteMetadata = vi.fn(async () =>
+    rootLevel
+      ? { id: NOTE_ID, title: "Probe", revision: "rev-1", notebookAbsenceConfirmed: true }
+      : { id: NOTE_ID, title: "Probe", revision: "rev-1", notebookId: noteNotebookId },
+  );
   const listNotes = vi.fn(async () => [{ id: NOTE_ID, title: "Probe" }]);
   const findNoteIdsByNotebook = vi.fn(async (notebookId: string) =>
-    notebookId === noteNotebookId ? [NOTE_ID] : [],
+    rootLevel || notebookId !== noteNotebookId ? [] : [NOTE_ID],
   );
   // Direct-holder proof: non-recursive fixture, so the note is directly in its notebook.
   const hasNoteInNotebook = vi.fn(
     async (notebookId: string, noteId: string) =>
-      notebookId === noteNotebookId && noteId === NOTE_ID,
+      !rootLevel && notebookId === noteNotebookId && noteId === NOTE_ID,
   );
   const readOperatorNoteContent = vi.fn(async () => NOTE_CONTENT);
   const resolveNotebookPath = vi.fn(async (notebookId: string) => NOTEBOOK_PATHS[notebookId]);
@@ -324,6 +330,7 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
     resolveNotebookPath,
     listNotes,
     findNoteIdsByNotebook,
+    readOperatorNoteContent,
   };
 }
 
@@ -491,4 +498,141 @@ describe("nookd operator wiring (S1b)", () => {
       await wiring.handle.shutdown();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// D2-2 — target reads must be authorized against a target this peer resolves.
+// ---------------------------------------------------------------------------
+
+/** The two read verbs that address an existing note by handle. */
+type TargetReadMethod = "notes.get-view" | "notes.edit-preimage";
+
+const targetReadMethods: ReadonlyArray<TargetReadMethod> = Object.freeze([
+  "notes.get-view",
+  "notes.edit-preimage",
+]);
+
+const targetReadRequest = (
+  id: string,
+  method: TargetReadMethod,
+  params: Readonly<Record<string, unknown>>,
+): unknown => ({ id, method, params });
+
+const authorizeTargetRead = (
+  operator: WiredOperator,
+  peer: OperatorPeer,
+  id: string,
+  method: TargetReadMethod,
+  params: Readonly<Record<string, unknown>>,
+) => operator.authorize(method, peer, targetReadRequest(id, method, params) as never);
+
+describe("nookd operator wiring — D2 target reads (D2-2)", () => {
+  it.each(targetReadMethods)(
+    "denies %s for a root-level note and reads no content",
+    async (method) => {
+      const wiring = await startWiredNookd({ rootLevel: true });
+      try {
+        // Precondition: the production S2a visibility filter must still see the
+        // root-level note, otherwise no handle exists and the case proves
+        // nothing.  browseHandle throws when no handle is minted.
+        const noteHandle = await browseHandle(wiring.operator, OPERATOR, `browse-root-${method}`);
+
+        const decision = await authorizeTargetRead(
+          wiring.operator,
+          OPERATOR,
+          `read-root-${method}`,
+          method,
+          {
+            id: noteHandle,
+          },
+        );
+        expect(decision).toMatchObject({ allowed: false, reason: "permission_denied" });
+        // A refused read must not reach the content projection.
+        expect(wiring.readOperatorNoteContent).not.toHaveBeenCalled();
+      } finally {
+        await wiring.handle.shutdown();
+      }
+    },
+  );
+
+  it.each(targetReadMethods)("denies %s for a forged handle", async (method) => {
+    const wiring = await startWiredNookd();
+    try {
+      const decision = await authorizeTargetRead(
+        wiring.operator,
+        OPERATOR,
+        `read-forged-${method}`,
+        method,
+        {
+          id: "h_forged",
+        },
+      );
+      expect(decision).toMatchObject({ allowed: false, reason: "permission_denied" });
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+
+  it.each(targetReadMethods)("denies %s for a handle another peer minted", async (method) => {
+    const wiring = await startWiredNookd();
+    try {
+      // Peer A mints the only handle a browse hands out.
+      const noteHandle = await browseHandle(wiring.operator, OPERATOR, `browse-peer-a-${method}`);
+
+      const decision = await authorizeTargetRead(
+        wiring.operator,
+        OTHER_OPERATOR,
+        `read-peer-b-${method}`,
+        method,
+        { id: noteHandle },
+      );
+      expect(decision).toMatchObject({ allowed: false, reason: "permission_denied" });
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+
+  it.each(targetReadMethods)("denies %s when the request names no target", async (method) => {
+    const wiring = await startWiredNookd();
+    try {
+      const decision = await authorizeTargetRead(
+        wiring.operator,
+        OPERATOR,
+        `read-no-target-${method}`,
+        method,
+        {},
+      );
+      expect(decision).toMatchObject({ allowed: false, reason: "permission_denied" });
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+
+  it.each(targetReadMethods)(
+    "admits %s for the owning peer on a resolvable target",
+    async (method) => {
+      const wiring = await startWiredNookd();
+      try {
+        // Control: an owner-scoped handle on a note whose notebook policy admits
+        // reads.  This must stay allowed, so the denials above are attributable
+        // to the D2 target-read gate alone.
+        const noteHandle = await browseHandle(
+          wiring.operator,
+          OPERATOR,
+          `browse-control-${method}`,
+        );
+
+        const decision = await authorizeTargetRead(
+          wiring.operator,
+          OPERATOR,
+          `read-control-${method}`,
+          method,
+          { id: noteHandle },
+        );
+        expect(decision).toMatchObject({ allowed: true, method });
+      } finally {
+        await wiring.handle.shutdown();
+      }
+    },
+  );
 });
