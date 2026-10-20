@@ -220,6 +220,7 @@ const COMPOSITION_ERROR_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.f
   "conflict",
   "vault_locked",
   "sync_failed",
+  "local_sync_marker_failed",
 ]);
 
 /**
@@ -1525,7 +1526,19 @@ async function runLocalOperation<T>(
       throw normaliseThrow(error);
     }
     const result = copy(raw);
-    recordPending(state, operation, (result as { readonly id: string }).id);
+    const id = (result as { readonly id: string }).id;
+    if (operation === "create") {
+      // The note is already committed locally; any failure to persist its
+      // pending marker is reported as committed-but-unqueued, never as a
+      // generic sync failure.
+      try {
+        recordPending(state, operation, id);
+      } catch {
+        fail("local_sync_marker_failed");
+      }
+    } else {
+      recordPending(state, operation, id);
+    }
     return result;
   } finally {
     state.localDepth -= 1;
