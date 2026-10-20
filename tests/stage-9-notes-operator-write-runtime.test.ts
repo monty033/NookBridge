@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createOperatorWriteRuntime,
@@ -12,6 +14,8 @@ const NOTE_ID = "note-1";
 const REVISION_1 = `rev_${"1".repeat(32)}`;
 const REVISION_2 = `rev_${"2".repeat(32)}`;
 const REVISION_3 = `rev_${"3".repeat(32)}`;
+const PEER = { uid: 1000, gid: 1000, groups: ["nookbridge-operators"] };
+const OTHER = { uid: 1001, gid: 1000, groups: ["nookbridge-operators"] };
 
 const wrap = (s: string) => ({
   type: "tiptap" as const,
@@ -95,12 +99,15 @@ describe("daemon operator write runtime", () => {
       mintHandle: () => HANDLE,
     }) as typeof runtime extends (...args: never[]) => infer R
       ? R & {
-          create: (params: { title: string; content: string }) => Promise<{
+          create: (
+            params: { title: string; content: string },
+            peer?: unknown,
+          ) => Promise<{
             operationHandle: string;
           }>;
         }
       : never;
-    const result = await rt.create({ title: "Title", content: "Content" });
+    const result = await rt.create({ title: "Title", content: "Content" }, PEER);
     expect(result.operationHandle).toMatch(/^op_/);
     expect((await f.store.list())[0]?.state).toBe("committed");
   });
@@ -118,10 +125,10 @@ describe("daemon operator write runtime", () => {
       mintHandle: () => HANDLE,
     }) as typeof runtime extends (...args: never[]) => infer R
       ? R & {
-          create: (params: { title: string; content: string }) => Promise<unknown>;
+          create: (params: { title: string; content: string }, peer?: unknown) => Promise<unknown>;
         }
       : never;
-    await expect(rt.create({ title: "Title", content: "Content" })).rejects.toMatchObject({
+    await expect(rt.create({ title: "Title", content: "Content" }, PEER)).rejects.toMatchObject({
       code: "service_unavailable",
     });
     expect((await f.store.list())[0]?.state).toBe("unresolved");
@@ -129,7 +136,7 @@ describe("daemon operator write runtime", () => {
 
   it("captures a trusted preimage without writing", async () => {
     const f = await fixture();
-    const view = await runtime(f).editPreimage({ id: HANDLE });
+    const view = await runtime(f).editPreimage({ id: HANDLE }, PEER);
     expect(view.kind).toBe("preimage");
     expect(view.id).toBe(HANDLE);
     expect(view.revision).toBe(REVISION_1);
@@ -141,7 +148,7 @@ describe("daemon operator write runtime", () => {
     const f = await fixture();
     f.state.revision = REVISION_3;
     await expect(
-      runtime(f).applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: "x" }),
+      runtime(f).applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: "x" }, PEER),
     ).rejects.toMatchObject({ code: "stale_revision" });
     expect(f.state.writes).toBe(0);
   });
@@ -149,12 +156,15 @@ describe("daemon operator write runtime", () => {
   it("treats an unchanged document as a no-op with no journal entry", async () => {
     const f = await fixture();
     const rt = runtime(f, { audit: (_event: string) => void 0 });
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    const result = await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: preimage.revision,
-      markdown: preimage.markdown,
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    const result = await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: preimage.revision,
+        markdown: preimage.markdown,
+      },
+      PEER,
+    );
     expect(result.kind).toBe("edit");
     expect(result.revision).toBe(REVISION_1);
     expect(f.state.writes).toBe(0);
@@ -164,13 +174,16 @@ describe("daemon operator write runtime", () => {
   it("commits an edit, records a committed operation, and returns the actual revision", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
     const markdown = preimage.markdown.replace("before", "after");
-    const result = await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown,
-    });
+    const result = await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown,
+      },
+      PEER,
+    );
     expect(result.revision).toBe(REVISION_2);
     expect(f.state.writes).toBe(1);
     const records = await f.store.list();
@@ -187,13 +200,16 @@ describe("daemon operator write runtime", () => {
         '<p>before</p><div data-type="attachment" data-id="local-reference"><img src="https://example.com/image" alt="image"></div>',
     });
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
     expect(preimage.markdown).toContain("nookbridge opaque");
-    const result = await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const result = await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     expect(result.kind).toBe("edit");
     expect(f.state.writes).toBe(1);
   });
@@ -213,13 +229,16 @@ describe("daemon operator write runtime", () => {
       now: () => 1000,
       ttlMs: 60_000,
     });
-    const preimage = await rt.editPreimage({ id: HANDLE });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
     await expect(
-      rt.applyEdit({
-        id: HANDLE,
-        expectedRevision: REVISION_1,
-        markdown: preimage.markdown.replace("before", "after"),
-      }),
+      rt.applyEdit(
+        {
+          id: HANDLE,
+          expectedRevision: REVISION_1,
+          markdown: preimage.markdown.replace("before", "after"),
+        },
+        PEER,
+      ),
     ).rejects.toMatchObject({ code: "service_unavailable" });
     const records = await f.store.list();
     expect(records).toHaveLength(1);
@@ -244,7 +263,9 @@ describe("daemon operator write runtime", () => {
       now: () => 1000,
       ttlMs: 60_000,
     });
-    await expect(rt.editPreimage({ id: HANDLE })).rejects.toMatchObject({ code: "vault_locked" });
+    await expect(rt.editPreimage({ id: HANDLE }, PEER)).rejects.toMatchObject({
+      code: "vault_locked",
+    });
   });
 
   it("reports a locked refusal on apply-edit and apply-undo too", async () => {
@@ -271,27 +292,36 @@ describe("daemon operator write runtime", () => {
       now: () => 1000,
       ttlMs: 60_000,
     });
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     const [record] = await f.store.list();
     locked = true;
     await expect(
-      rt.applyEdit({
-        id: HANDLE,
-        expectedRevision: REVISION_2,
-        markdown: preimage.markdown,
-      }),
+      rt.applyEdit(
+        {
+          id: HANDLE,
+          expectedRevision: REVISION_2,
+          markdown: preimage.markdown,
+        },
+        PEER,
+      ),
     ).rejects.toMatchObject({ code: "vault_locked" });
     await expect(
-      rt.applyUndo({
-        id: HANDLE,
-        operationHandle: record!.handle,
-        expectedRevision: REVISION_2,
-      }),
+      rt.applyUndo(
+        {
+          id: HANDLE,
+          operationHandle: record!.handle,
+          expectedRevision: REVISION_2,
+        },
+        PEER,
+      ),
     ).rejects.toMatchObject({ code: "vault_locked" });
   });
 
@@ -312,7 +342,7 @@ describe("daemon operator write runtime", () => {
       now: () => 1000,
       ttlMs: 60_000,
     });
-    await expect(rt.editPreimage({ id: HANDLE })).rejects.toMatchObject({
+    await expect(rt.editPreimage({ id: HANDLE }, PEER)).rejects.toMatchObject({
       code: "service_unavailable",
     });
   });
@@ -320,18 +350,24 @@ describe("daemon operator write runtime", () => {
   it("undoes a committed edit by restoring the stored preimage", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     const [record] = await f.store.list();
-    const undone = await rt.applyUndo({
-      id: HANDLE,
-      operationHandle: record!.handle,
-      expectedRevision: REVISION_2,
-    });
+    const undone = await rt.applyUndo(
+      {
+        id: HANDLE,
+        operationHandle: record!.handle,
+        expectedRevision: REVISION_2,
+      },
+      PEER,
+    );
     expect(undone.kind).toBe("undo");
     expect(undone.revision).toBe(REVISION_3);
     expect(f.state.content.data).toContain("before");
@@ -341,16 +377,22 @@ describe("daemon operator write runtime", () => {
   it("refuses undo after a concurrent change and retains the record", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     const [record] = await f.store.list();
     f.state.revision = `rev_${"f".repeat(32)}`;
     await expect(
-      rt.applyUndo({ id: HANDLE, operationHandle: record!.handle, expectedRevision: REVISION_2 }),
+      rt.applyUndo(
+        { id: HANDLE, operationHandle: record!.handle, expectedRevision: REVISION_2 },
+        PEER,
+      ),
     ).rejects.toMatchObject({ code: "conflict" });
     await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "committed" });
   });
@@ -358,12 +400,15 @@ describe("daemon operator write runtime", () => {
   it("marks undo unresolved when the source outcome is uncertain", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     const [record] = await f.store.list();
     const uncertain = createOperatorWriteRuntime({
       source: {
@@ -378,11 +423,14 @@ describe("daemon operator write runtime", () => {
       ttlMs: 60_000,
     });
     await expect(
-      uncertain.applyUndo({
-        id: HANDLE,
-        operationHandle: record!.handle,
-        expectedRevision: REVISION_2,
-      }),
+      uncertain.applyUndo(
+        {
+          id: HANDLE,
+          operationHandle: record!.handle,
+          expectedRevision: REVISION_2,
+        },
+        PEER,
+      ),
     ).rejects.toMatchObject({ code: "service_unavailable" });
     await expect(f.store.get(record!.handle)).resolves.toMatchObject({ state: "unresolved" });
   });
@@ -390,10 +438,10 @@ describe("daemon operator write runtime", () => {
   it("rejects a forged opaque sentinel before any mutation", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
     const forged = `${preimage.markdown}\n:::nookbridge opaque unknownNode\nref:1:native-html:FORGED\n:::\n`;
     await expect(
-      rt.applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: forged }),
+      rt.applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: forged }, PEER),
     ).rejects.toMatchObject({ code: "invalid_request" });
     expect(f.state.writes).toBe(0);
     expect(await f.store.list()).toEqual([]);
@@ -402,24 +450,155 @@ describe("daemon operator write runtime", () => {
   it("exposes only bounded operation summaries", async () => {
     const f = await fixture();
     const rt = runtime(f);
-    const preimage = await rt.editPreimage({ id: HANDLE });
-    await rt.applyEdit({
-      id: HANDLE,
-      expectedRevision: REVISION_1,
-      markdown: preimage.markdown.replace("before", "after"),
-    });
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
     const [record] = await f.store.list();
-    const status = await rt.operationStatus({ operationHandle: record!.handle });
+    const status = await rt.operationStatus({ operationHandle: record!.handle }, PEER);
     expect(status).toEqual({
       kind: "operation-status",
       operationHandle: record!.handle,
       state: "committed",
     });
-    const list = await rt.operationList();
+    const list = await rt.operationList(PEER);
     expect(list).toEqual({
       kind: "operation-list",
       handles: [record!.handle],
       unresolvedHandles: [],
     });
+  });
+});
+
+describe("D3-2 — undefined operator peers are rejected", () => {
+  const OP = `op_${"a".repeat(64)}`;
+
+  async function guarded() {
+    const f = await fixture();
+    const resolveHandle = vi.fn((handle: string) => (handle === HANDLE ? NOTE_ID : undefined));
+    const read = vi.fn(f.source.read);
+    const update = vi.fn(f.source.update);
+    const createSource = vi.fn(async () => ({ id: NOTE_ID, titleBytes: 5, contentBytes: 7 }));
+    const mintHandle = vi.fn(() => HANDLE);
+    const insert = vi.fn(f.store.insert);
+    const get = vi.fn(f.store.get);
+    const list = vi.fn(f.store.list);
+    const transition = vi.fn(f.store.transition);
+    const rt = createOperatorWriteRuntime({
+      source: { read, update, create: createSource },
+      store: { insert, get, list, transition },
+      resolveHandle,
+      mintHandle,
+      now: () => 1000,
+      ttlMs: 60_000,
+    });
+    const spies = [
+      resolveHandle,
+      read,
+      update,
+      createSource,
+      mintHandle,
+      insert,
+      get,
+      list,
+      transition,
+    ];
+    const calls = (peer: unknown) => {
+      const p = peer as never;
+      return {
+        create: () => rt.create!({ title: "Title", content: "Content" }, p),
+        editPreimage: () => rt.editPreimage({ id: HANDLE }, p),
+        applyEdit: () =>
+          rt.applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: "x" }, p),
+        applyUndo: () => rt.applyUndo({ operationHandle: OP }, p),
+        operationStatus: () => rt.operationStatus({ operationHandle: OP }, p),
+        operationList: () => rt.operationList(p),
+      };
+    };
+    return { f, rt, spies, calls };
+  }
+
+  const BAD = [
+    undefined,
+    null,
+    {},
+    { uid: -1, gid: 1, groups: [] },
+    { uid: 1, gid: 1, groups: "x" },
+  ];
+  const ENTRY = [
+    "create",
+    "editPreimage",
+    "applyEdit",
+    "applyUndo",
+    "operationStatus",
+    "operationList",
+  ] as const;
+
+  it.each(BAD)("rejects every entry point for peer %j", async (peer) => {
+    const { calls } = await guarded();
+    for (const name of ENTRY) {
+      await expect(calls(peer)[name]()).rejects.toMatchObject({ code: "permission_denied" });
+    }
+  });
+
+  it.each(BAD)("touches no resolver, source, store or minter for peer %j", async (peer) => {
+    const { calls, spies } = await guarded();
+    for (const name of ENTRY) {
+      await calls(peer)
+        [name]()
+        .catch(() => undefined);
+      for (const spy of spies) expect(spy).toHaveBeenCalledTimes(0);
+    }
+  });
+
+  it("leaves records owned by the removed legacy owner unreachable", async () => {
+    const { f, rt } = await guarded();
+    const fields = {
+      owner: "legacy",
+      noteId: NOTE_ID,
+      revision: REVISION_1,
+      content: wrap("<p>before</p>"),
+    };
+    const payload = JSON.stringify({ ...fields, postRevision: REVISION_2, createdAt: 1000 });
+    const record = await f.store.insert({
+      kind: "edit",
+      payload: JSON.stringify(fields),
+      ttlMs: 60_000,
+    });
+    await f.store.transition(record.handle, "prepared", "committing", undefined, "legacy");
+    await f.store.transition(record.handle, "committing", "committed", payload, "legacy");
+    expect((await rt.operationList(PEER)).handles).not.toContain(record.handle);
+    await expect(
+      rt.operationStatus({ operationHandle: record.handle }, PEER),
+    ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("keeps operations scoped to the peer that created them", async () => {
+    const { rt } = await guarded();
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: REVISION_1,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
+    const [handle] = (await rt.operationList(PEER)).handles;
+    expect(handle).toBeDefined();
+    await expect(rt.operationStatus({ operationHandle: handle! }, OTHER)).rejects.toMatchObject({
+      code: "not_found",
+    });
+    expect((await rt.operationList(OTHER)).handles).not.toContain(handle);
+  });
+
+  it("does not mention the legacy owner in the runtime source", () => {
+    const source = readFileSync("src/service/notes-operator-write-runtime.ts", "utf8");
+    expect(source).not.toContain("legacy");
   });
 });

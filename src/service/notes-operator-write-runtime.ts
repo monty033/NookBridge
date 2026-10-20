@@ -208,8 +208,23 @@ export class OperatorWriteError extends Error {
   }
 }
 
+/**
+ * Owner key for a well-formed peer. Anything else is refused, so a peerless
+ * caller can never share an owner with, or see the operations of, another.
+ */
 function ownerKey(peer?: OperatorPeer): string {
-  if (peer === undefined) return "legacy";
+  if (
+    typeof peer !== "object" ||
+    peer === null ||
+    !Number.isSafeInteger(peer.uid) ||
+    peer.uid < 0 ||
+    !Number.isSafeInteger(peer.gid) ||
+    peer.gid < 0 ||
+    !Array.isArray(peer.groups) ||
+    !peer.groups.every((group) => typeof group === "string")
+  ) {
+    return fail("permission_denied");
+  }
   return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
 }
 
@@ -368,6 +383,7 @@ export function createOperatorWriteRuntime(
     params: Readonly<{ id: string }>,
     peer?: OperatorPeer,
   ): Promise<OperatorEditPreimage> => {
+    ownerKey(peer);
     const noteId = resolve(params?.id, peer);
     const { revision, document } = await load(noteId);
     let markdown: string;
@@ -389,6 +405,7 @@ export function createOperatorWriteRuntime(
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
     peer?: OperatorPeer,
   ): Promise<OperatorEditApplied> => {
+    ownerKey(peer);
     const noteId = resolve(params?.id, peer);
     if (
       typeof params.expectedRevision !== "string" ||
@@ -605,6 +622,7 @@ export function createOperatorWriteRuntime(
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
     peer?: OperatorPeer,
   ): Promise<OperatorUndoApplied> => {
+    ownerKey(peer);
     if (
       typeof params.operationHandle !== "string" ||
       !OPERATION_HANDLE.test(params.operationHandle)
@@ -761,6 +779,7 @@ export function createOperatorWriteRuntime(
     params: Readonly<{ operationHandle: string }>,
     peer?: OperatorPeer,
   ): Promise<OperatorOperationStatus> => {
+    ownerKey(peer);
     if (
       typeof params?.operationHandle !== "string" ||
       !OPERATION_HANDLE.test(params.operationHandle)
@@ -790,6 +809,7 @@ export function createOperatorWriteRuntime(
   };
 
   const operationList = async (peer?: OperatorPeer): Promise<OperatorOperationList> => {
+    ownerKey(peer);
     let records: ReadonlyArray<OperationRecord>;
     try {
       records = await options.store.list(ownerKey(peer));
