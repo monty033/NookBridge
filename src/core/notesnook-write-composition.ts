@@ -1370,6 +1370,36 @@ const NOTHING_MUTATED_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.fre
 ]);
 
 /**
+ * Take a frozen, flat copy of a validated command before it reaches the adapter.
+ *
+ * `readOwnProperty` invokes an accessor exactly once. Reading the id during
+ * validation and then letting the adapter read the caller's object again
+ * would let a getter or proxy answer a different id at mutation time: the
+ * intent would name one note and the adapter would mutate another, which is
+ * exactly the unmarked write this path exists to prevent. Every own string
+ * key is read once here, so the id that is validated is the id the adapter
+ * receives, and the copy cannot be re-pointed afterwards.
+ */
+function snapshotCommand(record: object): Record<string, unknown> {
+  let keys: readonly string[];
+  try {
+    keys = Reflect.ownKeys(record).filter((key): key is string => typeof key === "string");
+  } catch {
+    fail("invalid_input");
+  }
+  const snapshot: Record<string, unknown> = {};
+  for (const key of new Set(keys)) {
+    Object.defineProperty(snapshot, key, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: readOwnProperty(record, key),
+    });
+  }
+  return Object.freeze(snapshot) as Record<string, unknown>;
+}
+
+/**
  * Record the durable write-ahead intent for an existing-note mutation.
  *
  * Runs after command-id validation and the capacity probe and before the
@@ -1429,13 +1459,14 @@ async function runWriteAheadOperation<T>(
   command: unknown,
   copy: (raw: unknown) => T,
 ): Promise<T> {
-  const noteId = requireNoteId(requireRecord(command), "id");
+  const snapshot = snapshotCommand(requireRecord(command));
+  const noteId = requireNoteId(snapshot, "id");
   checkMutationCapacity(state);
   const fn = invoker();
   const token = recordWriteAheadIntent(state, operation, noteId);
   let raw: unknown;
   try {
-    raw = await Reflect.apply(fn, state.adapterTarget, [command]);
+    raw = await Reflect.apply(fn, state.adapterTarget, [snapshot]);
   } catch (error) {
     const normalised = normaliseThrow(error);
     const code = readCategoricalCode(normalised);

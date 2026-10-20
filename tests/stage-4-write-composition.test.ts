@@ -2612,6 +2612,97 @@ describe("R2b — write-ahead intent precedes existing-note mutations", () => {
     expect(pendingOf(real)).toEqual([expect.objectContaining({ noteId: OTHER_NOTE_ID })]);
   });
 
+  // Opus review B3: the adapter must never read a different id than the one
+  // the intent named. `readOwnProperty` invokes an accessor once, so before
+  // the snapshot the caller's object was read again by the adapter and a
+  // getter or proxy could answer a second, different id.
+  function commandWithIdAccessor(op: IntentOp, idRead: () => string): unknown {
+    const base: Record<string, unknown> =
+      op === "append"
+        ? { markdownFragment: "one line", expectedRevision: revision() }
+        : op === "update"
+          ? { patch: { title: "renamed" }, expectedRevision: revision() }
+          : { expectedRevision: revision() };
+    Object.defineProperty(base, "id", {
+      configurable: true,
+      enumerable: true,
+      get: idRead,
+    });
+    return base;
+  }
+
+  function invokeWith(
+    composition: NotesnookLocalWriteComposition,
+    op: IntentOp,
+    command: unknown,
+  ): Promise<unknown> {
+    if (op === "append") return composition.appendNote(command as never);
+    if (op === "update") return composition.updateNote(command as never);
+    return composition.deleteNote(command as never);
+  }
+
+  it.each(OPS)("12. %s: a getter id cannot change after the intent", async (op) => {
+    const { store } = memoryStore();
+    const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+    const events: string[] = [];
+    const adapter = stubAdapterFor(op, () => goodResult(op), events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+    let reads = 0;
+    const command = commandWithIdAccessor(op, () => {
+      reads += 1;
+      return reads === 1 ? NOTE_ID : OTHER_NOTE_ID;
+    });
+
+    await invokeWith(composition, op, command);
+
+    // One read for the snapshot; the adapter then sees the same frozen value.
+    expect(reads).toBe(1);
+    const delivered = adapter.commands[0] as Record<string, unknown>;
+    expect(delivered["id"]).toBe(NOTE_ID);
+    expect(Object.isFrozen(delivered)).toBe(true);
+    expect(delivered).not.toBe(command);
+    expect(pendingOf(real)).toEqual([expect.objectContaining({ operation: op, noteId: NOTE_ID })]);
+  });
+
+  it.each(OPS)("12b. %s: a proxy id cannot change after the intent", async (op) => {
+    const { store } = memoryStore();
+    const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+    const events: string[] = [];
+    const adapter = stubAdapterFor(op, () => goodResult(op), events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+    const base = commandWithIdAccessor(op, () => NOTE_ID) as Record<string, unknown>;
+    const withoutId: Record<string, unknown> = { ...base };
+    delete withoutId["id"];
+    let descriptors = 0;
+    const proxy = new Proxy(withoutId, {
+      ownKeys(target) {
+        return [...Reflect.ownKeys(target), "id"];
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "id") {
+          descriptors += 1;
+          return {
+            configurable: true,
+            enumerable: true,
+            writable: false,
+            value: descriptors === 1 ? NOTE_ID : OTHER_NOTE_ID,
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    await invokeWith(composition, op, proxy);
+
+    expect(descriptors).toBe(1);
+    const delivered = adapter.commands[0] as Record<string, unknown>;
+    expect(delivered["id"]).toBe(NOTE_ID);
+    expect(Object.isFrozen(delivered)).toBe(true);
+    expect(pendingOf(real)).toEqual([expect.objectContaining({ operation: op, noteId: NOTE_ID })]);
+  });
+
   // Opus review B2: the token-shape guards were reachable but untested —
   // deleting them would have passed the suite.
   describe.each(OPS)("%s: a malformed intent token refuses the mutation", (op) => {
