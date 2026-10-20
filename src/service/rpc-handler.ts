@@ -374,15 +374,15 @@ export async function handleRpcRequest<T extends RpcRequest>(
         if (resolver === undefined) {
           return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
+        // Authorize on the parsed path BEFORE any lookup: resolving first
+        // would let a denied caller distinguish a missing note (not_found)
+        // from an existing one (permission_denied).
+        let parsedPath: ReturnType<typeof parseExactNotePath>;
         try {
-          await reflectApply(resolver, runtime, [target]);
-        } catch (error) {
-          if (error instanceof ExactNotePathError && error.code === "not_found") {
-            return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
-          }
+          parsedPath = parseExactNotePath(target);
+        } catch {
           return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
-        const parsedPath = parseExactNotePath(target);
         const settingsContext =
           parsedPath.notebookPath === undefined
             ? { noteTitle: parsedPath.noteTitle }
@@ -391,6 +391,14 @@ export async function handleRpcRequest<T extends RpcRequest>(
           if (!authorizeServiceMethod(policy, method, settingsContext).allowed) {
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
+        }
+        try {
+          await reflectApply(resolver, runtime, [target]);
+        } catch (error) {
+          if (error instanceof ExactNotePathError && error.code === "not_found") {
+            return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
+          }
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
         return (await runLockedNoteProof(
           structural.request,
