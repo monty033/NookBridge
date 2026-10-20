@@ -2732,3 +2732,135 @@ describe("Stage 4 write wiring — final identifier and record-boundary regressi
     }
   });
 });
+
+describe("R1 — indeterminate lock state fails closed", () => {
+  const baseNote = (extra: Record<string, unknown> = {}): FakeNoteRecord =>
+    ({
+      id: NOTE_ID,
+      title: "Indeterminate lock state",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      dateEdited: 1_700_000_000_000,
+      ...extra,
+    }) as unknown as FakeNoteRecord;
+
+  const withRow = (row: Record<string, unknown>, note: FakeNoteRecord = baseNote()) =>
+    createFakeRuntime({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([["c1", row as unknown as FakeContentRecord]]),
+    });
+
+  it("a. treats a content lookup failure as locked", async () => {
+    const runtime = createFakeRuntime({ notes: new Map([[NOTE_ID, baseNote()]]) });
+    runtime.content.findByNoteId = async () => {
+      throw new Error("network down");
+    };
+    const result = await bindNotesnookWriteRuntime(runtime).note(NOTE_ID);
+    expect(result).toMatchObject({ id: NOTE_ID, locked: true });
+    expect(JSON.stringify(result)).not.toContain("network down");
+  });
+
+  it("b. unknown content state beats an explicit note.locked:false", async () => {
+    const runtime = createFakeRuntime({
+      notes: new Map([[NOTE_ID, baseNote({ locked: false })]]),
+    });
+    runtime.content.findByNoteId = async () => {
+      throw new Error("network down");
+    };
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("c. treats a malformed content marker as locked without rejecting", async () => {
+    const runtime = withRow({
+      id: "c1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>x</p>",
+      locked: "yes",
+    });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("d. treats cipher-shaped data without a marker as locked", async () => {
+    const runtime = withRow({
+      id: "c1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: { cipher: "AA", iv: "BB", salt: "CC" },
+    });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("e. treats top-level cipher fields with locked:undefined as locked", async () => {
+    const runtime = withRow({
+      id: "c1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "AA",
+      cipher: "AA",
+      iv: "BB",
+      salt: "CC",
+      locked: undefined,
+    });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("f. treats a non-object lookup result as locked", async () => {
+    const runtime = createFakeRuntime({ notes: new Map([[NOTE_ID, baseNote()]]) });
+    runtime.content.findByNoteId = (async () =>
+      42) as unknown as typeof runtime.content.findByNoteId;
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("g1. control: plaintext row with locked:false stays unlocked", async () => {
+    const runtime = withRow({
+      id: "c1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>x</p>",
+      locked: false,
+    });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: false,
+    });
+  });
+
+  it("g2. control: row with locked:true stays locked", async () => {
+    const runtime = withRow({
+      id: "c1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: "<p>x</p>",
+      locked: true,
+    });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: true,
+    });
+  });
+
+  it("g3. control: no row and no flag stays unlocked", async () => {
+    const runtime = createFakeRuntime({ notes: new Map([[NOTE_ID, baseNote()]]) });
+    await expect(bindNotesnookWriteRuntime(runtime).note(NOTE_ID)).resolves.toMatchObject({
+      id: NOTE_ID,
+      locked: false,
+    });
+  });
+});
