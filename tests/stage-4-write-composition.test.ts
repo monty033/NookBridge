@@ -860,7 +860,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
   });
@@ -883,12 +883,12 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       observed = error;
     }
     expect(isNotesnookWriteCompositionError(observed)).toBe(true);
-    expect((observed as NotesnookWriteContractError).code).toBe("sync_failed");
+    expect((observed as NotesnookWriteContractError).code).toBe("local_sync_marker_failed");
     expect(JSON.stringify(String((observed as Error).message))).not.toContain(SECRET);
     expect((observed as Error).cause).toBeUndefined();
   });
 
-  it("preserves the coordinator's own categorical code for a bounded-queue refusal", async () => {
+  it("reports a bounded-queue refusal on create as committed-but-unqueued", async () => {
     const adapter = stubAdapter({ create: () => goodCreateResult() });
     const coordinator = stubCoordinator({
       onRecord: () => {
@@ -898,7 +898,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "invalid_input",
+      "local_sync_marker_failed",
     );
   });
 
@@ -937,7 +937,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       }),
     });
     expect(await codeOf(() => syncedAck.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
 
     // An acknowledgement for a different note id must not be accepted.
@@ -993,7 +993,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
       coordinator: stubCoordinator({ onRecord: () => "queued" }),
     });
     expect(await codeOf(() => primitiveAck.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
   });
 
@@ -1013,7 +1013,7 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
-      "sync_failed",
+      "local_sync_marker_failed",
     );
   });
 });
@@ -1854,7 +1854,7 @@ describe("Stage 4 write composition — hardened boundary regressions", () => {
     });
     expect(
       await codeOf(() => acknowledgementComposition.createNote({ title: "t", content: "c" })),
-    ).toBe("sync_failed");
+    ).toBe("local_sync_marker_failed");
 
     const inheritedSnapshot = Object.create({
       pending: Object.freeze([]),
@@ -2727,5 +2727,128 @@ describe("R2b — write-ahead intent precedes existing-note mutations", () => {
       expect(adapter.commands).toHaveLength(0);
       expect(coordinator.receipts).toHaveLength(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2c — create marker failure is reported as committed-but-unqueued.
+// ---------------------------------------------------------------------------
+
+describe("R2c — create marker failure is reported as committed-but-unqueued", () => {
+  const markerFailures: ReadonlyArray<readonly [string, () => unknown]> = [
+    [
+      "coordinator throws sync_failed",
+      () => {
+        throw new NotesnookWriteContractError("sync_failed");
+      },
+    ],
+    [
+      "coordinator throws invalid_input",
+      () => {
+        throw new NotesnookWriteContractError("invalid_input");
+      },
+    ],
+    [
+      "thenable acknowledgement",
+      () =>
+        Promise.resolve({
+          operation: "create",
+          id: NOTE_ID,
+          localCommitted: true,
+          remoteSynced: false,
+          pendingSync: true,
+        }),
+    ],
+    ["mismatched acknowledgement", () => ({ operation: "create", id: "other" })],
+    [
+      "hostile operation getter",
+      () => ({
+        get operation(): string {
+          throw new Error(SECRET);
+        },
+        id: NOTE_ID,
+      }),
+    ],
+  ];
+
+  it.each(markerFailures)("%s -> local_sync_marker_failed", async (_label, onRecord) => {
+    const cmd = { title: "t", content: "c" };
+    const build = () => {
+      const adapter = stubAdapter({ create: () => goodCreateResult() });
+      const composition = createNotesnookLocalWriteComposition({
+        adapter,
+        coordinator: stubCoordinator({ onRecord }),
+      });
+      return { adapter, composition };
+    };
+
+    const first = build();
+    expect(await codeOf(() => first.composition.createNote(cmd))).toBe("local_sync_marker_failed");
+    // The create really ran, exactly once.
+    expect(first.adapter.commands.length).toBe(1);
+
+    const second = build();
+    let observed: unknown;
+    try {
+      await second.composition.createNote(cmd);
+    } catch (error) {
+      observed = error;
+    }
+    expect(isNotesnookWriteCompositionError(observed)).toBe(true);
+    expect((observed as NotesnookWriteContractError).code).toBe("local_sync_marker_failed");
+    // JSON.stringify alone is tautological here: Error.message and cause are
+    // non-enumerable, and an Error cause serializes as {}. Inspect the message
+    // text as well, and require that the cause carries nothing.
+    const text = JSON.stringify(observed) + String((observed as Error).message);
+    expect(text).not.toContain(SECRET);
+    expect((observed as Error).cause).toBeUndefined();
+    expect(second.adapter.commands.length).toBe(1);
+  });
+
+  it("control: an adapter-side create failure stays sync_failed", async () => {
+    const adapter = stubAdapter({
+      create: () => {
+        throw new Error("boom");
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({
+      adapter,
+      coordinator: stubCoordinator(),
+    });
+    expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
+      "sync_failed",
+    );
+    expect(adapter.commands.length).toBe(1);
+  });
+
+  it("control: appendNote with a throwing recordLocalCommit stays sync_failed", async () => {
+    const adapter = stubAdapter({
+      append: () => ({
+        operation: "append",
+        id: NOTE_ID,
+        contentBytes: 1,
+        localCommitted: true,
+        remoteSynced: false,
+        pendingSync: true,
+      }),
+    });
+    const composition = createNotesnookLocalWriteComposition({
+      adapter,
+      coordinator: stubCoordinator({
+        onRecord: () => {
+          throw new NotesnookWriteContractError("sync_failed");
+        },
+      }),
+    });
+    expect(
+      await codeOf(() =>
+        composition.appendNote({
+          id: NOTE_ID,
+          markdownFragment: "f",
+          expectedRevision: revision(),
+        }),
+      ),
+    ).toBe("sync_failed");
+    expect(adapter.commands.length).toBe(1);
   });
 });

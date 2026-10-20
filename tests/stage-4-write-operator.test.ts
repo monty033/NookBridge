@@ -39,7 +39,10 @@ import {
   projectLiveDatabaseToWriteCapability,
 } from "../src/core/notesnook-live-write-capability.js";
 import { DETERMINISTIC_MARKDOWN_CODEC } from "../src/core/notesnook-write-codec.js";
-import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
+import {
+  createRevisionToken,
+  NotesnookWriteContractError,
+} from "../src/core/notesnook-write-contract.js";
 
 // ---------------------------------------------------------------------------
 // Pinned-API in-memory database fake.
@@ -1382,5 +1385,27 @@ describe("Stage 4 operator write source boundaries", () => {
     expect(source).not.toContain("localWrite");
     const projection = readSource("src/core/notesnook-readonly-projection.ts");
     expect(projection).not.toContain("notesnook-write");
+  });
+});
+
+describe("R2c — operator label for a committed-but-unqueued create", () => {
+  it("maps local_sync_marker_failed to its own label with the unchanged exit code", async () => {
+    const result = await runWriteCommand({
+      argv: ["create", "--title", "Acceptance"],
+      env: ENABLED_ENV,
+      createWriteRuntime: () => ({
+        capability: {
+          createNote: () =>
+            Promise.reject(new NotesnookWriteContractError("local_sync_marker_failed")),
+          appendNote: () => Promise.reject(new Error("unused")),
+          updateNote: () => Promise.reject(new Error("unused")),
+        } as unknown as NotesnookLiveWriteCapability,
+      }),
+    });
+    expect(result).toEqual({
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl write create: local change committed; sync intent not persisted",
+    });
   });
 });
