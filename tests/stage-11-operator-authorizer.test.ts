@@ -47,7 +47,7 @@ describe("operator authorizer", () => {
   it("admits a read for a client peer", async () => {
     const authorize = createOperatorAuthorizer(deps());
     await expect(
-      authorize("notes.get-view", CLIENT, request("notes.get-view")),
+      authorize("notes.get-view", CLIENT, request("notes.get-view", { id: "h_one" })),
     ).resolves.toMatchObject({
       allowed: true,
       method: "notes.get-view",
@@ -247,6 +247,119 @@ describe("operator authorizer", () => {
     );
     await expect(
       authorize("notes.apply-edit", OPERATOR, request("notes.apply-edit", { id: "h_one" })),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+});
+
+describe("D2-1 — operator target reads fail closed", () => {
+  const denied = { allowed: false, reason: "permission_denied" };
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s with no target is denied",
+    async (m) => {
+      const authorize = createOperatorAuthorizer(deps());
+      await expect(authorize(m, CLIENT, request(m))).resolves.toMatchObject(denied);
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s with a forged handle is denied without a path lookup",
+    async (m) => {
+      const readNoteNotebookPath = vi.fn(async () => "Public");
+      const authorize = createOperatorAuthorizer(
+        deps({ resolveHandle: () => undefined, readNoteNotebookPath }),
+      );
+      await expect(authorize(m, CLIENT, request(m, { id: "h_forged" }))).resolves.toMatchObject(
+        denied,
+      );
+      expect(readNoteNotebookPath).toHaveBeenCalledTimes(0);
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s on a root-level note is denied without a policy evaluation",
+    async (m) => {
+      const evaluateNotebookPolicy = vi.fn(() => true);
+      const authorize = createOperatorAuthorizer(
+        deps({ readNoteNotebookPath: vi.fn(async () => undefined), evaluateNotebookPolicy }),
+      );
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+        denied,
+      );
+      expect(evaluateNotebookPolicy).toHaveBeenCalledTimes(0);
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s with no path source is denied",
+    async (m) => {
+      const authorize = createOperatorAuthorizer(deps({ readNoteNotebookPath: undefined }));
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+        denied,
+      );
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s with no policy source is denied",
+    async (m) => {
+      const authorize = createOperatorAuthorizer(deps({ evaluateNotebookPolicy: undefined }));
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+        denied,
+      );
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s resolves to a denial when the path lookup throws",
+    async (m) => {
+      const authorize = createOperatorAuthorizer(
+        deps({
+          readNoteNotebookPath: async () => {
+            throw new Error("boom");
+          },
+        }),
+      );
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+        denied,
+      );
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s is denied when the notebook policy refuses read",
+    async (m) => {
+      const evaluateNotebookPolicy = vi.fn(() => false);
+      const authorize = createOperatorAuthorizer(
+        deps({ readNoteNotebookPath: async () => "Private", evaluateNotebookPolicy }),
+      );
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+        denied,
+      );
+      expect(evaluateNotebookPolicy).toHaveBeenCalledWith("read", "Private");
+    },
+  );
+
+  it.each(["notes.get-view", "notes.edit-preimage"] as const)(
+    "%s is admitted when the target resolves and policy allows read",
+    async (m) => {
+      const authorize = createOperatorAuthorizer(
+        deps({ readNoteNotebookPath: async () => "Public", evaluateNotebookPolicy: () => true }),
+      );
+      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject({
+        allowed: true,
+        method: m,
+      });
+    },
+  );
+
+  it("leaves untargeted reads allowed", async () => {
+    const authorize = createOperatorAuthorizer(deps());
+    await expect(
+      authorize("notes.operation-list", CLIENT, request("notes.operation-list")),
+    ).resolves.toMatchObject({ allowed: true });
+    await expect(
+      authorize("notes.browse", CLIENT, request("notes.browse", {})),
     ).resolves.toMatchObject({ allowed: true });
   });
 });
