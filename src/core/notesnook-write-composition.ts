@@ -172,6 +172,16 @@ export interface NotesnookPendingSyncHandle {
   readonly snapshot: () => SyncCoordinatorState;
   /** Optional on legacy test seams; production coordinators provide it. */
   readonly checkCapacity?: () => unknown;
+  /**
+   * Optional write-ahead pair.  Production coordinators provide both;
+   * legacy seams provide neither.  Supplying exactly one is refused at
+   * construction.
+   */
+  readonly recordIntent?: (intent: {
+    readonly operation: "append" | "update" | "delete";
+    readonly noteId: string;
+  }) => SyncPendingMarker;
+  readonly releaseIntent?: (token: SyncPendingMarker) => void;
 }
 
 /** Construction options.  Both handles are required and separate. */
@@ -710,6 +720,8 @@ interface CompositionState {
   readonly requestSync: UnknownFunction;
   readonly snapshot: UnknownFunction;
   readonly checkCapacity: UnknownFunction | undefined;
+  readonly recordIntent: UnknownFunction | undefined;
+  readonly releaseIntent: UnknownFunction | undefined;
   readonly database: object | undefined;
   localDepth: number;
 }
@@ -730,11 +742,16 @@ function buildState(options: unknown): CompositionState {
     ["createNote", "appendNote", "updateNote"],
     ["deleteNote"],
   );
-  const coordinator = requireHandle(readProperty(record, "coordinator"), [
-    "recordLocalCommit",
-    "requestSync",
-    "snapshot",
-  ]);
+  const coordinator = requireHandle(
+    readProperty(record, "coordinator"),
+    ["recordLocalCommit", "requestSync", "snapshot"],
+    ["recordIntent", "releaseIntent"],
+  );
+  // The write-ahead pair is all-or-nothing: a lone half would either
+  // record markers that can never be released or release unknown tokens.
+  const recordIntent = coordinator.methods["recordIntent"];
+  const releaseIntent = coordinator.methods["releaseIntent"];
+  if ((recordIntent === undefined) !== (releaseIntent === undefined)) fail("invalid_input");
   if (adapter.target === coordinator.target) {
     // A single object satisfying both roles would fuse the local-write
     // and remote-sync boundaries this slice exists to keep apart.
@@ -760,6 +777,8 @@ function buildState(options: unknown): CompositionState {
     checkCapacity: hasProperty(coordinator.target, "checkCapacity")
       ? readOwnMethod(coordinator.target, "checkCapacity")
       : undefined,
+    recordIntent,
+    releaseIntent,
     database,
     localDepth: 0,
   };
@@ -1340,6 +1359,102 @@ function checkMutationCapacity(state: CompositionState): void {
   fail("sync_failed");
 }
 
+/** Codes that prove the adapter mutated nothing, so the intent may be released. */
+const NOTHING_MUTATED_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.freeze([
+  "invalid_input",
+  "unsupported_content",
+  "unsupported_patch_field",
+  "stale_revision",
+  "conflict",
+  "vault_locked",
+]);
+
+/**
+ * Record the durable write-ahead intent for an existing-note mutation.
+ *
+ * Runs after command-id validation and the capacity probe and before the
+ * adapter, so a committed change always has a durable marker.  Any
+ * failure, including a malformed or asynchronous token, refuses the
+ * mutation before the adapter is reached.
+ */
+function recordWriteAheadIntent(
+  state: CompositionState,
+  operation: SyncOperation,
+  noteId: string,
+): unknown {
+  let token: unknown;
+  try {
+    token = Reflect.apply(state.recordIntent as UnknownFunction, state.coordinatorTarget, [
+      freezeSealed({ operation, noteId }),
+    ]);
+  } catch (error) {
+    throw normaliseThrow(error);
+  }
+  if (isThenable(token)) fail("sync_failed");
+  try {
+    const record = requireRecord(token);
+    if (readOwnProperty(record, "operation") !== operation) fail("sync_failed");
+    if (readOwnProperty(record, "noteId") !== noteId) fail("sync_failed");
+  } catch {
+    fail("sync_failed");
+  }
+  return token;
+}
+
+/** Best-effort release; a failing release keeps the marker and is not reported. */
+function releaseWriteAheadIntent(state: CompositionState, token: unknown): void {
+  try {
+    Reflect.apply(state.releaseIntent as UnknownFunction, state.coordinatorTarget, [token]);
+  } catch {
+    // The marker stays durable; recovery will treat the outcome as uncertain.
+  }
+}
+
+/**
+ * Run an existing-note mutation behind a durable write-ahead intent.
+ *
+ *   1. validate the command id and probe capacity;
+ *   2. record the intent (a failure refuses the mutation);
+ *   3. call the adapter;
+ *   4. release the intent only when the error code proves nothing was
+ *      mutated; any other failure keeps it because the outcome is unknown;
+ *   5. after success, a `recordLocalCommit` failure is absorbed because the
+ *      intent already guarantees recovery and a failure report would invite
+ *      a duplicate retry.
+ */
+async function runWriteAheadOperation<T>(
+  state: CompositionState,
+  operation: SyncOperation,
+  invoker: () => UnknownFunction,
+  command: unknown,
+  copy: (raw: unknown) => T,
+): Promise<T> {
+  const noteId = requireNoteId(requireRecord(command), "id");
+  checkMutationCapacity(state);
+  const fn = invoker();
+  const token = recordWriteAheadIntent(state, operation, noteId);
+  let raw: unknown;
+  try {
+    raw = await Reflect.apply(fn, state.adapterTarget, [command]);
+  } catch (error) {
+    const normalised = normaliseThrow(error);
+    const code = readCategoricalCode(normalised);
+    if (code !== undefined && NOTHING_MUTATED_CODES.includes(code)) {
+      releaseWriteAheadIntent(state, token);
+    }
+    throw normalised;
+  }
+  const result = copy(raw);
+  const resultId = (result as { readonly id: string }).id;
+  if (resultId !== noteId) fail("sync_failed");
+  try {
+    recordPending(state, operation, resultId);
+  } catch {
+    // Intentionally absorbed: the write-ahead marker is already durable.
+  }
+  return result;
+}
+
 /**
  * Run one local operation under the per-instance reentrancy guard.
  *
@@ -1367,6 +1482,9 @@ async function runLocalOperation<T>(
 ): Promise<T> {
   state.localDepth += 1;
   try {
+    if (operation !== "create" && state.recordIntent !== undefined) {
+      return await runWriteAheadOperation(state, operation, invoker, command, copy);
+    }
     checkMutationCapacity(state);
     const fn = invoker();
     let raw: unknown;
