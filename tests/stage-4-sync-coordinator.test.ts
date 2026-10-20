@@ -6,7 +6,7 @@
  * present in the fixtures or passed to the executor.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   NotesnookWriteContractError,
@@ -414,5 +414,180 @@ describe("Stage 4 SyncCoordinator — hostile seam handling and closed surface",
         "network",
       ]),
     );
+  });
+});
+
+describe("R2a — durable write-ahead sync intent", () => {
+  function fixture() {
+    const saves: SyncCoordinatorState[] = [];
+    let saved: SyncCoordinatorState | undefined;
+    const store = {
+      load: () => saved,
+      save: (state: SyncCoordinatorState) => {
+        saves.push(state);
+        saved = state;
+      },
+    };
+    const executor = vi.fn<SyncExecutor>(async () => ({ status: "confirmed" as const }));
+    const coordinator = new SyncCoordinator({ executor, stateStore: store });
+    return { saves, store, executor, coordinator };
+  }
+
+  it("persists a frozen intent token that survives restart", () => {
+    const { saves, store, executor, coordinator } = fixture();
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n1" });
+    expect(Object.isFrozen(token)).toBe(true);
+    expect(token.sequence).toBeGreaterThanOrEqual(1);
+    expect(saves.length).toBe(1);
+    const restarted = new SyncCoordinator({ executor, stateStore: store });
+    expect(restarted.snapshot().pending).toEqual([
+      { operation: "update", noteId: "n1", sequence: token.sequence },
+    ]);
+  });
+
+  it("rejects create and invalid ids without persisting", () => {
+    const { saves, coordinator } = fixture();
+    const call = (input: unknown) => () =>
+      (coordinator as unknown as { recordIntent: (i: unknown) => unknown }).recordIntent(input);
+    expect(codeOf(call({ operation: "create", noteId: "n1" }))).toBe("invalid_input");
+    expect(codeOf(call({ operation: "update", noteId: "" }))).toBe("invalid_input");
+    expect(codeOf(call({ operation: "update", noteId: "x".repeat(129) }))).toBe("invalid_input");
+    expect(codeOf(call({ operation: "update", noteId: 42 }))).toBe("invalid_input");
+    expect(saves.length).toBe(0);
+  });
+
+  it("refuses the 65th intent and persists nothing for it", () => {
+    const { saves, coordinator } = fixture();
+    for (let i = 0; i < 64; i++) {
+      coordinator.recordIntent({ operation: "update", noteId: `n${i}` });
+    }
+    expect(codeOf(() => coordinator.recordIntent({ operation: "update", noteId: "n64" }))).toBe(
+      "sync_failed",
+    );
+    expect(saves.length).toBe(64);
+    expect(coordinator.snapshot().pending.length).toBe(64);
+  });
+
+  it("fails closed and leaves memory unchanged when save throws", () => {
+    const executor = vi.fn<SyncExecutor>();
+    const coordinator = new SyncCoordinator({
+      executor,
+      stateStore: {
+        load: () => undefined,
+        save: () => {
+          throw new Error("disk");
+        },
+      },
+    });
+    expect(codeOf(() => coordinator.recordIntent({ operation: "update", noteId: "n1" }))).toBe(
+      "sync_failed",
+    );
+    expect(coordinator.snapshot().pending).toEqual([]);
+  });
+
+  it("does not consume a sequence when the save throws", () => {
+    const executor = vi.fn<SyncExecutor>();
+    const saves: SyncCoordinatorState[] = [];
+    let failNext = true;
+    const coordinator = new SyncCoordinator({
+      executor,
+      stateStore: {
+        load: () => undefined,
+        save: (state) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error("disk");
+          }
+          saves.push(state);
+        },
+      },
+    });
+    expect(codeOf(() => coordinator.recordIntent({ operation: "update", noteId: "n1" }))).toBe(
+      "sync_failed",
+    );
+    expect(coordinator.snapshot().pending).toEqual([]);
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n1" });
+    expect(token.sequence).toBe(1);
+    expect(saves.length).toBe(1);
+  });
+
+  it("releases its own intent idempotently", () => {
+    const { saves, coordinator } = fixture();
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n1" });
+    coordinator.releaseIntent(token);
+    expect(coordinator.snapshot().pending).toEqual([]);
+    expect(saves.at(-1)).toEqual({ pending: [] });
+    expect(() => coordinator.releaseIntent(token)).not.toThrow();
+    expect(coordinator.snapshot().pending).toEqual([]);
+  });
+
+  it("keeps an earlier commit marker for the same note when releasing", () => {
+    const { coordinator } = fixture();
+    coordinator.recordLocalCommit(commit("update", "n1"));
+    const original = coordinator.snapshot().pending[0];
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n1" });
+    expect(coordinator.snapshot().pending.length).toBe(2);
+    coordinator.releaseIntent(token);
+    expect(coordinator.snapshot().pending).toEqual([original]);
+  });
+
+  it("does not release a marker whose noteId does not match", () => {
+    const { saves, coordinator } = fixture();
+    coordinator.recordLocalCommit(commit("update", "n1"));
+    const marker = coordinator.snapshot().pending[0]!;
+    const savesBefore = saves.length;
+    coordinator.releaseIntent({ ...marker, noteId: "other" });
+    expect(coordinator.snapshot().pending).toEqual([marker]);
+    // An unmatched token is a persistence no-op too, not just a state no-op.
+    expect(saves.length).toBe(savesBefore);
+  });
+
+  it("collapses to one marker when the commit follows the intent", () => {
+    const { coordinator } = fixture();
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n1" });
+    coordinator.recordLocalCommit(commit("update", "n1"));
+    const pending = coordinator.snapshot().pending;
+    expect(pending.filter((m) => m.operation === "update" && m.noteId === "n1").length).toBe(1);
+    expect(pending.length).toBe(1);
+    // The commit mints a fresh sequence, so releasing the intent token must not
+    // remove the surviving marker: that marker is the only durable record of a
+    // mutation that actually happened.
+    expect(pending[0]!.sequence).toBeGreaterThan(token.sequence);
+    coordinator.releaseIntent(token);
+    expect(coordinator.snapshot().pending).toEqual(pending);
+  });
+
+  it("keeps an intent recorded during an in-flight sync after confirmation", async () => {
+    const gate = deferred<{ status: "confirmed" }>();
+    const saves: SyncCoordinatorState[] = [];
+    let saved: SyncCoordinatorState | undefined;
+    const coordinator = new SyncCoordinator({
+      executor: () => gate.promise,
+      stateStore: {
+        load: () => saved,
+        save: (s) => {
+          saves.push(s);
+          saved = s;
+        },
+      },
+    });
+    coordinator.recordLocalCommit(commit("append", "n1"));
+    const flight = coordinator.requestSync();
+    const token = coordinator.recordIntent({ operation: "update", noteId: "n2" });
+    gate.resolve({ status: "confirmed" });
+    await flight;
+    expect(coordinator.snapshot().pending).toEqual([
+      { operation: "update", noteId: "n2", sequence: token.sequence },
+    ]);
+  });
+
+  it("persists only the encrypted-store-compatible shape", () => {
+    const { saves, coordinator } = fixture();
+    coordinator.recordIntent({ operation: "delete", noteId: "n1" });
+    const last = saves.at(-1)!;
+    expect(Reflect.ownKeys(last)).toEqual(["pending"]);
+    for (const marker of last.pending) {
+      expect(Reflect.ownKeys(marker)).toEqual(["operation", "noteId", "sequence"]);
+    }
   });
 });

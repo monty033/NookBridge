@@ -281,6 +281,57 @@ export class SyncCoordinator {
   }
 
   /**
+   * Persist a write-ahead marker for an existing-note mutation BEFORE the
+   * mutator runs. A full queue or a failed save refuses the mutation. The
+   * marker is always fresh (never de-duplicated) so an unsynced marker for
+   * the same note is preserved; the returned token releases only this one.
+   */
+  recordIntent(intent: {
+    readonly operation: "append" | "update" | "delete";
+    readonly noteId: string;
+  }): SyncPendingMarker {
+    const record = requireRecord(intent, "sync intent");
+    const operation = readProperty(record, "operation");
+    const noteId = readProperty(record, "noteId");
+    if (
+      (operation !== "append" && operation !== "update" && operation !== "delete") ||
+      typeof noteId !== "string" ||
+      !validNoteId(noteId)
+    ) {
+      fail("invalid_input");
+    }
+    if (this.#pending.length >= MAX_PENDING_MARKERS) {
+      fail("sync_failed");
+    }
+
+    const marker = freezeMarker({ operation, noteId, sequence: this.#nextSequence });
+    const nextPending = [...this.#pending, marker];
+    persist(this.#store, freezeState(nextPending));
+    this.#pending = nextPending;
+    this.#nextSequence++;
+    return marker;
+  }
+
+  /**
+   * Release a marker created by `recordIntent` when the mutation is known
+   * not to have happened. Only the marker matching sequence, operation and
+   * note id is removed; an unmatched token is a no-op.
+   */
+  releaseIntent(token: SyncPendingMarker): void {
+    const record = requireRecord(token, "sync intent token");
+    const operation = readProperty(record, "operation");
+    const noteId = readProperty(record, "noteId");
+    const sequence = readProperty(record, "sequence");
+    const nextPending = this.#pending.filter(
+      (marker) =>
+        marker.sequence !== sequence || marker.operation !== operation || marker.noteId !== noteId,
+    );
+    if (nextPending.length === this.#pending.length) return;
+    persist(this.#store, freezeState(nextPending));
+    this.#pending = nextPending;
+  }
+
+  /**
    * Reject `requestSync` while the queue is at the published maximum.
    *
    * The composition refuses to start a new local mutation if the
