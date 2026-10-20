@@ -319,6 +319,62 @@ describe("nookd socket client — note revision projection", () => {
   });
 });
 
+describe("D4-1 — client rejects a non-closed locked-note proof envelope", () => {
+  const validProof = {
+    kind: "locked_note_proof",
+    pathBytes: 14,
+    read: "vault_locked",
+    update: "vault_locked",
+    delete: "vault_locked",
+  };
+
+  it("rejects an extra key inside result", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: { ...validProof, message: "CANARY" },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.lockedNoteProof({ path: "General/Locked" });
+
+    expect(result).toEqual({ ok: false, code: "service_unavailable" });
+  });
+
+  it("rejects an extra top-level envelope key", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: { ...validProof },
+        debug: "CANARY",
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.lockedNoteProof({ path: "General/Locked" });
+
+    expect(result).toEqual({ ok: false, code: "service_unavailable" });
+  });
+
+  it("rejects a code outside the closed list", async () => {
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: { ...validProof, read: "sync_failed" },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.lockedNoteProof({ path: "General/Locked" });
+
+    expect(result).toEqual({ ok: false, code: "service_unavailable" });
+  });
+});
+
 // -----------------------------------------------------------------------
 // Tool surface — exactly four read-only tools, no others.
 // -----------------------------------------------------------------------

@@ -322,6 +322,81 @@ describe("D4-2 — rpc-handler branches", () => {
   });
 });
 
+describe("D4-1 — handler rebuilds a closed proof result", () => {
+  it("drops extra runtime keys", async () => {
+    const proof = async () => ({
+      kind: "locked_note_proof",
+      pathBytes: Buffer.byteLength(PROOF_PATH),
+      read: "vault_locked",
+      update: "vault_locked",
+      delete: "vault_locked",
+      message: "CANARY-MSG",
+      path: "CANARY-PATH",
+      title: "CANARY-TITLE",
+      noteId: "CANARY-ID",
+    });
+    const response = await handleRpcRequest(
+      proofRequest(),
+      rpcRuntime(proof),
+      createCustomServicePolicy(ALL, () => ({ allowed: true })),
+    );
+    expect(response).toMatchObject({ ok: true });
+    if (!response.ok) throw new Error("expected a successful proof result");
+    expect(Object.keys(response.result)).toEqual(["kind", "pathBytes", "read", "update", "delete"]);
+    expect(response.result).toMatchObject({
+      kind: "locked_note_proof",
+      read: "vault_locked",
+      update: "vault_locked",
+      delete: "vault_locked",
+    });
+    expect(JSON.stringify(response)).not.toContain("CANARY");
+  });
+
+  describe.each(["read", "update", "delete"] as const)(
+    "maps a non-closed %s code to service_unavailable",
+    (field) => {
+      it.each(["sync_failed", "locked", "VAULT_LOCKED", "permission-denied", 1])(
+        "rejects %j",
+        async (bad) => {
+          const proof = async () => ({
+            kind: "locked_note_proof",
+            pathBytes: Buffer.byteLength(PROOF_PATH),
+            read: "vault_locked",
+            update: "vault_locked",
+            delete: "vault_locked",
+            [field]: bad,
+          });
+          const response = await handleRpcRequest(
+            proofRequest(),
+            rpcRuntime(proof),
+            createCustomServicePolicy(ALL, () => ({ allowed: true })),
+          );
+          expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+          expect("result" in response).toBe(false);
+          if (typeof bad === "string") expect(JSON.stringify(response)).not.toContain(bad);
+        },
+      );
+    },
+  );
+
+  it("ignores inherited proof fields", async () => {
+    const proof = async () =>
+      Object.assign(Object.create({ read: "vault_locked" }), {
+        kind: "locked_note_proof",
+        pathBytes: Buffer.byteLength(PROOF_PATH),
+        update: "vault_locked",
+        delete: "vault_locked",
+      });
+    const response = await handleRpcRequest(
+      proofRequest(),
+      rpcRuntime(proof),
+      createCustomServicePolicy(ALL, () => ({ allowed: true })),
+    );
+    expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    expect("result" in response).toBe(false);
+  });
+});
+
 describe("D4-2 — unresolved exact path", () => {
   it("not_found x3 and no lock read or mutation when the resolver rejects not_found", async () => {
     const d = deps("unlocked", {
