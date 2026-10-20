@@ -1,0 +1,636 @@
+/**
+ * Stage 7 — end-to-end error-vocabulary harness.
+ *
+ * Every row records three layers independently, so a failure names the layer
+ * that degraded rather than only the final MCP code:
+ *
+ *   L1 — `handleRpcRequest(request, runtime, policy).error.code` (RPC handler)
+ *   L2 — `NookdSocketClient` method -> `{ ok: false, code }` (framed Unix socket)
+ *   L3 — `buildNookMcpServer().callTool(tool, args)` -> MCP error code
+ *
+ * T1 injects write-contract errors at the service-runtime write seam.
+ * T2 runs the production runtime over a fake real-core database, no injection.
+ * T3 replays each RPC error envelope from a fake daemon.
+ */
+
+import { Buffer } from "node:buffer";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createNetServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  NOOK_MCP_APPEND_NOTE_TOOL_NAME,
+  NOOK_MCP_CREATE_NOTE_TOOL_NAME,
+  NOOK_MCP_DELETE_NOTE_TOOL_NAME,
+  NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
+  buildNookMcpServer,
+} from "../src/mcp/nook-mcp-server.js";
+import { NookdSocketClient, type NookdSocketResult } from "../src/mcp/socket-client.js";
+import type { NookMcpErrorCode } from "../src/mcp/errors.js";
+import { startNookdServer, type NookdServerRuntime } from "../src/service/nookd-server.js";
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { createCustomServicePolicy, type ServicePolicy } from "../src/service/service-policy.js";
+import { createProductionServiceRuntime } from "../src/service/service-runtime.js";
+import {
+  RPC_ERROR_MESSAGES,
+  type RpcErrorCode,
+  type RpcRequest,
+} from "../src/service/rpc-protocol.js";
+import {
+  NotesnookWriteContractError,
+  type NotesnookWriteErrorCode,
+} from "../src/core/notesnook-write-contract.js";
+import {
+  markRealCoreModule,
+  type NotesnookRealCoreModule,
+} from "../src/core/notesnook-core-adapter.js";
+import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credential-keystore.js";
+
+type McpServer = ReturnType<typeof buildNookMcpServer>;
+type ToolResult = Awaited<ReturnType<McpServer["callTool"]>>;
+type NookdSocketFailure = Extract<NookdSocketResult, { ok: false }>["code"];
+
+/** One row's expected codes at each layer. */
+interface Triple {
+  readonly rpc: RpcErrorCode;
+  readonly socket: NookdSocketFailure;
+  readonly mcp: NookMcpErrorCode;
+}
+
+/** Codes actually observed at each layer; `"ok"` marks a success. */
+interface Observed {
+  readonly rpc: string;
+  readonly socket: string;
+  readonly mcp: string;
+}
+
+interface Harness {
+  readonly policy: ServicePolicy;
+  readonly client: NookdSocketClient;
+  readonly server: McpServer;
+  readonly runtime: NookdServerRuntime;
+}
+
+type WriteMethod = "create" | "append" | "update" | "delete";
+
+const NOTE_ID = "note-1";
+const PATH = "General/Canary";
+const TITLE = "Renamed";
+const CONTENT = "Canary body";
+const MARKDOWN_FRAGMENT = "frag";
+const REVISION = "rev_00000000000000000000000000000001";
+const STALE_REVISION = "rev_ffffffffffffffffffffffffffffffff";
+
+/**
+ * Every daemon method except the locked-note proof, which no row exercises.
+ * The proof is outside the write surface this harness covers.
+ */
+const POLICY_METHODS = [
+  "notes.search",
+  "notes.status",
+  "notes.list_notebooks",
+  "notes.get",
+  "notes.create",
+  "notes.append",
+  "notes.update",
+  "notes.delete",
+  "notes.path_diagnostic",
+  "notes.sync",
+];
+
+const WRITE_METHODS: readonly WriteMethod[] = ["create", "append", "update", "delete"];
+
+/** Expected triple for a code that must pass through unchanged at every layer. */
+function same<C extends RpcErrorCode>(code: C): Triple {
+  return { rpc: code, socket: code, mcp: code };
+}
+
+/**
+ * Write-contract codes and their expected categorical outcome. Typed as a
+ * full Record so adding a `NotesnookWriteErrorCode` without a row fails tsc.
+ */
+const T1_EXPECTED: Record<NotesnookWriteErrorCode, Triple> = {
+  invalid_input: same("invalid_request"),
+  unsupported_content: same("invalid_request"),
+  unsupported_patch_field: same("invalid_request"),
+  stale_revision: same("stale_revision"),
+  conflict: same("conflict"),
+  vault_locked: same("vault_locked"),
+  sync_failed: same("sync_failed"),
+  local_sync_marker_failed: same("service_unavailable"),
+};
+const WRITE_CODES = Object.keys(T1_EXPECTED) as NotesnookWriteErrorCode[];
+
+/** RPC envelope code -> MCP code. Identity for every code; typed exhaustively. */
+const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
+  invalid_request: "invalid_request",
+  permission_denied: "permission_denied",
+  service_unavailable: "service_unavailable",
+  stale_revision: "stale_revision",
+  conflict: "conflict",
+  sync_failed: "sync_failed",
+  vault_locked: "vault_locked",
+  not_found: "not_found",
+};
+const RPC_CODES = Object.keys(RPC_TO_MCP) as RpcErrorCode[];
+
+const LAYER_LABELS = {
+  rpc: "L1 (RPC handler)",
+  socket: "L2 (socket client)",
+  mcp: "L3 (MCP tool)",
+} as const;
+
+/**
+ * Rows whose categorical origin is knowingly degraded to `service_unavailable`
+ * at L3. Owner: R2d. `local_sync_marker_failed` means the local write committed
+ * but its sync intent was not persisted; no closed RPC category covers that yet,
+ * so every method reports `service_unavailable`. Remove these rows when R2d
+ * assigns one. Any other categorical row that degrades fails the check.
+ */
+const KNOWN_DEGRADATIONS: ReadonlySet<string> = new Set<string>([
+  "T1 local_sync_marker_failed create",
+  "T1 local_sync_marker_failed append",
+  "T1 local_sync_marker_failed update",
+  "T1 local_sync_marker_failed delete",
+]);
+
+/**
+ * Guards the set above against silent shrinkage: deriving it from
+ * `WRITE_METHODS` would let a dropped method quietly reduce the allowlist and
+ * with it the coverage the equal-set assertion depends on.
+ */
+const EXPECTED_DEGRADATION_ROWS = WRITE_METHODS.map(
+  (method) => `T1 local_sync_marker_failed ${method}`,
+);
+
+/**
+ * Where a row's error started. `categorical` is any contract or RPC code other
+ * than `service_unavailable`; `uncategorised` is a plain Error or the
+ * `service_unavailable` code itself. Only a categorical origin that surfaces as
+ * `service_unavailable` counts as a degradation.
+ */
+type Origin = "categorical" | "uncategorised";
+/** Every recorded row, so the degradation check can see the whole run. */
+const observations = new Map<string, { readonly origin: Origin; readonly observed: Observed }>();
+
+/**
+ * Record the row, then fail naming the first layer whose code deviates. The
+ * record happens first so the degradation check still sees a failed row.
+ */
+function recordAndAssert(
+  rowId: string,
+  origin: Origin,
+  observed: Observed,
+  expected: Triple,
+): void {
+  observations.set(rowId, { origin, observed });
+  for (const layer of ["rpc", "socket", "mcp"] as const) {
+    if (observed[layer] !== expected[layer]) {
+      throw new Error(
+        `${rowId}: first deviating layer ${LAYER_LABELS[layer]} — expected ${expected[layer]}, observed ${observed[layer]} (rpc=${observed.rpc}, socket=${observed.socket}, mcp=${observed.mcp})`,
+      );
+    }
+  }
+}
+
+function mcpCode(result: ToolResult): string {
+  if (result.isError !== true) return "ok";
+  const block = result.content[0];
+  if (block?.type !== "text") throw new Error("MCP error result has no text block");
+  return (JSON.parse(block.text) as { code: string }).code;
+}
+
+let requestSeq = 0;
+function nextRequestId(): string {
+  requestSeq += 1;
+  return `e2e-${requestSeq}`;
+}
+
+function rpcRequestFor(method: WriteMethod, expectedRevision: string): RpcRequest {
+  const id = nextRequestId();
+  switch (method) {
+    case "create":
+      return { id, method: "notes.create", params: { title: TITLE, content: CONTENT } };
+    case "append":
+      return {
+        id,
+        method: "notes.append",
+        params: { id: NOTE_ID, markdownFragment: MARKDOWN_FRAGMENT, expectedRevision },
+      };
+    case "update":
+      return {
+        id,
+        method: "notes.update",
+        params: { id: NOTE_ID, expectedRevision, patch: { title: TITLE } },
+      };
+    case "delete":
+      return { id, method: "notes.delete", params: { path: PATH } };
+  }
+}
+
+function socketCallFor(
+  client: NookdSocketClient,
+  method: WriteMethod,
+  expectedRevision: string,
+): Promise<NookdSocketResult> {
+  switch (method) {
+    case "create":
+      return client.createNote({ title: TITLE, content: CONTENT });
+    case "append":
+      return client.appendNote({
+        id: NOTE_ID,
+        markdownFragment: MARKDOWN_FRAGMENT,
+        expectedRevision,
+      });
+    case "update":
+      return client.updateNote({ id: NOTE_ID, expectedRevision, patch: { title: TITLE } });
+    case "delete":
+      return client.deleteNote({ path: PATH });
+  }
+}
+
+function mcpCallFor(
+  server: McpServer,
+  method: WriteMethod,
+  expectedRevision: string,
+): Promise<ToolResult> {
+  switch (method) {
+    case "create":
+      return server.callTool(NOOK_MCP_CREATE_NOTE_TOOL_NAME, { title: TITLE, content: CONTENT });
+    case "append":
+      return server.callTool(NOOK_MCP_APPEND_NOTE_TOOL_NAME, {
+        id: NOTE_ID,
+        markdownFragment: MARKDOWN_FRAGMENT,
+        expectedRevision,
+      });
+    case "update":
+      return server.callTool(NOOK_MCP_UPDATE_NOTE_TOOL_NAME, {
+        id: NOTE_ID,
+        expectedRevision,
+        patch: { title: TITLE },
+      });
+    case "delete":
+      return server.callTool(NOOK_MCP_DELETE_NOTE_TOOL_NAME, { path: PATH });
+  }
+}
+
+/** Drive one write method through all three layers and collect the codes. */
+async function observeWrite(
+  harness: Harness,
+  method: WriteMethod,
+  expectedRevision: string,
+): Promise<Observed> {
+  const rpc = await handleRpcRequest(
+    rpcRequestFor(method, expectedRevision),
+    harness.runtime,
+    harness.policy,
+  );
+  const socket = await socketCallFor(harness.client, method, expectedRevision);
+  const mcp = await mcpCallFor(harness.server, method, expectedRevision);
+  return {
+    rpc: rpc.ok === true ? "ok" : rpc.error.code,
+    socket: socket.ok ? "ok" : socket.code,
+    mcp: mcpCode(mcp),
+  };
+}
+
+/**
+ * Start a real `nookd` on a fresh socket, then build the real socket client and
+ * MCP server against it. Shutdown runs `runtime.cleanup()`.
+ */
+async function withHarness(
+  runtime: NookdServerRuntime,
+  body: (harness: Harness) => Promise<void>,
+): Promise<void> {
+  const dir = mkdtempSync("/tmp/nbk-");
+  const socketPath = join(dir, "nookd.sock");
+  const policy = createCustomServicePolicy(POLICY_METHODS);
+  const handle = await startNookdServer({
+    socketPath,
+    runtime,
+    policy,
+    installSignalHandlers: false,
+  });
+  try {
+    const client = new NookdSocketClient({ socketPath });
+    await body({ policy, client, server: buildNookMcpServer({ client }), runtime });
+  } finally {
+    await handle.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T1 — write-error codes injected at the service-runtime write seam.
+// ---------------------------------------------------------------------------
+
+/** Runtime whose four write capabilities all throw `failure`. */
+function injectedRuntime(failure: Error): NookdServerRuntime {
+  const fail = async (): Promise<never> => {
+    throw failure;
+  };
+  return {
+    search: async () => [],
+    cleanup: async () => undefined,
+    resolveNotePath: async () => ({ id: NOTE_ID, expectedRevision: REVISION }),
+    createNote: fail,
+    appendNote: fail,
+    updateNote: fail,
+    deleteNote: fail,
+  };
+}
+
+describe("T1 — write-error codes injected at the service-runtime write seam", () => {
+  for (const code of WRITE_CODES) {
+    for (const method of WRITE_METHODS) {
+      const rowId = `T1 ${code} ${method}`;
+      it(rowId, async () => {
+        await withHarness(injectedRuntime(new NotesnookWriteContractError(code)), async (h) => {
+          const observed = await observeWrite(h, method, REVISION);
+          recordAndAssert(rowId, "categorical", observed, T1_EXPECTED[code]);
+        });
+      });
+    }
+  }
+
+  for (const method of WRITE_METHODS) {
+    const rowId = `T1 canary ${method}`;
+    it(rowId, async () => {
+      await withHarness(injectedRuntime(new Error("boom CANARY")), async (h) => {
+        const observed = await observeWrite(h, method, REVISION);
+        recordAndAssert(rowId, "uncategorised", observed, same("service_unavailable"));
+
+        // The canary must not survive the RPC envelope: a categorical code
+        // replaces the upstream message rather than forwarding its text.
+        const rpc = await handleRpcRequest(rpcRequestFor(method, REVISION), h.runtime, h.policy);
+        expect(rpc.ok).toBe(false);
+        if (rpc.ok === false) {
+          expect(rpc.error.message).not.toContain("CANARY");
+          expect(rpc.error.message.length).toBeGreaterThan(0);
+        }
+      });
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T2 — production runtime, no injection. Fake real-core database as in the
+// stage-10 "D4-2 — production runtime wiring" block.
+// ---------------------------------------------------------------------------
+
+type FakeDatabaseState = { readonly locked: boolean; readonly conflicted: boolean };
+
+function createFakeDatabase(state: FakeDatabaseState): Record<string, unknown> {
+  const note = {
+    id: NOTE_ID,
+    title: "Canary",
+    notebookId: "general-id",
+    pinned: false,
+    favorite: false,
+    conflicted: state.conflicted,
+    locked: false,
+    dateEdited: 1_700_000_000_000,
+  };
+  // The vault lock lives on the content row, matching the stage-10 fake.
+  const content = state.locked
+    ? { id: "content-1", noteId: NOTE_ID, type: "tiptap", data: "<p>canary</p>", locked: true }
+    : undefined;
+  const tags = new Map<string, { id: string; title: string }>();
+  return {
+    setup: () => undefined,
+    host: () => undefined,
+    init: async () => undefined,
+    user: {
+      authenticateEmail: async () => undefined,
+      authenticateMultiFactorCode: async () => undefined,
+      authenticatePassword: async () => undefined,
+      _login: async () => undefined,
+      getUser: async () => undefined,
+      logout: async () => undefined,
+    },
+    tokenManager: {
+      getToken: async () => undefined,
+      _refreshToken: async () => undefined,
+    },
+    kv: () => ({
+      read: async () => undefined,
+      write: async () => undefined,
+      delete: async () => undefined,
+    }),
+    syncer: { start: async () => true },
+    lastSynced: async () => 0,
+    hasUnsyncedChanges: async () => false,
+    notes: {
+      note: async (id: string) => (id === NOTE_ID ? { ...note } : undefined),
+      add: async () => "note-created",
+      addToNotebook: async () => undefined,
+      removeFromNotebook: async () => undefined,
+      moveToTrash: async () => undefined,
+      collection: { update: async () => undefined },
+    },
+    content: {
+      add: async () => "content-created",
+      findByNoteId: async (noteId: string) =>
+        noteId === NOTE_ID && content !== undefined ? { ...content } : undefined,
+      updateByNoteId: async () => undefined,
+    },
+    notebooks: {
+      all: { ids: async () => ["general-id"] },
+      notebook: async (id: string) =>
+        id === "general-id" ? { id, title: "General", dateEdited: 1 } : undefined,
+      breadcrumbs: async (id: string) => (id === "general-id" ? [{ id, title: "General" }] : []),
+      notes: async (id: string) => (id === "general-id" ? [NOTE_ID] : []),
+      exists: async (id: string) => id === "general-id",
+    },
+    tags: {
+      tag: async (id: string) => tags.get(id),
+      add: async ({ title }: { title: string }) => {
+        const id = `tag-${tags.size + 1}`;
+        tags.set(id, { id, title });
+        return id;
+      },
+    },
+    relations: {
+      add: async () => undefined,
+      unlink: async () => undefined,
+      from: (reference: { id: string; type: string }) => ({
+        get: async () => [],
+        has: async (noteId: string) =>
+          reference.type === "notebook" && reference.id === "general-id" && noteId === NOTE_ID,
+      }),
+    },
+    lookup: {
+      notes: async (title: string) => ({
+        ids: async () => (title === "Canary" ? [NOTE_ID] : []),
+      }),
+      notebooks: async () => ({ ids: async () => [] }),
+    },
+  };
+}
+
+async function withProductionHarness(
+  state: FakeDatabaseState,
+  body: (harness: Harness) => Promise<void>,
+): Promise<void> {
+  const stateDir = mkdtempSync(join(tmpdir(), "nbk-e2e-state-"));
+  const credentialsDir = mkdtempSync(join(tmpdir(), "nbk-e2e-creds-"));
+  writeFileSync(join(credentialsDir, "nookbridge-db-key"), "error-vocabulary-e2e-key", {
+    mode: 0o600,
+  });
+  const database = createFakeDatabase(state);
+  const injectedModule = markRealCoreModule({
+    Database: function FakeDatabase() {
+      return database;
+    } as unknown as NotesnookRealCoreModule["Database"],
+  });
+  const keys = createSystemdCredentialKeyStore({ credentialsDirectory: credentialsDir });
+  try {
+    const runtime = await createProductionServiceRuntime({ stateDir, keys, injectedModule });
+    await withHarness(runtime, body);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(credentialsDir, { recursive: true, force: true });
+  }
+}
+
+describe("T2 — production runtime, no injection", () => {
+  for (const method of ["update", "append", "delete"] as const) {
+    const rowId = `T2 locked content row ${method}`;
+    it(rowId, async () => {
+      await withProductionHarness({ locked: true, conflicted: false }, async (h) => {
+        const observed = await observeWrite(h, method, REVISION);
+        recordAndAssert(rowId, "categorical", observed, same("vault_locked"));
+      });
+    });
+  }
+
+  for (const method of ["update", "append"] as const) {
+    const staleId = `T2 stale expectedRevision ${method}`;
+    it(staleId, async () => {
+      await withProductionHarness({ locked: false, conflicted: false }, async (h) => {
+        const observed = await observeWrite(h, method, STALE_REVISION);
+        recordAndAssert(staleId, "categorical", observed, same("stale_revision"));
+      });
+    });
+
+    const conflictId = `T2 conflicted note ${method}`;
+    it(conflictId, async () => {
+      await withProductionHarness({ locked: false, conflicted: true }, async (h) => {
+        const observed = await observeWrite(h, method, REVISION);
+        recordAndAssert(conflictId, "categorical", observed, same("conflict"));
+      });
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T3 — RPC code pass-through through the socket client and MCP tool.
+// ---------------------------------------------------------------------------
+
+function framedEnvelope(envelope: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(envelope), "utf8");
+  const frame = Buffer.alloc(4 + payload.length);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return frame;
+}
+
+/**
+ * One-shot fake daemon: answers every framed request with the given error
+ * envelope. Same framing as the stage-6 proxy fake, with the echoed id.
+ */
+async function startEnvelopeDaemon(
+  code: RpcErrorCode,
+): Promise<{ readonly socketPath: string; readonly close: () => Promise<void> }> {
+  const dir = mkdtempSync("/tmp/nbk-");
+  const socketPath = join(dir, "fake-nookd.sock");
+  const sockets = new Set<Socket>();
+  const server: Server = createNetServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    let buffer = Buffer.alloc(0);
+    const onData = (chunk: Buffer): void => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length < 4) return;
+      const length = buffer.readUInt32BE(0);
+      if (buffer.length < 4 + length) return;
+      const request = JSON.parse(buffer.subarray(4, 4 + length).toString("utf8")) as {
+        id: string;
+      };
+      socket.off("data", onData);
+      socket.end(
+        framedEnvelope({
+          id: request.id,
+          ok: false,
+          error: { code, message: RPC_ERROR_MESSAGES[code] },
+        }),
+      );
+    };
+    socket.on("data", onData);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+  return {
+    socketPath,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("T3 — RPC error code pass-through", () => {
+  for (const code of RPC_CODES) {
+    const rowId = `T3 notes.update envelope ${code}`;
+    it(rowId, async () => {
+      const daemon = await startEnvelopeDaemon(code);
+      try {
+        const client = new NookdSocketClient({ socketPath: daemon.socketPath });
+        const server = buildNookMcpServer({ client });
+        const socket = await client.updateNote({
+          id: NOTE_ID,
+          expectedRevision: REVISION,
+          patch: { title: TITLE },
+        });
+        const mcp = await server.callTool(NOOK_MCP_UPDATE_NOTE_TOOL_NAME, {
+          id: NOTE_ID,
+          expectedRevision: REVISION,
+          patch: { title: TITLE },
+        });
+        // L1 is the envelope the fake daemon emits, so it equals the injected code.
+        recordAndAssert(
+          rowId,
+          code === "service_unavailable" ? "uncategorised" : "categorical",
+          { rpc: code, socket: socket.ok ? "ok" : socket.code, mcp: mcpCode(mcp) },
+          { rpc: code, socket: code, mcp: RPC_TO_MCP[code] },
+        );
+      } finally {
+        await daemon.close();
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Degradation detection. Runs last, after every row has recorded its codes.
+// ---------------------------------------------------------------------------
+
+describe("degradation detection", () => {
+  it("KNOWN_DEGRADATIONS matches the rows the write matrix actually produces", () => {
+    expect([...KNOWN_DEGRADATIONS].sort()).toEqual([...EXPECTED_DEGRADATION_ROWS].sort());
+  });
+
+  it("rows observed as service_unavailable from a categorical origin equal KNOWN_DEGRADATIONS", () => {
+    const degraded = [...observations]
+      .filter(
+        ([, entry]) =>
+          entry.origin === "categorical" && entry.observed.mcp === "service_unavailable",
+      )
+      .map(([rowId]) => rowId)
+      .sort();
+    expect(degraded).toEqual([...KNOWN_DEGRADATIONS].sort());
+  });
+});

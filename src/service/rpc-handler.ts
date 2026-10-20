@@ -66,6 +66,7 @@ import type {
   CreateNoteCommand,
   AppendNoteCommand,
   DeleteNoteCommand,
+  NotesnookWriteErrorCode,
   UpdateNoteCommand,
 } from "../core/notesnook-write-contract.js";
 import type {
@@ -228,7 +229,8 @@ const DEFAULT_READ_ONLY_POLICY: ServicePolicy = createReadOnlyServicePolicy();
  *   - The request id is preserved on every code path.  The parser
  *     has already validated the id, so echoing it cannot leak data
  *     and silently dropping it would make the response useless.
- *   - Runtime errors collapse to `service_unavailable`; request
+ *   - Runtime errors collapse to `service_unavailable` unless they carry a
+ *     write-contract code (see `WRITE_ERROR_TO_RPC`); request
  *     shape errors collapse to `invalid_request`; policy denials
  *     collapse to `permission_denied`.  No raw upstream detail,
  *     `cause`, path, credential label, or note corpus data crosses
@@ -794,13 +796,21 @@ function hasDisallowedControlCharacter(value: string): boolean {
 }
 
 const revisionTokenPattern = /^rev_[0-9a-f]{32}$/;
-const APPEND_UPDATE_ERROR_CODES = [
-  "stale_revision",
-  "conflict",
-  "vault_locked",
-  "sync_failed",
-] as const;
-type AppendUpdateErrorCode = (typeof APPEND_UPDATE_ERROR_CODES)[number];
+/**
+ * Every write-contract code and the RPC category it crosses the boundary as.
+ * Typed as a full Record so a new `NotesnookWriteErrorCode` without a row fails
+ * tsc. Errors whose own `code` is not in this table stay `service_unavailable`.
+ */
+const WRITE_ERROR_TO_RPC: Readonly<Record<NotesnookWriteErrorCode, RpcErrorCode>> = objectFreeze({
+  invalid_input: "invalid_request",
+  unsupported_content: "invalid_request",
+  unsupported_patch_field: "invalid_request",
+  stale_revision: "stale_revision",
+  conflict: "conflict",
+  vault_locked: "vault_locked",
+  sync_failed: "sync_failed",
+  local_sync_marker_failed: "service_unavailable",
+});
 
 function isRevisionToken(value: string | undefined): value is string {
   return value !== undefined && revisionTokenPattern.test(value);
@@ -874,10 +884,13 @@ function mapRuntimeError(error: unknown, id: string): RpcAnyResponseEnvelope | u
     return undefined;
   }
   const code = readOwnStringField(error as Record<string, unknown>, "code");
-  if (code === undefined || !(APPEND_UPDATE_ERROR_CODES as readonly string[]).includes(code)) {
+  if (
+    code === undefined ||
+    objectGetOwnPropertyDescriptor(WRITE_ERROR_TO_RPC, code) === undefined
+  ) {
     return undefined;
   }
-  return buildErrorEnvelope(id, code as AppendUpdateErrorCode);
+  return buildErrorEnvelope(id, WRITE_ERROR_TO_RPC[code as NotesnookWriteErrorCode]);
 }
 
 async function runAuthorizedRpcMethod(
@@ -1140,8 +1153,8 @@ async function runNotesCreate(
   let raw: unknown;
   try {
     raw = await reflectApply(fn, runtime, [command]);
-  } catch {
-    return buildErrorEnvelope(id, "service_unavailable");
+  } catch (error) {
+    return mapRuntimeError(error, id) ?? buildErrorEnvelope(id, "service_unavailable");
   }
 
   const result = normaliseCreatedNoteResult(raw);
