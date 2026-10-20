@@ -31,7 +31,7 @@
 import { Buffer } from "node:buffer";
 import process from "node:process";
 import { setTimeout } from "node:timers";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +43,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   FORBIDDEN_TOOL_NAMES,
   NOOK_MCP_ALLOWED_TOOL_NAME,
+  NOOK_MCP_TOOL_DEFINITIONS,
   buildNookMcpServer,
 } from "../src/mcp/nook-mcp-server.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
@@ -632,6 +633,133 @@ describe("notesnook_search_notes — input validation", () => {
     const result = await server.callTool("notesnook_search_notes", { query: "  hello  " });
     expect(result.isError).toBeFalsy();
     expect(observed[0]?.params.query).toBe("hello");
+  });
+});
+
+// -----------------------------------------------------------------------
+// Optional limit — applied at the proxy, never sent to the daemon.
+// -----------------------------------------------------------------------
+
+describe("notesnook_search_notes — limit", () => {
+  const tenHits = Array.from({ length: 10 }, (_, index) => ({ title: `hit-${index}` }));
+
+  async function startTenHitDaemon(
+    observed: { id: string; method: string; params: { query: string } }[] = [],
+  ): Promise<string> {
+    return startFakeDaemon((request) => {
+      observed.push(request);
+      return framedResponse({
+        id: request.id,
+        ok: true,
+        result: { kind: "search", notes: tenHits },
+      });
+    });
+  }
+
+  function parseNotes(
+    result: Awaited<ReturnType<ReturnType<typeof buildNookMcpServer>["callTool"]>>,
+  ): {
+    title: string;
+  }[] {
+    const textBlock = result.content[0] as { type: string; text: string };
+    const parsed = JSON.parse(textBlock.text) as { notes: Array<{ title: string }> };
+    return parsed.notes;
+  }
+
+  it("returns at most the requested number of hits in daemon order", async () => {
+    const socketPath = await startTenHitDaemon();
+    const client = new NookdSocketClient({ socketPath });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_search_notes", { query: "needle", limit: 3 });
+
+    expect(result.isError).toBeFalsy();
+    expect(parseNotes(result)).toEqual([
+      { title: "hit-0" },
+      { title: "hit-1" },
+      { title: "hit-2" },
+    ]);
+  });
+
+  it("never forwards limit to the daemon", async () => {
+    const observed: { id: string; method: string; params: { query: string } }[] = [];
+    const socketPath = await startTenHitDaemon(observed);
+    const client = new NookdSocketClient({ socketPath });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_search_notes", { query: "needle", limit: 3 });
+
+    expect(result.isError).toBeFalsy();
+    expect(observed.length).toBe(1);
+    expect(observed[0]?.params).toEqual({ query: "needle" });
+  });
+
+  it("returns every hit when no limit is supplied", async () => {
+    const socketPath = await startTenHitDaemon();
+    const client = new NookdSocketClient({ socketPath });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_search_notes", { query: "needle" });
+
+    expect(result.isError).toBeFalsy();
+    expect(parseNotes(result)).toHaveLength(10);
+  });
+
+  it("returns every hit when the limit exceeds the hit count", async () => {
+    const socketPath = await startTenHitDaemon();
+    const client = new NookdSocketClient({ socketPath });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_search_notes", { query: "needle", limit: 64 });
+
+    expect(result.isError).toBeFalsy();
+    expect(parseNotes(result)).toHaveLength(10);
+  });
+
+  it("returns exactly one hit for limit 1", async () => {
+    const socketPath = await startTenHitDaemon();
+    const client = new NookdSocketClient({ socketPath });
+    const server = buildNookMcpServer({ client });
+
+    const result = await server.callTool("notesnook_search_notes", { query: "needle", limit: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(parseNotes(result)).toEqual([{ title: "hit-0" }]);
+  });
+
+  it.each([0, 65, 1.5, "3", -1])(
+    "rejects invalid limit %s before opening the socket",
+    async (limit) => {
+      let connectCount = 0;
+      const client = new NookdSocketClient({
+        socketPath: "/tmp/never-used",
+        connect: async () => {
+          connectCount += 1;
+          throw new Error("connect must not run");
+        },
+      });
+      const server = buildNookMcpServer({ client });
+
+      const result = await server.callTool("notesnook_search_notes", { query: "needle", limit });
+
+      expect(connectCount).toBe(0);
+      expect(result.isError).toBe(true);
+      const textBlock = result.content[0] as { type: string; text: string };
+      expect(textBlock.text).toContain("invalid_request");
+    },
+  );
+
+  it("documents that limit is applied and no longer ignored", () => {
+    const docs = readFileSync(join(process.cwd(), "docs/reference/mcp-tools.md"), "utf8");
+    expect(docs).not.toContain("not applied by the service");
+
+    const searchTool = NOOK_MCP_TOOL_DEFINITIONS.find(
+      (tool) => tool.name === "notesnook_search_notes",
+    );
+    const schema = searchTool?.inputSchema as {
+      properties?: { limit?: { description?: string } };
+    };
+    expect(schema.properties?.limit?.description ?? "").not.toContain("currently ignored");
   });
 });
 
