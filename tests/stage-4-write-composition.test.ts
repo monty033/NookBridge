@@ -29,7 +29,7 @@ import { readFileSync } from "node:fs";
 import { dirname as dirnameOf, join as joinPath } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   NotesnookLocalWriteComposition,
@@ -201,6 +201,12 @@ function stubCoordinator(
     readonly onRecord?: (receipt: unknown) => unknown;
     readonly onSync?: () => unknown;
     readonly onSnapshot?: () => unknown;
+    /** Opt in to the write-ahead intent pair; `events` is shared with the adapter. */
+    readonly intent?: {
+      readonly events: string[];
+      readonly onRecordIntent?: (intent: unknown) => unknown;
+      readonly omitRelease?: boolean;
+    };
   } = {},
 ): StubCoordinator {
   const receipts: unknown[] = [];
@@ -212,6 +218,7 @@ function stubCoordinator(
     snapshotCalls,
     recordLocalCommit(receipt: unknown) {
       receipts.push(receipt);
+      overrides.intent?.events.push("recordLocalCommit");
       if (overrides.onRecord !== undefined) return overrides.onRecord(receipt) as never;
       const record = receipt as { readonly operation: string; readonly id: string };
       return Object.freeze({
@@ -242,31 +249,65 @@ function stubCoordinator(
       return Object.freeze({ pending: Object.freeze([]) }) as never;
     },
   };
+  if (overrides.intent !== undefined) {
+    const { events, onRecordIntent, omitRelease } = overrides.intent;
+    let sequence = 0;
+    Object.assign(handle, {
+      recordIntent: vi.fn((intent: unknown) => {
+        events.push("recordIntent");
+        if (onRecordIntent !== undefined) return onRecordIntent(intent);
+        const record = intent as { readonly operation: string; readonly noteId: string };
+        sequence += 1;
+        return Object.freeze({ operation: record.operation, noteId: record.noteId, sequence });
+      }),
+    });
+    if (omitRelease !== true) {
+      Object.assign(handle, {
+        releaseIntent: vi.fn(() => {
+          events.push("releaseIntent");
+        }),
+      });
+    }
+  }
   return handle as unknown as StubCoordinator;
 }
 
 /** Minimal adapter stand-in returning caller-chosen raw results. */
-function stubAdapter(results: {
-  readonly create?: () => unknown;
-  readonly append?: () => unknown;
-  readonly update?: () => unknown;
-}): NotesnookLocalWriteHandle & { readonly commands: unknown[] } {
+function stubAdapter(
+  results: {
+    readonly create?: () => unknown;
+    readonly append?: () => unknown;
+    readonly update?: () => unknown;
+    readonly delete?: () => unknown;
+  },
+  events?: string[],
+): NotesnookLocalWriteHandle & { readonly commands: unknown[] } {
   const commands: unknown[] = [];
-  const handle = {
+  const handle: Record<string, unknown> = {
     commands,
     createNote(command: unknown) {
       commands.push(command);
+      events?.push("adapter");
       return Promise.resolve(results.create?.()) as never;
     },
     appendNote(command: unknown) {
       commands.push(command);
+      events?.push("adapter");
       return Promise.resolve(results.append?.()) as never;
     },
     updateNote(command: unknown) {
       commands.push(command);
+      events?.push("adapter");
       return Promise.resolve(results.update?.()) as never;
     },
   };
+  if (results.delete !== undefined) {
+    handle["deleteNote"] = (command: unknown) => {
+      commands.push(command);
+      events?.push("adapter");
+      return Promise.resolve(results.delete?.()) as never;
+    };
+  }
   return handle as unknown as NotesnookLocalWriteHandle & { readonly commands: unknown[] };
 }
 
@@ -402,7 +443,8 @@ describe("Stage 4 write composition — local commits become pending metadata", 
       pendingSync: true,
     });
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
-      pending: [{ operation: "append", noteId: NOTE_ID, sequence: 1 }],
+      // Sequence 1 belongs to the write-ahead intent; 2 to the commit that replaced it.
+      pending: [{ operation: "append", noteId: NOTE_ID, sequence: 2 }],
     });
   });
 
@@ -428,7 +470,8 @@ describe("Stage 4 write composition — local commits become pending metadata", 
     expect(Array.isArray(result.appliedFields)).toBe(true);
     expect(Object.getPrototypeOf(result.appliedFields)).toBeNull();
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
-      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      // Sequence 1 belongs to the write-ahead intent; 2 to the commit that replaced it.
+      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 2 }],
     });
   });
 
@@ -472,9 +515,10 @@ describe("Stage 4 write composition — local commits become pending metadata", 
     await composition.createNote({ title: "t", content: "c" });
 
     expect(Array.from(composition.pendingSnapshot().pending)).toEqual([
-      { operation: "append", noteId: NOTE_ID, sequence: 1 },
-      { operation: "update", noteId: NOTE_ID, sequence: 2 },
-      { operation: "create", noteId: OTHER_NOTE_ID, sequence: 3 },
+      // append: intent=1, commit=2; update: intent=3, commit=4; create has no intent, so 5.
+      { operation: "append", noteId: NOTE_ID, sequence: 2 },
+      { operation: "update", noteId: NOTE_ID, sequence: 4 },
+      { operation: "create", noteId: OTHER_NOTE_ID, sequence: 5 },
     ]);
   });
 
@@ -2114,4 +2158,410 @@ describe("Stage 4 write composition — exact closed surface", () => {
     expect(persistedText).not.toContain("canary body");
     expect(persistedText).not.toContain("canary title");
   });
+});
+
+// ---------------------------------------------------------------------------
+// 10. R2b — write-ahead intent precedes existing-note mutations (P1-3).
+// ---------------------------------------------------------------------------
+
+describe("R2b — write-ahead intent precedes existing-note mutations", () => {
+  type IntentOp = "append" | "update" | "delete";
+  const OPS: readonly IntentOp[] = ["append", "update", "delete"];
+  const NOTHING_MUTATED_CODES = [
+    "invalid_input",
+    "unsupported_content",
+    "unsupported_patch_field",
+    "stale_revision",
+    "conflict",
+    "vault_locked",
+  ] as const;
+
+  function goodResult(op: IntentOp, id = NOTE_ID): unknown {
+    const base = {
+      operation: op,
+      id,
+      localCommitted: true,
+      remoteSynced: false,
+      pendingSync: true,
+    };
+    if (op === "append") return { ...base, contentBytes: 8 };
+    if (op === "update") return { ...base, appliedFields: ["title"] };
+    return base;
+  }
+
+  function stubAdapterFor(
+    op: IntentOp,
+    produce: () => unknown,
+    events: string[],
+  ): NotesnookLocalWriteHandle & { readonly commands: unknown[] } {
+    return stubAdapter({ [op]: produce }, events);
+  }
+
+  function run(composition: NotesnookLocalWriteComposition, op: IntentOp): Promise<unknown> {
+    if (op === "append") {
+      return composition.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "one line",
+        expectedRevision: revision(),
+      });
+    }
+    if (op === "update") {
+      return composition.updateNote({
+        id: NOTE_ID,
+        patch: { title: "renamed" },
+        expectedRevision: revision(),
+      });
+    }
+    return composition.deleteNote({ id: NOTE_ID, expectedRevision: revision() });
+  }
+
+  /** A real-adapter seam that can also delete, still recording every call. */
+  function mutatingAdapter(): { adapter: NotesnookWriteAdapter; calls: string[] } {
+    const seam = fakeSeam();
+    const database: NotesnookWriteDatabase = Object.freeze({
+      ...seam.database,
+      notesDelete: async () => {
+        seam.calls.push("notesDelete");
+      },
+    });
+    return {
+      adapter: createNotesnookWriteAdapter({ source: database, codec }),
+      calls: seam.calls,
+    };
+  }
+
+  const MUTATING_CALLS = [
+    "notesUpdate",
+    "notesTouch",
+    "contentUpdateByNoteId",
+    "contentAdd",
+    "notesAdd",
+    "notesDelete",
+    "notebookAddNote",
+    "notebookRemoveNote",
+    "tagAdd",
+    "relationAdd",
+    "relationRemove",
+  ];
+
+  function memoryStore(): {
+    store: { load: () => unknown; save: (state: SyncCoordinatorState) => void };
+    saves: SyncCoordinatorState[];
+  } {
+    const saves: SyncCoordinatorState[] = [];
+    return {
+      saves,
+      store: {
+        load: () => saves[saves.length - 1],
+        save: (state) => {
+          saves.push(state);
+        },
+      },
+    };
+  }
+
+  function pendingOf(coordinator: SyncCoordinator): unknown[] {
+    return Array.from(coordinator.snapshot().pending as unknown as Iterable<unknown>);
+  }
+
+  function leakFree(error: unknown): void {
+    const text = JSON.stringify(error) + String((error as Error).message);
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(SECRET_CAUSE);
+    expect(text).not.toContain("one line");
+    expect(text).not.toContain("renamed");
+  }
+
+  async function capture(fn: () => Promise<unknown>): Promise<unknown> {
+    try {
+      await fn();
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected rejection");
+  }
+
+  it.each(OPS)("1. %s: intent, adapter, then recordLocalCommit", async (op) => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events } });
+    const adapter = stubAdapterFor(op, () => goodResult(op), events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    const result = (await run(composition, op)) as { operation: string; id: string };
+
+    expect(events).toEqual(["recordIntent", "adapter", "recordLocalCommit"]);
+    expect(coordinator.recordIntent).toHaveBeenCalledWith({ operation: op, noteId: NOTE_ID });
+    expect(result.operation).toBe(op);
+    expect(result.id).toBe(NOTE_ID);
+  });
+
+  it.each(OPS)("2. %s: a recordIntent failure never reaches the adapter", async (op) => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({
+      intent: {
+        events,
+        onRecordIntent: () => {
+          throw new NotesnookWriteContractError("sync_failed");
+        },
+      },
+    });
+    const adapter = stubAdapterFor(op, () => goodResult(op), events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+    expect(adapter.commands).toHaveLength(0);
+    expect(coordinator.receipts).toHaveLength(0);
+    expect(events).toEqual(["recordIntent"]);
+  });
+
+  it.each(OPS)("3. %s: a full queue refuses before any mutating call", async (op) => {
+    const { adapter, calls } = mutatingAdapter();
+    const real = new SyncCoordinator({ executor: vi.fn(), stateStore: memoryStore().store });
+    for (let i = 0; i < 64; i++) real.recordIntent({ operation: "append", noteId: NOTE_ID });
+    // Hide the advisory capacity probe so recordIntent's own bound is what refuses.
+    const coordinator = {
+      recordIntent: real.recordIntent.bind(real),
+      releaseIntent: real.releaseIntent.bind(real),
+      recordLocalCommit: real.recordLocalCommit.bind(real),
+      requestSync: real.requestSync.bind(real),
+      snapshot: real.snapshot.bind(real),
+    };
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+    expect(calls.filter((call) => MUTATING_CALLS.includes(call))).toEqual([]);
+    expect(pendingOf(real)).toHaveLength(64);
+  });
+
+  it.each(OPS)(
+    "3b. %s: the capacity pre-check reports invalid_input before any intent is recorded",
+    async (op) => {
+      const { adapter, calls } = mutatingAdapter();
+      const real = new SyncCoordinator({ executor: vi.fn(), stateStore: memoryStore().store });
+      for (let i = 0; i < 64; i++) real.recordIntent({ operation: "append", noteId: NOTE_ID });
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+      expect(await codeOf(() => run(composition, op))).toBe("invalid_input");
+      expect(calls.filter((call) => MUTATING_CALLS.includes(call))).toEqual([]);
+    },
+  );
+
+  describe.each(OPS)("4. %s: nothing-mutated codes release the exact token", (op) => {
+    it.each(NOTHING_MUTATED_CODES)("%s", async (code) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({ intent: { events } });
+      const adapter = stubAdapterFor(
+        op,
+        () => {
+          throw new NotesnookWriteContractError(code, SECRET_CAUSE);
+        },
+        events,
+      );
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      const error = await capture(() => run(composition, op));
+
+      expect(isNotesnookWriteCompositionError(error)).toBe(true);
+      expect((error as { code: string }).code).toBe(code);
+      leakFree(error);
+      const issued = vi.mocked(coordinator.recordIntent!).mock.results[0]!.value;
+      expect(coordinator.releaseIntent).toHaveBeenCalledTimes(1);
+      expect(coordinator.releaseIntent).toHaveBeenCalledWith(issued);
+      expect(vi.mocked(coordinator.releaseIntent!).mock.calls[0]![0]).toBe(issued);
+      expect(coordinator.receipts).toHaveLength(0);
+    });
+  });
+
+  describe.each(OPS)("5. %s: uncertain outcomes keep the marker", (op) => {
+    it.each([
+      ["sync_failed contract error", () => new NotesnookWriteContractError("sync_failed")],
+      ["plain Error", () => new Error(`boom ${SECRET_CAUSE}`)],
+    ] as const)("%s", async (_label, make) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({ intent: { events } });
+      const adapter = stubAdapterFor(
+        op,
+        () => {
+          throw make();
+        },
+        events,
+      );
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      const error = await capture(() => run(composition, op));
+
+      expect((error as { code: string }).code).toBe("sync_failed");
+      leakFree(error);
+      expect(coordinator.releaseIntent).toHaveBeenCalledTimes(0);
+    });
+  });
+
+  it.each(OPS)(
+    "5b. %s: a failing release is swallowed and the original code is kept",
+    async (op) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({ intent: { events } });
+      vi.mocked(coordinator.releaseIntent!).mockImplementation(() => {
+        throw new Error(SECRET_CAUSE);
+      });
+      const adapter = stubAdapterFor(
+        op,
+        () => {
+          throw new NotesnookWriteContractError("stale_revision");
+        },
+        events,
+      );
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      const error = await capture(() => run(composition, op));
+
+      expect((error as { code: string }).code).toBe("stale_revision");
+      leakFree(error);
+    },
+  );
+
+  it.each(OPS)("6. %s: the intent survives a crash after the adapter mutated", async (op) => {
+    const { store } = memoryStore();
+    const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+    const events: string[] = [];
+    const adapter = stubAdapterFor(
+      op,
+      () => {
+        events.push("mutated");
+        throw new Error("crash");
+      },
+      events,
+    );
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+    expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+
+    const restarted = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+    expect(pendingOf(restarted)).toEqual([
+      expect.objectContaining({ operation: op, noteId: NOTE_ID }),
+    ]);
+  });
+
+  it.each(OPS)(
+    "7. %s: a recordLocalCommit failure still returns the success result",
+    async (op) => {
+      const { store } = memoryStore();
+      const real = new SyncCoordinator({ executor: vi.fn(), stateStore: store });
+      const coordinator = {
+        recordIntent: real.recordIntent.bind(real),
+        releaseIntent: real.releaseIntent.bind(real),
+        recordLocalCommit: () => {
+          throw new NotesnookWriteContractError("sync_failed");
+        },
+        requestSync: real.requestSync.bind(real),
+        snapshot: real.snapshot.bind(real),
+      };
+      const { adapter } = mutatingAdapter();
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      const result = (await run(composition, op)) as { operation: string; id: string };
+
+      expect(result.operation).toBe(op);
+      expect(result.id).toBe(NOTE_ID);
+      expect(pendingOf(real)).toEqual([
+        expect.objectContaining({ operation: op, noteId: NOTE_ID }),
+      ]);
+    },
+  );
+
+  it.each(OPS)(
+    "7b. %s: the stub variant also resolves when recordLocalCommit throws",
+    async (op) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({
+        intent: { events },
+        onRecord: () => {
+          throw new NotesnookWriteContractError("sync_failed");
+        },
+      });
+      const adapter = stubAdapterFor(op, () => goodResult(op), events);
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      const result = (await run(composition, op)) as { operation: string };
+
+      expect(result.operation).toBe(op);
+      expect(coordinator.releaseIntent).toHaveBeenCalledTimes(0);
+    },
+  );
+
+  it.each(OPS)("8. %s: a mismatched result id fails closed and keeps the marker", async (op) => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events } });
+    const adapter = stubAdapterFor(op, () => goodResult(op, "other-note"), events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+    expect(coordinator.releaseIntent).toHaveBeenCalledTimes(0);
+    expect(coordinator.receipts).toHaveLength(0);
+  });
+
+  it("9. recordIntent without releaseIntent fails construction", () => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events, omitRelease: true } });
+    const adapter = stubAdapter({}, events);
+    let thrown: unknown;
+    try {
+      new NotesnookLocalWriteComposition({ adapter, coordinator });
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as { code?: string }).code).toBe("invalid_input");
+  });
+
+  it("9b. releaseIntent without recordIntent fails construction", () => {
+    const coordinator = stubCoordinator();
+    Object.assign(coordinator, { releaseIntent: () => undefined });
+    let thrown: unknown;
+    try {
+      new NotesnookLocalWriteComposition({ adapter: stubAdapter({}), coordinator });
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as { code?: string }).code).toBe("invalid_input");
+  });
+
+  it("10. create is unchanged: no recordIntent, post-commit marker only", async () => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events } });
+    const adapter = stubAdapter({ create: () => goodCreateResult() }, events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    await composition.createNote({ title: "t", content: "c" });
+
+    expect(coordinator.recordIntent).toHaveBeenCalledTimes(0);
+    expect(events).toEqual(["adapter", "recordLocalCommit"]);
+  });
+
+  it.each(["append", "update", "delete"] as const)(
+    "11. a legacy coordinator keeps the post-commit order (%s)",
+    async (op) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({
+        onRecord: (receipt) => {
+          events.push("recordLocalCommit");
+          const record = receipt as { readonly operation: string; readonly id: string };
+          return Object.freeze({
+            operation: record.operation,
+            id: record.id,
+            localCommitted: true,
+            remoteSynced: false,
+            pendingSync: true,
+          });
+        },
+      });
+      const adapter = stubAdapterFor(op, () => goodResult(op), events);
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+      await run(composition, op);
+
+      // No intent pair: the old post-commit order must survive untouched.
+      expect(events).toEqual(["adapter", "recordLocalCommit"]);
+      expect((coordinator as unknown as { recordIntent?: unknown }).recordIntent).toBeUndefined();
+    },
+  );
 });
