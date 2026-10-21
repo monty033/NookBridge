@@ -64,8 +64,8 @@ uploaded". This is tracked as an open defect, not a closed boundary.
 Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
 categorical `vault_locked` for a locked note and `permission_denied` for the
 unlocked control — proven live on 1.3.9 — but the daemon still records
-`peerCredentials: "unknown"` for the peer, and the proof's own path resolution
-collapses every failure other than `not_found` into the generic code.
+`peerCredentials: "unknown"` for the peer. The proof's path-resolution coverage
+is no longer generic: #202–#204 closed it, as recorded below.
 
 The read-only sync proof no longer reports a pass against an implicit store. Its
 state directory used to be derived from the working directory when
@@ -96,14 +96,14 @@ through `a4028c7`) squashed in.
 ### Documentation reconciliation — 2026-09-28
 
 A read-only audit (source-only; no VM, live, or production checks) confirmed
-this section's four named defects — the `pendingSync` upload gap, the
-hardcoded `peerCredentials: "unknown"` audit field, the locked-note proof's
-generic-code collapse on non-`not_found` path-resolution failures, and the
+three of this section's four named defects — the `pendingSync` upload gap, the
+hardcoded `peerCredentials: "unknown"` audit field, and the
 `NOOKBRIDGE_STATE_DIR` fallback that lets the read-only sync proof pass
-against an empty store — remain **open and untouched** by any commit merged
+against an empty store — remained **open and untouched** by any commit merged
 since 2026-09-21 (operator-notes follow-ups #126/#136, release/CI hardening
-#127–#159, and native block-markdown parity #160 do not touch any of the four
-affected files). This section was not stale; it is confirmed current as of
+#127–#159, and native block-markdown parity #160 do not touch any of those
+files). The fourth, the locked-note proof's path-resolution coverage, was
+closed later by #202–#204, as recorded below. This section was not stale as of
 2026-09-28.
 
 ### Implicit-state-directory sync proof — 2026-10-04
@@ -125,9 +125,23 @@ Two limits on this claim, stated so it is not read as more than it is:
   search steps record `pass` when they are skipped. That second half of the gap is
   not addressed by this change.
 
-The other three defects remain open and untouched: the `pendingSync` upload gap,
-the hardcoded `peerCredentials: "unknown"` audit field, and the locked-note
-proof's generic-code collapse on non-`not_found` path-resolution failures.
+The other two defects remain open and untouched: the `pendingSync` upload gap
+and the hardcoded `peerCredentials: "unknown"` audit field. The locked-note
+proof's path-resolution coverage was closed separately by #202–#204.
+
+### Locked-note proof path codes — 2026-10-20
+
+The locked-note proof's path-resolution defect is closed. #202 (`59a378e`)
+maps every `ExactNotePathErrorCode` to a closed proof result through a typed
+record, so `not_found` stays `not_found` and `invalid_path`, `ambiguous`, and
+`source_unavailable` stay `service_unavailable`; a new resolver code fails
+typecheck until its mapping is decided. #203 (`e5b625d`) authorizes
+`notes.get`, `notes.update`, and `notes.delete` from the parsed path before
+resolution, so an unauthorized caller can no longer learn whether a note
+exists. #200 (`adcfc56`) proves the proof never trashes an unlocked note, and
+#204 (`38499d2`) locks the closed handler and client result shape. This is
+source evidence and offline regression coverage only; no VM or live proof was
+run.
 
 ## Reading status claims safely
 
