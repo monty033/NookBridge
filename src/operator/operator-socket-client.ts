@@ -3,6 +3,7 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../service/service-abuse-bounds.js";
 import {
   STAGE5_RPC_LIMITS,
   isRpcErrorCode,
@@ -13,7 +14,12 @@ import {
 import { isOperatorMethod, type OperatorMethod } from "../service/operator-methods.js";
 
 const FRAME_PREFIX_BYTES = 4;
-const DEFAULT_TIMEOUT_MS = 5_000;
+/**
+ * The client's deadline must outlive the daemon's own per-request deadline,
+ * otherwise the client reports `service_unavailable` while the daemon is
+ * still working. Same formula as the R9a client deadline.
+ */
+const DEFAULT_TIMEOUT_MS = DEFAULT_SERVICE_ABUSE_BOUNDS.requestTimeoutMs + 2_000;
 
 /**
  * Failure categories the operator client can report.
@@ -81,16 +87,54 @@ export class OperatorSocketClient {
     frame.writeUInt32BE(body.byteLength, 0);
     body.copy(frame, FRAME_PREFIX_BYTES);
 
+    return await this.#exchange(id, frame);
+  }
+
+  /**
+   * Runs one request under a single deadline that starts before `connect` and
+   * covers connect, write and read.
+   *
+   * The deadline is owned here rather than inside `roundTrip` so a stalled
+   * connect cannot outlive it: the daemon has no per-request deadline, so a
+   * client that only bounded the read phase would hang `nookctl` forever.
+   * A socket that resolves from `connect` after expiry is destroyed instead
+   * of being used.
+   */
+  async #exchange(id: string, frame: Buffer): Promise<OperatorSocketResult> {
     let socket: Socket | undefined;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const deadline = new Promise<OperatorSocketResult>((resolveDeadline) => {
+      timer = setTimeout(() => {
+        expired = true;
+        socket?.destroy();
+        resolveDeadline({ ok: false, code: "service_unavailable" });
+      }, this.#timeoutMs);
+    });
+
+    const work = (async (): Promise<OperatorSocketResult> => {
+      try {
+        const connected = await this.#connect(this.#socketPath);
+        socket = connected;
+        if (expired) {
+          // The deadline expired while `connect` was pending: destroy the
+          // late socket instead of using it, and absorb any late `error`
+          // event so an abandoned connection cannot crash the CLI.
+          connected.once("error", () => undefined);
+          connected.destroy();
+          return { ok: false, code: "service_unavailable" };
+        }
+        return decodeResponse(await roundTrip(connected, frame), id);
+      } catch {
+        return { ok: false, code: "service_unavailable" };
+      }
+    })();
+
     try {
-      socket = await this.#connect(this.#socketPath);
-      const responseBytes = await roundTrip(socket, frame, this.#timeoutMs);
-      const response = decodeResponse(responseBytes, id);
-      if (response.ok === false) return response;
-      return response;
-    } catch {
-      socket?.destroy();
-      return { ok: false, code: "service_unavailable" };
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 }
@@ -107,18 +151,25 @@ async function defaultConnect(path: string): Promise<Socket> {
   });
 }
 
-async function roundTrip(socket: Socket, frame: Buffer, timeoutMs: number): Promise<Buffer> {
+/**
+ * Writes one frame and resolves with the framed reply.
+ *
+ * There is deliberately no timer here: the caller owns the one deadline for
+ * the whole operation. Teardown still destroys the socket and detaches every
+ * listener so a deadline-driven `destroy` (or a server-side close) settles
+ * this promise instead of leaving it pending.
+ */
+async function roundTrip(socket: Socket, frame: Buffer): Promise<Buffer> {
   return await new Promise<Buffer>((resolveBytes, reject) => {
     let received = Buffer.alloc(0);
     let expected: number | undefined;
-    const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
     const finish = (error?: Error): void => {
-      clearTimeout(timer);
       socket.removeAllListeners();
       socket.destroy();
       if (error) reject(error);
     };
     socket.on("error", () => finish(new Error("socket error")));
+    socket.on("close", () => finish(new Error("socket closed")));
     socket.on("data", (chunk: Buffer) => {
       received = Buffer.concat([received, chunk]);
       if (received.byteLength > STAGE5_RPC_LIMITS.maxResponseBytes)
