@@ -17,6 +17,9 @@ import {
   type NookdServerHandle,
   type NookdServerRuntime,
 } from "../src/service/nookd-server.js";
+import { createLogger } from "../src/logging/logger.js";
+import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../src/service/service-abuse-bounds.js";
+import type { ServiceAuditRecord } from "../src/service/service-audit.js";
 import { runNookdCli } from "../src/nookd.js";
 import {
   startOperatorSocketServer,
@@ -481,6 +484,192 @@ describe("nookd Unix socket server", () => {
         >,
       }),
     ).rejects.toThrow("operator");
+  });
+});
+
+describe("R4 — runtime ownership outlives the transport", () => {
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function deferred<T = void>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+  } {
+    let resolve: (value: T) => void = () => undefined;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  async function ownershipFixture(
+    options: { shutdownTimeoutMs?: number; maxConnections?: number } = {},
+  ): Promise<{
+    handle: NookdServerHandle;
+    socketPath: string;
+    events: string[];
+    records: ServiceAuditRecord[];
+    cleanup: ReturnType<typeof vi.fn>;
+    search: ReturnType<typeof vi.fn>;
+    gate: ReturnType<typeof deferred<{ title: string }[]>>;
+  }> {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-r4-"));
+    tempDirectories.push(directory);
+    const socketPath = path.join(directory, "nookbridge.sock");
+    const events: string[] = [];
+    const records: ServiceAuditRecord[] = [];
+    const gate = deferred<{ title: string }[]>();
+    const search = vi.fn(() => gate.promise);
+    const cleanup = vi.fn(async () => {
+      events.push("cleanup");
+    });
+    const handle = await startNookdServer({
+      socketPath,
+      runtime: Object.freeze({ search, cleanup }) as NookdServerRuntime,
+      installSignalHandlers: false,
+      abuseBounds: {
+        ...DEFAULT_SERVICE_ABUSE_BOUNDS,
+        perProcessBurstSize: 100,
+        requestTimeoutMs: 30,
+      },
+      auditLogger: createLogger({
+        sink: (line) => {
+          const parsed = JSON.parse(line) as ServiceAuditRecord & { component?: string };
+          if (parsed.component === "service_audit") records.push(parsed);
+        },
+      }),
+      ...options,
+    });
+    handles.push(handle);
+    return { handle, socketPath, events, records, cleanup, search, gate };
+  }
+
+  it("does not clean the runtime while timed-out work is still running", async () => {
+    const { handle, socketPath, events, records, cleanup, search, gate } = await ownershipFixture({
+      shutdownTimeoutMs: 50,
+    });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("t1", "needle"));
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(records.map((record) => record.event)).toContain("rpc.request.timeout"),
+    );
+
+    try {
+      let shutdownSettled = false;
+      const shutdown = handle.shutdown().then(() => {
+        shutdownSettled = true;
+      });
+      await sleep(100);
+      expect(cleanup).not.toHaveBeenCalled();
+      expect(shutdownSettled).toBe(false);
+
+      events.push("settled");
+      gate.resolve([{ title: "late" }]);
+      await shutdown;
+      expect(events).toEqual(["settled", "cleanup"]);
+    } finally {
+      gate.resolve([]);
+      socket.destroy();
+    }
+  });
+
+  it("does not clean the runtime while work abandoned by a client disconnect is running", async () => {
+    const { handle, socketPath, events, cleanup, search, gate } = await ownershipFixture({
+      shutdownTimeoutMs: 50,
+    });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("t2", "needle"));
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+    socket.destroy();
+    await waitForClose(socket);
+
+    try {
+      const shutdown = handle.shutdown();
+      await sleep(100);
+      expect(cleanup).not.toHaveBeenCalled();
+
+      events.push("settled");
+      gate.resolve([{ title: "late" }]);
+      await shutdown;
+      expect(events).toEqual(["settled", "cleanup"]);
+    } finally {
+      gate.resolve([]);
+    }
+  });
+
+  it("does not let shutdownTimeoutMs let cleanup overtake running runtime work", async () => {
+    const { handle, socketPath, events, cleanup, search, gate } = await ownershipFixture({
+      shutdownTimeoutMs: 20,
+    });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("t3", "needle"));
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+
+    try {
+      const shutdown = handle.shutdown();
+      await sleep(200);
+      expect(cleanup).not.toHaveBeenCalled();
+
+      events.push("settled");
+      gate.resolve([{ title: "late" }]);
+      await shutdown;
+      expect(events).toEqual(["settled", "cleanup"]);
+    } finally {
+      gate.resolve([]);
+      socket.destroy();
+    }
+  });
+
+  it("keeps the connection slot occupied until detached runtime work settles", async () => {
+    const { socketPath, records, search, gate } = await ownershipFixture({ maxConnections: 1 });
+    const a = await connect(socketPath);
+    a.write(requestBytes("a", "needle"));
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+    await waitForClose(a);
+
+    try {
+      const rejectedBefore = records.filter(
+        (record) => record.event === "rpc.connection.admission_rejected",
+      ).length;
+      const b = await connect(socketPath);
+      const bData: Buffer[] = [];
+      b.on("data", (chunk: Buffer) => bData.push(chunk));
+      b.on("error", () => undefined);
+      await waitForClose(b);
+      expect(bData).toHaveLength(0);
+      expect(
+        records.filter((record) => record.event === "rpc.connection.admission_rejected").length,
+      ).toBe(rejectedBefore + 1);
+
+      gate.resolve([{ title: "done" }]);
+      await sleep(20);
+      search.mockImplementation(async () => [{ title: "c" }]);
+      const c = await connect(socketPath);
+      c.write(requestBytes("c", "needle"));
+      expect(await readFrame(c)).toMatchObject({ id: "c", ok: true });
+      c.destroy();
+    } finally {
+      gate.resolve([]);
+    }
+  });
+
+  it("regression: a normal request then shutdown answers and cleans up once without added wait", async () => {
+    const { handle, socketPath, events, cleanup, search, gate } = await ownershipFixture({
+      shutdownTimeoutMs: 50,
+    });
+    gate.resolve([{ title: "fast" }]);
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("n", "needle"));
+    expect(await readFrame(socket)).toMatchObject({ id: "n", ok: true });
+    expect(search).toHaveBeenCalledTimes(1);
+
+    const startedMs = Date.now();
+    socket.destroy();
+    await handle.shutdown();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["cleanup"]);
+    expect(Date.now() - startedMs).toBeLessThan(1_000);
   });
 });
 

@@ -414,7 +414,7 @@ describe("service boundary abuse controls", () => {
     expect(records.map((record) => record.event)).toContain("rpc.connection.closed");
   });
 
-  it("detaches a runtime promise when the daemon shuts down", async () => {
+  it("closes the connection and waits for runtime work when the daemon shuts down", async () => {
     const records: ServiceAuditRecord[] = [];
     let release: (() => void) | undefined;
     let startedResolve: (() => void) | undefined;
@@ -433,8 +433,9 @@ describe("service boundary abuse controls", () => {
     const socket = await connect(socketPath);
     socket.write(requestFrame("shutdown", "query"));
     await started;
-    await handle.shutdown();
+    const shutdownPromise = handle.shutdown();
     release?.();
+    await shutdownPromise;
     await delay(20);
     expect(records.map((record) => record.event)).toContain("rpc.connection.closed");
   });
