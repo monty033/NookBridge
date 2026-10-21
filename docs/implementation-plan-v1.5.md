@@ -298,7 +298,15 @@ For Stages 0–4 only, development may temporarily instantiate the application l
 
 ## 3.3 Local IPC contract
 
-The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations such as `status`, `sync`, `listNotebooks`, `searchNotes`, `getNote`, `createNote`, `appendNote`, and `updateNote`.
+The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations. The non-operator RPC surface is exactly eleven methods: `notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.locked_note_proof`, `notes.path_diagnostic`, and `notes.sync`. Nine of them are reachable over the daemon socket; `notes.locked_note_proof` and `notes.path_diagnostic` are reachable only from the operator CLI and are never admitted by the daemon listener or through MCP.
+
+The operator listener is a separate administrative surface. It admits nine methods in the same `RpcMethod` union, exported as
+`OPERATOR_TRANSPORT_METHODS`: `OPERATOR_METHODS` holds seven (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`,
+`notes.create`, `notes.operation-status`, `notes.operation-list`) and `OPERATOR_DISCOVERY_METHODS` holds two (`notes.browse`, `notes.search-operator`).
+`notes.create` is shared with the daemon surface. The union therefore holds nineteen methods, grouped by surface: nine are reachable over the daemon socket
+(`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.sync`); two are CLI-only and are
+never admitted by the daemon listener (`notes.locked_note_proof`, `notes.path_diagnostic`); and eight are operator-only, as listed above. That is eleven non-operator
+methods plus eight operator-only methods, with `notes.create` counted once because it is shared.
 
 The RPC layer must not expose:
 
@@ -309,7 +317,7 @@ The RPC layer must not expose:
 - shell execution;
 - secret/key retrieval;
 - generic import/export of the state database;
-- delete operations unless they are explicitly designed and enabled in a future release.
+- no bulk or generic delete; single-note delete is available only through the explicit, policy-controlled `notes.delete`.
 
 Each request has a bounded payload size, method-specific schema validation, a request ID, and structured errors. Socket peer authorization should be based on OS permissions first; optional peer-credential checks can be added as defense in depth.
 
@@ -759,8 +767,11 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 | `notesnook_create_note` | Write | Title, Markdown/HTML, optional notebook/tags. |
 | `notesnook_append_note` | Write | ID, expectedRevision, Markdown fragment. |
 | `notesnook_update_note` | Write | ID, expectedRevision, patch fields; full replacement explicitly marked. |
+| `notesnook_delete_note` | Write | Exact path, or `notebookPath` + `noteTitle`; destructive, policy-controlled single-note trash operation; not included in `readWriteNoDelete`. |
 
 The MCP proxy maps these tools to equivalent named RPC methods. There is no generic `call`, `execute`, `sql`, `read_file`, `get_secret`, or arbitrary core method.
+
+The MCP surface is exactly the 9 tools above. The `RpcMethod` union holds 19 literals, grouped by surface: 9 are reachable over the daemon socket, 2 are CLI-only and never admitted by the daemon listener (`notes.locked_note_proof`, `notes.path_diagnostic`), and 8 are operator-only.
 
 ## 6.2 Permission model
 
