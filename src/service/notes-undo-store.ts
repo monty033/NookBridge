@@ -197,9 +197,14 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
     });
     records.delete(handle);
   }
+  /** `committing` and `unresolved` records are the only proof (and preimage) of a
+   * mutation with an uncertain outcome, so they never expire; they keep counting
+   * against the quotas until reconciled. */
+  const expirable: readonly OperationState[] = ["prepared", "aborted", "undone", "committed"];
   async function expire() {
     const t = clock();
-    for (const [h, r] of records) if (r.record.expiresAt <= t) await remove(h);
+    for (const [h, r] of records)
+      if (r.record.expiresAt <= t && expirable.includes(r.record.state)) await remove(h);
   }
   function lookup(handle: string) {
     if (typeof handle !== "string" || !HANDLE.test(handle)) fail("invalid-input");
@@ -230,6 +235,10 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
       fail("quota");
     // Validate every final record before removing any expired record or orphan.
     for (const name of names.filter((n) => TEMP.test(n))) await remove(name);
+    // A record found in `committing` means the previous daemon stopped mid-commit:
+    // the outcome is uncertain, so persist it as `unresolved` before serving.
+    for (const { record } of [...records.values()])
+      if (record.state === "committing") await persist({ ...record, state: "unresolved" });
     await expire();
   } catch (error) {
     closeKey();
