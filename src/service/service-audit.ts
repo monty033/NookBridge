@@ -49,7 +49,7 @@ export type ServiceAuditOutcome =
   | "admission_rejected"
   | "budget_exceeded";
 
-export type ServiceAuditPeerCredentials = "self" | "unknown" | "rejected";
+export type ServiceAuditPeerCredentials = "self" | "verified" | "unknown" | "rejected";
 
 export interface ServiceAuditRecord {
   readonly event: ServiceAuditEvent;
@@ -229,5 +229,5 @@ function isMethod(value: unknown): value is RpcMethod {
   );
 }
 function isPeerCredentials(value: unknown): value is ServiceAuditPeerCredentials {
-  return value === "self" || value === "unknown" || value === "rejected";
+  return value === "self" || value === "verified" || value === "unknown" || value === "rejected";
 }
