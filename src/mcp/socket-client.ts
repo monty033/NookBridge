@@ -25,7 +25,6 @@
 
 import { Buffer } from "node:buffer";
 import { createConnection, type Socket } from "node:net";
-import { clearTimeout, setTimeout } from "node:timers";
 import { isAbsolute, resolve } from "node:path";
 
 import {
@@ -48,6 +47,7 @@ import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
+import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../service/service-abuse-bounds.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
@@ -55,9 +55,10 @@ const MAX_RESPONSE_FRAME_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
 const ARRAY_PROTOTYPE = Array.prototype;
 const OBJECT_PROTOTYPE = Object.prototype;
 
-/** Default connect / read timeout. Kept short to surface a closed
- *  socket quickly rather than leaving Hermes waiting. */
-const DEFAULT_IO_TIMEOUT_MS = 5_000;
+/** Default whole-request deadline. It must outlast the daemon's own
+ *  request timeout so the daemon can answer with its categorical
+ *  timeout before the client gives up. */
+const DEFAULT_IO_TIMEOUT_MS = DEFAULT_SERVICE_ABUSE_BOUNDS.requestTimeoutMs + 2_000;
 
 /**
  * Closed result of a single socket I/O round-trip. Either the
@@ -118,24 +119,41 @@ function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure 
  * `net.Socket` and connects to `socketPath`; tests may override
  * it to return a fake.
  */
-export type SocketConnect = (path: string) => Promise<Socket>;
+export type SocketConnect = (path: string, signal?: AbortSignal) => Promise<Socket>;
 
-async function defaultConnect(socketPath: string): Promise<Socket> {
+async function defaultConnect(socketPath: string, signal?: AbortSignal): Promise<Socket> {
+  if (signal?.aborted) throw new Error("connect aborted");
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let settled = false;
-    const onError = (error: Error): void => {
+    const cleanup = (): void => {
+      socket.off("error", onError);
+      socket.off("connect", onConnect);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const fail = (error: Error): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(error);
     };
-    socket.once("error", onError);
-    socket.once("connect", () => {
+    const onError = (error: Error): void => fail(error);
+    const onConnect = (): void => {
       if (settled) return;
       settled = true;
-      socket.off("error", onError);
+      cleanup();
       resolve(socket);
-    });
+    };
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(new Error("connect aborted"));
+    };
+    socket.once("error", onError);
+    socket.once("connect", onConnect);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -143,7 +161,7 @@ export interface NookdSocketClientOptions {
   readonly socketPath: string;
   /** Tests may substitute a fake connect. */
   readonly connect?: SocketConnect;
-  /** Per-operation timeout in ms. Defaults to 5s. */
+  /** Whole-request deadline in ms, covering connect, write and read. Defaults to 12s. */
   readonly ioTimeoutMs?: number;
 }
 
@@ -274,15 +292,37 @@ export class NookdSocketClient {
     }
     if (frame.byteLength > MAX_FRAME_BYTES_ON_WIRE) return { ok: false, code: "invalid_request" };
 
-    let socket: Socket;
+    const abortController = new AbortController();
+    let socket: Socket | undefined;
+    let deadlineExpired = false;
+    let rejectDeadline: ((error: Error) => void) | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject;
+    });
+    const timer = globalThis.setTimeout(() => {
+      deadlineExpired = true;
+      abortController.abort();
+      if (socket !== undefined) destroyQuietly(socket);
+      rejectDeadline?.(new Error("timeout"));
+    }, this.#ioTimeoutMs);
+
     try {
-      socket = await this.#connect(this.#socketPath);
-    } catch {
-      return { ok: false, code: "service_unavailable" };
-    }
-    try {
-      await writeAll(socket, frame);
-      const responseFrame = await readFramedResponse(socket, this.#ioTimeoutMs);
+      const connected = this.#connect(this.#socketPath, abortController.signal).then(
+        async (connectedSocket) => {
+          if (deadlineExpired) {
+            destroyQuietly(connectedSocket);
+            throw new Error("timeout");
+          }
+          socket = connectedSocket;
+          await writeAll(connectedSocket, frame);
+          return connectedSocket;
+        },
+      );
+      socket = await Promise.race([connected, deadline]);
+      const responseFrame = await Promise.race([
+        readFramedResponse(socket, abortController.signal),
+        deadline,
+      ]);
       if (responseFrame.byteLength > MAX_RESPONSE_FRAME_BYTES)
         return { ok: false, code: "service_unavailable" };
       let response: RpcAnyResponseEnvelope;
@@ -296,7 +336,8 @@ export class NookdSocketClient {
     } catch {
       return { ok: false, code: "service_unavailable" };
     } finally {
-      destroyQuietly(socket);
+      globalThis.clearTimeout(timer);
+      if (socket !== undefined) destroyQuietly(socket);
     }
   }
 }
@@ -740,8 +781,12 @@ async function writeAll(socket: Socket, frame: Uint8Array): Promise<void> {
   });
 }
 
-async function readFramedResponse(socket: Socket, ioTimeoutMs: number): Promise<Uint8Array> {
+async function readFramedResponse(socket: Socket, signal: AbortSignal): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("timeout"));
+      return;
+    }
     let buffer = Buffer.alloc(0);
     let settled = false;
     const finish = (cb: () => void): void => {
@@ -749,7 +794,8 @@ async function readFramedResponse(socket: Socket, ioTimeoutMs: number): Promise<
       settled = true;
       socket.off("data", onData);
       socket.off("error", onError);
-      clearTimeout(timer);
+      socket.off("close", onClose);
+      signal.removeEventListener("abort", onAbort);
       cb();
     };
     const onData = (chunk: Buffer): void => {
@@ -774,14 +820,16 @@ async function readFramedResponse(socket: Socket, ioTimeoutMs: number): Promise<
     const onError = (error: Error): void => {
       finish(() => reject(error));
     };
-    const timer = setTimeout(() => {
+    const onClose = (): void => {
+      finish(() => reject(new Error("socket closed before frame")));
+    };
+    const onAbort = (): void => {
       finish(() => reject(new Error("timeout")));
-    }, ioTimeoutMs);
+    };
     socket.on("data", onData);
     socket.on("error", onError);
-    socket.once("close", () => {
-      finish(() => reject(new Error("socket closed before frame")));
-    });
+    socket.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
