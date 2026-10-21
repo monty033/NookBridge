@@ -2767,6 +2767,63 @@ P2-1 (pagination cursors), P2-2 (undo durability/bounds), P2-3 (whole-operation 
 
 It does not close any Stage 9 gate, run any VM or live check, or resolve P1-2/P1-6/P1-7/P2-1–P2-5 to a final verdict; those need either a dedicated live/VM pass or a deeper line-by-line seam audit than a documentation reconciliation budget allows. The next actionable, source-only ticket is closing **scoped discovery authorization**; the next actionable, VM-dependent ticket is the **Stage 9 production recovery drill**, since it is the oldest fully-open gate with the clearest reproduction path (`docs/engineering/stages/stage-9-recovery.md`).
 
+## 13.21 Roadmap reconciliation — PRs #200–#216
+
+**Status date:** 2026-10-20 (America/New_York)
+**Mode:** documentation-only reconciliation. This section changes no source, test, VM, live-Notesnook, or deployment behavior; `tests/docs.test.ts` asserts only the claims recorded here.
+**Baseline:** `311ec64` (PR #199, P1-9 phase 1).
+**Tip:** `ea67312` (PR #216), `upstream/main`.
+
+The first-parent history between the baseline and the tip is exactly the sixteen merges below. This section records them and corrects the status statements in §13.12–§13.20 that they superseded. The text of those sections is history and is left unchanged; where a statement there is now stale, this section says so instead of rewriting it. The pre-existing §13.16/§13.17 numbering gap is also left as-is.
+
+### Merged PRs
+
+| PR | Merge commit | Change commit | Plan step | Roadmap item |
+| --- | --- | --- | --- | --- |
+| #200 | `8751aee` | `adcfc56` | D4-2 | New finding: the locked-note proof trashed unlocked notes |
+| #201 | `2386366` | `6128fec` | P-1 | New finding: `readWriteNoDelete` admitted `notes.delete`, contrary to `docs/configuration.md` |
+| #202 | `511cb48` | `59a378e` | D4-4 | Project-status defect: the proof collapsed path-resolution codes to a generic code |
+| #203 | `d4e2fa0` | `e5b625d` | D4-3 | New finding: the proof leaked note existence by resolving the path before authorizing |
+| #204 | `e22087a` | `38499d2` | D4-1 | D4 closed proof result (regression lock) |
+| #205 | `1681556` | `7be006e` | R7 | P2-1, MCP search limit applied at the proxy |
+| #206 | `f5e2ad2` | `2f11c4f` | D2-1 | D2: operator target reads fail closed |
+| #207 | `b88dff1` | `2f67ad4` | D2-2 | D2 production-wiring proof |
+| #208 | `48182d5` | `e7512ea` | D3-2 | D3 write runtime: peerless callers rejected, "legacy" owner removed |
+| #209 | `68155a1` | `67dcf78` | R1 | P1-2: lock state that can't be determined fails closed |
+| #210 | `4ab3f4b` | `d8cfe85` | R2a | P1-3: write-ahead intent in the coordinator |
+| #211 | `509a552` | `8e00d59` | R2b | P1-3: intent recorded before existing-note mutations |
+| #212 | `de60b00` | `c353dc1` | R2b follow-up | P1-3: release path and token guards (tests) |
+| #213 | `9d6155a` | `b523e2e` | R2b follow-up (B3) | P1-3: adapter receives a frozen command snapshot |
+| #214 | `2b2b886` | `b6c14d6` | R2c | P1-3: create marker failure reported as committed but not queued |
+| #215 | `977f0d4` | `9e11b0d` | R6 | P1-6: RPC no longer collapses write-contract codes |
+| #216 | `ea67312` | `2decc88` | R2d | P1-6 / P1-3: `local_sync_marker_failed` carried end to end |
+
+### Status corrections
+
+- **P1-9 phase 1 — merged in #199; the drill remains open.** §13.20 says "PHASE 1 IMPLEMENTED, PENDING REVIEW AND MERGE" as of 2026-10-14. That is superseded: phase 1 merged in #199 at `311ec64`, this section's baseline, so independent review and merge are complete. The clean NixOS VM recovery drill, privileged production-state recovery, post-recovery policy checks, and resync evidence remain open.
+- **P1-2 — closed at source for the write seam (#209).** Indeterminate lock state now fails closed: a content lookup that throws, a malformed locked marker, cipher-shaped content with no marker, and a non-object lookup result all report locked, so the write adapter returns its existing categorical `vault_locked` and no mutator runs. This is source-level closure of the write seam, not a fresh end-to-end Vault-state verification.
+- **P1-3 — closed at source for existing-note mutations; create reporting is honest (#210–#213, #214).** #210 persists a write-ahead intent before touching in-memory state; #211 records the intent before existing-note mutations and releases it only for codes that prove nothing was mutated; #212 proves the release path and the token guards; #213 snapshots the command so the validated id and the mutated id are the same. #214 reports a create marker failure as `local_sync_marker_failed` — committed but not queued — instead of `sync_failed`. #216 carries that code through to clients in R2d, so a caller now learns the note exists locally and must not retry the create.
+- **P1-6 — RPC mapping fixed and no code remains degraded (#215, #216).** #215 replaces the partial pass-through with a complete `WRITE_ERROR_TO_RPC` record, so input-layer codes reach the caller as `invalid_request` and status codes map to themselves. #216 finishes the job: `local_sync_marker_failed` crosses the RPC, audit, socket and MCP layers as itself with one fixed message, and the harness allowlist is now empty, so no categorical origin may degrade to `service_unavailable` anywhere in T1 or T2. Keeping `unsupported_content` as its own code was **not** decided, so it stays mapped to `invalid_request`.
+- **P2-1 — MCP search limit applied (#205); source pushdown remains open.** #205 carries the validated 1–64 limit through the proxy and slices the title-only hits, without changing the daemon's `{ query }` protocol. Pushing the limit into the source query (P1-5a / R5) remains open.
+- **Discovery and operator authorization.** Scoped discovery authorization was closed by #198 (`152c874`, the merge immediately before the baseline). Operator target reads are now closed by #206, which makes `notes.get-view` and `notes.edit-preimage` fail closed unless the target resolves for this peer, and by #207, which proves the denial through production `nookd` wiring.
+
+### Binding decisions
+
+Patrick's decisions for the D1–D6 workstreams are binding and are recorded as he stated them; this section applies them through the corrections above rather than re-opening them. The two numbered decisions that change observable behavior are restated here:
+
+- **Decision 3 — an unlocked proof target returns `permission_denied`.** A locked target remains `vault_locked`; the unlocked control is refused rather than admitted, so the proof cannot be used to mutate or probe an unlocked note.
+- **Decision 8 — `notes.delete` is removed from `readWriteNoDelete`.** Delete remains reachable only through an explicit custom allowlist; #201 makes the implementation agree with `docs/configuration.md` and `docs/reference/mcp-tools.md`.
+
+Patrick also authorizes R2d to widen the closed RPC/MCP vocabulary so `local_sync_marker_failed` can cross those boundaries. `unsupported_content` is not split out in this round and stays mapped to `invalid_request`.
+
+### Evidence class
+
+Source evidence only. Each row is a merged commit on `upstream/main`, and the supporting evidence is the repository's offline tests plus review of the merged diff. No clean NixOS VM was booted, no live Notesnook account was contacted, no daemon was deployed, no privileged recovery scan was run, and no state directory or credential was inspected. Passing offline tests do not substitute for the Stage 9 VM, production-recovery, resync, or privileged-scan gates.
+
+### Still open
+
+D1-1, D3-1, D3-3, D6-x, S7a-x, R3–R5, R8–R13, R15, DOC-1, and G1a–G8 remain open. The step plan for those items is not duplicated here.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
