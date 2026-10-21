@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { URL, fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   NOOK_MCP_APPEND_NOTE_TOOL_NAME,
@@ -45,6 +45,7 @@ import {
 import { buildServiceAuditRecord, type ServiceAuditRecord } from "../src/service/service-audit.js";
 import { createLogger } from "../src/logging/logger.js";
 import {
+  createRevisionToken,
   NotesnookWriteContractError,
   type NotesnookWriteErrorCode,
 } from "../src/core/notesnook-write-contract.js";
@@ -86,8 +87,26 @@ const PATH = "General/Canary";
 const TITLE = "Renamed";
 const CONTENT = "Canary body";
 const MARKDOWN_FRAGMENT = "frag";
+/**
+ * Inline HTML is outside `SUPPORTED_MARKDOWN_CONSTRUCTS`, so
+ * `assertSupportedConstructs` refuses it.  This is the exact fragment from
+ * the stage-4 fidelity-gate case "refuses a create note whose content uses
+ * inline HTML" (`tests/stage-4-write-adapter.test.ts`), reused here for the
+ * append production path.
+ */
+const UNSUPPORTED_MARKDOWN_FRAGMENT = "<div>raw</div>";
 const REVISION = "rev_00000000000000000000000000000001";
 const STALE_REVISION = "rev_ffffffffffffffffffffffffffffffff";
+/**
+ * Revision the fake core derives for {@link NOTE_ID} at the fake
+ * `dateEdited` (1_700_000_000_000). Rows that must reach the adapter's
+ * post-revision gates use this; `REVISION` is only exercised by rows that
+ * fail before the revision comparison.
+ */
+const PRODUCTION_REVISION = createRevisionToken({
+  id: NOTE_ID,
+  dateEdited: 1_700_000_000_000,
+});
 
 /**
  * Every daemon method except the locked-note proof, which no row exercises.
@@ -206,8 +225,18 @@ function nextRequestId(): string {
   return `e2e-${requestSeq}`;
 }
 
-function rpcRequestFor(method: WriteMethod, expectedRevision: string): RpcRequest {
+/** Per-row command overrides; every field defaults to the shared canary. */
+interface WriteOverrides {
+  readonly markdownFragment?: string;
+}
+
+function rpcRequestFor(
+  method: WriteMethod,
+  expectedRevision: string,
+  overrides: WriteOverrides = {},
+): RpcRequest {
   const id = nextRequestId();
+  const markdownFragment = overrides.markdownFragment ?? MARKDOWN_FRAGMENT;
   switch (method) {
     case "create":
       return { id, method: "notes.create", params: { title: TITLE, content: CONTENT } };
@@ -215,7 +244,7 @@ function rpcRequestFor(method: WriteMethod, expectedRevision: string): RpcReques
       return {
         id,
         method: "notes.append",
-        params: { id: NOTE_ID, markdownFragment: MARKDOWN_FRAGMENT, expectedRevision },
+        params: { id: NOTE_ID, markdownFragment, expectedRevision },
       };
     case "update":
       return {
@@ -232,14 +261,16 @@ function socketCallFor(
   client: NookdSocketClient,
   method: WriteMethod,
   expectedRevision: string,
+  overrides: WriteOverrides = {},
 ): Promise<NookdSocketResult> {
+  const markdownFragment = overrides.markdownFragment ?? MARKDOWN_FRAGMENT;
   switch (method) {
     case "create":
       return client.createNote({ title: TITLE, content: CONTENT });
     case "append":
       return client.appendNote({
         id: NOTE_ID,
-        markdownFragment: MARKDOWN_FRAGMENT,
+        markdownFragment,
         expectedRevision,
       });
     case "update":
@@ -253,14 +284,16 @@ function mcpCallFor(
   server: McpServer,
   method: WriteMethod,
   expectedRevision: string,
+  overrides: WriteOverrides = {},
 ): Promise<ToolResult> {
+  const markdownFragment = overrides.markdownFragment ?? MARKDOWN_FRAGMENT;
   switch (method) {
     case "create":
       return server.callTool(NOOK_MCP_CREATE_NOTE_TOOL_NAME, { title: TITLE, content: CONTENT });
     case "append":
       return server.callTool(NOOK_MCP_APPEND_NOTE_TOOL_NAME, {
         id: NOTE_ID,
-        markdownFragment: MARKDOWN_FRAGMENT,
+        markdownFragment,
         expectedRevision,
       });
     case "update":
@@ -279,14 +312,15 @@ async function observeWrite(
   harness: Harness,
   method: WriteMethod,
   expectedRevision: string,
+  overrides: WriteOverrides = {},
 ): Promise<Observed> {
   const rpc = await handleRpcRequest(
-    rpcRequestFor(method, expectedRevision),
+    rpcRequestFor(method, expectedRevision, overrides),
     harness.runtime,
     harness.policy,
   );
-  const socket = await socketCallFor(harness.client, method, expectedRevision);
-  const mcp = await mcpCallFor(harness.server, method, expectedRevision);
+  const socket = await socketCallFor(harness.client, method, expectedRevision, overrides);
+  const mcp = await mcpCallFor(harness.server, method, expectedRevision, overrides);
   return {
     rpc: rpc.ok === true ? "ok" : rpc.error.code,
     socket: socket.ok ? "ok" : socket.code,
@@ -380,7 +414,16 @@ describe("T1 — write-error codes injected at the service-runtime write seam", 
 
 type FakeDatabaseState = { readonly locked: boolean; readonly conflicted: boolean };
 
-function createFakeDatabase(state: FakeDatabaseState): Record<string, unknown> {
+/** Mutator spies the T2 rows use to prove no write reached the fake core. */
+interface FakeDatabaseSpies {
+  readonly contentUpdate: ReturnType<typeof vi.fn>;
+  readonly collectionUpdate: ReturnType<typeof vi.fn>;
+}
+
+function createFakeDatabase(
+  state: FakeDatabaseState,
+  spies: FakeDatabaseSpies,
+): Record<string, unknown> {
   const note = {
     id: NOTE_ID,
     title: "Canary",
@@ -392,9 +435,15 @@ function createFakeDatabase(state: FakeDatabaseState): Record<string, unknown> {
     dateEdited: 1_700_000_000_000,
   };
   // The vault lock lives on the content row, matching the stage-10 fake.
-  const content = state.locked
-    ? { id: "content-1", noteId: NOTE_ID, type: "tiptap", data: "<p>canary</p>", locked: true }
-    : undefined;
+  // The row is always present so the unlocked append row reaches the
+  // fidelity gate instead of failing because stored content is missing.
+  const content = {
+    id: "content-1",
+    noteId: NOTE_ID,
+    type: "html",
+    data: "<p>canary</p>",
+    locked: state.locked,
+  };
   const tags = new Map<string, { id: string; title: string }>();
   return {
     setup: () => undefined,
@@ -426,13 +475,12 @@ function createFakeDatabase(state: FakeDatabaseState): Record<string, unknown> {
       addToNotebook: async () => undefined,
       removeFromNotebook: async () => undefined,
       moveToTrash: async () => undefined,
-      collection: { update: async () => undefined },
+      collection: { update: spies.collectionUpdate },
     },
     content: {
       add: async () => "content-created",
-      findByNoteId: async (noteId: string) =>
-        noteId === NOTE_ID && content !== undefined ? { ...content } : undefined,
-      updateByNoteId: async () => undefined,
+      findByNoteId: async (noteId: string) => (noteId === NOTE_ID ? { ...content } : undefined),
+      updateByNoteId: spies.contentUpdate,
     },
     notebooks: {
       all: { ids: async () => ["general-id"] },
@@ -470,14 +518,18 @@ function createFakeDatabase(state: FakeDatabaseState): Record<string, unknown> {
 
 async function withProductionHarness(
   state: FakeDatabaseState,
-  body: (harness: Harness) => Promise<void>,
+  body: (harness: Harness, spies: FakeDatabaseSpies) => Promise<void>,
 ): Promise<void> {
   const stateDir = mkdtempSync(join(tmpdir(), "nbk-e2e-state-"));
   const credentialsDir = mkdtempSync(join(tmpdir(), "nbk-e2e-creds-"));
   writeFileSync(join(credentialsDir, "nookbridge-db-key"), "error-vocabulary-e2e-key", {
     mode: 0o600,
   });
-  const database = createFakeDatabase(state);
+  const spies: FakeDatabaseSpies = {
+    contentUpdate: vi.fn(async () => undefined),
+    collectionUpdate: vi.fn(async () => undefined),
+  };
+  const database = createFakeDatabase(state, spies);
   const injectedModule = markRealCoreModule({
     Database: function FakeDatabase() {
       return database;
@@ -486,7 +538,7 @@ async function withProductionHarness(
   const keys = createSystemdCredentialKeyStore({ credentialsDirectory: credentialsDir });
   try {
     const runtime = await createProductionServiceRuntime({ stateDir, keys, injectedModule });
-    await withHarness(runtime, body);
+    await withHarness(runtime, (harness) => body(harness, spies));
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(credentialsDir, { recursive: true, force: true });
@@ -521,6 +573,32 @@ describe("T2 — production runtime, no injection", () => {
       });
     });
   }
+
+  it("T2 unsupported construct on append", async () => {
+    const rowId = "T2 unsupported construct on append";
+    await withProductionHarness({ locked: false, conflicted: false }, async (h, spies) => {
+      // Inline HTML (`<div>raw</div>`) is the stage-4 fidelity-gate
+      // construct: `assertSupportedConstructs` refuses it, the adapter
+      // normalises that refusal to `unsupported_content`, and the RPC
+      // handler maps that to `invalid_request`.
+      const observed = await observeWrite(h, "append", PRODUCTION_REVISION, {
+        markdownFragment: UNSUPPORTED_MARKDOWN_FRAGMENT,
+      });
+      recordAndAssert(rowId, "categorical", observed, same("invalid_request"));
+
+      // The gate runs before any mutator, so neither the content write nor
+      // the metadata touch reached the fake core on any of the three layers.
+      expect(spies.contentUpdate).toHaveBeenCalledTimes(0);
+      expect(spies.collectionUpdate).toHaveBeenCalledTimes(0);
+
+      // R2b's write-ahead intent is released on this failure, but the
+      // coordinator state is persisted through the runtime's encrypted
+      // PersistentStorage (`PersistentSyncMetadataStateStore`), not through
+      // the fake core's `kv` slot. The service runtime exposes neither the
+      // store nor a pending snapshot, so `pending: []` is not observable
+      // through this fake and that assertion is dropped here.
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
