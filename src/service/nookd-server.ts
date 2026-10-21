@@ -9,7 +9,7 @@
 
 import { Buffer } from "node:buffer";
 import { chmodSync } from "node:fs";
-import { lstat, unlink } from "node:fs/promises";
+import { lchown, lstat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -107,6 +107,16 @@ export type StartNookdServerOptions = Readonly<{
   policy?: ServicePolicy;
   /** Optional socket permission bits, applied after a successful bind. Defaults to 0770. */
   socketMode?: number;
+  /**
+   * Group to apply to the bound socket. When set, startup resolves it, applies
+   * it if needed, and verifies the result before any connection is accepted;
+   * any failure unlinks the socket and rejects startup.
+   */
+  socketGroup?: string;
+  /** Resolves `socketGroup` to a gid. Required when `socketGroup` is set. */
+  resolveGroupId?: (name: string) => Promise<number | undefined>;
+  /** Internal seam; defaults to `lchown(path, -1, gid)`. */
+  applySocketGroup?: (socketPath: string, gid: number) => Promise<void>;
   /** Maximum time to let an in-flight handler finish during shutdown. */
   shutdownTimeoutMs?: number;
   /** Maximum number of simultaneously accepted Unix-socket connections. */
@@ -176,7 +186,9 @@ export async function startNookdServer(
   // never removes an entry: only the runtime settling does.
   const runtimeOps = new Set<Promise<unknown>>();
   const runtimeOpOwners = new Map<Promise<unknown>, ConnectionState>();
-  let accepting = true;
+  // Stays false until the socket group (if any) has been applied and verified,
+  // so a peer that connects right after bind is destroyed, not served.
+  let accepting = false;
   let ownedSocketIdentity: { readonly dev: number; readonly ino: number } | undefined;
   let operatorServer: OperatorSocketServerHandle | undefined;
   let shutdownPromise: Promise<void> | undefined;
@@ -305,6 +317,17 @@ export async function startNookdServer(
     const bound = await lstat(normalized.socketPath);
     if (!bound.isSocket()) throw nookdServerError("nookd did not create a Unix socket");
     ownedSocketIdentity = { dev: bound.dev, ino: bound.ino };
+    if (normalized.socketGroup !== undefined) {
+      await applyAndVerifySocketGroup(
+        normalized.socketPath,
+        ownedSocketIdentity,
+        normalized.socketMode,
+        normalized.socketGroup,
+        normalized.resolveGroupId,
+        normalized.applySocketGroup,
+      );
+    }
+    accepting = true;
   } catch (error) {
     server.close();
     await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
@@ -617,6 +640,9 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
     const operator = options.operator;
     const policy = options.policy;
     const socketMode = options.socketMode;
+    const socketGroup = options.socketGroup;
+    const resolveGroupId = options.resolveGroupId;
+    const applySocketGroup = options.applySocketGroup;
     const shutdownTimeoutMs = options.shutdownTimeoutMs;
     const maxConnections = options.maxConnections;
     const maxRequestsPerConnection = options.maxRequestsPerConnection;
@@ -629,6 +655,9 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
       ...(operator === undefined ? {} : { operator }),
       ...(policy === undefined ? {} : { policy }),
       ...(socketMode === undefined ? {} : { socketMode }),
+      ...(socketGroup === undefined ? {} : { socketGroup }),
+      ...(resolveGroupId === undefined ? {} : { resolveGroupId }),
+      ...(applySocketGroup === undefined ? {} : { applySocketGroup }),
       ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs }),
       ...(maxConnections === undefined ? {} : { maxConnections }),
       ...(maxRequestsPerConnection === undefined ? {} : { maxRequestsPerConnection }),
@@ -644,6 +673,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
 type NormalizedStartNookdServerOptions = Omit<
   StartNookdServerOptions,
   | "socketMode"
+  | "applySocketGroup"
   | "shutdownTimeoutMs"
   | "maxConnections"
   | "maxRequestsPerConnection"
@@ -652,6 +682,7 @@ type NormalizedStartNookdServerOptions = Omit<
   | "installSignalHandlers"
 > & {
   readonly socketMode: number;
+  readonly applySocketGroup: (socketPath: string, gid: number) => Promise<void>;
   readonly policy: ServicePolicy;
   readonly shutdownTimeoutMs: number;
   readonly maxConnections: number;
@@ -695,6 +726,21 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   ) {
     throw nookdServerError("invalid nookd socket mode");
   }
+  if (
+    options.socketGroup !== undefined &&
+    (typeof options.socketGroup !== "string" ||
+      options.socketGroup.length === 0 ||
+      hasControlCharacter(options.socketGroup) ||
+      typeof options.resolveGroupId !== "function")
+  ) {
+    throw nookdServerError("invalid nookd socket group");
+  }
+  if (options.resolveGroupId !== undefined && typeof options.resolveGroupId !== "function") {
+    throw nookdServerError("invalid nookd socket group");
+  }
+  if (options.applySocketGroup !== undefined && typeof options.applySocketGroup !== "function") {
+    throw nookdServerError("invalid nookd socket group");
+  }
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   if (!Number.isInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1) {
     throw nookdServerError("invalid nookd shutdown timeout");
@@ -735,6 +781,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     runtime: options.runtime,
     policy,
     socketMode: options.socketMode ?? DEFAULT_SOCKET_MODE,
+    applySocketGroup: options.applySocketGroup ?? defaultApplySocketGroup,
     shutdownTimeoutMs,
     maxConnections,
     maxRequestsPerConnection,
@@ -745,7 +792,50 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     // whitelist, and `operator` is optional on the normalized type, so dropping
     // it here disables the operator endpoint silently with no startup error.
     ...(operator === undefined ? {} : { operator }),
+    // Same whitelist hazard as `operator`: dropping these would silently skip
+    // the group check instead of failing startup.
+    ...(options.socketGroup === undefined ? {} : { socketGroup: options.socketGroup }),
+    ...(options.resolveGroupId === undefined ? {} : { resolveGroupId: options.resolveGroupId }),
   };
+}
+
+function defaultApplySocketGroup(socketPath: string, gid: number): Promise<void> {
+  return lchown(socketPath, -1, gid);
+}
+
+/**
+ * Resolve, apply and verify the socket group. Every failure, including a
+ * resolver or chown that throws, collapses to one categorical error so no
+ * cause, path or group-file detail leaves this function.
+ */
+async function applyAndVerifySocketGroup(
+  socketPath: string,
+  identity: { readonly dev: number; readonly ino: number },
+  socketMode: number,
+  socketGroup: string,
+  resolveGroupId: ((name: string) => Promise<number | undefined>) | undefined,
+  applySocketGroup: (socketPath: string, gid: number) => Promise<void>,
+): Promise<void> {
+  const failure = (): Error => nookdServerError("nookd socket group could not be applied");
+  try {
+    if (resolveGroupId === undefined) throw failure();
+    const gid = await resolveGroupId(socketGroup);
+    if (typeof gid !== "number" || !Number.isSafeInteger(gid) || gid < 0) throw failure();
+    const before = await lstat(socketPath);
+    if (before.gid !== gid) await applySocketGroup(socketPath, gid);
+    const after = await lstat(socketPath);
+    if (
+      !after.isSocket() ||
+      after.dev !== identity.dev ||
+      after.ino !== identity.ino ||
+      after.gid !== gid ||
+      (after.mode & 0o777) !== socketMode
+    ) {
+      throw failure();
+    }
+  } catch {
+    throw failure();
+  }
 }
 
 function hasControlCharacter(value: string): boolean {
