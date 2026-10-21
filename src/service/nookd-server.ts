@@ -45,6 +45,8 @@ import {
   type StartOperatorSocketServerOptions,
   type OperatorSocketServerHandle,
 } from "./operator-socket-server.js";
+import type { OperatorPeer } from "./operator-server.js";
+import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 import type { Logger } from "../logging/logger.js";
 
 const FRAME_PREFIX_BYTES = 4;
@@ -58,6 +60,12 @@ const MAX_CONNECTIONS = 128;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
 const MAX_REQUESTS_PER_CONNECTION = 1_024;
 const AUDIT_METHOD_SENTINEL = "notes.search" as const;
+const PEER_RESOLUTION_TIMEOUT_MS = 1_000;
+
+export type NookdPeerResolver = (
+  socket: net.Socket,
+  signal: AbortSignal,
+) => Promise<OperatorPeer | undefined>;
 
 function peekRpcMethod(frame: Buffer): RpcMethod {
   try {
@@ -127,6 +135,12 @@ export type StartNookdServerOptions = Readonly<{
   abuseBounds?: ServiceAbuseBounds;
   /** Best-effort categorical audit logger. */
   auditLogger?: Logger;
+  /**
+   * Internal seam for resolving the connecting peer. Defaults to the
+   * asynchronous SO_PEERCRED helper resolver; tests inject a deterministic
+   * result.
+   */
+  resolvePeer?: NookdPeerResolver;
   /** Entry points may install SIGTERM/SIGINT; tests can disable the hooks. */
   installSignalHandlers?: boolean;
 }>;
@@ -159,6 +173,11 @@ interface ConnectionState {
   readonly runtimeInFlight: Set<Promise<unknown>>;
   readonly closePromise: Promise<void>;
   readonly resolveClosed: () => void;
+  readonly peerController: AbortController;
+  peer: Promise<ServiceAuditPeerCredentials>;
+  /** Effective category after the bounded wait; never a numeric peer id. */
+  peerCategory: ServiceAuditPeerCredentials;
+  peerWaited: boolean;
 }
 
 type FrameRead =
@@ -253,7 +272,14 @@ export async function startNookdServer(
       connections.size + detachedOps() >= normalized.maxConnections ||
       !admitConnection()
     ) {
-      audit("rpc.connection.admission_rejected", "admission_rejected");
+      audit(
+        "rpc.connection.admission_rejected",
+        "admission_rejected",
+        AUDIT_METHOD_SENTINEL,
+        false,
+        0,
+        "rejected",
+      );
       socket.destroy();
       return;
     }
@@ -261,6 +287,7 @@ export async function startNookdServer(
     const stateResolver = new Promise<void>((resolve) => {
       resolveClosed = resolve;
     });
+    const peerController = new AbortController();
     const state: ConnectionState = {
       socket,
       pending: Buffer.alloc(0),
@@ -275,8 +302,26 @@ export async function startNookdServer(
       runtimeInFlight: new Set<Promise<unknown>>(),
       closePromise: stateResolver,
       resolveClosed: () => resolveClosed(),
+      peerController,
+      peer: Promise.resolve("unknown"),
+      peerCategory: "unknown",
+      peerWaited: false,
     };
     connections.add(state);
+    const selfUid = process.getuid?.();
+    let peerLookup: Promise<OperatorPeer | undefined>;
+    try {
+      peerLookup = Promise.resolve(normalized.resolvePeer(socket, peerController.signal));
+    } catch {
+      peerLookup = Promise.resolve(undefined);
+    }
+    state.peer = peerLookup.then(
+      (peer) => {
+        if (peer === undefined) return "unknown";
+        return peer.uid === selfUid ? "self" : "verified";
+      },
+      () => "unknown",
+    );
     socket.on("data", (chunk: Buffer): void => {
       if (state.closed || !accepting) return;
       state.lastActivityMs = Date.now();
@@ -305,7 +350,7 @@ export async function startNookdServer(
       clearIdleTimer(state);
       state.resolveClosed();
       connections.delete(state);
-      audit("rpc.connection.closed", "ok");
+      audit("rpc.connection.closed", "ok", AUDIT_METHOD_SENTINEL, false, 0, state.peerCategory);
     });
     armIdleTimer(state);
   };
@@ -407,6 +452,7 @@ export async function startNookdServer(
 
   function destroyConnection(state: ConnectionState): void {
     state.closing = true;
+    state.peerController.abort();
     clearIdleTimer(state);
     // PR-65 P1-5 — runtime ownership.  Resolve the close promise only
     // after every runtime operation handed off via `registerInFlight`
@@ -430,7 +476,14 @@ export async function startNookdServer(
         armIdleTimer(state);
         return;
       }
-      audit("rpc.connection.idle_timeout", "timeout", AUDIT_METHOD_SENTINEL, false, idleForMs);
+      audit(
+        "rpc.connection.idle_timeout",
+        "timeout",
+        AUDIT_METHOD_SENTINEL,
+        false,
+        idleForMs,
+        state.peerCategory,
+      );
       destroyConnection(state);
     }, normalized.abuseBounds.connectionIdleTimeoutMs);
   }
@@ -462,11 +515,36 @@ export async function startNookdServer(
     promise.then(release, release);
   }
 
+  /**
+   * Bound the first frame's wait on peer resolution. Timeout and close both
+   * degrade to "unknown"; the connection is still served when it is open.
+   */
+  async function waitForPeerResolution(
+    state: ConnectionState,
+  ): Promise<ServiceAuditPeerCredentials> {
+    let timeoutHandle: ReturnType<typeof scheduleTimeout> | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timeoutHandle = scheduleTimeout(() => resolve("timeout"), PEER_RESOLUTION_TIMEOUT_MS);
+    });
+    const closed = state.closePromise.then(() => "closed" as const);
+    try {
+      const result = await Promise.race([state.peer, timeout, closed]);
+      return result === "timeout" || result === "closed" ? "unknown" : result;
+    } finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    }
+  }
+
   function processConnection(state: ConnectionState): void {
     if (state.processing || state.closed || state.closing) return;
     state.processing = true;
     const work = (async (): Promise<void> => {
       try {
+        if (!state.peerWaited) {
+          state.peerWaited = true;
+          state.peerCategory = await waitForPeerResolution(state);
+          if (state.closed || state.closing) return;
+        }
         while (!state.closed && !state.closing) {
           if (
             state.requestsHandled >= normalized.maxRequestsPerConnection ||
@@ -478,6 +556,7 @@ export async function startNookdServer(
               AUDIT_METHOD_SENTINEL,
               false,
               state.elapsedMs,
+              state.peerCategory,
             );
             destroyConnection(state);
             break;
@@ -488,8 +567,15 @@ export async function startNookdServer(
             destroyConnection(state);
             break;
           }
-          audit("rpc.frame.extracted", "ok");
-          audit("rpc.frame.method_peek", "ok", peekRpcMethod(next.frame));
+          audit("rpc.frame.extracted", "ok", AUDIT_METHOD_SENTINEL, false, 0, state.peerCategory);
+          audit(
+            "rpc.frame.method_peek",
+            "ok",
+            peekRpcMethod(next.frame),
+            false,
+            0,
+            state.peerCategory,
+          );
           let request;
           try {
             request = parseRpcFrame(next.frame);
@@ -505,14 +591,28 @@ export async function startNookdServer(
           } catch {
             // A malformed frame has no trusted request id. The protocol has no
             // nullable-id response envelope, so close without an error body.
-            audit("rpc.protocol.rejected", "invalid_request");
+            audit(
+              "rpc.protocol.rejected",
+              "invalid_request",
+              AUDIT_METHOD_SENTINEL,
+              false,
+              0,
+              state.peerCategory,
+            );
             destroyConnection(state);
             break;
           }
-          audit("rpc.request.parsed", "ok", request.method);
+          audit("rpc.request.parsed", "ok", request.method, false, 0, state.peerCategory);
           state.requestsHandled += 1;
           const requestStartedMs = Date.now();
-          audit("rpc.request.received", "ok", request.method, request.id.length > 0, 0);
+          audit(
+            "rpc.request.received",
+            "ok",
+            request.method,
+            request.id.length > 0,
+            0,
+            state.peerCategory,
+          );
           let timeoutHandle: ReturnType<typeof scheduleTimeout> | undefined;
           const timeout = new Promise<"timeout">((resolve) => {
             timeoutHandle = scheduleTimeout(
@@ -549,6 +649,7 @@ export async function startNookdServer(
               request.method,
               request.id.length > 0,
               requestElapsedMs,
+              state.peerCategory,
             );
             destroyConnection(state);
             break;
@@ -561,6 +662,7 @@ export async function startNookdServer(
               request.method,
               request.id.length > 0,
               state.elapsedMs,
+              state.peerCategory,
             );
             destroyConnection(state);
             break;
@@ -572,6 +674,7 @@ export async function startNookdServer(
               request.method,
               request.id.length > 0,
               requestElapsedMs,
+              state.peerCategory,
             );
             destroyConnection(state);
             break;
@@ -585,6 +688,7 @@ export async function startNookdServer(
             request.method,
             request.id.length > 0,
             requestElapsedMs,
+            state.peerCategory,
           );
           let responseFrame: Uint8Array;
           try {
@@ -607,6 +711,7 @@ export async function startNookdServer(
             request.method,
             request.id.length > 0,
             Math.max(0, Date.now() - requestStartedMs),
+            state.peerCategory,
           );
         }
       } finally {
@@ -648,6 +753,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
     const maxRequestsPerConnection = options.maxRequestsPerConnection;
     const abuseBounds = options.abuseBounds;
     const auditLogger = options.auditLogger;
+    const resolvePeer = options.resolvePeer;
     const installSignalHandlers = options.installSignalHandlers;
     return Object.freeze({
       socketPath,
@@ -663,6 +769,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
       ...(maxRequestsPerConnection === undefined ? {} : { maxRequestsPerConnection }),
       ...(abuseBounds === undefined ? {} : { abuseBounds }),
       ...(auditLogger === undefined ? {} : { auditLogger }),
+      ...(resolvePeer === undefined ? {} : { resolvePeer }),
       ...(installSignalHandlers === undefined ? {} : { installSignalHandlers }),
     });
   } catch {
@@ -679,6 +786,7 @@ type NormalizedStartNookdServerOptions = Omit<
   | "maxRequestsPerConnection"
   | "abuseBounds"
   | "auditLogger"
+  | "resolvePeer"
   | "installSignalHandlers"
 > & {
   readonly socketMode: number;
@@ -689,6 +797,7 @@ type NormalizedStartNookdServerOptions = Omit<
   readonly maxRequestsPerConnection: number;
   readonly abuseBounds: ServiceAbuseBounds;
   readonly auditLogger: Logger | undefined;
+  readonly resolvePeer: NookdPeerResolver;
   readonly installSignalHandlers: boolean;
 };
 
@@ -768,6 +877,13 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   if (auditLogger !== undefined && (typeof auditLogger !== "object" || auditLogger === null)) {
     throw nookdServerError("invalid nookd audit logger");
   }
+  if (options.resolvePeer !== undefined && typeof options.resolvePeer !== "function") {
+    throw nookdServerError("invalid nookd peer resolver");
+  }
+  const resolvePeer =
+    options.resolvePeer ??
+    ((socket: net.Socket, signal: AbortSignal) =>
+      resolvePeerAsync(socket, { helperPath: defaultPeerCredentialHelperPath(), signal }));
   const installSignalHandlers = options.installSignalHandlers ?? true;
   if (typeof installSignalHandlers !== "boolean") {
     throw nookdServerError("invalid nookd signal-handler option");
@@ -787,6 +903,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     maxRequestsPerConnection,
     abuseBounds,
     auditLogger,
+    resolvePeer,
     installSignalHandlers,
     // Must be carried through explicitly: this return value is a hand-written
     // whitelist, and `operator` is optional on the normalized type, so dropping

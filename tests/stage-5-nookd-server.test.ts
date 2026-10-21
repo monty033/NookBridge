@@ -18,9 +18,10 @@ import {
   type NookdServerHandle,
   type NookdServerRuntime,
 } from "../src/service/nookd-server.js";
-import { createLogger } from "../src/logging/logger.js";
+import { createLogger, type Logger, type LogRecord } from "../src/logging/logger.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../src/service/service-abuse-bounds.js";
 import type { ServiceAuditRecord } from "../src/service/service-audit.js";
+import type { OperatorPeer } from "../src/service/operator-server.js";
 import { runNookdCli } from "../src/nookd.js";
 import {
   startOperatorSocketServer,
@@ -888,6 +889,347 @@ describe("R10b — socket group is applied and verified", () => {
     expect(applySocketGroup).not.toHaveBeenCalled();
     expect(resolveGroupId).not.toHaveBeenCalled();
     socket.destroy();
+  });
+});
+
+describe("R11 — audit records real peer credentials", () => {
+  type ResolvePeer = (socket: net.Socket, signal: AbortSignal) => Promise<OperatorPeer | undefined>;
+  type StartOptions = Parameters<typeof startNookdServer>[0];
+
+  const allRecords: ServiceAuditRecord[] = [];
+  const PER_CONNECTION_EVENTS = [
+    "rpc.request.parsed",
+    "rpc.request.received",
+    "rpc.request.dispatched",
+    "rpc.response.sent",
+    "rpc.connection.closed",
+  ] as const;
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve: (value: T) => void = () => undefined;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  function auditSink(records: ServiceAuditRecord[]): Logger {
+    const capture = (record?: LogRecord): void => {
+      if (record === undefined || record.component !== "service_audit") return;
+      const captured = record as unknown as ServiceAuditRecord;
+      records.push(captured);
+      allRecords.push(captured);
+    };
+    return {
+      debug: (_message, record) => capture(record),
+      info: (_message, record) => capture(record),
+      warn: (_message, record) => capture(record),
+      error: (_message, record) => capture(record),
+      child: () => auditSink(records),
+      setSink: () => undefined,
+    };
+  }
+
+  async function r11Fixture(
+    options: {
+      search?: NookdServerRuntime["search"];
+      resolvePeer?: ResolvePeer;
+      maxConnections?: number;
+      abuseBounds?: StartOptions["abuseBounds"];
+    } = {},
+  ): Promise<{
+    handle: NookdServerHandle;
+    socketPath: string;
+    records: ServiceAuditRecord[];
+    search: ReturnType<typeof vi.fn>;
+    cleanup: ReturnType<typeof vi.fn>;
+  }> {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-r11-"));
+    tempDirectories.push(directory);
+    const socketPath = path.join(directory, "nookbridge.sock");
+    const records: ServiceAuditRecord[] = [];
+    const search = vi.fn(options.search ?? (async () => [{ title: "r11" }]));
+    const cleanup = vi.fn(async () => undefined);
+    const handle = await startNookdServer({
+      socketPath,
+      runtime: Object.freeze({ search, cleanup }) as NookdServerRuntime,
+      installSignalHandlers: false,
+      auditLogger: auditSink(records),
+      ...(options.resolvePeer === undefined ? {} : { resolvePeer: options.resolvePeer }),
+      ...(options.maxConnections === undefined ? {} : { maxConnections: options.maxConnections }),
+      ...(options.abuseBounds === undefined ? {} : { abuseBounds: options.abuseBounds }),
+    });
+    handles.push(handle);
+    return { handle, socketPath, records, search, cleanup };
+  }
+
+  async function waitUntil(predicate: () => boolean): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error("condition not reached");
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  async function waitForClosedRecord(records: ServiceAuditRecord[]): Promise<void> {
+    await vi.waitFor(() =>
+      expect(records.some((record) => record.event === "rpc.connection.closed")).toBe(true),
+    );
+  }
+
+  function expectConnectionCategories(
+    records: ServiceAuditRecord[],
+    category: ServiceAuditRecord["peerCredentials"],
+  ): void {
+    const observed = records.filter((record) =>
+      (PER_CONNECTION_EVENTS as readonly string[]).includes(record.event),
+    );
+    expect(observed).toHaveLength(PER_CONNECTION_EVENTS.length);
+    for (const record of observed) {
+      expect(record.peerCredentials).toBe(category);
+    }
+  }
+
+  const selfPeer = (): OperatorPeer => ({
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+    groups: ["x"],
+  });
+
+  it("A1 audits a same-uid peer as self on every per-connection record", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => selfPeer());
+    const { socketPath, records } = await r11Fixture({
+      resolvePeer,
+      search: async (query) => [{ title: `hit:${query}` }],
+    });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("r11-a1", "needle"));
+
+    expect(await readFrame(socket)).toMatchObject({ id: "r11-a1", ok: true });
+    socket.destroy();
+    await waitForClose(socket);
+    await waitForClosedRecord(records);
+
+    expectConnectionCategories(records, "self");
+  });
+
+  it("A2 audits a different uid as verified", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => ({
+      ...selfPeer(),
+      uid: (process.getuid?.() ?? 0) + 1,
+    }));
+    const { socketPath, records } = await r11Fixture({ resolvePeer });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("r11-a2", "needle"));
+
+    expect(await readFrame(socket)).toMatchObject({ id: "r11-a2", ok: true });
+    socket.destroy();
+    await waitForClose(socket);
+    await waitForClosedRecord(records);
+
+    expectConnectionCategories(records, "verified");
+  });
+
+  it("A3 locks the unresolved-peer path: audit unknown but still serve", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => undefined);
+    const { socketPath, records } = await r11Fixture({ resolvePeer });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("r11-a3", "needle"));
+
+    expect(await readFrame(socket)).toMatchObject({ id: "r11-a3", ok: true });
+    socket.destroy();
+    await waitForClose(socket);
+    await waitForClosedRecord(records);
+
+    expectConnectionCategories(records, "unknown");
+  });
+
+  it("A4 maps a rejected resolver to unknown without an unhandled rejection", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => {
+      throw new Error("helper exploded with a credential canary");
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const { socketPath, records } = await r11Fixture({ resolvePeer });
+      const socket = await connect(socketPath);
+      socket.write(requestBytes("r11-a4", "needle"));
+
+      expect(await readFrame(socket)).toMatchObject({ id: "r11-a4", ok: true });
+      socket.destroy();
+      await waitForClose(socket);
+      await waitForClosedRecord(records);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+      expect(resolvePeer).toHaveBeenCalledTimes(1);
+      expectConnectionCategories(records, "unknown");
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("A5 resolves the peer once per connection", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => selfPeer());
+    const { socketPath } = await r11Fixture({ resolvePeer });
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("r11-a5-one", "one"));
+    expect(await readFrame(socket)).toMatchObject({ id: "r11-a5-one", ok: true });
+    socket.write(requestBytes("r11-a5-two", "two"));
+    expect(await readFrame(socket)).toMatchObject({ id: "r11-a5-two", ok: true });
+
+    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    socket.destroy();
+  });
+
+  it("A6 audits an over-cap connection as rejected and resolves only the admitted peer", async () => {
+    const resolvePeer = vi.fn<ResolvePeer>(async () => selfPeer());
+    const { socketPath, records } = await r11Fixture({ resolvePeer, maxConnections: 1 });
+    const first = await connect(socketPath);
+    const second = await connect(socketPath);
+    second.on("error", () => undefined);
+    await waitForClose(second);
+
+    const rejected = records.filter(
+      (record) => record.event === "rpc.connection.admission_rejected",
+    );
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.peerCredentials).toBe("rejected");
+    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    first.destroy();
+  });
+
+  it("A7 audits pre-gate connections as rejected and never starts their resolver", async () => {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-r11-group-"));
+    tempDirectories.push(directory);
+    const socketPath = path.join(directory, "nookbridge.sock");
+    const records: ServiceAuditRecord[] = [];
+    const gate = deferred<number | undefined>();
+    const resolveGroupId = vi.fn(() => gate.promise);
+    const resolvePeer = vi.fn<ResolvePeer>(async () => selfPeer());
+    const search = vi.fn(async () => [{ title: "served" }]);
+    const cleanup = vi.fn(async () => undefined);
+    const started = startNookdServer({
+      socketPath,
+      runtime: Object.freeze({ search, cleanup }) as NookdServerRuntime,
+      installSignalHandlers: false,
+      socketMode: 0o770,
+      socketGroup: "g",
+      resolveGroupId,
+      auditLogger: auditSink(records),
+      resolvePeer,
+    });
+    started.then(
+      (handle) => handles.push(handle),
+      () => undefined,
+    );
+
+    await waitUntil(() => resolveGroupId.mock.calls.length > 0);
+    const early = net.createConnection(socketPath);
+    early.on("error", () => undefined);
+    const earlyClosed = new Promise<void>((resolve) => early.on("close", () => resolve()));
+    early.write(requestBytes("r11-a7-early", "needle"));
+    await earlyClosed;
+
+    const earlyRejected = records.filter(
+      (record) => record.event === "rpc.connection.admission_rejected",
+    );
+    expect(earlyRejected).toHaveLength(1);
+    expect(earlyRejected[0]?.peerCredentials).toBe("rejected");
+    expect(resolvePeer).not.toHaveBeenCalled();
+
+    gate.resolve(process.getegid?.() ?? -1);
+    const handle = await started;
+    expect(handle.socketPath).toBe(socketPath);
+
+    const later = await connect(socketPath);
+    later.write(requestBytes("r11-a7-later", "needle"));
+    expect(await readFrame(later)).toMatchObject({ id: "r11-a7-later", ok: true });
+    later.destroy();
+    await waitForClose(later);
+    await waitForClosedRecord(records);
+
+    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expectConnectionCategories(records, "self");
+  });
+
+  it("A8 aborts a pending peer lookup on shutdown before the runtime is touched", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const resolvePeer = vi.fn<ResolvePeer>((_socket, signal) => {
+      seenSignal = signal;
+      return new Promise<OperatorPeer | undefined>(() => undefined);
+    });
+    const { handle, socketPath, records, search, cleanup } = await r11Fixture({
+      resolvePeer,
+    });
+    const socket = await connect(socketPath);
+    socket.on("error", () => undefined);
+    socket.write(requestBytes("r11-a8", "needle"));
+
+    await vi.waitFor(() => expect(resolvePeer).toHaveBeenCalledTimes(1));
+    await handle.shutdown();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(seenSignal?.aborted).toBe(true);
+    expect(search).not.toHaveBeenCalled();
+    expect(records.some((record) => record.event === "rpc.request.received")).toBe(false);
+    socket.destroy();
+  });
+
+  it("A9 bounds the peer wait at 1000 ms and audits unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      const resolvePeer = vi.fn<ResolvePeer>(
+        () =>
+          new Promise<OperatorPeer | undefined>((resolve) => {
+            setTimeout(() => resolve(selfPeer()), 1_500);
+          }),
+      );
+      const search = vi.fn(async () => [{ title: "bounded" }]);
+      const { socketPath, records } = await r11Fixture({ resolvePeer, search });
+      const socket = await connect(socketPath);
+      const responsePromise = readFrame(socket);
+      socket.write(requestBytes("r11-a9", "needle"));
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await responsePromise).toMatchObject({ id: "r11-a9", ok: true });
+      expect(resolvePeer).toHaveBeenCalledTimes(1);
+      expect(search).toHaveBeenCalledTimes(1);
+
+      const observed = records.filter((record) =>
+        (PER_CONNECTION_EVENTS as readonly string[]).includes(record.event),
+      );
+      expect(observed.length).toBeGreaterThanOrEqual(4);
+      for (const record of observed) {
+        expect(record.peerCredentials).toBe("unknown");
+      }
+      socket.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("A10 keeps the six-field record shape and never records numeric peer ids", () => {
+    const uid = process.getuid?.();
+    const gid = process.getgid?.();
+    expect(allRecords.length).toBeGreaterThan(0);
+    for (const record of allRecords) {
+      expect(Object.keys(record).filter((key) => key !== "component")).toEqual([
+        "event",
+        "outcome",
+        "method",
+        "requestIdEcho",
+        "latencyMs",
+        "peerCredentials",
+      ]);
+      for (const value of Object.values(record)) {
+        expect(value).not.toBe(uid);
+        expect(value).not.toBe(gid);
+      }
+    }
   });
 });
 
