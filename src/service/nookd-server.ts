@@ -172,6 +172,10 @@ export async function startNookdServer(
 
   const connections = new Set<ConnectionState>();
   const inFlight = new Set<Promise<void>>();
+  // Every handleRpcRequest promise until it settles. A timeout or disconnect
+  // never removes an entry: only the runtime settling does.
+  const runtimeOps = new Set<Promise<unknown>>();
+  const runtimeOpOwners = new Map<Promise<unknown>, ConnectionState>();
   let accepting = true;
   let ownedSocketIdentity: { readonly dev: number; readonly ino: number } | undefined;
   let operatorServer: OperatorSocketServerHandle | undefined;
@@ -220,8 +224,23 @@ export async function startNookdServer(
     return true;
   };
 
+  // Runtime ops whose connection is gone. Derived from the live sets on each
+  // call, so an op settling after its connection was destroyed cannot be
+  // counted twice or leave a stale count behind.
+  const detachedOps = (): number => {
+    let count = 0;
+    for (const owner of runtimeOpOwners.values()) {
+      if (!connections.has(owner)) count += 1;
+    }
+    return count;
+  };
+
   const onConnection = (socket: net.Socket): void => {
-    if (!accepting || connections.size >= normalized.maxConnections || !admitConnection()) {
+    if (
+      !accepting ||
+      connections.size + detachedOps() >= normalized.maxConnections ||
+      !admitConnection()
+    ) {
       audit("rpc.connection.admission_rejected", "admission_rejected");
       socket.destroy();
       return;
@@ -322,6 +341,13 @@ export async function startNookdServer(
       await serverClosed;
       await operatorServer?.close();
       await unlinkOwnedSocket(normalized.socketPath, ownedSocketIdentity);
+      // shutdownTimeoutMs only caps the connection loops above. The runtime
+      // (and its database) is released only once every runtime op has settled;
+      // there is deliberately no timeout here. systemd TimeoutStopSec/SIGKILL
+      // is the backstop and SQLite WAL recovers a crash.
+      while (runtimeOps.size > 0) {
+        await Promise.allSettled([...runtimeOps]);
+      }
       try {
         await normalized.runtime.cleanup();
       } catch {
@@ -399,6 +425,20 @@ export async function startNookdServer(
     promise.then(cleanup, cleanup);
   }
 
+  /**
+   * Track a runtime operation at process level until it settles, independent
+   * of the connection that started it. Removal is idempotent.
+   */
+  function registerRuntimeOp(state: ConnectionState, promise: Promise<unknown>): void {
+    runtimeOps.add(promise);
+    runtimeOpOwners.set(promise, state);
+    const release = (): void => {
+      runtimeOps.delete(promise);
+      runtimeOpOwners.delete(promise);
+    };
+    promise.then(release, release);
+  }
+
   function processConnection(state: ConnectionState): void {
     if (state.processing || state.closed || state.closing) return;
     state.processing = true;
@@ -457,7 +497,9 @@ export async function startNookdServer(
               normalized.abuseBounds.requestTimeoutMs,
             );
           });
-          const responsePromise = handleRpcRequest(request, normalized.runtime, normalized.policy)
+          const runtimeOp = handleRpcRequest(request, normalized.runtime, normalized.policy);
+          registerRuntimeOp(state, runtimeOp);
+          const responsePromise = runtimeOp
             .then((response) => ({
               kind: "response" as const,
               response,
