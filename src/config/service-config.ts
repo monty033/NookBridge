@@ -45,8 +45,16 @@
  *     unexpected types are rejected before any field is even copied.
  */
 
-import { constants as fsConstants, lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { Buffer } from "node:buffer";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+} from "node:fs";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import type { RpcMethod } from "../service/rpc-protocol.js";
 
 /**
@@ -119,6 +127,7 @@ export const SERVICE_CONFIG_ERROR_CATEGORIES = Object.freeze([
   "unsafe_config_owner",
   "unsafe_config_mode",
   "unsafe_config_type",
+  "unsafe_config_ancestor",
   "config_unreadable",
   "config_malformed_json",
 ] as const);
@@ -173,9 +182,9 @@ export type LoadServiceConfigResult =
   | { readonly ok: false; readonly error: ServiceConfigError };
 
 /**
- * Stat-shaped value the loader depends on.  Only `uid` and `mode`
- * are read by the loader; `dev`/`ino` are accepted for seam parity
- * with `fs.Stats` but not consulted.
+ * Stat-shaped value the loader depends on.  `uid` and `mode` drive the
+ * ownership checks; `dev`/`ino` of the config file are compared against
+ * the opened descriptor so a swap between inspection and read is refused.
  */
 export interface ServiceConfigStat {
   readonly uid: number;
@@ -191,12 +200,19 @@ export interface ServiceConfigStat {
  *   - `stat` substitutes the underlying `fs.lstatSync` so tests can
  *     model a non-root owner or a permissive mode without actually
  *     chmod'ing the test fixture.
+ *   - `ancestorStat` inspects each parent directory.  It defaults to
+ *     `stat` when the caller supplies `stat`, and to `fs.lstatSync`
+ *     otherwise.
  * The owner assertion is fixed to `uid === 0`. Tests use the `stat` seam
  * rather than weakening the production contract.
  */
 export interface LoadServiceConfigOptions {
   readonly stat?: (path: string) => ServiceConfigStat;
+  readonly ancestorStat?: (path: string) => ServiceConfigStat;
 }
+
+/** Hard cap on the bytes read from the config file. */
+const SERVICE_CONFIG_MAX_BYTES = 64 * 1024;
 
 /**
  * Read, parse, and validate a service config file at `path`.
@@ -227,16 +243,19 @@ export function loadServiceConfig(
   }
 
   const stat = options.stat ?? defaultStat;
+  const ancestorStat = options.ancestorStat ?? options.stat ?? defaultStat;
 
-  let raw: string;
-  try {
-    raw = readFileSync(path, { encoding: "utf8" });
-  } catch {
-    return {
-      ok: false,
-      error: new ServiceConfigError("config_unreadable", "service config is unreadable"),
-    };
-  }
+  // Ownership, type and mode are verified BEFORE the file is opened or
+  // read, so an untrusted file is never parsed and a special file at the
+  // path can never block startup.
+  const statResult = inspectConfigFile(path, stat);
+  if (!statResult.ok) return statResult;
+
+  const ancestorError = checkAncestors(path, ancestorStat);
+  if (ancestorError !== undefined) return { ok: false, error: ancestorError };
+
+  const raw = readConfigText(path, statResult.stat);
+  if (typeof raw !== "string") return { ok: false, error: raw };
 
   let parsed: unknown;
   try {
@@ -265,7 +284,7 @@ export function loadServiceConfig(
     };
   }
 
-  const result = validateFields(parsed, path, stat);
+  const result = validateFields(parsed);
   if (!result.ok) return result;
   return { ok: true, config: result.config };
 }
@@ -293,11 +312,7 @@ export function loadServiceConfig(
  *   - no credential-path, env-override, dev-backend, or generic
  *     passthrough field slipped through the strict walk.
  */
-function validateFields(
-  parsed: Record<string, unknown>,
-  path: string,
-  stat: (p: string) => ServiceConfigStat,
-): LoadServiceConfigResult {
+function validateFields(parsed: Record<string, unknown>): LoadServiceConfigResult {
   // Strict duplicate-key detection.  `JSON.parse` collapses
   // duplicates silently, so the only way to catch them is to scan the
   // raw text before parsing.  We do that scan at the loader entry
@@ -479,22 +494,45 @@ function validateFields(
     };
   }
 
-  // Ownership / mode verification.  Tests may inject a non-root
-  // owner to exercise the rejection branch.
-  let statResult: ServiceConfigStat;
-  try {
-    statResult = stat(path);
-  } catch {
-    return {
-      ok: false,
-      error: new ServiceConfigError("config_unreadable", "service config could not be inspected"),
-    };
-  }
+  const configReadPolicy =
+    readPolicy.length === SERVICE_CONFIG_READ_POLICY.length &&
+    readPolicy.every((value, index) => value === SERVICE_CONFIG_READ_POLICY[index])
+      ? SERVICE_CONFIG_READ_POLICY
+      : Object.freeze(readPolicy.slice() as RpcMethod[]);
+  const config: ServiceConfig = Object.freeze({
+    stateDir,
+    socketPath,
+    socketGroup,
+    backend,
+    credentialName,
+    ...(settingsBackend === undefined ? {} : { settingsBackend }),
+    readPolicy: configReadPolicy,
+  });
+  return { ok: true, config };
+}
+
+/**
+ * Step 2: `stat(path)` must describe a root-owned, regular,
+ * non-group/world-writable file.
+ */
+function inspectConfigFile(
+  path: string,
+  stat: (p: string) => ServiceConfigStat,
+):
+  | { readonly ok: true; readonly stat: ServiceConfigStat }
+  | { readonly ok: false; readonly error: ServiceConfigError } {
   let uid: number;
   let mode: number;
+  let dev: number;
+  let ino: number;
+  let gid: number;
   try {
+    const statResult = stat(path);
     uid = statResult.uid;
+    gid = statResult.gid;
     mode = statResult.mode;
+    dev = statResult.dev;
+    ino = statResult.ino;
   } catch {
     return {
       ok: false,
@@ -517,8 +555,6 @@ function validateFields(
     };
   }
   // Group or world writable is categorically refused.
-  // Mask to the file permission bits and check the
-  // group/world write bits.
   const permBits = mode & 0o777;
   if ((permBits & fsConstants.S_IWGRP) !== 0 || (permBits & fsConstants.S_IWOTH) !== 0) {
     return {
@@ -529,22 +565,82 @@ function validateFields(
       ),
     };
   }
+  return { ok: true, stat: { uid, gid, mode, dev, ino } };
+}
 
-  const configReadPolicy =
-    readPolicy.length === SERVICE_CONFIG_READ_POLICY.length &&
-    readPolicy.every((value, index) => value === SERVICE_CONFIG_READ_POLICY[index])
-      ? SERVICE_CONFIG_READ_POLICY
-      : Object.freeze(readPolicy.slice() as RpcMethod[]);
-  const config: ServiceConfig = Object.freeze({
-    stateDir,
-    socketPath,
-    socketGroup,
-    backend,
-    credentialName,
-    ...(settingsBackend === undefined ? {} : { settingsBackend }),
-    readPolicy: configReadPolicy,
-  });
-  return { ok: true, config };
+/**
+ * Step 3: every directory from `/` down to `dirname(path)` must be a real
+ * directory owned by root and not group/world writable unless sticky.
+ */
+function checkAncestors(
+  path: string,
+  ancestorStat: (p: string) => ServiceConfigStat,
+): ServiceConfigError | undefined {
+  const unsafe = (): ServiceConfigError =>
+    new ServiceConfigError("unsafe_config_ancestor", "service config directory is unsafe");
+  const parent = dirname(path);
+  const directories = ["/"];
+  let current = "";
+  for (const part of parent.split(sep)) {
+    if (part.length === 0) continue;
+    current = `${current}${sep}${part}`;
+    directories.push(current);
+  }
+  for (const directory of directories) {
+    let uid: number;
+    let mode: number;
+    try {
+      const st = ancestorStat(directory);
+      uid = st.uid;
+      mode = st.mode;
+    } catch {
+      return unsafe();
+    }
+    if (uid !== 0) return unsafe();
+    if ((mode & fsConstants.S_IFMT) !== fsConstants.S_IFDIR) return unsafe();
+    const writable = (mode & (fsConstants.S_IWGRP | fsConstants.S_IWOTH)) !== 0;
+    const sticky = (mode & 0o1000) !== 0;
+    if (writable && !sticky) return unsafe();
+  }
+  return undefined;
+}
+
+/**
+ * Steps 4-5: open without following symlinks or blocking, confirm the
+ * descriptor is the same regular file that was inspected, and read at most
+ * {@link SERVICE_CONFIG_MAX_BYTES}.  The descriptor is always closed.
+ */
+function readConfigText(path: string, inspected: ServiceConfigStat): string | ServiceConfigError {
+  const unreadable = (): ServiceConfigError =>
+    new ServiceConfigError("config_unreadable", "service config is unreadable");
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch {
+    return unreadable();
+  }
+  try {
+    const opened = fstatSync(fd);
+    if ((opened.mode & fsConstants.S_IFMT) !== fsConstants.S_IFREG) return unreadable();
+    if (opened.dev !== inspected.dev || opened.ino !== inspected.ino) return unreadable();
+    const buffer = Buffer.allocUnsafe(SERVICE_CONFIG_MAX_BYTES + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = readSync(fd, buffer, total, buffer.length - total, null);
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > SERVICE_CONFIG_MAX_BYTES) return unreadable();
+    return buffer.toString("utf8", 0, total);
+  } catch {
+    return unreadable();
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor is already unusable; nothing further to release.
+    }
+  }
 }
 
 function isValidReadPolicy(value: readonly unknown[]): value is readonly RpcMethod[] {

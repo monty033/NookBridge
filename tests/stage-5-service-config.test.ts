@@ -129,12 +129,23 @@ type MutatedConfig = {
   readPolicy: readonly string[] | string;
 };
 
+/**
+ * Hermetic root-owned stat: a directory (the parent chain the loader
+ * walks) reports a canonical root-owned `0o755` directory so the result
+ * never depends on the host's real ancestor modes; anything else keeps
+ * its real type and mode with `uid: 0`.
+ */
+function rootOwnedStat(path: string) {
+  const st = lstatSync(path);
+  if (st.isDirectory()) {
+    return { uid: 0, gid: 0, mode: 0o040755, dev: st.dev, ino: st.ino };
+  }
+  return { uid: 0, gid: 0, mode: st.mode, dev: st.dev, ino: st.ino };
+}
+
 /** A safe stat seam — pretend the file is owned by the current uid. */
 const ROOT_OWNED_STAT_SEAM = {
-  stat: (path: string) => {
-    const st = lstatSync(path);
-    return { uid: 0, gid: 0, mode: st.mode, dev: st.dev, ino: st.ino };
-  },
+  stat: rootOwnedStat,
 };
 
 /** A stat seam that pretends the file is owned by a non-root uid. */
@@ -684,3 +695,133 @@ function mkdirThenWrite(name: string, body: string): string {
   writeFileSync(file, Buffer.from(body, "utf8"), { mode: 0o600 });
   return file;
 }
+
+describe("R10a — ownership is verified before the config is read", () => {
+  const S_IFDIR = 0o040000;
+  const S_IFLNK = 0o120000;
+
+  /** Root-owned seam that reports a caller-chosen mode for one exact path. */
+  function rootSeamWithMode(target: string, mode: number) {
+    return (path: string) => {
+      const base = rootOwnedStat(path);
+      return path === target ? { ...base, mode } : base;
+    };
+  }
+
+  /** Ancestor seam that overrides the stat of exactly one directory. */
+  function ancestorSeam(
+    target: string,
+    override: Partial<{ uid: number; mode: number }>,
+  ): (path: string) => { uid: number; gid: number; mode: number; dev: number; ino: number } {
+    return (path: string) => {
+      const base = rootOwnedStat(path);
+      if (path !== target) return base;
+      return {
+        ...base,
+        uid: override.uid ?? base.uid,
+        mode: override.mode ?? base.mode,
+      };
+    };
+  }
+
+  function expectCategory(result: ReturnType<typeof loadServiceConfig>, category: string): void {
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.category).toBe(category);
+  }
+
+  it("1. refuses a non-root file before parsing malformed JSON", () => {
+    const file = mkdirThenWrite("r10a-owner-malformed", "{ not json");
+    expectCategory(
+      loadServiceConfig(file, { stat: NON_ROOT_STAT_SEAM.stat }),
+      "unsafe_config_owner",
+    );
+  });
+
+  it("2. refuses a group-writable file before parsing malformed JSON", () => {
+    const file = mkdirThenWrite("r10a-mode-malformed", "{ not json");
+    expectCategory(
+      loadServiceConfig(file, { stat: rootSeamWithMode(file, 0o100664) }),
+      "unsafe_config_mode",
+    );
+  });
+
+  it("3. refuses a directory at the config path with unsafe_config_type", () => {
+    const dir = join(workspaceRoot, "r10a-dir-as-config");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    expectCategory(
+      loadServiceConfig(dir, { stat: ROOT_OWNED_STAT_SEAM.stat }),
+      "unsafe_config_type",
+    );
+  });
+
+  it("4. refuses a symlink to a valid file (lock)", () => {
+    const target = writeJsonConfig("r10a-symlink-target", VALID_FIXTURE);
+    const link = join(workspaceRoot, "r10a-symlink-config.json");
+    symlinkSync(target, link);
+    expectCategory(
+      loadServiceConfig(link, { stat: ROOT_OWNED_STAT_SEAM.stat }),
+      "unsafe_config_type",
+    );
+  });
+
+  it("5. refuses a file whose opened dev/ino differ from the stat result", () => {
+    const file = writeJsonConfig("r10a-swap", VALID_FIXTURE);
+    const other = writeJsonConfig("r10a-swap-other", VALID_FIXTURE);
+    const result = loadServiceConfig(file, {
+      stat: (path: string) => rootOwnedStat(path === file ? other : path),
+    });
+    expectCategory(result, "config_unreadable");
+  });
+
+  describe("6. parent directories", () => {
+    it("6a. refuses a parent not owned by root", () => {
+      const file = writeJsonConfig("r10a-anc-owner", VALID_FIXTURE);
+      const parent = join(workspaceRoot, "r10a-anc-owner-dir");
+      const result = loadServiceConfig(file, {
+        stat: ROOT_OWNED_STAT_SEAM.stat,
+        ancestorStat: ancestorSeam(parent, { uid: 1000 }),
+      });
+      expectCategory(result, "unsafe_config_ancestor");
+    });
+
+    it("6b. refuses a group-writable parent without the sticky bit", () => {
+      const file = writeJsonConfig("r10a-anc-mode", VALID_FIXTURE);
+      const parent = join(workspaceRoot, "r10a-anc-mode-dir");
+      const result = loadServiceConfig(file, {
+        stat: ROOT_OWNED_STAT_SEAM.stat,
+        ancestorStat: ancestorSeam(parent, { mode: S_IFDIR | 0o775 }),
+      });
+      expectCategory(result, "unsafe_config_ancestor");
+    });
+
+    it("6c. refuses a parent that is a symlink", () => {
+      const file = writeJsonConfig("r10a-anc-link", VALID_FIXTURE);
+      const parent = join(workspaceRoot, "r10a-anc-link-dir");
+      const result = loadServiceConfig(file, {
+        stat: ROOT_OWNED_STAT_SEAM.stat,
+        ancestorStat: ancestorSeam(parent, { mode: S_IFLNK | 0o755 }),
+      });
+      expectCategory(result, "unsafe_config_ancestor");
+    });
+
+    it("6d. accepts a root-owned sticky world-writable parent", () => {
+      const file = writeJsonConfig("r10a-anc-sticky", VALID_FIXTURE);
+      const parent = join(workspaceRoot, "r10a-anc-sticky-dir");
+      const result = loadServiceConfig(file, {
+        stat: ROOT_OWNED_STAT_SEAM.stat,
+        ancestorStat: ancestorSeam(parent, { mode: S_IFDIR | 0o1777 }),
+      });
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  it("7. refuses a valid config padded past the 64 KiB cap", () => {
+    const padded = JSON.stringify(VALID_FIXTURE) + " ".repeat(64 * 1024 + 1);
+    const file = mkdirThenWrite("r10a-oversize", padded);
+    expectCategory(
+      loadServiceConfig(file, { stat: ROOT_OWNED_STAT_SEAM.stat }),
+      "config_unreadable",
+    );
+  });
+});
