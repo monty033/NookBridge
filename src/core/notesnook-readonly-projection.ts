@@ -31,10 +31,11 @@
  *     attachments are intentionally not part of the seam.
  *   - `Database.lookup: Lookup` → `lookup.notes(query)` /
  *     `lookup.notebooks(query)` returning `SearchResults<Note>` /
- *     `SearchResults<Notebook>`.  We use `.ids()` to obtain the
- *     closed hit list and project each id back through
- *     `notes.note(id)` / `notebooks.notebook(id)` so the metadata is
- *     validated through the same coerced path.
+ *     `SearchResults<Notebook>`.  We use `.items(cap + 1)` (R5) so the
+ *     upstream query is bounded, keep only each record's own `id`, and
+ *     project each id back through `notes.note(id)` /
+ *     `notebooks.notebook(id)` so the metadata is validated through the
+ *     same coerced path.  `.ids()` is the fallback when `items` is absent.
  *   - `Database.lastSynced(): Promise<number>` and
  *     `Database.hasUnsyncedChanges(): Promise<boolean>` are forwarded
  *     verbatim.
@@ -647,7 +648,13 @@ export function flattenLiveDatabaseToReadOnly(
         [title],
         "Notesnook read-only projection: lookup.notes rejected",
       );
-      const noteIds = await readSearchResultIds(noteResults, "lookup.notes.ids");
+      // Ask for one hit past the cap: receiving `cap + 1` ids is how the
+      // overflow is detected, so the upstream query stays bounded.
+      const noteIds = await readSearchResultItemIds(
+        noteResults,
+        "lookup.notes",
+        MAX_SEARCH_HITS + 1,
+      );
       if (noteIds.length > MAX_SEARCH_HITS) {
         throw projectionError("Notesnook read-only projection: title candidate set is too large");
       }
@@ -822,12 +829,15 @@ export function flattenLiveDatabaseToReadOnly(
         [query],
         "Notesnook read-only projection: lookup.notes rejected",
       );
-      const noteIds = await readSearchResultIds(noteResults, "lookup.notes.ids");
-      // PR-65 P1-5a — read-side corpus bound.  The seam does not
-      // expose a query with a limit, so the source still returns every
-      // match.  We stop iterating after the published cap so a large
-      // corpus cannot drive an unbounded number of follow-up
-      // `notes.note(id)` calls.  Tests assert the cap is honored.
+      const noteIds = await readSearchResultItemIds(
+        noteResults,
+        "lookup.notes",
+        MAX_SEARCH_HITS + 1,
+      );
+      // PR-65 P1-5a / R5 — read-side corpus bound.  The source query
+      // is limited to `cap + 1` records, and we stop iterating after
+      // the published cap so a large corpus cannot drive an unbounded
+      // number of follow-up `notes.note(id)` calls.
       const boundedNoteIds = truncateIds(noteIds, MAX_SEARCH_HITS);
       for (const noteId of boundedNoteIds) {
         const note = await callThrough(
@@ -847,7 +857,11 @@ export function flattenLiveDatabaseToReadOnly(
         [query],
         "Notesnook read-only projection: lookup.notebooks rejected",
       );
-      const notebookIds = await readSearchResultIds(notebookResults, "lookup.notebooks.ids");
+      const notebookIds = await readSearchResultItemIds(
+        notebookResults,
+        "lookup.notebooks",
+        MAX_SEARCH_HITS + 1,
+      );
       const boundedNotebookIds = truncateIds(notebookIds, MAX_SEARCH_HITS);
       for (const notebookId of boundedNotebookIds) {
         const notebook = await callThrough(
@@ -1203,6 +1217,86 @@ async function readSearchResultIds(results: unknown, label: string): Promise<str
     }
     return ids;
   });
+}
+
+/**
+ * Read up to `limit` hit ids from a `SearchResults<T>` through its
+ * `items(limit)` method (R5, PR-65 P1-5a).  The upstream query itself is
+ * bounded, so the full id array is never materialised.  Only each record's
+ * own string `id` is kept; metadata is still read through `notes.note(id)` /
+ * `notebooks.notebook(id)`.  When `items` is absent (older fakes) this falls
+ * back to {@link readSearchResultIds}, and the caller's truncation applies.
+ */
+async function readSearchResultItemIds(
+  results: unknown,
+  label: string,
+  limit: number,
+): Promise<string[]> {
+  if (results === undefined || results === null) return [];
+  if (typeof results !== "object") {
+    throw projectionError(`Notesnook read-only projection: ${label} returned a non-object`);
+  }
+  let itemsFn: unknown;
+  try {
+    itemsFn = (results as Record<string, unknown>).items;
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label}.items getter threw`);
+  }
+  if (typeof itemsFn !== "function") {
+    return readSearchResultIds(results, label);
+  }
+  let raw: unknown;
+  try {
+    raw = (itemsFn as (limit: number) => unknown).call(results, limit);
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label}.items threw synchronously`);
+  }
+  let isThenable = false;
+  try {
+    isThenable =
+      raw !== null &&
+      typeof raw === "object" &&
+      typeof (raw as { then?: unknown }).then === "function";
+  } catch {
+    throw projectionError(`Notesnook read-only projection: ${label}.items then getter threw`);
+  }
+  if (!isThenable) {
+    throw projectionError(
+      `Notesnook read-only projection: ${label}.items did not return a thenable`,
+    );
+  }
+  return callThenable(raw as PromiseLike<unknown>, `${label}.items`, (resolved) => {
+    if (!Array.isArray(resolved)) {
+      throw projectionError(
+        `Notesnook read-only projection: ${label}.items did not resolve to an array`,
+      );
+    }
+    return resolved.map((record: unknown) => readOwnRecordId(record, `${label}.items`));
+  });
+}
+
+/**
+ * Return a record's own, non-empty string `id`.  Anything else (a non-object,
+ * an inherited or missing `id`, a throwing getter, or a non-string id) is a
+ * categorical projection error that carries no record content.
+ */
+function readOwnRecordId(record: unknown, label: string): string {
+  const message = `Notesnook read-only projection: ${label} returned a record without an id`;
+  let id: unknown;
+  try {
+    id =
+      record !== null &&
+      typeof record === "object" &&
+      Object.prototype.hasOwnProperty.call(record, "id")
+        ? (record as { readonly id: unknown }).id
+        : undefined;
+  } catch {
+    throw projectionError(message);
+  }
+  if (typeof id !== "string" || id.length === 0) {
+    throw projectionError(message);
+  }
+  return id;
 }
 
 /**
