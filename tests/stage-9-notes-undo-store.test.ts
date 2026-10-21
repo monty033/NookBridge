@@ -109,7 +109,7 @@ describe("daemon encrypted operation store", () => {
       fs.fail = "";
       const recovered = await setup(fs);
       expect((await recovered.get(r.handle)).state).toBe(
-        failure === "directory-sync" ? "committing" : "prepared",
+        failure === "directory-sync" ? "unresolved" : "prepared",
       );
       expect([...fs.files.keys()]).toEqual([r.handle]);
     },
@@ -140,6 +140,66 @@ describe("daemon encrypted operation store", () => {
     expect(await store.list()).toEqual([]);
     await expect(store.get(b.handle)).rejects.toThrow("missing");
     expect(fs.files.size).toBe(0);
+  });
+  describe("R8 — uncertain operations are never expired", () => {
+    const toState = async (
+      store: Awaited<ReturnType<typeof setup>>,
+      state: "committing" | "unresolved",
+    ) => {
+      const r = await store.insert(input);
+      await store.transition(r.handle, "prepared", "committing");
+      if (state === "unresolved") await store.transition(r.handle, "committing", "unresolved");
+      return r;
+    };
+    it.each(["unresolved", "committing"] as const)(
+      "retains a %s record past its expiresAt",
+      async (state) => {
+        const fs = new MemoryFs();
+        let time = 100;
+        const store = await setup(fs, { now: () => time });
+        const r = await toState(store, state);
+        time = 5000;
+        expect((await store.list()).map((x) => x.handle)).toEqual([r.handle]);
+        expect((await store.get(r.handle)).state).toBe(state);
+        expect(fs.files.has(r.handle)).toBe(true);
+      },
+    );
+    it("converts committing to unresolved on open and persists the conversion", async () => {
+      const fs = new MemoryFs();
+      const store = await setup(fs);
+      const r = await toState(store, "committing");
+      const before = fs.files.get(r.handle)!.slice();
+      fs.events = [];
+      const first = await setup(fs);
+      expect((await first.get(r.handle)).state).toBe("unresolved");
+      expect(fs.events).toEqual(["write", "file-sync", "rename", "directory-sync"]);
+      expect(Buffer.from(fs.files.get(r.handle)!).equals(Buffer.from(before))).toBe(false);
+      fs.events = [];
+      expect((await (await setup(fs)).get(r.handle)).state).toBe("unresolved");
+      expect(fs.events).toEqual([]);
+    });
+    it("still expires prepared and committed records", async () => {
+      const fs = new MemoryFs();
+      let time = 100;
+      const store = await setup(fs, { now: () => time });
+      await store.insert(input);
+      const c = await store.insert(input);
+      await store.transition(c.handle, "prepared", "committing");
+      await store.transition(c.handle, "committing", "committed");
+      time = 5000;
+      expect(await store.list()).toEqual([]);
+      expect(fs.files.size).toBe(0);
+    });
+    it("counts never-expiring records against quota and never evicts them", async () => {
+      const fs = new MemoryFs();
+      let time = 100;
+      const store = await setup(fs, { now: () => time, maxRecords: 1 });
+      const r = await toState(store, "unresolved");
+      time = 5000;
+      await expect(store.insert(input)).rejects.toThrow("quota");
+      expect((await store.get(r.handle)).state).toBe("unresolved");
+      expect(fs.files.has(r.handle)).toBe(true);
+    });
   });
   it("rejects invalid handles and transitions categorically", async () => {
     const store = await setup();
