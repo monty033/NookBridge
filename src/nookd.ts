@@ -43,6 +43,7 @@ import {
   type StartNookdServerOptions,
 } from "./service/nookd-server.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "./service/service-abuse-bounds.js";
+import { resolveGroupId } from "./service/socket-group-resolver.js";
 import { createLogger } from "./logging/logger.js";
 import type { RpcMethod } from "./service/rpc-protocol.js";
 import { asRevisionToken } from "./core/notesnook-write-contract.js";
@@ -624,6 +625,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       runtime: serverRuntime,
       ...(operator === undefined ? {} : { operator }),
       policy,
+      socketGroup: config.socketGroup,
+      resolveGroupId,
       abuseBounds: DEFAULT_SERVICE_ABUSE_BOUNDS,
       auditLogger: createLogger({ bindings: { component: "nookd" } }),
     });

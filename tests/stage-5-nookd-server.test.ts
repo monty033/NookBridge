@@ -2,7 +2,8 @@
 
 import { once } from "node:events";
 import { Buffer } from "node:buffer";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { lchown, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -670,6 +671,223 @@ describe("R4 — runtime ownership outlives the transport", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
     expect(events).toEqual(["cleanup"]);
     expect(Date.now() - startedMs).toBeLessThan(1_000);
+  });
+});
+
+describe("R10b — socket group is applied and verified", () => {
+  const GROUP_MESSAGE = "nookd socket group could not be applied";
+  const SOCKET_MODE = 0o770;
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve: (value: T) => void = () => undefined;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  async function groupSocketPath(): Promise<string> {
+    const directory = await mkdtemp(path.join("/tmp", "nbk-r10b-"));
+    tempDirectories.push(directory);
+    return path.join(directory, "nookbridge.sock");
+  }
+
+  function startGrouped(
+    socketPath: string,
+    options: {
+      socketGroup?: string;
+      resolveGroupId?: (name: string) => Promise<number | undefined>;
+      applySocketGroup?: (socketPath: string, gid: number) => Promise<void>;
+    },
+  ): Promise<NookdServerHandle> {
+    const runtime: NookdServerRuntime = Object.freeze({
+      search: async () => [{ title: "served" }],
+      cleanup: vi.fn(async () => undefined),
+    });
+    const started = startNookdServer({
+      socketPath,
+      runtime,
+      installSignalHandlers: false,
+      socketMode: SOCKET_MODE,
+      ...options,
+    } as Parameters<typeof startNookdServer>[0]);
+    // Track a (wrongly) successful start so a RED run does not leak the server.
+    started.then(
+      (handle) => handles.push(handle),
+      () => undefined,
+    );
+    return started;
+  }
+
+  const supplementaryGid = (): number => {
+    const egid = process.getegid?.() ?? -1;
+    const gid = (process.getgroups?.() ?? []).find((candidate) => candidate !== egid);
+    if (gid === undefined) throw new Error("test process has no supplementary group");
+    return gid;
+  };
+
+  async function waitUntil(predicate: () => boolean): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error("condition not reached");
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  it("fails closed and unlinks the socket when the group name does not resolve", async () => {
+    const socketPath = await groupSocketPath();
+    const resolveGroupId = vi.fn(async () => undefined);
+    const applySocketGroup = vi.fn(async () => undefined);
+
+    await expect(
+      startGrouped(socketPath, { socketGroup: "nbk-clients", resolveGroupId, applySocketGroup }),
+    ).rejects.toThrow(GROUP_MESSAGE);
+
+    expect(resolveGroupId).toHaveBeenCalledWith("nbk-clients");
+    expect(applySocketGroup).not.toHaveBeenCalled();
+    expect(existsSync(socketPath)).toBe(false);
+  });
+
+  it("fails closed and unlinks the socket when the resolver throws", async () => {
+    const socketPath = await groupSocketPath();
+    const resolveGroupId = vi.fn(async (): Promise<number | undefined> => {
+      throw new Error("/etc/group exploded with a secret path");
+    });
+    const applySocketGroup = vi.fn(async () => undefined);
+
+    const failure = await startGrouped(socketPath, {
+      socketGroup: "nbk-clients",
+      resolveGroupId,
+      applySocketGroup,
+    }).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+    expect(failure?.message).toBe(GROUP_MESSAGE);
+    expect(String(failure?.message)).not.toContain("secret");
+    expect(applySocketGroup).not.toHaveBeenCalled();
+    expect(existsSync(socketPath)).toBe(false);
+  });
+
+  it("does not chown when the socket already has the resolved group", async () => {
+    const socketPath = await groupSocketPath();
+    const egid = process.getegid?.() ?? -1;
+    const applySocketGroup = vi.fn(async () => undefined);
+
+    await startGrouped(socketPath, {
+      socketGroup: "nbk-clients",
+      resolveGroupId: async () => egid,
+      applySocketGroup,
+    });
+
+    const socketStat = await lstat(socketPath);
+    expect(socketStat.gid).toBe(egid);
+    expect(socketStat.mode & 0o777).toBe(SOCKET_MODE);
+    expect(applySocketGroup).toHaveBeenCalledTimes(0);
+  });
+
+  it("applies a supplementary group and verifies the result", async () => {
+    const socketPath = await groupSocketPath();
+    const gid = supplementaryGid();
+    const applySocketGroup = vi.fn((target: string, group: number) => lchown(target, -1, group));
+
+    await startGrouped(socketPath, {
+      socketGroup: "nbk-clients",
+      resolveGroupId: async () => gid,
+      applySocketGroup,
+    });
+
+    const socketStat = await lstat(socketPath);
+    expect(applySocketGroup).toHaveBeenCalledTimes(1);
+    expect(applySocketGroup).toHaveBeenCalledWith(socketPath, gid);
+    expect(socketStat.gid).toBe(gid);
+    expect(socketStat.mode & 0o777).toBe(SOCKET_MODE);
+  });
+
+  it("fails closed and unlinks the socket when the chown throws", async () => {
+    const socketPath = await groupSocketPath();
+    const applySocketGroup = vi.fn(async (): Promise<void> => {
+      throw new Error("EPERM with a secret path");
+    });
+
+    const failure = await startGrouped(socketPath, {
+      socketGroup: "nbk-clients",
+      resolveGroupId: async () => supplementaryGid(),
+      applySocketGroup,
+    }).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+    expect(failure?.message).toBe(GROUP_MESSAGE);
+    expect(applySocketGroup).toHaveBeenCalledTimes(1);
+    expect(existsSync(socketPath)).toBe(false);
+  });
+
+  it("fails closed when the chown reports success but the group did not change", async () => {
+    const socketPath = await groupSocketPath();
+    const applySocketGroup = vi.fn(async () => undefined);
+
+    await expect(
+      startGrouped(socketPath, {
+        socketGroup: "nbk-clients",
+        resolveGroupId: async () => supplementaryGid(),
+        applySocketGroup,
+      }),
+    ).rejects.toThrow(GROUP_MESSAGE);
+
+    expect(applySocketGroup).toHaveBeenCalledTimes(1);
+    expect(existsSync(socketPath)).toBe(false);
+  });
+
+  it("destroys a connection that arrives before the group is verified", async () => {
+    const socketPath = await groupSocketPath();
+    const gate = deferred<number | undefined>();
+    const resolveGroupId = vi.fn(() => gate.promise);
+    const applySocketGroup = vi.fn(async () => undefined);
+    const started = startGrouped(socketPath, {
+      socketGroup: "nbk-clients",
+      resolveGroupId,
+      applySocketGroup,
+    });
+
+    await waitUntil(() => resolveGroupId.mock.calls.length > 0);
+    const early = net.createConnection(socketPath);
+    const earlyData: Buffer[] = [];
+    early.on("data", (chunk: Buffer) => earlyData.push(chunk));
+    // The server may reset the peer before or after the connect completes.
+    const earlyClosed = new Promise<void>((resolve) => early.on("close", () => resolve()));
+    early.on("error", () => undefined);
+    early.write(requestBytes("early", "needle"));
+    await earlyClosed;
+    expect(earlyData).toHaveLength(0);
+
+    gate.resolve(process.getegid?.() ?? -1);
+    const handle = await started;
+    expect(handle.socketPath).toBe(socketPath);
+
+    const later = await connect(socketPath);
+    later.write(requestBytes("later", "needle"));
+    const response = await readFrame(later);
+    expect(response).toMatchObject({ id: "later", ok: true });
+    later.destroy();
+  });
+
+  it("neither resolves nor applies a group when none is configured", async () => {
+    const socketPath = await groupSocketPath();
+    const resolveGroupId = vi.fn(async () => undefined);
+    const applySocketGroup = vi.fn(async () => undefined);
+
+    await startGrouped(socketPath, { resolveGroupId, applySocketGroup });
+
+    const socket = await connect(socketPath);
+    socket.write(requestBytes("plain", "needle"));
+    const response = await readFrame(socket);
+    expect(response).toMatchObject({ id: "plain", ok: true });
+    expect(applySocketGroup).not.toHaveBeenCalled();
+    expect(resolveGroupId).not.toHaveBeenCalled();
+    socket.destroy();
   });
 });
 

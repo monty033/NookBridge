@@ -115,6 +115,25 @@ describe("bounded nookd startup composition", () => {
     expect(handle.socketPath).toBe(CONFIG.socketPath);
   });
 
+  it("passes config.socketGroup and the production resolver through to startServer", async () => {
+    vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
+    let serverOptions: StartNookdServerOptions | undefined;
+    const factories = factoriesFixture({
+      startServer: vi.fn(async (options) => {
+        serverOptions = options;
+        return fakeHandle();
+      }),
+    });
+
+    await startNookd({ configPath: CONFIG_PATH, factories });
+    // Imported lazily so the other tests in this file stay independent of it.
+    const { resolveGroupId } = await import("../src/service/socket-group-resolver.js");
+
+    expect(serverOptions?.socketGroup).toBe(CONFIG.socketGroup);
+    expect(serverOptions?.socketGroup).toBe("nookbridge-clients");
+    expect(serverOptions?.resolveGroupId).toBe(resolveGroupId);
+  });
+
   it("forwards the selected frozen policy and every optional write capability", async () => {
     vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
     const cleanup = vi.fn(async () => undefined);
