@@ -100,10 +100,11 @@ function proofError(message: string): OfflineSyncProofError {
 // ---------------------------------------------------------------------------
 
 /**
- * Single-step outcome the offline proof records.  Every step is
- * either `pass` (the closed read-only surface returned a structurally
- * valid value) or `fail` (categorical failure).  The proof NEVER
- * carries the raw upstream value, message, or cause — only the
+ * Single-step outcome the offline proof records.  A step is `pass`
+ * (the closed read-only surface returned a structurally valid value),
+ * `fail` (categorical failure), or `skipped` (the operator supplied no
+ * input for an optional assertion, so the step did not run).  The proof
+ * NEVER carries the raw upstream value, message, or cause — only the
  * categorical step name and the high-level outcome.
  */
 export type OfflineSyncProofStep = Readonly<{
@@ -117,13 +118,17 @@ export type OfflineSyncProofStep = Readonly<{
     | "vault-locked"
     | "search"
     | "close";
-  status: "pass" | "fail";
+  status: "pass" | "fail" | "skipped";
   /** Categorical step detail; never carries upstream error text. */
   detail: string;
 }>;
 
 export type OfflineSyncProofReport = Readonly<{
-  kind: "pass" | "fail";
+  /**
+   * `inconclusive` means the fetch-only sync ran against an empty store
+   * without any optional assertion, so no read was actually proven.
+   */
+  kind: "pass" | "fail" | "inconclusive";
   steps: ReadonlyArray<OfflineSyncProofStep>;
   /** Aggregate counts so a CLI can render a one-line summary. */
   summary: Readonly<{
@@ -172,6 +177,9 @@ export type RunOfflineSyncProofOptions = Readonly<{
 // ---------------------------------------------------------------------------
 // Runner.
 // ---------------------------------------------------------------------------
+
+/** Optional read assertions a proof must actually run to avoid `inconclusive`. */
+const ASSERTION_STEP_NAMES = ["note-metadata", "conflict", "vault-locked", "search"] as const;
 
 /**
  * Execute the offline read-only sync proof against the injected
@@ -263,7 +271,7 @@ export async function runOfflineSyncProof(
       return failedReport(steps, summary);
     }
   } else {
-    steps.push({ name: "sync", status: "pass", detail: "sync skipped for status" });
+    steps.push({ name: "sync", status: "skipped", detail: "sync skipped for status" });
   }
 
   // Step 4 — list-notebooks.  Reads the closed notebook summary
@@ -289,8 +297,7 @@ export async function runOfflineSyncProof(
 
   // Step 5 — note-metadata.  Reads metadata for the supplied id
   // (if any).  When the id is absent, the step is recorded as
-  // `pass` with detail "skipped" so the report's pass/fail stays
-  // driven by the upstream surface, not by an arbitrary default id.
+  // `skipped` so the report never counts an assertion that did not run.
   if (typeof options.noteMetadataId === "string" && options.noteMetadataId.length > 0) {
     try {
       const metadata: NotesnookReadOnlyNoteMetadata | undefined = await adapter.noteMetadata(
@@ -320,7 +327,7 @@ export async function runOfflineSyncProof(
   } else {
     steps.push({
       name: "note-metadata",
-      status: "pass",
+      status: "skipped",
       detail: "no note id supplied",
     });
   }
@@ -345,7 +352,7 @@ export async function runOfflineSyncProof(
       return failedReport(steps, summary);
     }
   } else {
-    steps.push({ name: "conflict", status: "pass", detail: "no conflict canary supplied" });
+    steps.push({ name: "conflict", status: "skipped", detail: "no conflict canary supplied" });
   }
 
   if (
@@ -384,15 +391,14 @@ export async function runOfflineSyncProof(
   } else {
     steps.push({
       name: "vault-locked",
-      status: "pass",
+      status: "skipped",
       detail: "no locked-note canary supplied",
     });
   }
 
   // Step 6 — search.  Title-only search through the closed surface.
-  // When the query is absent, the step is recorded as `pass` with
-  // detail "skipped" so the proof stays bounded on whatever the
-  // operator supplied.
+  // When the query is absent, the step is recorded as `skipped` so the
+  // proof stays bounded on whatever the operator supplied.
   if (typeof options.query === "string" && options.query.length > 0) {
     try {
       const hits: NotesnookReadOnlySearchHit[] = await adapter.search(options.query);
@@ -429,7 +435,7 @@ export async function runOfflineSyncProof(
   } else {
     steps.push({
       name: "search",
-      status: "pass",
+      status: "skipped",
       detail: "no query supplied",
     });
   }
@@ -440,6 +446,23 @@ export async function runOfflineSyncProof(
     detail: "proof completed",
   });
   void startedAt;
+
+  // A named store that happens to be empty proves nothing: the sync ran,
+  // but none of the optional read assertions did.  Do not report `pass`
+  // for a vacuous run.
+  const syncRan = options.performSync !== false;
+  const assertionsSkipped = ASSERTION_STEP_NAMES.every((name) =>
+    steps.some((step) => step.name === name && step.status === "skipped"),
+  );
+  if (syncRan && summary.notebooks === 0 && assertionsSkipped) {
+    return {
+      kind: "inconclusive",
+      steps,
+      summary,
+      message: "read-only sync proof inconclusive: empty store and no assertions",
+    };
+  }
+
   return {
     kind: "pass",
     steps,
@@ -510,7 +533,7 @@ function failedReport(
  */
 export function formatOfflineSyncProofReport(report: OfflineSyncProofReport): string {
   const lines: string[] = [];
-  lines.push(`read-only sync proof: ${report.kind === "pass" ? "pass" : "fail"}`);
+  lines.push(`read-only sync proof: ${report.kind}`);
   for (const step of report.steps) {
     lines.push(`  - ${step.name}: ${step.status} (${step.detail})`);
   }

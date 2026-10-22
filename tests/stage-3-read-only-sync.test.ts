@@ -25,6 +25,10 @@ import {
   runSyncCommand,
 } from "../src/core/notesnook-sync-admin.js";
 import type { NotesnookLiveDatabase } from "../src/core/notesnook-core-adapter.js";
+import {
+  formatOfflineSyncProofReport,
+  runOfflineSyncProof,
+} from "../src/core/notesnook-sync-proof.js";
 import { isExactFetchRequest } from "../src/core/readonly-sync-shape.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createOperatorAuthorizer } from "../src/service/operator-authorizer.js";
@@ -372,6 +376,99 @@ describe("NotesnookReadOnlyAdapter", () => {
         } as never),
       "Notesnook read-only adapter: injected source must resolve before construction",
     );
+  });
+});
+
+describe("R12 — skipped steps are not passes", () => {
+  const ASSERTION_STEPS = ["note-metadata", "conflict", "vault-locked", "search"] as const;
+
+  function createNotebookFakeDatabase(count: number) {
+    const source = createFakeDatabase();
+    const mutable = source as unknown as {
+      listNotebooks: NotesnookReadOnlyDatabase["listNotebooks"];
+    };
+    mutable.listNotebooks = async () =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `notebook-${index + 1}`,
+        title: `Notebook ${index + 1}`,
+        dateCreated: index,
+      }));
+    return source;
+  }
+
+  function statusOf(
+    report: Awaited<ReturnType<typeof runOfflineSyncProof>>,
+    name: (typeof ASSERTION_STEPS)[number] | "sync",
+  ) {
+    return report.steps.find((step) => step.name === name)?.status;
+  }
+
+  it("returns inconclusive for an empty store with no assertions", async () => {
+    const source = createNotebookFakeDatabase(0);
+    const report = await runOfflineSyncProof({ source });
+
+    expect(report.kind).toBe("inconclusive");
+    for (const name of ASSERTION_STEPS) {
+      expect(report.steps.find((step) => step.name === name)).toMatchObject({
+        name,
+        status: "skipped",
+      });
+    }
+    expect(formatOfflineSyncProofReport(report).split("\n")[0]).toBe(
+      "read-only sync proof: inconclusive",
+    );
+    expect(report.message).toBe("read-only sync proof inconclusive: empty store and no assertions");
+  });
+
+  it("passes a non-empty store while recording the unrun assertions as skipped", async () => {
+    const source = createNotebookFakeDatabase(3);
+    const report = await runOfflineSyncProof({ source });
+
+    expect(report.kind).toBe("pass");
+    for (const name of ASSERTION_STEPS) {
+      expect(report.steps.find((step) => step.name === name)).toMatchObject({
+        name,
+        status: "skipped",
+      });
+    }
+  });
+
+  it("passes an empty store when the search assertion actually ran", async () => {
+    const source = createNotebookFakeDatabase(0);
+    const report = await runOfflineSyncProof({ source, query: "note" });
+
+    expect(statusOf(report, "search")).toBe("pass");
+    expect(report.kind).toBe("pass");
+  });
+
+  it("passes status mode on an empty store with sync skipped", async () => {
+    const source = createNotebookFakeDatabase(0);
+    const report = await runOfflineSyncProof({ source, performSync: false });
+
+    expect(report.kind).toBe("pass");
+    expect(statusOf(report, "sync")).toBe("skipped");
+  });
+
+  it("always issues exactly the fetch-only sync request", async () => {
+    const source = createNotebookFakeDatabase(0);
+    await runOfflineSyncProof({ source });
+
+    expect(source.syncCalls).toEqual([{ type: "fetch" }]);
+  });
+
+  it("still fails when the status read fails", async () => {
+    const source = createFakeDatabase();
+    (source as unknown as { lastSynced: NotesnookReadOnlyDatabase["lastSynced"] }).lastSynced =
+      async () => {
+        throw new Error("status read failed");
+      };
+    const report = await runOfflineSyncProof({ source });
+
+    expect(report.kind).toBe("fail");
+    expect(report.steps[report.steps.length - 1]).toMatchObject({
+      name: "close",
+      status: "fail",
+    });
   });
 });
 
@@ -893,7 +990,7 @@ describe("Stage 3 production projection and sync gate", () => {
             status: "pass",
             detail: "vault_locked body refusal observed",
           },
-          { name: "search", status: "pass", detail: "no query supplied" },
+          { name: "search", status: "skipped", detail: "no query supplied" },
         ]),
       },
     });

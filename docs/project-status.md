@@ -116,14 +116,16 @@ refusal naming the variable, returned before any proof source is constructed, so
 the proof can no longer report `pass` for a store that was never named.
 Regression coverage lives in `tests/stage-3-sync-state-dir.test.ts`.
 
-Two limits on this claim, stated so it is not read as more than it is:
+One limit on this claim, stated so it is not read as more than it is:
 
 - The gate is on the *sync* tree only. Other subcommand trees still resolve a
   working-directory default of their own; they are separate slices.
-- An explicitly named store that happens to be empty can still produce a vacuous
-  `pass` when no search query or canary flag is supplied, because the conflict and
-  search steps record `pass` when they are skipped. That second half of the gap is
-  not addressed by this change.
+
+The second half of the gap — an explicitly named store that happens to be empty
+producing a vacuous `pass` — is closed by R12's pull request. Unrun assertion
+steps now record `skipped`, and the proof returns `inconclusive` when the
+fetch-only sync ran against an empty store with no query, note id, or canary
+flags.
 
 The other two defects remain open and untouched: the `pendingSync` upload gap
 and the hardcoded `peerCredentials: "unknown"` audit field. The locked-note
