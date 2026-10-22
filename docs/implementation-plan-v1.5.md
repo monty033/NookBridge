@@ -392,6 +392,8 @@ Provisioning is an administrative action, not an agent action. `nookctl provisio
 | Persistent auth/protocol failure | Stop automatic retry after a bounded policy and surface operator-visible health failure. |
 | Conflict detected | Return a conflict result with note identity/revision metadata. Do not auto-resolve. |
 
+DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged.
+
 A future admin-only `forceSync` may bypass ordinary scheduling for repair/diagnostics, but it must not be exposed through the Hermes MCP/RPC interface.
 
 ## 3.7 Security-parity invariants
@@ -2834,6 +2836,38 @@ Source evidence only. Each row is a merged commit on `upstream/main`, and the su
 ### Still open
 
 D1-1, D3-1, D3-3, D6-x, S7a-x, R3–R5, R8–R13, R15, DOC-1, and G1a–G8 remain open. The step plan for those items is not duplicated here.
+
+## 13.22 Decision record DR-S7a — no upload without explicit sync intent
+
+**Status:** approved by Patrick (decision 1), 2026-10-21.
+**Mode:** decision record; no source change in this section.
+
+No upload without explicit sync intent.
+
+1. Upstream `{type:"full"}` is called only from `createLiveRemoteSyncExecutor`, and only for an explicit `notes.sync` request (`notesnook_sync` or `nookctl write sync`). No timer, startup, post-write or reconciliation path may call it. The S7a-1 call-site lock (#232) enforces this.
+2. The read-only boundary is unchanged. It accepts only `{ type: "fetch" }`; `full`, `send` and `force` are never added to it.
+3. Upload intent is recorded per note and durably in the coordinator. MCP writes record it. Operator writes do not, unless the operator approves upload.
+4. Before `full`, the executor reads the upstream dirty set read-only. It refuses with the categorical reason `unapproved_pending` if any dirty item lacks recorded intent, or if the dirty set can't be read.
+5. Fallback: if the pinned core has no read-only way to read the dirty set (S7a-2 settles this), every `full` sync is refused while any operator-origin pending marker exists.
+
+### Pending decision
+
+The operator approval path in item 3 waits on **decision 5**, which is not yet approved: whether to add an upload-intent parameter to the frozen T00 D2 operator vocabulary. Until then, operator-origin writes have **no approval path**. They stay local-only and, under items 4 and 5, block `full` sync. No mechanism is specified.
+
+### Known consequence
+
+After S7a-4 lands, any operator-origin pending write blocks every explicit sync (MCP and `nookctl write sync`) until decision 5 provides approval.
+
+### Implementation order
+
+- S7a-2: dirty-set probe
+- S7a-3: intent ledger
+- S7a-5: intent recorded by origin
+- S7a-4: executor preflight gate. It merges **after** S7a-5; otherwise every sync would be refused because MCP writes don't yet record intent.
+- S7a-7: docs
+- S7a-6: blocked on decision 5
+
+**Evidence class:** a decision record only; no source, VM or live evidence.
 
 # Appendix A. Research Sources
 
