@@ -669,6 +669,33 @@ export class NotesnookWriteAdapter {
               "Notesnook write adapter: legacy content update would discard a task-list title",
             );
           }
+          if (stored.data.trim() !== "") {
+            let hasPreserved: boolean;
+            try {
+              const decoded = decodeNoteDocumentNative(
+                { type: stored.type, data: stored.data },
+                {
+                  noteId: plan.id,
+                  revision: createRevisionToken({
+                    id: observed.id,
+                    dateEdited: observed.dateEdited,
+                  }),
+                },
+              );
+              hasPreserved = containsOpaqueBlock(decoded.document.blocks);
+            } catch {
+              throw adapterError(
+                "unsupported_content",
+                "Notesnook write adapter: cannot safely inspect stored content",
+              );
+            }
+            if (hasPreserved) {
+              throw adapterError(
+                "unsupported_content",
+                "Notesnook write adapter: legacy content update would discard preserved content",
+              );
+            }
+          }
           try {
             assertSupportedConstructs(newContent, STAGE4_WRITE_LIMITS.maxContentBytes);
           } catch {
@@ -1513,6 +1540,86 @@ function encodeVersionedCreate(content: string, plan: CreateNotePlan): Notesnook
       "Notesnook write adapter: unsupported content format",
     );
   }
+}
+
+/**
+ * Recursively detects preserved content the legacy codec cannot write back:
+ * opaque blocks plus image, attachment and embed reference blocks.  Every `NoteBlock`
+ * member is handled explicitly and the `never` default makes a newly added
+ * block type a compile error rather than a silent pass.  A container whose
+ * shape is wrong throws instead of reading as "no children": callers treat a
+ * throw as "cannot safely inspect" and refuse.
+ *
+ * @internal Exported for tests only.
+ */
+export function containsOpaqueBlock(blocks: readonly NoteBlock[]): boolean {
+  const malformed = (_context?: unknown): never => {
+    throw new Error("malformed note block");
+  };
+  const array = (value: unknown): readonly unknown[] =>
+    Array.isArray(value) ? (value as readonly unknown[]) : malformed();
+  const walkTaskItems = (items: unknown): boolean => {
+    let found = false;
+    for (const item of array(items)) {
+      if (typeof item !== "object" || item === null) malformed();
+      const { blocks: nested, children } = item as { blocks?: unknown; children?: unknown };
+      if (nested !== undefined && walk(nested)) found = true;
+      if (walkTaskItems(children)) found = true;
+    }
+    return found;
+  };
+  const walk = (list: unknown): boolean => {
+    let found = false;
+    for (const block of array(list) as readonly NoteBlock[]) {
+      if (typeof block !== "object" || block === null) malformed();
+      switch (block.type) {
+        case "opaque":
+        case "image":
+        case "attachment":
+        case "embed":
+          found = true;
+          break;
+        case "callout":
+        case "blockquote":
+          if (walk(block.blocks)) found = true;
+          break;
+        case "bullet-list":
+        case "ordered-list":
+          for (const item of array(block.items)) {
+            if (typeof item !== "object" || item === null) malformed();
+            const children = (item as { blocks?: unknown }).blocks;
+            if (children !== undefined && walk(children)) found = true;
+          }
+          break;
+        case "task-list":
+          // Task items are typed without block children, but any present are
+          // walked so a preserved block can never hide in one.
+          if (walkTaskItems(block.items)) found = true;
+          break;
+        case "table":
+          // Cells are plain strings; a cell holding rich content decodes the
+          // whole table to an opaque block instead.
+          for (const column of array(block.columns)) {
+            if (typeof column !== "string") malformed();
+          }
+          for (const row of array(block.rows)) {
+            for (const cell of array(row)) if (typeof cell !== "string") malformed();
+          }
+          break;
+        case "paragraph":
+        case "heading":
+        case "code-block":
+        case "horizontal-rule":
+          break;
+        default: {
+          const unreachable: never = block;
+          return malformed(unreachable);
+        }
+      }
+    }
+    return found;
+  };
+  return walk(blocks);
 }
 
 /**

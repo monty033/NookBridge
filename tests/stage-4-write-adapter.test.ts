@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  containsOpaqueBlock,
   createNotesnookWriteAdapter,
   isNotesnookWriteAdapterError,
   type NotesnookStoredContent,
@@ -40,6 +41,7 @@ import {
 import { noteHtmlReadonlyMarkdown } from "../src/core/note-html-readonly-markdown.js";
 import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
 import { serializeNoteDocumentMarkdown } from "../src/core/note-document-markdown.js";
+import type { NoteBlock } from "../src/core/note-document.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { serializeRpcResponse } from "../src/service/rpc-protocol.js";
@@ -3249,5 +3251,277 @@ describe("Stage 4 write adapter — fidelity gate (P1-7)", () => {
     });
     expect(result.operation).toBe("update");
     expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+});
+
+describe("D6-3 — legacy replacement never drops preserved content", () => {
+  const REVISION_DATE = 1_700_000_000_000;
+  const MUTATORS = [
+    "update",
+    "contentUpdate",
+    "touch",
+    "relationAdd",
+    "relationRemove",
+    "notebookAdd",
+    "notebookRemove",
+  ] as const;
+
+  function setup(data: string) {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Original",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: REVISION_DATE,
+    };
+    const stored: FakeContent = { id: "content-1", noteId: NOTE_ID, type: "html", data };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({ source: database, codec: htmlCodec() });
+    return { adapter, database };
+  }
+
+  function hasOpaque(blocks: readonly NoteBlock[]): boolean {
+    return blocks.some(
+      (b) =>
+        b.type === "opaque" ||
+        ((b.type === "callout" || b.type === "blockquote") && hasOpaque(b.blocks)) ||
+        ((b.type === "bullet-list" || b.type === "ordered-list") &&
+          b.items.some((i) => hasOpaque(i.blocks ?? []))),
+    );
+  }
+
+  function decodeSeed(data: string) {
+    return decodeNoteDocumentNative(
+      { type: "html", data },
+      { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, REVISION_DATE) },
+    ).document;
+  }
+
+  it.each([
+    ["an image", '<p>text</p><img src="https://example.invalid/a.png">'],
+    ["a mention", '<p>hi <span class="mention" data-id="x">@x</span></p>'],
+    [
+      "an image inside a table cell",
+      '<table><tr><th>h</th></tr><tr><td><img src="https://example.invalid/a.png"></td></tr></table>',
+    ],
+    [
+      "an image inside an untitled checklist item",
+      '<ul class="checklist"><li class="checklist--item"><p>a</p><img src="https://example.invalid/a.png"></li></ul>',
+    ],
+    [
+      "an opaque block inside a callout",
+      '<div data-type="callout" data-variant="info"><p>note</p><img src="https://example.invalid/a.png"></div>',
+    ],
+    [
+      "an opaque block inside a blockquote",
+      '<blockquote><p>q</p><img src="https://example.invalid/a.png"></blockquote>',
+    ],
+  ])("refuses a claim-free replacement of content with %s", async (_label, data) => {
+    const html = `<div data-type="document">${data}</div>`;
+    expect(hasOpaque(decodeSeed(html).blocks)).toBe(true);
+    const { adapter, database } = setup(html);
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+        patch: { content: "new text", title: "Must not be saved" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    for (const key of MUTATORS) expect(database.calls[key]).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(html);
+  });
+
+  describe("containsOpaqueBlock walker", () => {
+    const opaque = {
+      type: "opaque",
+      nodeType: "img",
+      sentinel: { version: 1, source: "native-html", token: "t" },
+    };
+    const blocks = (value: unknown) => value as readonly NoteBlock[];
+
+    it("finds opaque blocks in nested containers and passes leaf-only content", () => {
+      expect(containsOpaqueBlock(blocks([opaque]))).toBe(true);
+      expect(
+        containsOpaqueBlock(blocks([{ type: "callout", variant: "info", blocks: [opaque] }])),
+      ).toBe(true);
+      expect(
+        containsOpaqueBlock(
+          blocks([{ type: "blockquote", blocks: [{ type: "blockquote", blocks: [opaque] }] }]),
+        ),
+      ).toBe(true);
+      expect(
+        containsOpaqueBlock(
+          blocks([{ type: "bullet-list", items: [{ inlines: [], blocks: [opaque] }] }]),
+        ),
+      ).toBe(true);
+      expect(
+        containsOpaqueBlock(blocks([{ type: "ordered-list", items: [{ inlines: [] }] }])),
+      ).toBe(false);
+      expect(containsOpaqueBlock(blocks([{ type: "table", columns: ["h"], rows: [["c"]] }]))).toBe(
+        false,
+      );
+      expect(
+        containsOpaqueBlock(
+          blocks([
+            {
+              type: "task-list",
+              items: [
+                {
+                  checked: false,
+                  inlines: [],
+                  children: [{ checked: true, inlines: [], children: [] }],
+                },
+              ],
+            },
+          ]),
+        ),
+      ).toBe(false);
+    });
+
+    const reference = {
+      image: { type: "image", url: "https://example.invalid/a.png" },
+      attachment: { type: "attachment", url: "https://example.invalid/a.bin" },
+      embed: { type: "embed", url: "https://example.invalid/e" },
+    };
+    const taskItem = (extra: object) => ({ checked: false, inlines: [], children: [], ...extra });
+
+    it.each(Object.entries(reference))("counts a %s block as preserved content", (_type, block) => {
+      expect(containsOpaqueBlock(blocks([block]))).toBe(true);
+      expect(
+        containsOpaqueBlock(blocks([{ type: "callout", variant: "info", blocks: [block] }])),
+      ).toBe(true);
+      expect(
+        containsOpaqueBlock(
+          blocks([{ type: "bullet-list", items: [{ inlines: [], blocks: [block] }] }]),
+        ),
+      ).toBe(true);
+    });
+
+    it.each(Object.entries(reference))(
+      "finds a %s block nested in a task-list item",
+      (_type, block) => {
+        expect(
+          containsOpaqueBlock(
+            blocks([{ type: "task-list", items: [taskItem({ blocks: [block] })] }]),
+          ),
+        ).toBe(true);
+        expect(
+          containsOpaqueBlock(
+            blocks([
+              {
+                type: "task-list",
+                items: [taskItem({ children: [taskItem({ blocks: [block] })] })],
+              },
+            ]),
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it("throws on a task item whose blocks field is not an array", () => {
+      expect(() =>
+        containsOpaqueBlock(blocks([{ type: "task-list", items: [taskItem({ blocks: "x" })] }])),
+      ).toThrow("malformed note block");
+    });
+
+    it.each([
+      [
+        "a callout with a non-array blocks field",
+        { type: "callout", variant: "info", blocks: "x" },
+      ],
+      ["a blockquote missing blocks", { type: "blockquote" }],
+      [
+        "a list item with a non-array blocks field",
+        { type: "bullet-list", items: [{ inlines: [], blocks: {} }] },
+      ],
+      ["a list whose items are not an array", { type: "ordered-list", items: null }],
+      ["a table whose rows are not arrays", { type: "table", columns: ["h"], rows: "x" }],
+      ["a table cell that is not a string", { type: "table", columns: ["h"], rows: [[opaque]] }],
+      ["a task list missing items", { type: "task-list" }],
+      [
+        "a task item missing children",
+        { type: "task-list", items: [{ checked: false, inlines: [] }] },
+      ],
+      ["an unknown block type", { type: "future-block" }],
+    ])("throws rather than passing %s", (_label, block) => {
+      expect(() => containsOpaqueBlock(blocks([block]))).toThrow();
+    });
+  });
+
+  it("refuses malformed stored HTML", async () => {
+    const { adapter, database } = setup("<ul data-title='");
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+        patch: { content: "new text" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  it("proceeds for paragraphs, headings, a plain list and a table", async () => {
+    const html =
+      "<h1>Title</h1><p>para</p><ul><li><p>a</p></li><li><p>b</p></li></ul>" +
+      "<table><tr><th>h</th></tr><tr><td>c</td></tr></table>";
+    expect(hasOpaque(decodeSeed(html).blocks)).toBe(false);
+    const { adapter, database } = setup(html);
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+      patch: { content: "new text" },
+    });
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+
+  it("proceeds when stored content is empty", async () => {
+    const { adapter, database } = setup("");
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+      patch: { content: "new text" },
+    });
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+
+  it("still allows a canonical versioned update that keeps the opaque placeholder", async () => {
+    const html =
+      '<div data-type="document"><p>text</p><img src="https://example.invalid/a.png"></div>';
+    const doc = decodeSeed(html);
+    expect(hasOpaque(doc.blocks)).toBe(true);
+    const { adapter, database } = setup(html);
+    const content = serializeNoteDocumentMarkdown(doc).replace("text", "edited");
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+      patch: { content },
+    });
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    const after = (await database.contentFindByNoteId(NOTE_ID))!;
+    expect(after.data).toContain('<img src="https://example.invalid/a.png">');
+    expect(after.data).toContain("edited");
+  });
+
+  it("keeps the existing refusal message for a titled task list", async () => {
+    const { adapter, database } = setup(
+      '<div data-type="document"><ul class="checklist" data-title="T"><li class="checklist--item"><p>a</p></li></ul></div>',
+    );
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, REVISION_DATE),
+        patch: { content: "new text" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
   });
 });
