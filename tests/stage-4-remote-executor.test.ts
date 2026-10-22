@@ -311,7 +311,11 @@ describe("Stage 4 live remote executor", () => {
 
   it("round-trips through encrypted PersistentStorage and recovers after reopen", () => {
     const fixture = persistentStateStore();
-    const state = { pending: [{ operation: "create" as const, noteId: NOTE_ID, sequence: 1 }] };
+    const state = {
+      pending: [
+        { operation: "create" as const, noteId: NOTE_ID, sequence: 1, origin: "unknown" as const },
+      ],
+    };
     try {
       fixture.store.save(state);
       expect(fixture.store.load()).toEqual(state);
@@ -339,7 +343,11 @@ describe("Stage 4 live remote executor", () => {
 
   it("round-trips a pending delete marker through encrypted storage", () => {
     const fixture = persistentStateStore();
-    const state = { pending: [{ operation: "delete" as const, noteId: NOTE_ID, sequence: 1 }] };
+    const state = {
+      pending: [
+        { operation: "delete" as const, noteId: NOTE_ID, sequence: 1, origin: "unknown" as const },
+      ],
+    };
     try {
       fixture.store.save(state);
       expect(fixture.store.load()).toEqual(state);
@@ -351,6 +359,66 @@ describe("Stage 4 live remote executor", () => {
       }
       rmSync(fixture.stateDir, { recursive: true, force: true });
     }
+  });
+
+  describe("S7a-3 marker origin persistence", () => {
+    function rawStore(initial?: unknown) {
+      const values = new Map<string, unknown>();
+      if (initial !== undefined) values.set(SYNC_COORDINATOR_STATE_KEY, JSON.stringify(initial));
+      const store = new PersistentSyncMetadataStateStore({
+        readSync: <T>(key: string) => values.get(key) as T | undefined,
+        writeSync: <T>(key: string, value: T) => values.set(key, value),
+      });
+      return store;
+    }
+
+    it("13: preserves origins across save and load", () => {
+      const store = rawStore();
+      const state = {
+        pending: [
+          { operation: "update" as const, noteId: NOTE_ID, sequence: 1, origin: "mcp" as const },
+          {
+            operation: "append" as const,
+            noteId: NOTE_ID,
+            sequence: 2,
+            origin: "operator" as const,
+          },
+          {
+            operation: "create" as const,
+            noteId: "nb-pending-create-3",
+            sequence: 3,
+            origin: "unknown" as const,
+          },
+        ],
+      };
+      store.save(state);
+      expect(store.load()).toEqual(state);
+    });
+
+    it("14: loads markers persisted without origin as unknown", () => {
+      const store = rawStore({ pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }] });
+      expect(store.load()).toEqual({
+        pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin: "unknown" }],
+      });
+    });
+
+    it("15: fails closed on an origin outside the closed set or extra keys", () => {
+      for (const origin of ["admin", 1, null, "MCP", ""]) {
+        const store = rawStore({
+          pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin }],
+        });
+        expect(() => store.load()).toThrow("invalid persisted sync metadata");
+      }
+      const extra = rawStore({
+        pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin: "mcp", body: "x" }],
+      });
+      expect(() => extra.load()).toThrow("invalid persisted sync metadata");
+      expect(() =>
+        rawStore().save({
+          pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin: "admin" }],
+        } as never),
+      ).toThrow("failed to persist sync metadata");
+    });
   });
 
   it("rejects malformed persisted JSON", () => {

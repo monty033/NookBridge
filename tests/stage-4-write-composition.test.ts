@@ -835,7 +835,16 @@ describe("Stage 4 write composition — bounded immutable result copies", () => 
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.pending)).toBe(true);
     expect(Object.isFrozen(first.pending[0])).toBe(true);
-    expect(pendingSnapshotAsPlain(coordinator.snapshot())).toEqual(pendingSnapshotAsPlain(first));
+    // The composition's snapshot copy does not carry `origin` until S7a-5, so
+    // compare the coordinator state with `origin` stripped.
+    const withoutOrigin = {
+      pending: Array.from(coordinator.snapshot().pending, ({ operation, noteId, sequence }) => ({
+        operation,
+        noteId,
+        sequence,
+      })),
+    };
+    expect(withoutOrigin).toEqual(pendingSnapshotAsPlain(first));
   });
 });
 

@@ -51,13 +51,25 @@ function normalizeState(value: unknown): SyncCoordinatorState {
   }
 
   const pending = rawPending.map((rawMarker, index) => {
-    if (!isRecord(rawMarker) || !hasExactlyKeys(rawMarker, ["operation", "noteId", "sequence"])) {
+    // Markers written before origins existed have no `origin` key.
+    const hasOrigin = isRecord(rawMarker) && Reflect.ownKeys(rawMarker).includes("origin");
+    if (
+      !isRecord(rawMarker) ||
+      !hasExactlyKeys(
+        rawMarker,
+        hasOrigin
+          ? ["operation", "noteId", "sequence", "origin"]
+          : ["operation", "noteId", "sequence"],
+      )
+    ) {
       throw new Error(`invalid sync metadata marker ${index}`);
     }
     const operation = readOwnData(rawMarker, "operation");
     const noteId = readOwnData(rawMarker, "noteId");
     const sequence = readOwnData(rawMarker, "sequence");
+    const origin = hasOrigin ? readOwnData(rawMarker, "origin") : "unknown";
     if (
+      (origin !== "mcp" && origin !== "operator" && origin !== "unknown") ||
       (operation !== "create" &&
         operation !== "append" &&
         operation !== "update" &&
@@ -72,7 +84,7 @@ function normalizeState(value: unknown): SyncCoordinatorState {
     ) {
       throw new Error(`invalid sync metadata marker ${index}`);
     }
-    return Object.freeze({ operation, noteId, sequence });
+    return Object.freeze({ operation, noteId, sequence, origin });
   });
 
   return Object.freeze({ pending: Object.freeze(pending) });
