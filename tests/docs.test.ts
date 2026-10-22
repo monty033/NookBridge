@@ -9,14 +9,38 @@ const read = (relative: string): string => readFileSync(resolve(root, relative),
 const plan = read("docs/implementation-plan-v1.5.md");
 const status = read("docs/project-status.md");
 
+const SECTION_36 = "## 3.6 ";
+const SECTION_37 = "## 3.7 ";
 const SECTION_1320 = "## 13.20 ";
 const SECTION_1321 = "## 13.21 ";
+const SECTION_1322 = "## 13.22 ";
 const APPENDIX = "# Appendix A. Research Sources";
 
 const section1320 = plan.indexOf(SECTION_1320);
 const section1321 = plan.indexOf(SECTION_1321);
 const appendix = plan.indexOf(APPENDIX);
-const slice = plan.slice(section1321, appendix);
+
+/**
+ * §13.21's slice ends at the next `## 13.` heading, so a later section cannot
+ * leak into it. Before §13.22 existed this resolves to the Appendix heading.
+ */
+const nextSection13 = plan.indexOf("\n## 13.", section1321 + SECTION_1321.length);
+const sliceEnd1321 = nextSection13 === -1 ? appendix : nextSection13;
+const slice = plan.slice(section1321, sliceEnd1321);
+
+const section36 = plan.indexOf(SECTION_36);
+const section37 = plan.indexOf(SECTION_37);
+const syncPolicy = plan.slice(section36, section37);
+
+const section1322 = plan.indexOf(SECTION_1322);
+const slice1322 = section1322 === -1 ? "" : plan.slice(section1322, appendix);
+
+/** §13.22's implementation order, from its heading to the end of the slice. */
+const implementationOrder1322 = (() => {
+  const marker = "### Implementation order";
+  const start = slice1322.indexOf(marker);
+  return start === -1 ? "" : slice1322.slice(start);
+})();
 
 /** PR, merge commit, change commit, plan step — as merged on upstream/main. */
 const rows: ReadonlyArray<readonly [string, string, string, string]> = [
@@ -82,5 +106,95 @@ describe("roadmap reconciliation §13.21 (R14)", () => {
     expect(slice).not.toMatch(/rev_[0-9a-f]{32}/);
     expect(slice).not.toMatch(/NOOKBRIDGE_DATABASE_KEY=/);
     expect(slice).not.toMatch(/password\s*[:=]/i);
+  });
+});
+
+describe("DR-S7a §13.22 (S7a-0)", () => {
+  it("places exactly one §13.22 heading after §13.21 and before Appendix A", () => {
+    expect(section1321, "§13.21 heading is missing").toBeGreaterThan(-1);
+    expect(appendix, "Appendix A heading is missing").toBeGreaterThan(section1321);
+    expect(plan.split(SECTION_1322), "expected exactly one §13.22 heading").toHaveLength(2);
+    expect(section1322).toBeGreaterThan(section1321);
+    expect(appendix).toBeGreaterThan(section1322);
+  });
+
+  it("records the DR identifier, exact sentence, approval and date", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    expect(slice1322).toContain("DR-S7a");
+    expect(slice1322).toContain("No upload without explicit sync intent.");
+    expect(slice1322).toContain("approved by Patrick (decision 1)");
+    expect(slice1322).toContain("2026-10-21");
+  });
+
+  it("names the executor, the explicit sync request, the fetch boundary and the refusal", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    for (const term of [
+      "createLiveRemoteSyncExecutor",
+      "notes.sync",
+      '{ type: "fetch" }',
+      "unapproved_pending",
+      "dirty set",
+      "operator-origin",
+      "S7a-1",
+    ]) {
+      expect(slice1322, `§13.22 is missing ${term}`).toContain(term);
+    }
+  });
+
+  it("records the pending decision and names no approval mechanism", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    expect(slice1322).toContain("decision 5");
+    expect(slice1322).toContain("no approval path");
+
+    for (const forbidden of [
+      "--approve-upload",
+      "uploadIntent",
+      "approve-upload",
+      "notes.approve",
+    ]) {
+      expect(slice1322, `§13.22 must not name ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it("puts S7a-5 before S7a-4 in the implementation order and says S7a-4 merges after", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+    expect(implementationOrder1322, "§13.22 implementation order is missing").not.toBe("");
+
+    const s7a5 = implementationOrder1322.indexOf("S7a-5");
+    const s7a4 = implementationOrder1322.indexOf("S7a-4");
+
+    expect(s7a5, "implementation order does not name S7a-5").toBeGreaterThan(-1);
+    expect(s7a4, "implementation order does not name S7a-4").toBeGreaterThan(s7a5);
+    expect(implementationOrder1322).toMatch(/merges \*\*after\*\* S7a-5/);
+  });
+
+  it("notes the DR-S7a supersession in §3.6", () => {
+    expect(section36, "§3.6 heading is missing").toBeGreaterThan(-1);
+    expect(section37, "§3.7 heading is missing").toBeGreaterThan(section36);
+
+    expect(syncPolicy).toContain("DR-S7a");
+    expect(syncPolicy).toContain("§13.22");
+  });
+
+  it("keeps DR-S7a out of the §13.21 slice", () => {
+    expect(slice, "§13.21 slice is empty").not.toBe("");
+
+    expect(slice).not.toContain("DR-S7a");
+  });
+
+  it("keeps §13.22 free of credentials and secret-shaped values", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    expect(slice1322).not.toMatch(/rev_[0-9a-f]{32}/);
+    expect(slice1322).not.toMatch(/NOOKBRIDGE_DATABASE_KEY=/);
+    expect(slice1322).not.toMatch(/password\s*[:=]/i);
+  });
+
+  it("leaves the pendingSync upload gap open in project status for S7a-7", () => {
+    expect(status).toContain("`pendingSync` upload gap");
+    expect(status).toMatch(/`pendingSync` upload gap[^\n]*\b(open|remain)/i);
   });
 });
