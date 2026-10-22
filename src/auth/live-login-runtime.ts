@@ -41,6 +41,7 @@ import {
   type NotesnookLiveCoreHandle,
   type NotesnookLiveCoreLifecycle,
 } from "../core/notesnook-live-factory.js";
+import type { NotesnookWriteOrigin } from "../core/notesnook-write-composition.js";
 import { PersistentSyncMetadataStateStore } from "../core/notesnook-sync-state-store.js";
 import { PersistentNotesnookRecoveryJournal } from "../core/notesnook-recovery-journal.js";
 import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.js";
@@ -122,6 +123,10 @@ export type ProductionRuntimeCoreOptions = Readonly<{
   keys: SecureKeyStore;
   logger?: Logger;
   injectedModule?: NotesnookRealCoreModule;
+  /** Fixed write origin for the local-write capability; forwarded unchanged. */
+  localWriteOrigin?: NotesnookWriteOrigin;
+  /** Also build the operator-origin local-write capability; forwarded unchanged. */
+  operatorLocalWrite?: true;
 }>;
 
 export type ProductionRuntimeCore = Readonly<{
@@ -182,6 +187,12 @@ export async function createProductionRuntimeCore(
       syncStateStore: new PersistentSyncMetadataStateStore(storage),
       recoveryJournal: new PersistentNotesnookRecoveryJournal(storage),
       ...(options.injectedModule === undefined ? {} : { injectedModule: options.injectedModule }),
+      ...(options.localWriteOrigin === undefined
+        ? {}
+        : { localWriteOrigin: options.localWriteOrigin }),
+      ...(options.operatorLocalWrite === undefined
+        ? {}
+        : { operatorLocalWrite: options.operatorLocalWrite }),
     });
     hardenLiveSqliteDatabases(sqliteDatabases);
 

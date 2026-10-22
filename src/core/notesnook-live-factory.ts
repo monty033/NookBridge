@@ -61,6 +61,7 @@ import {
   type NotesnookLiveRemoteSyncCapability,
 } from "./notesnook-live-remote-sync.js";
 import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
+import type { NotesnookWriteOrigin } from "./notesnook-write-composition.js";
 import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
 import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
 
@@ -171,6 +172,13 @@ export interface NotesnookLiveCoreHandle {
    * acquire a write path.  The raw `Database` is not reachable through it.
    */
   readonly localWrite?: NotesnookLiveWriteCapability;
+  /**
+   * Second local write capability fixed to the `"operator"` origin. It shares
+   * the coordinator and database identity of `localWrite`, so the two are
+   * serialised and feed one queue. Present only when the factory was asked for
+   * it with `operatorLocalWrite: true`.
+   */
+  readonly operatorLocalWrite?: NotesnookLiveWriteCapability;
   /** Separately named explicit remote synchronization capability. */
   readonly remoteSync?: NotesnookLiveRemoteSyncCapability;
   /**
@@ -215,6 +223,13 @@ export type NotesnookLiveFactoryOptions = Readonly<{
   syncStateStore?: SyncMetadataStateStore;
   /** Encrypted journal for unrecoverable local-write compensation. */
   recoveryJournal?: NotesnookRecoveryJournal;
+  /**
+   * Fixed origin of the `localWrite` capability. When absent the capability
+   * sends no origin and its markers are `"unknown"`.
+   */
+  localWriteOrigin?: NotesnookWriteOrigin;
+  /** Also build `operatorLocalWrite`, fixed to the `"operator"` origin. */
+  operatorLocalWrite?: boolean;
 }>;
 
 /** Shared lifecycle across the runtime, narrow handle, and providers. */
@@ -312,25 +327,38 @@ export async function createNotesnookLiveCoreFactory(
     // Stage 4: the write capability is built from a separate projection of
     // the same opened database.  It is optional so legacy injected auth-only
     // fakes remain valid, and it never widens `readOnly`.
+    //
+    // Every composition built here shares ONE coordinator and the SAME
+    // `database` identity, so the per-database mutex serialises them and one
+    // queue holds every marker. They differ only in their fixed write origin.
     let sharedCoordinator: SyncCoordinator | undefined;
-    const localWrite =
+    const writes =
       normalized.injectedModule === undefined || hasLiveWriteSurface(db)
         ? (() => {
-            sharedCoordinator = new SyncCoordinator({
+            const coordinator = new SyncCoordinator({
               executor: createLiveRemoteSyncExecutor(db as unknown as object, ensureOpen),
               ...(normalized.syncStateStore === undefined
                 ? {}
                 : { stateStore: normalized.syncStateStore }),
             });
-            return projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
-              coordinator: sharedCoordinator,
-              database: db as unknown as object,
-              ...(normalized.recoveryJournal === undefined
-                ? {}
-                : { recoveryJournal: normalized.recoveryJournal }),
-            });
+            sharedCoordinator = coordinator;
+            const project = (origin: NotesnookWriteOrigin | undefined) =>
+              projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
+                coordinator,
+                database: db as unknown as object,
+                ...(normalized.recoveryJournal === undefined
+                  ? {}
+                  : { recoveryJournal: normalized.recoveryJournal }),
+                ...(origin === undefined ? {} : { origin }),
+              });
+            return {
+              localWrite: project(normalized.localWriteOrigin),
+              operatorLocalWrite: normalized.operatorLocalWrite ? project("operator") : undefined,
+            };
           })()
         : undefined;
+    const localWrite = writes?.localWrite;
+    const operatorLocalWrite = writes?.operatorLocalWrite;
     const remoteSync =
       localWrite === undefined || sharedCoordinator === undefined
         ? undefined
@@ -378,6 +406,7 @@ export async function createNotesnookLiveCoreFactory(
       cleanup,
       ...(readOnly === undefined ? {} : { readOnly }),
       ...(localWrite === undefined ? {} : { localWrite }),
+      ...(operatorLocalWrite === undefined ? {} : { operatorLocalWrite }),
       ...(remoteSync === undefined ? {} : { remoteSync }),
       ...(localConflictObserver === undefined ? {} : { localConflictObserver }),
     });
@@ -400,6 +429,8 @@ type NormalizedFactoryOptions = Readonly<{
   lifecycle: NotesnookLiveCoreLifecycle;
   syncStateStore?: SyncMetadataStateStore;
   recoveryJournal?: NotesnookRecoveryJournal;
+  localWriteOrigin?: NotesnookWriteOrigin;
+  operatorLocalWrite: boolean;
 }>;
 
 function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
@@ -414,6 +445,8 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
     const lifecycle = candidate.lifecycle;
     const syncStateStore = candidate.syncStateStore;
     const recoveryJournal = candidate.recoveryJournal;
+    const localWriteOrigin = candidate.localWriteOrigin;
+    const operatorLocalWrite = candidate.operatorLocalWrite;
     const validatedSetup = validateDatabaseSetupOptions(setup);
     if (typeof onCleanup !== "function") {
       throw factoryError("onCleanup hook is required");
@@ -445,9 +478,21 @@ function normalizeFactoryOptions(options: unknown): NormalizedFactoryOptions {
         throw factoryError("invalid local-write recovery journal");
       }
     }
+    if (
+      localWriteOrigin !== undefined &&
+      localWriteOrigin !== "mcp" &&
+      localWriteOrigin !== "operator"
+    ) {
+      throw factoryError("invalid local-write origin");
+    }
+    if (operatorLocalWrite !== undefined && typeof operatorLocalWrite !== "boolean") {
+      throw factoryError("invalid operator local-write flag");
+    }
     return {
       setup: validatedSetup,
       onCleanup: onCleanup as () => void | Promise<void>,
+      ...(localWriteOrigin === undefined ? {} : { localWriteOrigin }),
+      operatorLocalWrite: operatorLocalWrite === true,
       ...(injectedModule === undefined
         ? {}
         : { injectedModule: injectedModule as NotesnookRealCoreModule }),

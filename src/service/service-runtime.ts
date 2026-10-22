@@ -175,6 +175,14 @@ export interface ServiceRuntime {
   readonly appendNote?: (command: AppendNoteCommand) => Promise<AppendNoteResult>;
   /** Optional bounded local note update capability. */
   readonly updateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  /**
+   * Operator-origin variants of create/update.  Same semantics as the
+   * MCP variants but the pending marker is stamped `origin:"operator"`.
+   * Consumed only by the operator write source; never part of the RPC
+   * or `startNookdServer` runtime.
+   */
+  readonly operatorCreateNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
+  readonly operatorUpdateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
   /** Optional bounded local single-note delete capability. */
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   /** Optional approval-gated outbound synchronization capability. */
@@ -232,6 +240,8 @@ export async function createProductionServiceRuntime(
       ...(normalized.injectedModule === undefined
         ? {}
         : { injectedModule: normalized.injectedModule }),
+      localWriteOrigin: "mcp",
+      operatorLocalWrite: true,
     });
   } catch {
     // The seam already normalises every internal failure to a
@@ -574,22 +584,52 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         };
 
   const localWrite = core.handle.localWrite;
-  const createNote =
-    localWrite === undefined
-      ? undefined
-      : async (command: CreateNoteCommand): Promise<CreateNoteResult> => {
-          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
-          try {
-            const result = await localWrite.createNote(command);
-            if (result.operation !== "create") {
-              throw serviceRuntimeError("service runtime note creation failed");
-            }
-            return result;
-          } catch (error) {
-            if (isServiceRuntimeError(error)) throw error;
-            throw serviceRuntimeError("service runtime note creation failed");
-          }
-        };
+  const buildCreateNote =
+    (
+      capability: NonNullable<typeof localWrite>,
+    ): ((command: CreateNoteCommand) => Promise<CreateNoteResult>) =>
+    async (command: CreateNoteCommand): Promise<CreateNoteResult> => {
+      if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+      try {
+        const result = await capability.createNote(command);
+        if (result.operation !== "create") {
+          throw serviceRuntimeError("service runtime note creation failed");
+        }
+        return result;
+      } catch (error) {
+        if (isServiceRuntimeError(error)) throw error;
+        throw serviceRuntimeError("service runtime note creation failed");
+      }
+    };
+  const buildUpdateNote =
+    (
+      capability: NonNullable<typeof localWrite>,
+    ): ((command: UpdateNoteCommand) => Promise<UpdateNoteResult>) =>
+    async (command: UpdateNoteCommand): Promise<UpdateNoteResult> => {
+      if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
+      try {
+        const result = await capability.updateNote(
+          command as unknown as Parameters<typeof capability.updateNote>[0],
+        );
+        if (result.operation !== "update") {
+          throw serviceRuntimeError("service runtime note update failed");
+        }
+        return result;
+      } catch (error) {
+        if (isServiceRuntimeError(error)) throw error;
+        if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
+          throw error;
+        throw serviceRuntimeError("service runtime write failed");
+      }
+    };
+  const createNote = localWrite === undefined ? undefined : buildCreateNote(localWrite);
+  // Operator-origin variants: same wrapper semantics, distinct capability.
+  // Never handed to the RPC handler or `startNookdServer`.
+  const operatorLocalWrite = core.handle.operatorLocalWrite;
+  const operatorCreateNote =
+    operatorLocalWrite === undefined ? undefined : buildCreateNote(operatorLocalWrite);
+  const operatorUpdateNote =
+    operatorLocalWrite === undefined ? undefined : buildUpdateNote(operatorLocalWrite);
 
   const appendNote =
     localWrite === undefined
@@ -610,26 +650,7 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
           }
         };
 
-  const updateNote =
-    localWrite === undefined
-      ? undefined
-      : async (command: UpdateNoteCommand): Promise<UpdateNoteResult> => {
-          if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
-          try {
-            const result = await localWrite.updateNote(
-              command as unknown as Parameters<typeof localWrite.updateNote>[0],
-            );
-            if (result.operation !== "update") {
-              throw serviceRuntimeError("service runtime note update failed");
-            }
-            return result;
-          } catch (error) {
-            if (isServiceRuntimeError(error)) throw error;
-            if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
-              throw error;
-            throw serviceRuntimeError("service runtime write failed");
-          }
-        };
+  const updateNote = localWrite === undefined ? undefined : buildUpdateNote(localWrite);
 
   const deleteFn = localWrite?.deleteNote;
   const deleteNote =
@@ -701,6 +722,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(createNote === undefined ? {} : { createNote }),
     ...(appendNote === undefined ? {} : { appendNote }),
     ...(updateNote === undefined ? {} : { updateNote }),
+    ...(operatorCreateNote === undefined ? {} : { operatorCreateNote }),
+    ...(operatorUpdateNote === undefined ? {} : { operatorUpdateNote }),
     ...(deleteNote === undefined ? {} : { deleteNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,

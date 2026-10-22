@@ -36,6 +36,7 @@ import {
   createNotesnookLocalWriteComposition,
   type NotesnookLocalWriteComposition,
   type NotesnookPendingSyncHandle,
+  type NotesnookWriteOrigin,
 } from "./notesnook-write-composition.js";
 import { SyncCoordinator, type SyncExecutor } from "./notesnook-sync-coordinator.js";
 import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
@@ -142,6 +143,7 @@ export function createLiveLocalWriteComposition(
     adapter,
     coordinator,
     ...(options.database === undefined ? {} : { database: options.database }),
+    ...(options.origin === undefined ? {} : { origin: options.origin }),
   });
 }
 
@@ -157,6 +159,12 @@ export type LiveWriteCompositionOptions = Readonly<{
    */
   readonly database?: object;
   readonly recoveryJournal?: NotesnookRecoveryJournal;
+  /**
+   * Fixed origin of the resulting composition (see
+   * {@link NotesnookWriteOrigin}).  Omitted means no origin is sent and the
+   * coordinator's `"unknown"` default applies.
+   */
+  readonly origin?: NotesnookWriteOrigin;
 }>;
 
 /**

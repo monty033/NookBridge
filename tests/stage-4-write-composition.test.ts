@@ -37,6 +37,7 @@ import {
   isNotesnookWriteCompositionError,
   type NotesnookLocalWriteHandle,
   type NotesnookPendingSyncHandle,
+  type NotesnookWriteOrigin,
 } from "../src/core/notesnook-write-composition.js";
 import {
   SyncCoordinator,
@@ -395,7 +396,8 @@ describe("Stage 4 write composition — local commits become pending metadata", 
       pendingSync: true,
     });
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
-      pending: [{ operation: "create", noteId: OTHER_NOTE_ID, sequence: 1 }],
+      // A create without an origin is write-ahead: placeholder=1, resolve=2, commit=3.
+      pending: [{ operation: "create", noteId: OTHER_NOTE_ID, sequence: 3 }],
     });
     // No executor ran as a side effect of the local write.
     expect(executors).toEqual([]);
@@ -419,8 +421,27 @@ describe("Stage 4 write composition — local commits become pending metadata", 
     expect(await codeOf(() => composition.createNote({ title: "failed", content: "body" }))).toBe(
       "sync_failed",
     );
-    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
+    // `sync_failed` leaves the outcome unknown, so the write-ahead placeholder
+    // stays pending and keeps blocking.  It is never a real note's marker.
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({
+      pending: [{ operation: "create", noteId: "nb-pending-create-1", sequence: 1 }],
+    });
     expect(executorCalls).toBe(0);
+  });
+
+  it("releases the create placeholder when the failure proves nothing was created", async () => {
+    const coordinator = new SyncCoordinator({ executor: async () => ({ status: "confirmed" }) });
+    const adapter = stubAdapter({
+      create: () => {
+        throw new NotesnookWriteContractError("invalid_input");
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
+
+    expect(await codeOf(() => composition.createNote({ title: "failed", content: "body" }))).toBe(
+      "invalid_input",
+    );
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
   });
 
   it("records a pending marker for a real append", async () => {
@@ -515,10 +536,11 @@ describe("Stage 4 write composition — local commits become pending metadata", 
     await composition.createNote({ title: "t", content: "c" });
 
     expect(Array.from(composition.pendingSnapshot().pending)).toEqual([
-      // append: intent=1, commit=2; update: intent=3, commit=4; create has no intent, so 5.
+      // append: intent=1, commit=2; update: intent=3, commit=4;
+      // create (no origin, so write-ahead): placeholder=5, resolve=6, commit=7.
       { operation: "append", noteId: NOTE_ID, sequence: 2 },
       { operation: "update", noteId: NOTE_ID, sequence: 4 },
-      { operation: "create", noteId: OTHER_NOTE_ID, sequence: 5 },
+      { operation: "create", noteId: OTHER_NOTE_ID, sequence: 7 },
     ]);
   });
 
@@ -856,7 +878,7 @@ type NotesnookUpdatePatchFieldMutable = "title" | "content" | "pinned";
 
 describe("Stage 4 write composition — queue recording failure is explicit", () => {
   it("surfaces a coordinator persistence failure categorically", async () => {
-    const { adapter } = realAdapter();
+    const { adapter, calls } = realAdapter();
     const coordinator = new SyncCoordinator({
       executor: async () => ({ status: "confirmed" }),
       stateStore: {
@@ -868,9 +890,42 @@ describe("Stage 4 write composition — queue recording failure is explicit", ()
     });
     const composition = createNotesnookLocalWriteComposition({ adapter, coordinator });
 
+    // A create without an origin is write-ahead: the placeholder is persisted
+    // BEFORE the adapter runs, so a failing store refuses the create outright.
+    // Nothing was committed, so this is `sync_failed` (the same code a failed
+    // write-ahead intent on an existing note reports), not
+    // `local_sync_marker_failed`, which means "the change is committed but its
+    // marker was not persisted" and tells the client not to retry the create.
+    expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
+      "sync_failed",
+    );
+    expect(calls).toEqual([]);
+    expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
+  });
+
+  it("an mcp create marks after the commit, so a persistence failure is local_sync_marker_failed", async () => {
+    const { adapter, calls } = realAdapter();
+    const coordinator = new SyncCoordinator({
+      executor: async () => ({ status: "confirmed" }),
+      stateStore: {
+        load: () => undefined,
+        save: () => {
+          throw new Error(SECRET);
+        },
+      },
+    });
+    const composition = createNotesnookLocalWriteComposition({
+      adapter,
+      coordinator,
+      origin: "mcp",
+    });
+
+    // The MCP path is unchanged: the adapter commits first, then the marker
+    // fails, which is exactly the committed-but-unmarked case this code names.
     expect(await codeOf(() => composition.createNote({ title: "t", content: "c" }))).toBe(
       "local_sync_marker_failed",
     );
+    expect(calls.length).toBeGreaterThan(0);
     expect(pendingSnapshotAsPlain(composition.pendingSnapshot())).toEqual({ pending: [] });
   });
 
@@ -2859,5 +2914,421 @@ describe("R2c — create marker failure is reported as committed-but-unqueued", 
       ),
     ).toBe("sync_failed");
     expect(adapter.commands.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S7a-5 — the composition's fixed origin reaches every marker it records.
+// ---------------------------------------------------------------------------
+
+describe("S7a-5 — write origin threads into pending markers", () => {
+  type OriginOp = "append" | "update" | "delete";
+  const ORIGIN_OPS: readonly OriginOp[] = ["append", "update", "delete"];
+
+  function originResult(op: OriginOp): unknown {
+    const base = {
+      operation: op,
+      id: NOTE_ID,
+      localCommitted: true,
+      remoteSynced: false,
+      pendingSync: true,
+    };
+    if (op === "append") return { ...base, contentBytes: 8 };
+    if (op === "update") return { ...base, appliedFields: ["title"] };
+    return base;
+  }
+
+  function runOp(composition: NotesnookLocalWriteComposition, op: OriginOp): Promise<unknown> {
+    if (op === "append") {
+      return composition.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "one line",
+        expectedRevision: revision(),
+      });
+    }
+    if (op === "update") {
+      return composition.updateNote({
+        id: NOTE_ID,
+        patch: { title: "renamed" },
+        expectedRevision: revision(),
+      });
+    }
+    return composition.deleteNote({ id: NOTE_ID, expectedRevision: revision() });
+  }
+
+  /** A stub coordinator that also exposes the create write-ahead pair. */
+  function createPairCoordinator(
+    events: string[],
+    hooks: {
+      readonly onResolve?: () => void;
+      readonly onRecordCreate?: () => unknown;
+      readonly omit?: "resolve" | "record";
+    } = {},
+  ) {
+    const coordinator = stubCoordinator({ intent: { events } });
+    const recordCreateIntent = vi.fn((_intent: unknown) => {
+      events.push("recordCreateIntent");
+      if (hooks.onRecordCreate !== undefined) return hooks.onRecordCreate();
+      return Object.freeze({
+        operation: "create",
+        noteId: "nb-pending-create-1",
+        sequence: 1,
+        origin: "unknown",
+      });
+    });
+    const resolveCreateIntent = vi.fn((_token: unknown, _noteId: string) => {
+      events.push("resolveCreateIntent");
+      hooks.onResolve?.();
+    });
+    if (hooks.omit !== "record") Object.assign(coordinator, { recordCreateIntent });
+    if (hooks.omit !== "resolve") Object.assign(coordinator, { resolveCreateIntent });
+    return { coordinator, recordCreateIntent, resolveCreateIntent };
+  }
+
+  function realOriginCoordinator(): SyncCoordinator {
+    return new SyncCoordinator({ executor: vi.fn() });
+  }
+
+  function realPending(coordinator: SyncCoordinator): Array<Record<string, unknown>> {
+    return Array.from(coordinator.snapshot().pending as unknown as Iterable<unknown>) as Array<
+      Record<string, unknown>
+    >;
+  }
+
+  const createCommand = { title: "t", content: "c" };
+
+  describe.each(["mcp", "operator"] as const)("1/2. origin %s", (origin) => {
+    it.each(ORIGIN_OPS)("%s: recordIntent and the receipt both carry the origin", async (op) => {
+      const events: string[] = [];
+      const coordinator = stubCoordinator({ intent: { events } });
+      const adapter = stubAdapter({ [op]: () => originResult(op) }, events);
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator, origin });
+
+      await runOp(composition, op);
+
+      expect(coordinator.recordIntent).toHaveBeenCalledWith({
+        operation: op,
+        noteId: NOTE_ID,
+        origin,
+      });
+      expect(coordinator.receipts).toHaveLength(1);
+      expect((coordinator.receipts[0] as { origin?: unknown }).origin).toBe(origin);
+    });
+
+    it("a real coordinator stores that origin on the marker", async () => {
+      const coordinator = realOriginCoordinator();
+      const adapter = stubAdapter({ update: () => originResult("update") });
+      const composition = new NotesnookLocalWriteComposition({ adapter, coordinator, origin });
+
+      await runOp(composition, "update");
+
+      expect(realPending(coordinator).map((marker) => marker["origin"])).toEqual([origin]);
+    });
+  });
+
+  it.each(ORIGIN_OPS)("3. %s without an origin option sends no origin field", async (op) => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events } });
+    const adapter = stubAdapter({ [op]: () => originResult(op) }, events);
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    await runOp(composition, op);
+
+    const intent = vi.mocked(coordinator.recordIntent!).mock.calls[0]![0] as object;
+    expect(Object.keys(intent)).not.toContain("origin");
+    expect(intent).toEqual({ operation: op, noteId: NOTE_ID });
+    expect(Object.keys(coordinator.receipts[0] as object)).not.toContain("origin");
+  });
+
+  it("3b. a legacy create without an origin option sends no origin field", async () => {
+    const coordinator = stubCoordinator();
+    const adapter = stubAdapter({ create: () => goodCreateResult() });
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
+
+    await composition.createNote(createCommand);
+
+    expect(Object.keys(coordinator.receipts[0] as object)).not.toContain("origin");
+  });
+
+  it("4. operator create is write-ahead: intent, adapter, resolve, then the receipt", async () => {
+    const events: string[] = [];
+    const { coordinator, recordCreateIntent, resolveCreateIntent } = createPairCoordinator(events);
+    const adapter = stubAdapter({ create: () => goodCreateResult() }, events);
+    const composition = new NotesnookLocalWriteComposition({
+      adapter,
+      coordinator,
+      origin: "operator",
+    });
+
+    await composition.createNote(createCommand);
+
+    expect(events).toEqual([
+      "recordCreateIntent",
+      "adapter",
+      "resolveCreateIntent",
+      "recordLocalCommit",
+    ]);
+    expect(recordCreateIntent).toHaveBeenCalledTimes(1);
+    expect(recordCreateIntent).toHaveBeenCalledWith({ origin: "operator" });
+    const token = recordCreateIntent.mock.results[0]!.value;
+    expect(resolveCreateIntent).toHaveBeenCalledWith(token, NOTE_ID);
+    expect((coordinator.receipts[0] as { origin?: unknown }).origin).toBe("operator");
+  });
+
+  it("4b. a recordCreateIntent failure never reaches the adapter", async () => {
+    const events: string[] = [];
+    const { coordinator } = createPairCoordinator(events, {
+      onRecordCreate: () => {
+        throw new NotesnookWriteContractError("sync_failed", SECRET_CAUSE);
+      },
+    });
+    const adapter = stubAdapter({ create: () => goodCreateResult() }, events);
+    const composition = new NotesnookLocalWriteComposition({
+      adapter,
+      coordinator,
+      origin: "operator",
+    });
+
+    expect(await codeOf(() => composition.createNote(createCommand))).toBe("sync_failed");
+    expect(adapter.commands).toHaveLength(0);
+    expect(coordinator.receipts).toHaveLength(0);
+    expect(events).toEqual(["recordCreateIntent"]);
+  });
+
+  it("5. a nothing-mutated code releases the placeholder; an uncertain one keeps it", async () => {
+    const released = createPairCoordinator([]);
+    const lockedComposition = new NotesnookLocalWriteComposition({
+      adapter: stubAdapter({
+        create: () => {
+          throw new NotesnookWriteContractError("vault_locked");
+        },
+      }),
+      coordinator: released.coordinator,
+      origin: "operator",
+    });
+    expect(await codeOf(() => lockedComposition.createNote(createCommand))).toBe("vault_locked");
+    const issued = released.recordCreateIntent.mock.results[0]!.value;
+    expect(released.coordinator.releaseIntent).toHaveBeenCalledTimes(1);
+    expect(released.coordinator.releaseIntent).toHaveBeenCalledWith(issued);
+    expect(released.resolveCreateIntent).not.toHaveBeenCalled();
+    expect(released.coordinator.receipts).toHaveLength(0);
+
+    const kept = createPairCoordinator([]);
+    const uncertainComposition = new NotesnookLocalWriteComposition({
+      adapter: stubAdapter({
+        create: () => {
+          throw new Error(`boom ${SECRET_CAUSE}`);
+        },
+      }),
+      coordinator: kept.coordinator,
+      origin: "operator",
+    });
+    expect(await codeOf(() => uncertainComposition.createNote(createCommand))).toBe("sync_failed");
+    expect(kept.coordinator.releaseIntent).toHaveBeenCalledTimes(0);
+    expect(kept.resolveCreateIntent).not.toHaveBeenCalled();
+  });
+
+  it("5b. with a real coordinator vault_locked clears the placeholder and sync_failed keeps it", async () => {
+    const cleared = realOriginCoordinator();
+    const lockedComposition = new NotesnookLocalWriteComposition({
+      adapter: stubAdapter({
+        create: () => {
+          throw new NotesnookWriteContractError("vault_locked");
+        },
+      }),
+      coordinator: cleared,
+      origin: "operator",
+    });
+    expect(await codeOf(() => lockedComposition.createNote(createCommand))).toBe("vault_locked");
+    expect(realPending(cleared)).toEqual([]);
+
+    const kept = realOriginCoordinator();
+    const failedComposition = new NotesnookLocalWriteComposition({
+      adapter: stubAdapter({
+        create: () => {
+          throw new NotesnookWriteContractError("sync_failed");
+        },
+      }),
+      coordinator: kept,
+      origin: "operator",
+    });
+    expect(await codeOf(() => failedComposition.createNote(createCommand))).toBe("sync_failed");
+    const markers = realPending(kept);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!["noteId"]).toMatch(/^nb-pending-create-/);
+    expect(markers[0]!["origin"]).toBe("operator");
+  });
+
+  it("6. a resolveCreateIntent failure reports local_sync_marker_failed and keeps the placeholder", async () => {
+    const real = realOriginCoordinator();
+    const failingResolve = {
+      recordLocalCommit: real.recordLocalCommit.bind(real),
+      requestSync: real.requestSync.bind(real),
+      snapshot: real.snapshot.bind(real),
+      checkCapacity: real.checkCapacity.bind(real),
+      recordIntent: real.recordIntent.bind(real),
+      releaseIntent: real.releaseIntent.bind(real),
+      recordCreateIntent: real.recordCreateIntent.bind(real),
+      resolveCreateIntent: () => {
+        throw new NotesnookWriteContractError("sync_failed", SECRET_CAUSE);
+      },
+    };
+    const adapter = stubAdapter({ create: () => goodCreateResult() });
+    const composition = new NotesnookLocalWriteComposition({
+      adapter,
+      coordinator: failingResolve,
+      origin: "operator",
+    });
+
+    expect(await codeOf(() => composition.createNote(createCommand))).toBe(
+      "local_sync_marker_failed",
+    );
+    expect(adapter.commands).toHaveLength(1);
+    const markers = realPending(real);
+    expect(markers.some((marker) => /^nb-pending-create-/.test(String(marker["noteId"])))).toBe(
+      true,
+    );
+  });
+
+  it("7. a create with no origin option still gets a write-ahead placeholder, origin unknown", async () => {
+    const real = realOriginCoordinator();
+    let seenDuringAdapter: Array<Record<string, unknown>> = [];
+    const adapter = stubAdapter({
+      create: () => {
+        seenDuringAdapter = realPending(real);
+        return goodCreateResult();
+      },
+    });
+    const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
+
+    await composition.createNote(createCommand);
+
+    expect(seenDuringAdapter).toHaveLength(1);
+    expect(seenDuringAdapter[0]!["noteId"]).toMatch(/^nb-pending-create-/);
+    expect(seenDuringAdapter[0]!["origin"]).toBe("unknown");
+    // After the commit the placeholder is replaced by the real note's marker.
+    const after = realPending(real);
+    expect(after).toHaveLength(1);
+    expect(after[0]!["noteId"]).toBe(NOTE_ID);
+    expect(after[0]!["origin"]).toBe("unknown");
+  });
+
+  it("8. an mcp create is marked only after the commit, with origin mcp", async () => {
+    const events: string[] = [];
+    const { coordinator, recordCreateIntent, resolveCreateIntent } = createPairCoordinator(events);
+    const adapter = stubAdapter({ create: () => goodCreateResult() }, events);
+    const composition = new NotesnookLocalWriteComposition({
+      adapter,
+      coordinator,
+      origin: "mcp",
+    });
+
+    await composition.createNote(createCommand);
+
+    expect(recordCreateIntent).toHaveBeenCalledTimes(0);
+    expect(resolveCreateIntent).toHaveBeenCalledTimes(0);
+    expect(events).toEqual(["adapter", "recordLocalCommit"]);
+    expect((coordinator.receipts[0] as { origin?: unknown }).origin).toBe("mcp");
+  });
+
+  it("8b. an mcp create against a real coordinator leaves exactly one mcp marker", async () => {
+    const real = realOriginCoordinator();
+    const composition = new NotesnookLocalWriteComposition({
+      adapter: stubAdapter({ create: () => goodCreateResult() }),
+      coordinator: real,
+      origin: "mcp",
+    });
+
+    await composition.createNote(createCommand);
+
+    expect(realPending(real).map((marker) => [marker["noteId"], marker["origin"]])).toEqual([
+      [NOTE_ID, "mcp"],
+    ]);
+  });
+
+  it.each(["resolve", "record"] as const)(
+    "9. a coordinator missing %sCreateIntent fails invalid_input at construction",
+    (omit) => {
+      const { coordinator } = createPairCoordinator([], { omit });
+      let error: unknown;
+      try {
+        new NotesnookLocalWriteComposition({
+          adapter: stubAdapter({}),
+          coordinator,
+          origin: "operator",
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(isNotesnookWriteCompositionError(error)).toBe(true);
+      expect((error as { code: string }).code).toBe("invalid_input");
+    },
+  );
+
+  it.each(["admin", "unknown", "", null, 1, {}, "MCP"] as const)(
+    "10. origin %j fails invalid_input at construction",
+    (origin) => {
+      let error: unknown;
+      try {
+        new NotesnookLocalWriteComposition({
+          adapter: stubAdapter({}),
+          coordinator: stubCoordinator(),
+          origin: origin as never,
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(isNotesnookWriteCompositionError(error)).toBe(true);
+      expect((error as { code: string }).code).toBe("invalid_input");
+    },
+  );
+
+  it("10b. a throwing origin getter fails invalid_input, and an absent origin is accepted", () => {
+    const hostile = {
+      adapter: stubAdapter({}),
+      coordinator: stubCoordinator(),
+      get origin(): NotesnookWriteOrigin {
+        throw new Error(SECRET);
+      },
+    };
+    let error: unknown;
+    try {
+      new NotesnookLocalWriteComposition(hostile);
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as { code?: string }).code).toBe("invalid_input");
+    expect(
+      () =>
+        new NotesnookLocalWriteComposition({
+          adapter: stubAdapter({}),
+          coordinator: stubCoordinator(),
+        }),
+    ).not.toThrow();
+  });
+
+  it("the origin is fixed per instance: a command-borne origin is never forwarded", async () => {
+    const events: string[] = [];
+    const coordinator = stubCoordinator({ intent: { events } });
+    const adapter = stubAdapter({ update: () => originResult("update") }, events);
+    const composition = new NotesnookLocalWriteComposition({
+      adapter,
+      coordinator,
+      origin: "mcp",
+    });
+
+    await composition.updateNote({
+      id: NOTE_ID,
+      patch: { title: "renamed" },
+      expectedRevision: revision(),
+      origin: "mcp-but-spoofed",
+    } as never);
+
+    expect(coordinator.recordIntent).toHaveBeenCalledWith({
+      operation: "update",
+      noteId: NOTE_ID,
+      origin: "mcp",
+    });
+    expect((coordinator.receipts[0] as { origin?: unknown }).origin).toBe("mcp");
   });
 });
