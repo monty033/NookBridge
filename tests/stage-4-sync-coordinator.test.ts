@@ -86,7 +86,7 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
     });
     expect(Object.isFrozen(local)).toBe(true);
     expect(coordinator.snapshot()).toEqual({
-      pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1 }],
+      pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1, origin: "unknown" }],
     });
 
     const synced = await coordinator.requestSync();
@@ -101,7 +101,7 @@ describe("Stage 4 SyncCoordinator — local and remote outcomes", () => {
     expect(coordinator.snapshot()).toEqual({ pending: [] });
     expect(requests).toEqual([
       {
-        pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1 }],
+        pending: [{ operation: "create", noteId: NOTE_ID, sequence: 1, origin: "unknown" }],
       },
     ]);
   });
@@ -300,20 +300,22 @@ describe("Stage 4 SyncCoordinator — restart-safe metadata state", () => {
     first.recordLocalCommit(commit("update"));
 
     expect(persisted).toEqual({
-      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin: "unknown" }],
     });
 
     let calls = 0;
     const restarted = new SyncCoordinator({
       executor: async (request) => {
         calls++;
-        expect(request.pending).toEqual([{ operation: "update", noteId: NOTE_ID, sequence: 1 }]);
+        expect(request.pending).toEqual([
+          { operation: "update", noteId: NOTE_ID, sequence: 1, origin: "unknown" },
+        ]);
         return { status: "confirmed" };
       },
       stateStore: store,
     });
     expect(restarted.snapshot()).toEqual({
-      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1 }],
+      pending: [{ operation: "update", noteId: NOTE_ID, sequence: 1, origin: "unknown" }],
     });
     await expect(restarted.requestSync()).resolves.toMatchObject({ status: "synced" });
     expect(calls).toBe(1);
@@ -397,7 +399,7 @@ describe("Stage 4 SyncCoordinator — hostile seam handling and closed surface",
     coordinator.recordLocalCommit(commit("append"));
 
     expect(coordinator.snapshot().pending).toEqual([
-      { operation: "append", noteId: NOTE_ID, sequence: 2 },
+      { operation: "append", noteId: NOTE_ID, sequence: 2, origin: "unknown" },
     ]);
     expect(Object.isFrozen(coordinator)).toBe(true);
     expect(Object.isFrozen(coordinator.snapshot())).toBe(true);
@@ -441,7 +443,7 @@ describe("R2a — durable write-ahead sync intent", () => {
     expect(saves.length).toBe(1);
     const restarted = new SyncCoordinator({ executor, stateStore: store });
     expect(restarted.snapshot().pending).toEqual([
-      { operation: "update", noteId: "n1", sequence: token.sequence },
+      { operation: "update", noteId: "n1", sequence: token.sequence, origin: "unknown" },
     ]);
   });
 
@@ -577,7 +579,7 @@ describe("R2a — durable write-ahead sync intent", () => {
     gate.resolve({ status: "confirmed" });
     await flight;
     expect(coordinator.snapshot().pending).toEqual([
-      { operation: "update", noteId: "n2", sequence: token.sequence },
+      { operation: "update", noteId: "n2", sequence: token.sequence, origin: "unknown" },
     ]);
   });
 
@@ -587,7 +589,207 @@ describe("R2a — durable write-ahead sync intent", () => {
     const last = saves.at(-1)!;
     expect(Reflect.ownKeys(last)).toEqual(["pending"]);
     for (const marker of last.pending) {
-      expect(Reflect.ownKeys(marker)).toEqual(["operation", "noteId", "sequence"]);
+      expect(Reflect.ownKeys(marker)).toEqual(["operation", "noteId", "sequence", "origin"]);
     }
+  });
+});
+
+describe("S7a-3 — durable origin on every pending marker", () => {
+  function fixture(initial?: unknown) {
+    let saved: unknown = initial;
+    const saves: unknown[] = [];
+    const store = {
+      load: () => saved,
+      save: (state: SyncCoordinatorState) => {
+        saves.push(state);
+        saved = state;
+      },
+    };
+    const executor = vi.fn<SyncExecutor>(async () => ({ status: "confirmed" as const }));
+    const coordinator = new SyncCoordinator({ executor, stateStore: store, minIntervalMs: 0 });
+    return { saves, store, executor, coordinator, saved: () => saved };
+  }
+  const withOrigin = (
+    operation: SyncLocalCommit["operation"],
+    id: string,
+    origin: unknown,
+  ): SyncLocalCommit => ({ ...commit(operation, id), origin }) as unknown as SyncLocalCommit;
+
+  it("1: records an explicit mcp origin", () => {
+    const { coordinator } = fixture();
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    expect(coordinator.snapshot().pending.map((m) => m.origin)).toEqual(["mcp"]);
+  });
+
+  it("2: defaults a missing origin to unknown, never mcp", () => {
+    const { coordinator } = fixture();
+    coordinator.recordLocalCommit(commit("update", "n1"));
+    coordinator.recordIntent({ operation: "append", noteId: "n2" });
+    expect(coordinator.snapshot().pending.map((m) => m.origin)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("2b: rejects an origin outside the closed set", () => {
+    const { coordinator } = fixture();
+    for (const bad of ["admin", 1, null, ""]) {
+      expect(codeOf(() => coordinator.recordLocalCommit(withOrigin("update", "n1", bad)))).toBe(
+        "invalid_input",
+      );
+      expect(
+        codeOf(() =>
+          coordinator.recordIntent({
+            operation: "update",
+            noteId: "n1",
+            origin: bad,
+          } as never),
+        ),
+      ).toBe("invalid_input");
+    }
+    expect(coordinator.snapshot().pending).toEqual([]);
+  });
+
+  it("3: an operator intent token carries its origin and releases exactly itself", () => {
+    const { coordinator } = fixture();
+    coordinator.recordLocalCommit(commit("update", "n9"));
+    const token = coordinator.recordIntent({
+      operation: "update",
+      noteId: "n1",
+      origin: "operator",
+    });
+    expect(token.origin).toBe("operator");
+    coordinator.releaseIntent(token);
+    expect(coordinator.snapshot().pending.map((m) => m.noteId)).toEqual(["n9"]);
+  });
+
+  it("4: an MCP commit after an operator intent leaves every marker for the note operator", () => {
+    const { coordinator } = fixture();
+    coordinator.recordIntent({ operation: "update", noteId: "n1", origin: "operator" });
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    const forN1 = coordinator.snapshot().pending.filter((m) => m.noteId === "n1");
+    expect(forN1.length).toBeGreaterThan(0);
+    expect(forN1.every((m) => m.origin === "operator")).toBe(true);
+  });
+
+  it("5: an MCP update commit after an operator append marker is operator", () => {
+    const { coordinator } = fixture();
+    coordinator.recordIntent({ operation: "append", noteId: "n1", origin: "operator" });
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    const update = coordinator.snapshot().pending.find((m) => m.operation === "update");
+    expect(update?.origin).toBe("operator");
+  });
+
+  it("6: an MCP commit never lowers an unknown marker", () => {
+    const { coordinator } = fixture();
+    coordinator.recordIntent({ operation: "append", noteId: "n1" });
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    expect(coordinator.snapshot().pending.map((m) => m.origin)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("6b: the highest rank wins regardless of which operation holds it", () => {
+    const { coordinator } = fixture();
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    coordinator.recordIntent({ operation: "append", noteId: "n1", origin: "operator" });
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    expect(coordinator.snapshot().pending.at(-1)?.origin).toBe("operator");
+    coordinator.recordLocalCommit(withOrigin("update", "n2", "mcp"));
+    expect(coordinator.snapshot().pending.at(-1)?.origin).toBe("mcp");
+  });
+
+  it("7: a create intent placeholder resolves to the real note id and survives reload", () => {
+    const { coordinator, store } = fixture();
+    const token = coordinator.recordCreateIntent({ origin: "operator" });
+    expect(token.operation).toBe("create");
+    expect(token.noteId).toMatch(/^nb-pending-create-\d+$/);
+    expect(token.origin).toBe("operator");
+    expect(coordinator.snapshot().pending).toEqual([token]);
+
+    coordinator.resolveCreateIntent(token, "abc123");
+    const pending = coordinator.snapshot().pending;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ operation: "create", noteId: "abc123", origin: "operator" });
+    expect(pending[0]!.sequence).toBeGreaterThan(token.sequence);
+
+    const reloaded = new SyncCoordinator({ executor: vi.fn<SyncExecutor>(), stateStore: store });
+    expect(reloaded.snapshot()).toEqual(coordinator.snapshot());
+  });
+
+  it("7b: resolving takes the sticky origin of existing markers and ignores unmatched tokens", () => {
+    const { coordinator } = fixture();
+    coordinator.recordIntent({ operation: "update", noteId: "abc123", origin: "operator" });
+    const token = coordinator.recordCreateIntent({ origin: "mcp" });
+    coordinator.resolveCreateIntent(token, "abc123");
+    const created = coordinator.snapshot().pending.find((m) => m.operation === "create");
+    expect(created?.origin).toBe("operator");
+
+    const before = coordinator.snapshot();
+    coordinator.resolveCreateIntent(token, "zzz");
+    expect(coordinator.snapshot()).toEqual(before);
+  });
+
+  it("8: releaseIntent removes a create placeholder", () => {
+    const { coordinator } = fixture();
+    const token = coordinator.recordCreateIntent({ origin: "operator" });
+    coordinator.releaseIntent(token);
+    expect(coordinator.snapshot().pending).toEqual([]);
+  });
+
+  it("9: the placeholder prefix is reserved for real note ids", () => {
+    const { coordinator } = fixture();
+    const reserved = "nb-pending-create-7";
+    expect(codeOf(() => coordinator.recordLocalCommit(commit("update", reserved)))).toBe(
+      "invalid_input",
+    );
+    expect(codeOf(() => coordinator.recordIntent({ operation: "update", noteId: reserved }))).toBe(
+      "invalid_input",
+    );
+    const token = coordinator.recordCreateIntent({ origin: "mcp" });
+    expect(codeOf(() => coordinator.resolveCreateIntent(token, reserved))).toBe("invalid_input");
+  });
+
+  it("10: a full queue refuses a create intent and persists nothing", () => {
+    const { coordinator, saves } = fixture();
+    for (let i = 0; i < 64; i++) coordinator.recordIntent({ operation: "update", noteId: `n${i}` });
+    const count = saves.length;
+    expect(codeOf(() => coordinator.recordCreateIntent({ origin: "operator" }))).toBe(
+      "sync_failed",
+    );
+    expect(saves.length).toBe(count);
+    expect(coordinator.snapshot().pending).toHaveLength(64);
+  });
+
+  it("10b: a create intent requires a valid origin when one is given", () => {
+    const { coordinator } = fixture();
+    expect(codeOf(() => coordinator.recordCreateIntent({ origin: "admin" } as never))).toBe(
+      "invalid_input",
+    );
+    expect(coordinator.recordCreateIntent({}).origin).toBe("unknown");
+  });
+
+  it("11: the executor batch includes origin", async () => {
+    const { coordinator, executor } = fixture();
+    coordinator.recordLocalCommit(withOrigin("update", "n1", "mcp"));
+    coordinator.recordIntent({ operation: "append", noteId: "n2", origin: "operator" });
+    await coordinator.requestSync();
+    const request = executor.mock.calls[0]![0];
+    expect(request.pending.map((m) => m.origin)).toEqual(["mcp", "operator"]);
+  });
+
+  it("12: operator and unknown markers do not block a confirmed sync", async () => {
+    const { coordinator } = fixture();
+    coordinator.recordIntent({ operation: "update", noteId: "n1", origin: "operator" });
+    coordinator.recordIntent({ operation: "update", noteId: "n2" });
+    const result = await coordinator.requestSync();
+    expect(result.status).toBe("synced");
+    expect(coordinator.snapshot().pending).toEqual([]);
+  });
+
+  it("loads stored markers with a valid origin and rejects an invalid one", () => {
+    const good = {
+      pending: [{ operation: "update", noteId: "n1", sequence: 1, origin: "operator" }],
+    };
+    expect(fixture(good).coordinator.snapshot().pending[0]!.origin).toBe("operator");
+    const legacy = { pending: [{ operation: "update", noteId: "n1", sequence: 1 }] };
+    expect(fixture(legacy).coordinator.snapshot().pending[0]!.origin).toBe("unknown");
+    const bad = { pending: [{ operation: "update", noteId: "n1", sequence: 1, origin: "admin" }] };
+    expect(() => fixture(bad)).toThrow();
   });
 });

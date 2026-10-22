@@ -27,6 +27,9 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 100;
 const DEFAULT_RETRY_AFTER_CAP_MS = 30_000;
 const DEFAULT_MIN_INTERVAL_MS = 2_000;
+/** Reserved note-id prefix for write-ahead create placeholders. */
+const PENDING_CREATE_PREFIX = "nb-pending-create-";
+const ORIGIN_RANK: Readonly<Record<SyncOrigin, number>> = { mcp: 0, unknown: 1, operator: 2 };
 
 /** The only local mutation categories the coordinator can queue. */
 export type SyncOperation = "create" | "append" | "update" | "delete";
@@ -41,13 +44,22 @@ export type SyncLocalCommit = Readonly<{
   readonly localCommitted: true;
   readonly remoteSynced: false;
   readonly pendingSync: true;
+  /** Who produced the commit. Absent means `"unknown"`, never `"mcp"`. */
+  readonly origin?: SyncOrigin;
 }>;
+
+/**
+ * Who produced a pending marker. Ranked `operator > unknown > mcp`; a marker
+ * for a note never takes a lower rank than any marker already queued for it.
+ */
+export type SyncOrigin = "mcp" | "operator" | "unknown";
 
 /** Durable queue marker. It contains no body, record, credential, or path. */
 export type SyncPendingMarker = Readonly<{
   readonly operation: SyncOperation;
   readonly noteId: string;
   readonly sequence: number;
+  readonly origin: SyncOrigin;
 }>;
 
 /** The complete metadata-only state accepted by an injected store. */
@@ -272,10 +284,14 @@ export class SyncCoordinator {
       fail("invalid_input");
     }
 
+    if (isReservedNoteId(id)) fail("invalid_input");
+    const origin = stickyOrigin(this.#pending, id, parseOrigin(record));
+
     const marker = freezeMarker({
       operation,
       noteId: id,
       sequence: this.#nextSequence,
+      origin,
     });
     const nextPending = [
       ...this.#pending.filter(
@@ -310,6 +326,7 @@ export class SyncCoordinator {
   recordIntent(intent: {
     readonly operation: "append" | "update" | "delete";
     readonly noteId: string;
+    readonly origin?: SyncOrigin;
   }): SyncPendingMarker {
     const record = requireRecord(intent, "sync intent");
     const operation = readProperty(record, "operation");
@@ -317,20 +334,95 @@ export class SyncCoordinator {
     if (
       (operation !== "append" && operation !== "update" && operation !== "delete") ||
       typeof noteId !== "string" ||
-      !validNoteId(noteId)
+      !validNoteId(noteId) ||
+      isReservedNoteId(noteId)
     ) {
       fail("invalid_input");
     }
+    const requested = parseOrigin(record);
     if (this.#pending.length >= MAX_PENDING_MARKERS) {
       fail("sync_failed");
     }
 
-    const marker = freezeMarker({ operation, noteId, sequence: this.#nextSequence });
+    const marker = freezeMarker({
+      operation,
+      noteId,
+      sequence: this.#nextSequence,
+      origin: stickyOrigin(this.#pending, noteId, requested),
+    });
     const nextPending = [...this.#pending, marker];
     persist(this.#store, freezeState(nextPending));
     this.#pending = nextPending;
     this.#nextSequence++;
     return marker;
+  }
+
+  /**
+   * Persist a write-ahead placeholder for a create BEFORE the create runs, so
+   * committed-but-unmarked content cannot exist. The placeholder's reserved
+   * note id cannot be a real note; if a crash leaves it behind, it stays
+   * pending and its origin keeps blocking. Counts toward the marker cap.
+   */
+  recordCreateIntent(intent: { readonly origin?: SyncOrigin }): SyncPendingMarker {
+    const record = requireRecord(intent, "create intent");
+    const origin = parseOrigin(record);
+    if (this.#pending.length >= MAX_PENDING_MARKERS) {
+      fail("sync_failed");
+    }
+
+    const marker = freezeMarker({
+      operation: "create",
+      noteId: `${PENDING_CREATE_PREFIX}${this.#nextSequence}`,
+      sequence: this.#nextSequence,
+      origin,
+    });
+    const nextPending = [...this.#pending, marker];
+    persist(this.#store, freezeState(nextPending));
+    this.#pending = nextPending;
+    this.#nextSequence++;
+    return marker;
+  }
+
+  /**
+   * Replace the placeholder from `recordCreateIntent` with the marker for the
+   * real note id, in one persisted step. The origin is the stored
+   * placeholder's (not the token's), raised to any existing marker's rank for
+   * the note. A token that matches no stored placeholder is a no-op.
+   */
+  resolveCreateIntent(token: SyncPendingMarker, noteId: string): void {
+    const record = requireRecord(token, "create intent token");
+    const tokenOperation = readProperty(record, "operation");
+    const tokenNoteId = readProperty(record, "noteId");
+    const tokenSequence = readProperty(record, "sequence");
+    if (typeof noteId !== "string" || !validNoteId(noteId) || isReservedNoteId(noteId)) {
+      fail("invalid_input");
+    }
+    const placeholder = this.#pending.find(
+      (marker) =>
+        marker.sequence === tokenSequence &&
+        marker.operation === "create" &&
+        tokenOperation === "create" &&
+        marker.noteId === tokenNoteId &&
+        isReservedNoteId(marker.noteId),
+    );
+    if (placeholder === undefined) return;
+
+    const resolved = freezeMarker({
+      operation: "create",
+      noteId,
+      sequence: this.#nextSequence,
+      origin: stickyOrigin(this.#pending, noteId, placeholder.origin),
+    });
+    const nextPending = [
+      ...this.#pending.filter(
+        (marker) =>
+          marker !== placeholder && (marker.operation !== "create" || marker.noteId !== noteId),
+      ),
+      resolved,
+    ];
+    persist(this.#store, freezeState(nextPending));
+    this.#pending = nextPending;
+    this.#nextSequence++;
   }
 
   /**
@@ -617,6 +709,8 @@ function validateState(value: unknown): SyncCoordinatorState {
     const operation = readProperty(markerRecord, "operation");
     const noteId = readProperty(markerRecord, "noteId");
     const sequence = readProperty(markerRecord, "sequence");
+    // Markers persisted before origins existed load as "unknown" (fail closed).
+    const origin = parseOrigin(markerRecord);
     if (
       !isOperation(operation) ||
       typeof noteId !== "string" ||
@@ -627,7 +721,7 @@ function validateState(value: unknown): SyncCoordinatorState {
     ) {
       fail("invalid_input");
     }
-    pending.push(freezeMarker({ operation, noteId, sequence }));
+    pending.push(freezeMarker({ operation, noteId, sequence, origin }));
   }
   return freezeState(pending);
 }
@@ -641,7 +735,34 @@ function copyMarker(marker: SyncPendingMarker): SyncPendingMarker {
     operation: marker.operation,
     noteId: marker.noteId,
     sequence: marker.sequence,
+    origin: marker.origin,
   });
+}
+
+function parseOrigin(record: Record<string, unknown>): SyncOrigin {
+  const origin = readProperty(record, "origin");
+  if (origin === undefined) return "unknown";
+  if (origin !== "mcp" && origin !== "operator" && origin !== "unknown") fail("invalid_input");
+  return origin;
+}
+
+function isReservedNoteId(noteId: string): boolean {
+  return noteId.startsWith(PENDING_CREATE_PREFIX);
+}
+
+/** Highest-ranked of `requested` and every queued marker's origin for `noteId`. */
+function stickyOrigin(
+  pending: readonly SyncPendingMarker[],
+  noteId: string,
+  requested: SyncOrigin,
+): SyncOrigin {
+  let best = requested;
+  for (const marker of pending) {
+    if (marker.noteId === noteId && ORIGIN_RANK[marker.origin] > ORIGIN_RANK[best]) {
+      best = marker.origin;
+    }
+  }
+  return best;
 }
 
 function freezeMarker(marker: SyncPendingMarker): SyncPendingMarker {
