@@ -793,3 +793,77 @@ describe("S7a-3 — durable origin on every pending marker", () => {
     expect(() => fixture(bad)).toThrow();
   });
 });
+
+describe("S7a-4 — executor refusal (unapproved_pending)", () => {
+  const REFUSAL = { status: "refused", reason: "unapproved_pending" } as const;
+
+  function refusing(overrides: { now?: () => number; minIntervalMs?: number } = {}) {
+    const sleep = vi.fn(async (_delayMs: number) => undefined);
+    const executor = vi.fn<SyncExecutor>(async () => REFUSAL);
+    const coordinator = new SyncCoordinator({
+      executor,
+      sleep,
+      baseDelayMs: 100,
+      maxAttempts: 3,
+      minIntervalMs: 0,
+      ...overrides,
+    });
+    coordinator.recordIntent({ operation: "update", noteId: "n1", origin: "operator" });
+    coordinator.recordIntent({ operation: "append", noteId: "n2", origin: "mcp" });
+    return { sleep, executor, coordinator };
+  }
+
+  it("7. a refusal fails once with unapproved_pending, no retry, no sleep, markers untouched", async () => {
+    const { sleep, executor, coordinator } = refusing({ now: () => 1000 });
+    const before = coordinator.snapshot();
+
+    const result = await coordinator.requestSync();
+
+    expect(result).toEqual({
+      status: "failed",
+      errorCode: "unapproved_pending",
+      localCommitted: true,
+      remoteSynced: false,
+      pendingSync: true,
+      attempts: 1,
+      startedAt: 1000,
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(executor).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(coordinator.snapshot()).toEqual(before);
+  });
+
+  it("7b. the refused batch is still offered on the next request", async () => {
+    const { executor, coordinator } = refusing();
+    await coordinator.requestSync();
+    await coordinator.requestSync();
+    expect(executor).toHaveBeenCalledTimes(2);
+    expect(executor.mock.calls[1]![0].pending.map((m) => m.origin)).toEqual(["operator", "mcp"]);
+  });
+
+  it("7c. a refusal still sets the R3 hold for the next flight", async () => {
+    let now = 5_000;
+    const { sleep, coordinator } = refusing({ now: () => now, minIntervalMs: 2_000 });
+    await coordinator.requestSync();
+    now = 5_500;
+    await coordinator.requestSync();
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(1_500);
+  });
+
+  it("8. any other refused shape takes the existing invalid-result handling", async () => {
+    for (const bad of [
+      { status: "refused", reason: "other" },
+      { status: "refused" },
+      { status: "refused", reason: 7 },
+    ]) {
+      const executor = vi.fn<SyncExecutor>(async () => bad as never);
+      const coordinator = new SyncCoordinator({ executor, maxAttempts: 3 });
+      coordinator.recordLocalCommit(commit());
+      expect(await asyncCodeOf(() => coordinator.requestSync())).toBe("sync_failed");
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(coordinator.snapshot().pending).toHaveLength(1);
+    }
+  });
+});

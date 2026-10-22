@@ -6,6 +6,10 @@
  * Database/syncer after construction. Every invocation supplies the pinned
  * literal `{ type: "full" }`; upstream truthy success is not accepted — only
  * the boolean `true` confirms the batch.
+ *
+ * Upload gate (DR-S7a item 5): the executor reads the marker batch the
+ * coordinator hands it and refuses, without touching upstream, unless every
+ * marker is `origin: "mcp"`.
  */
 
 import { NotesnookWriteContractError } from "./notesnook-write-contract.js";
@@ -48,6 +52,43 @@ function boundedTimestamp(value: unknown): value is number {
 
 function boundedAttempts(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 8;
+}
+
+/** Most markers the coordinator can queue; a longer batch is not one it produced. */
+const MAX_GATED_MARKERS = 64;
+
+/**
+ * True only when `request.pending` is a bounded array of markers that are all
+ * `origin: "mcp"`. An empty batch passes. Everything else is false, so the
+ * gate fails closed: a missing or malformed request, a non-array `pending`, a
+ * batch over the cap, a non-record marker, and any origin other than `"mcp"`
+ * (`"operator"`, `"unknown"`, an absent origin, or a value outside the closed
+ * set). Reads are own data properties only, so a getter, a prototype-supplied
+ * field or a hostile Proxy trap is never trusted or invoked.
+ */
+function pendingIsAllMcp(request: unknown): boolean {
+  try {
+    if (!isRecord(request)) return false;
+    const pending = readOwnData(request, "pending");
+    if (!Array.isArray(pending)) return false;
+    const length = readOwnData(pending, "length");
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_GATED_MARKERS
+    ) {
+      return false;
+    }
+    for (let index = 0; index < length; index++) {
+      const marker = readOwnData(pending, String(index));
+      if (!isRecord(marker)) return false;
+      if (readOwnData(marker, "origin") !== "mcp") return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
@@ -97,7 +138,7 @@ function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
   const errorCode = readOwnData(value, "errorCode");
   if (
     status === "failed" &&
-    errorCode === "sync_failed" &&
+    (errorCode === "sync_failed" || errorCode === "unapproved_pending") &&
     typeof localCommitted === "boolean" &&
     remoteSynced === false &&
     typeof pendingSync === "boolean" &&
@@ -105,7 +146,7 @@ function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
   ) {
     return Object.freeze({
       status: "failed" as const,
-      errorCode: "sync_failed" as const,
+      errorCode,
       localCommitted,
       remoteSynced: false as const,
       pendingSync,
@@ -152,9 +193,17 @@ export function createLiveRemoteSyncExecutor(
     failInvalidInput();
   }
 
-  return async (_request): Promise<SyncExecutorResult> => {
+  return async (request): Promise<SyncExecutorResult> => {
     try {
       ensureOpen();
+      // Upload gate (DR-S7a item 5). Decided from the markers alone, and
+      // before `boundStart` so a refusal can never reach upstream.
+      if (!pendingIsAllMcp(request)) {
+        return Object.freeze({
+          status: "refused" as const,
+          reason: "unapproved_pending" as const,
+        });
+      }
       const result = boundStart({ type: "full" });
       const resolved = await result;
       if (resolved === true) return Object.freeze({ status: "confirmed" as const });

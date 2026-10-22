@@ -1107,7 +1107,8 @@ function copyCoordinatorResult(raw: unknown): SyncCoordinatorResult {
     }) as unknown as SyncCoordinatorResult;
   }
   if (status === "failed") {
-    if (readOwnProperty(record, "errorCode") !== "sync_failed") fail("sync_failed");
+    const errorCode = readOwnProperty(record, "errorCode");
+    if (errorCode !== "sync_failed" && errorCode !== "unapproved_pending") fail("sync_failed");
     if (
       typeof localCommitted !== "boolean" ||
       remoteSynced !== false ||
@@ -1118,7 +1119,7 @@ function copyCoordinatorResult(raw: unknown): SyncCoordinatorResult {
     if (attempts < 1) fail("sync_failed");
     return freezeSealed({
       status: "failed" as const,
-      errorCode: "sync_failed" as const,
+      errorCode,
       localCommitted,
       remoteSynced: false as const,
       pendingSync,
