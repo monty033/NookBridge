@@ -109,6 +109,7 @@ import type {
   SyncLocalCommit,
   SyncLocalCommitResult,
   SyncOperation,
+  SyncOrigin,
   SyncPendingMarker,
 } from "./notesnook-sync-coordinator.js";
 import { withMutex } from "./notesnook-database-mutex.js";
@@ -180,14 +181,33 @@ export interface NotesnookPendingSyncHandle {
   readonly recordIntent?: (intent: {
     readonly operation: "append" | "update" | "delete";
     readonly noteId: string;
+    readonly origin?: SyncOrigin;
   }) => SyncPendingMarker;
   readonly releaseIntent?: (token: SyncPendingMarker) => void;
+  /**
+   * Optional create write-ahead pair.  Production coordinators provide both;
+   * legacy seams provide neither.  Supplying exactly one is refused at
+   * construction.
+   */
+  readonly recordCreateIntent?: (intent: { readonly origin?: SyncOrigin }) => SyncPendingMarker;
+  readonly resolveCreateIntent?: (token: SyncPendingMarker, noteId: string) => void;
 }
+
+/** The origins a composition may be fixed to; anything else is refused. */
+export type NotesnookWriteOrigin = "mcp" | "operator";
 
 /** Construction options.  Both handles are required and separate. */
 export interface NotesnookLocalWriteCompositionOptions {
   readonly adapter: NotesnookLocalWriteHandle;
   readonly coordinator: NotesnookPendingSyncHandle;
+  /**
+   * Who this composition writes for.  Fixed at construction and never taken
+   * from a command, so a caller cannot choose its own origin.  When present,
+   * every write-ahead intent and every `recordLocalCommit` receipt carries it.
+   * When absent, no field is sent and the coordinator's `"unknown"` default
+   * applies.  Any other value fails with `invalid_input`.
+   */
+  readonly origin?: NotesnookWriteOrigin;
   /**
    * Optional database identity used for per-database serialization
    * (P1-1).  When provided, every public method acquires a per-Database
@@ -723,6 +743,10 @@ interface CompositionState {
   readonly checkCapacity: UnknownFunction | undefined;
   readonly recordIntent: UnknownFunction | undefined;
   readonly releaseIntent: UnknownFunction | undefined;
+  readonly recordCreateIntent: UnknownFunction | undefined;
+  readonly resolveCreateIntent: UnknownFunction | undefined;
+  /** Fixed per instance; `undefined` means "send no origin". */
+  readonly origin: NotesnookWriteOrigin | undefined;
   readonly database: object | undefined;
   localDepth: number;
 }
@@ -746,13 +770,25 @@ function buildState(options: unknown): CompositionState {
   const coordinator = requireHandle(
     readProperty(record, "coordinator"),
     ["recordLocalCommit", "requestSync", "snapshot"],
-    ["recordIntent", "releaseIntent"],
+    ["recordIntent", "releaseIntent", "recordCreateIntent", "resolveCreateIntent"],
   );
   // The write-ahead pair is all-or-nothing: a lone half would either
   // record markers that can never be released or release unknown tokens.
   const recordIntent = coordinator.methods["recordIntent"];
   const releaseIntent = coordinator.methods["releaseIntent"];
   if ((recordIntent === undefined) !== (releaseIntent === undefined)) fail("invalid_input");
+  // The create pair is all-or-nothing for the same reason: a placeholder
+  // that can never be resolved would block sync forever.
+  const recordCreateIntent = coordinator.methods["recordCreateIntent"];
+  const resolveCreateIntent = coordinator.methods["resolveCreateIntent"];
+  if ((recordCreateIntent === undefined) !== (resolveCreateIntent === undefined)) {
+    fail("invalid_input");
+  }
+  const originValue = readProperty(record, "origin");
+  if (originValue !== undefined && originValue !== "mcp" && originValue !== "operator") {
+    fail("invalid_input");
+  }
+  const origin: NotesnookWriteOrigin | undefined = originValue;
   if (adapter.target === coordinator.target) {
     // A single object satisfying both roles would fuse the local-write
     // and remote-sync boundaries this slice exists to keep apart.
@@ -780,6 +816,9 @@ function buildState(options: unknown): CompositionState {
       : undefined,
     recordIntent,
     releaseIntent,
+    recordCreateIntent,
+    resolveCreateIntent,
+    origin,
     database,
     localDepth: 0,
   };
@@ -935,13 +974,19 @@ function copyAppliedFields(value: unknown): readonly NotesnookUpdatePatchField[]
 // persist.
 // ---------------------------------------------------------------------------
 
-function freezeReceipt(operation: SyncOperation, id: string): SyncLocalCommit {
+function freezeReceipt(
+  operation: SyncOperation,
+  id: string,
+  origin: NotesnookWriteOrigin | undefined,
+): SyncLocalCommit {
   return freezeSealed({
     operation,
     id,
     localCommitted: true as const,
     remoteSynced: false as const,
     pendingSync: true as const,
+    // Absent stays absent so the coordinator's "unknown" default applies.
+    ...(origin === undefined ? {} : { origin }),
   }) as unknown as SyncLocalCommit;
 }
 
@@ -956,7 +1001,7 @@ function freezeReceipt(operation: SyncOperation, id: string): SyncLocalCommit {
  * remotely synchronized.
  */
 function recordPending(state: CompositionState, operation: SyncOperation, id: string): void {
-  const receipt = freezeReceipt(operation, id);
+  const receipt = freezeReceipt(operation, id, state.origin);
   let acknowledgement: unknown;
   try {
     acknowledgement = Reflect.apply(state.recordLocalCommit, state.coordinatorTarget, [receipt]);
@@ -1416,7 +1461,11 @@ function recordWriteAheadIntent(
   let token: unknown;
   try {
     token = Reflect.apply(state.recordIntent as UnknownFunction, state.coordinatorTarget, [
-      freezeSealed({ operation, noteId }),
+      freezeSealed({
+        operation,
+        noteId,
+        ...(state.origin === undefined ? {} : { origin: state.origin }),
+      }),
     ]);
   } catch (error) {
     throw normaliseThrow(error);
@@ -1439,6 +1488,82 @@ function releaseWriteAheadIntent(state: CompositionState, token: unknown): void 
   } catch {
     // The marker stays durable; recovery will treat the outcome as uncertain.
   }
+}
+
+/**
+ * Record the durable write-ahead placeholder for a create.
+ *
+ * A create has no note id until the adapter returns, so the coordinator
+ * issues a reserved placeholder instead. The origin is always sent here
+ * (`"unknown"` when the composition has none): an unattributed create must
+ * block exactly like any other unattributed marker, never default to `"mcp"`.
+ */
+function recordCreateWriteAhead(state: CompositionState): unknown {
+  let token: unknown;
+  try {
+    token = Reflect.apply(state.recordCreateIntent as UnknownFunction, state.coordinatorTarget, [
+      freezeSealed({ origin: state.origin ?? "unknown" }),
+    ]);
+  } catch (error) {
+    throw normaliseThrow(error);
+  }
+  if (isThenable(token)) fail("sync_failed");
+  try {
+    const record = requireRecord(token);
+    if (readOwnProperty(record, "operation") !== "create") fail("sync_failed");
+    if (typeof readOwnProperty(record, "noteId") !== "string") fail("sync_failed");
+  } catch {
+    fail("sync_failed");
+  }
+  return token;
+}
+
+/**
+ * Run a create behind a durable write-ahead placeholder.
+ *
+ *   1. probe capacity and record the placeholder (a failure refuses the
+ *      create before the adapter is reached);
+ *   2. call the adapter;
+ *   3. release the placeholder only when the error code proves nothing was
+ *      created; any other failure keeps it because the outcome is unknown;
+ *   4. after success, swap the placeholder for the real note's marker and then
+ *      record the commit; either failing is `local_sync_marker_failed`, and a
+ *      failed swap leaves the placeholder in place so sync stays blocked.
+ */
+async function runWriteAheadCreate<T>(
+  state: CompositionState,
+  invoker: () => UnknownFunction,
+  command: unknown,
+  copy: (raw: unknown) => T,
+): Promise<T> {
+  checkMutationCapacity(state);
+  const fn = invoker();
+  const token = recordCreateWriteAhead(state);
+  let raw: unknown;
+  try {
+    raw = await Reflect.apply(fn, state.adapterTarget, [command]);
+  } catch (error) {
+    const normalised = normaliseThrow(error);
+    const code = readCategoricalCode(normalised);
+    if (code !== undefined && NOTHING_MUTATED_CODES.includes(code)) {
+      releaseWriteAheadIntent(state, token);
+    }
+    throw normalised;
+  }
+  const result = copy(raw);
+  const id = (result as { readonly id: string }).id;
+  try {
+    const resolved: unknown = Reflect.apply(
+      state.resolveCreateIntent as UnknownFunction,
+      state.coordinatorTarget,
+      [token, id],
+    );
+    if (isThenable(resolved)) fail("local_sync_marker_failed");
+    recordPending(state, "create", id);
+  } catch {
+    fail("local_sync_marker_failed");
+  }
+  return result;
 }
 
 /**
@@ -1516,6 +1641,15 @@ async function runLocalOperation<T>(
   try {
     if (operation !== "create" && state.recordIntent !== undefined) {
       return await runWriteAheadOperation(state, operation, invoker, command, copy);
+    }
+    // MCP creates stay marked after the commit; any other origin (operator, or
+    // none) is write-ahead so committed-but-unmarked content cannot exist.
+    if (
+      operation === "create" &&
+      state.origin !== "mcp" &&
+      state.recordCreateIntent !== undefined
+    ) {
+      return await runWriteAheadCreate(state, invoker, command, copy);
     }
     checkMutationCapacity(state);
     const fn = invoker();

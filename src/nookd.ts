@@ -59,7 +59,10 @@ import {
   createOperatorHandleRegistry,
   operatorPeerKey,
 } from "./service/operator-discovery-runtime.js";
-import { createOperatorWriteRuntime } from "./service/notes-operator-write-runtime.js";
+import {
+  createOperatorWriteRuntime,
+  type OperatorWriteSource,
+} from "./service/notes-operator-write-runtime.js";
 import { createNotesUndoStore } from "./service/notes-undo-store.js";
 import {
   createOperationStoreFs,
@@ -124,6 +127,8 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "createNote"
       | "appendNote"
       | "updateNote"
+      | "operatorCreateNote"
+      | "operatorUpdateNote"
       | "deleteNote"
       | "resolveNotePath"
       | "pathDiagnostic"
@@ -133,6 +138,65 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "resolveNotebookPath"
     >
   >;
+
+type OperatorWriteSourceInputs = Readonly<{
+  operatorCreateNote: NookdStartupRuntime["operatorCreateNote"];
+  operatorUpdateNote: NookdStartupRuntime["operatorUpdateNote"];
+  readOnly: ServiceRuntime["readOnly"] | undefined;
+}>;
+
+/**
+ * Build the operator write source from the operator-origin note variants so
+ * every operator-initiated pending marker carries `origin:"operator"`.
+ * Returns `undefined` (operator writes unavailable) unless both variants and
+ * the read-only surface are present; it never falls back to the MCP variants.
+ */
+export function createOperatorWriteSource(
+  inputs: OperatorWriteSourceInputs,
+): OperatorWriteSource | undefined {
+  const { operatorCreateNote, operatorUpdateNote, readOnly } = inputs;
+  if (operatorCreateNote === undefined || operatorUpdateNote === undefined) return undefined;
+  if (readOnly === undefined) return undefined;
+  return {
+    create: operatorCreateNote,
+    read: async (noteId: string) => {
+      const metadata = await readOnly.noteMetadata(noteId);
+      const reader = readOnly.readOperatorNoteContent;
+      if (metadata === undefined || reader === undefined) return undefined;
+      const revision = metadata.revision;
+      if (typeof revision !== "string" || revision.length === 0) return undefined;
+      const content = await reader(noteId);
+      return { revision, content };
+    },
+    update: async (command: {
+      readonly noteId: string;
+      readonly expectedRevision: string;
+      readonly content: { readonly type: "tiptap" | "html"; readonly data: string };
+    }) => {
+      try {
+        await operatorUpdateNote({
+          id: command.noteId,
+          expectedRevision: asRevisionToken(command.expectedRevision),
+          patch: { storedContent: command.content },
+        });
+      } catch (error) {
+        const code =
+          error !== null && typeof error === "object"
+            ? (error as { readonly code?: unknown }).code
+            : undefined;
+        if (code === "stale_revision" || code === "conflict") return { kind: "conflict" };
+        if (code === "vault_locked") return { kind: "locked" };
+        return { kind: "error" };
+      }
+      // Honest revision reporting: read back what the daemon actually
+      // stored rather than predicting the next token.
+      const after = await readOnly.noteMetadata(command.noteId);
+      const revision = after?.revision;
+      if (typeof revision !== "string" || revision.length === 0) return { kind: "error" };
+      return { kind: "updated", revision };
+    },
+  };
+}
 
 /** Narrow seams for testing composition without replacing production defaults. */
 export type NookdStartupFactories = Readonly<{
@@ -329,6 +393,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let createNote: NookdStartupRuntime["createNote"];
   let appendNote: NookdStartupRuntime["appendNote"];
   let updateNote: NookdStartupRuntime["updateNote"];
+  let operatorCreateNote: NookdStartupRuntime["operatorCreateNote"];
+  let operatorUpdateNote: NookdStartupRuntime["operatorUpdateNote"];
   let deleteNote: NookdStartupRuntime["deleteNote"];
   let resolveNotePath: NookdStartupRuntime["resolveNotePath"];
   let pathDiagnostic: NookdStartupRuntime["pathDiagnostic"];
@@ -356,6 +422,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedCreateNote = runtime.createNote;
     const capturedAppendNote = runtime.appendNote;
     const capturedUpdateNote = runtime.updateNote;
+    const capturedOperatorCreateNote = runtime.operatorCreateNote;
+    const capturedOperatorUpdateNote = runtime.operatorUpdateNote;
     const capturedDeleteNote = runtime.deleteNote;
     const capturedResolveNotePath = runtime.resolveNotePath;
     const capturedPathDiagnostic = runtime.pathDiagnostic;
@@ -378,6 +446,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedCreateNote !== undefined && typeof capturedCreateNote !== "function") ||
       (capturedAppendNote !== undefined && typeof capturedAppendNote !== "function") ||
       (capturedUpdateNote !== undefined && typeof capturedUpdateNote !== "function") ||
+      (capturedOperatorCreateNote !== undefined &&
+        typeof capturedOperatorCreateNote !== "function") ||
+      (capturedOperatorUpdateNote !== undefined &&
+        typeof capturedOperatorUpdateNote !== "function") ||
       (capturedDeleteNote !== undefined && typeof capturedDeleteNote !== "function") ||
       (capturedResolveNotePath !== undefined && typeof capturedResolveNotePath !== "function") ||
       (capturedPathDiagnostic !== undefined && typeof capturedPathDiagnostic !== "function") ||
@@ -396,6 +468,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     createNote = capturedCreateNote;
     appendNote = capturedAppendNote;
     updateNote = capturedUpdateNote;
+    operatorCreateNote = capturedOperatorCreateNote;
+    operatorUpdateNote = capturedOperatorUpdateNote;
     deleteNote = capturedDeleteNote;
     resolveNotePath = capturedResolveNotePath;
     pathDiagnostic = capturedPathDiagnostic;
@@ -496,7 +570,14 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   // daemon (the MCP surface must keep working).
   let operatorStore: Awaited<ReturnType<typeof createNotesUndoStore>> | undefined;
   let operatorWrite: ReturnType<typeof createOperatorWriteRuntime> | undefined;
-  if (readOnly !== undefined && (updateNote !== undefined || createNote !== undefined)) {
+  // The operator source is built from the operator-origin variants only; it
+  // never falls back to the MCP `createNote` / `updateNote`.
+  const operatorSource = createOperatorWriteSource({
+    operatorCreateNote,
+    operatorUpdateNote,
+    readOnly,
+  });
+  if (operatorSource !== undefined) {
     try {
       const databaseKey = keys.getDatabaseKey();
       if (typeof databaseKey === "string" && databaseKey.length > 0) {
@@ -508,46 +589,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           store: operatorStore,
           resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
           mintHandle: (noteId, peer) => operatorHandles.mint(noteId, peer),
-          source: {
-            ...(createNote === undefined ? {} : { create: createNote }),
-            read: async (noteId: string) => {
-              const metadata = await readOnly.noteMetadata(noteId);
-              const reader = readOnly.readOperatorNoteContent;
-              if (metadata === undefined || reader === undefined) return undefined;
-              const revision = metadata.revision;
-              if (typeof revision !== "string" || revision.length === 0) return undefined;
-              const content = await reader(noteId);
-              return { revision, content };
-            },
-            update: async (command: {
-              readonly noteId: string;
-              readonly expectedRevision: string;
-              readonly content: { readonly type: "tiptap" | "html"; readonly data: string };
-            }) => {
-              if (updateNote === undefined) return { kind: "error" as const };
-              try {
-                await updateNote({
-                  id: command.noteId,
-                  expectedRevision: asRevisionToken(command.expectedRevision),
-                  patch: { storedContent: command.content },
-                });
-              } catch (error) {
-                const code =
-                  error !== null && typeof error === "object"
-                    ? (error as { readonly code?: unknown }).code
-                    : undefined;
-                if (code === "stale_revision" || code === "conflict") return { kind: "conflict" };
-                if (code === "vault_locked") return { kind: "locked" };
-                return { kind: "error" };
-              }
-              // Honest revision reporting: read back what the daemon actually
-              // stored rather than predicting the next token.
-              const after = await readOnly.noteMetadata(command.noteId);
-              const revision = after?.revision;
-              if (typeof revision !== "string" || revision.length === 0) return { kind: "error" };
-              return { kind: "updated", revision };
-            },
-          },
+          source: operatorSource,
         });
       }
     } catch {
