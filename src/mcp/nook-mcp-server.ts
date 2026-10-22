@@ -442,9 +442,13 @@ const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
   }),
 }) as unknown as Tool;
 
+const SYNC_TOOL_DESCRIPTION =
+  "Explicitly request the approval-gated outbound sync coordinator. " +
+  "If the result is `unapproved_pending`, do not retry: local changes are committed but operator- or unknown-origin changes await approval before upload; tell the user.";
+
 const SYNC_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_SYNC_TOOL_NAME,
-  description: "Explicitly request the approval-gated outbound sync coordinator.",
+  description: SYNC_TOOL_DESCRIPTION,
   inputSchema: EMPTY_INPUT_SCHEMA,
   annotations: Object.freeze({
     title: "Sync notes",
@@ -758,7 +762,7 @@ export function buildNookMcpServer(options: BuildNookMcpServerOptions): NookMcpS
       NOOK_MCP_SYNC_TOOL_NAME,
       {
         title: "Sync notes",
-        description: "Explicitly request the approval-gated outbound sync coordinator.",
+        description: SYNC_TOOL_DESCRIPTION,
         inputSchema: emptyInputSchema,
         annotations: SYNC_TOOL_DEFINITION.annotations as ToolAnnotations,
       },
@@ -1575,6 +1579,8 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
       return "not_found";
     case "local_sync_marker_failed":
       return "local_sync_marker_failed";
+    case "unapproved_pending":
+      return "unapproved_pending";
     case "service_unavailable":
       return "service_unavailable";
     default:

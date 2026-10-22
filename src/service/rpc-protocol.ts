@@ -735,7 +735,8 @@ export type RpcErrorCode =
   | "sync_failed"
   | "vault_locked"
   | "not_found"
-  | "local_sync_marker_failed";
+  | "local_sync_marker_failed"
+  | "unapproved_pending";
 
 /** Fixed, non-sensitive messages for the categorical RPC error vocabulary. */
 const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
@@ -748,6 +749,7 @@ rpcErrorMessages.sync_failed = "Sync failed";
 rpcErrorMessages.vault_locked = "Vault locked";
 rpcErrorMessages.not_found = "Not found";
 rpcErrorMessages.local_sync_marker_failed = "Local change committed; sync intent not persisted";
+rpcErrorMessages.unapproved_pending = "Unapproved pending changes";
 /**
  * The single source of truth for the categorical error vocabulary.
  *

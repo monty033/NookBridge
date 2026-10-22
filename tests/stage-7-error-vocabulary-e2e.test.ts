@@ -27,6 +27,7 @@ import {
   NOOK_MCP_APPEND_NOTE_TOOL_NAME,
   NOOK_MCP_CREATE_NOTE_TOOL_NAME,
   NOOK_MCP_DELETE_NOTE_TOOL_NAME,
+  NOOK_MCP_SYNC_TOOL_NAME,
   NOOK_MCP_UPDATE_NOTE_TOOL_NAME,
   buildNookMcpServer,
 } from "../src/mcp/nook-mcp-server.js";
@@ -159,6 +160,7 @@ const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
   vault_locked: "vault_locked",
   not_found: "not_found",
   local_sync_marker_failed: "local_sync_marker_failed",
+  unapproved_pending: "unapproved_pending",
 };
 const RPC_CODES = Object.keys(RPC_TO_MCP) as RpcErrorCode[];
 
@@ -824,5 +826,166 @@ describe("R2d — audit and wire contract", () => {
   it("documents the code and the do-not-retry rule", () => {
     const docs = readFileSync("docs/reference/mcp-tools.md", "utf8");
     expect(docs).toContain("local_sync_marker_failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S7a-4b — unapproved_pending through the closed vocabulary.
+// ---------------------------------------------------------------------------
+
+const FIXED_UNAPPROVED_MESSAGE = "Unapproved pending changes";
+
+type OperatorUpdate = (command: {
+  id: string;
+  expectedRevision: ReturnType<typeof createRevisionToken>;
+  patch: { title: string };
+}) => Promise<unknown>;
+
+describe("S7a-4b — unapproved_pending vocabulary", () => {
+  it("(4) serializeRpcResponse accepts the new code with its exact message only", () => {
+    const envelope = (message: string) => ({
+      id: "s7a4b-1",
+      ok: false as const,
+      error: { code: "unapproved_pending" as const, message },
+    });
+    expect(RPC_ERROR_MESSAGES.unapproved_pending).toBe(FIXED_UNAPPROVED_MESSAGE);
+    expect(() => serializeRpcResponse(envelope(FIXED_UNAPPROVED_MESSAGE))).not.toThrow();
+    expect(() => serializeRpcResponse(envelope("Sync failed"))).toThrow();
+  });
+
+  it("(5) the socket client surfaces the envelope as unapproved_pending", async () => {
+    const daemon = await startEnvelopeDaemon("unapproved_pending");
+    try {
+      const client = new NookdSocketClient({ socketPath: daemon.socketPath });
+      await expect(client.requestSync()).resolves.toEqual({
+        ok: false,
+        code: "unapproved_pending",
+      });
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("(6) L2 and L3 are identity for the new code and nothing degrades", () => {
+    expect(RPC_CODES).toContain("unapproved_pending");
+    expect(RPC_TO_MCP.unapproved_pending).toBe("unapproved_pending");
+    expect(KNOWN_DEGRADATIONS.size).toBe(0);
+    expect(EXPECTED_DEGRADATION_ROWS).toHaveLength(0);
+  });
+
+  it("(7) notesnook_sync after an operator write: MCP error, fixed message, audited outcome", async () => {
+    const records: ServiceAuditRecord[] = [];
+    const auditLogger = createLogger({
+      sink: (line) => {
+        const parsed = JSON.parse(line) as ServiceAuditRecord & { component?: string };
+        if (parsed.component === "service_audit") records.push(parsed);
+      },
+    });
+    const stateDir = mkdtempSync(join(tmpdir(), "nbk-e2e-state-"));
+    const credentialsDir = mkdtempSync(join(tmpdir(), "nbk-e2e-creds-"));
+    writeFileSync(join(credentialsDir, "nookbridge-db-key"), "s7a4b-e2e-key", { mode: 0o600 });
+    const spies: FakeDatabaseSpies = {
+      contentUpdate: vi.fn(async () => undefined),
+      collectionUpdate: vi.fn(async () => undefined),
+    };
+    const database = createFakeDatabase({ locked: false, conflicted: false }, spies);
+    const syncStart = vi.fn(async () => true);
+    database.syncer = { start: syncStart };
+    const injectedModule = markRealCoreModule({
+      Database: function FakeDatabase() {
+        return database;
+      } as unknown as NotesnookRealCoreModule["Database"],
+    });
+    const keys = createSystemdCredentialKeyStore({ credentialsDirectory: credentialsDir });
+    const dir = mkdtempSync("/tmp/nbk-");
+    const socketPath = join(dir, "nookd.sock");
+    let result: ToolResult | undefined;
+    let handle: Awaited<ReturnType<typeof startNookdServer>> | undefined;
+    try {
+      const runtime = await createProductionServiceRuntime({ stateDir, keys, injectedModule });
+      const operatorUpdate = (runtime as unknown as { operatorUpdateNote: OperatorUpdate })
+        .operatorUpdateNote;
+      await operatorUpdate({
+        id: NOTE_ID,
+        expectedRevision: PRODUCTION_REVISION,
+        patch: { title: "Renamed by operator" },
+      });
+      handle = await startNookdServer({
+        socketPath,
+        runtime,
+        policy: createCustomServicePolicy(POLICY_METHODS),
+        installSignalHandlers: false,
+        auditLogger,
+      });
+      const client = new NookdSocketClient({ socketPath });
+      result = await buildNookMcpServer({ client }).callTool(NOOK_MCP_SYNC_TOOL_NAME, {});
+      for (let i = 0; i < 50 && !records.some((r) => r.event === "rpc.response.sent"); i += 1) {
+        await delay(10);
+      }
+    } finally {
+      if (handle !== undefined) await handle.shutdown();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(credentialsDir, { recursive: true, force: true });
+    }
+
+    expect(result?.isError).toBe(true);
+    const block = result?.content[0];
+    if (block?.type !== "text") throw new Error("no text block");
+    expect(JSON.parse(block.text)).toEqual({
+      code: "unapproved_pending",
+      message: FIXED_UNAPPROVED_MESSAGE,
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("SECRET");
+    expect(serialized).not.toContain("CANARY");
+    expect(syncStart).toHaveBeenCalledTimes(0);
+
+    const sent = records.filter((record) => record.event === "rpc.response.sent");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.outcome).toBe("unapproved_pending");
+    expect(sent[0]?.method).toBe("notes.sync");
+  });
+
+  it("(8) an unknown envelope code on notes.sync still degrades to service_unavailable", async () => {
+    const daemon = await startEnvelopeDaemon("made_up_code" as RpcErrorCode);
+    try {
+      const client = new NookdSocketClient({ socketPath: daemon.socketPath });
+      await expect(client.requestSync()).resolves.toEqual({
+        ok: false,
+        code: "service_unavailable",
+      });
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("(9) the tool list is 9 tools; schemas unchanged; only the sync description is extended", () => {
+    const client = new NookdSocketClient({ socketPath: "/tmp/nbk-never-used.sock" });
+    const { tools } = buildNookMcpServer({ client });
+    const baseline = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./fixtures/mcp-input-schemas-pre-r2d.json", import.meta.url)),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(tools).toHaveLength(9);
+    expect(Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]))).toEqual(
+      baseline,
+    );
+    const sync = tools.find((tool) => tool.name === NOOK_MCP_SYNC_TOOL_NAME);
+    expect(sync?.description).toContain("unapproved_pending");
+    expect(sync?.description).toContain("do not retry");
+    expect(sync?.description).toContain(
+      "Explicitly request the approval-gated outbound sync coordinator.",
+    );
+    expect(sync?.description).toContain(
+      "If the result is `unapproved_pending`, do not retry: local changes are committed but operator- or unknown-origin changes await approval before upload; tell the user.",
+    );
+    for (const tool of tools) {
+      if (tool.name !== NOOK_MCP_SYNC_TOOL_NAME) {
+        expect(tool.description ?? "").not.toContain("unapproved_pending");
+      }
+    }
   });
 });

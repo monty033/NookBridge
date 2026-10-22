@@ -1492,7 +1492,15 @@ async function runNotesSync(
   ) {
     return buildErrorEnvelope(id, "service_unavailable");
   }
-  if (status === "failed") return buildErrorEnvelope(id, "sync_failed");
+  if (status === "failed") {
+    // Only the exact refusal code is carried; anything else stays generic.
+    return buildErrorEnvelope(
+      id,
+      readOwnStringField(record, "errorCode") === "unapproved_pending"
+        ? "unapproved_pending"
+        : "sync_failed",
+    );
+  }
   const result = objectFreeze(
     objectCreate(null, {
       kind: { value: "sync", enumerable: true, configurable: false, writable: false },
@@ -2276,7 +2284,8 @@ function buildErrorEnvelope(
     | "sync_failed"
     | "vault_locked"
     | "not_found"
-    | "local_sync_marker_failed",
+    | "local_sync_marker_failed"
+    | "unapproved_pending",
 ): RpcAnyResponseEnvelope {
   const messages = {
     invalid_request: "Invalid request",
@@ -2288,6 +2297,7 @@ function buildErrorEnvelope(
     vault_locked: "Vault locked",
     not_found: "Not found",
     local_sync_marker_failed: "Local change committed; sync intent not persisted",
+    unapproved_pending: "Unapproved pending changes",
   } as const;
   const message = messages[code];
 
