@@ -329,7 +329,7 @@ describe("S7a-5 — production runtime tags each write path with its own origin"
     });
   });
 
-  it("14. interim lock: with an operator marker present, requestSync still reaches the executor", async () => {
+  it("14. with an operator marker present, requestSync is refused before the executor (S7a-4)", async () => {
     await withProductionRuntime(async ({ runtime, saves, syncStart }) => {
       await operatorVariants(runtime).operatorUpdateNote!({
         id: EXISTING_NOTE_ID,
@@ -341,10 +341,13 @@ describe("S7a-5 — production runtime tags each write path with its own origin"
       );
       expect(syncStart).not.toHaveBeenCalled();
 
-      // No refusal before S7a-4: this assertion must keep passing until that
-      // step deliberately replaces it.
-      await runtime.requestSync!();
-      expect(syncStart).toHaveBeenCalledTimes(1);
+      // S7a-4 replaced the interim lock: the operator marker refuses the
+      // sync before `syncer.start` is reached.
+      await expect(runtime.requestSync!()).resolves.toMatchObject({
+        status: "failed",
+        errorCode: "unapproved_pending",
+      });
+      expect(syncStart).not.toHaveBeenCalled();
     });
   });
 });

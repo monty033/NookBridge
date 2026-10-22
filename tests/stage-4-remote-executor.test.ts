@@ -468,7 +468,8 @@ describe("Stage 4 shared coordinator and write sync command", () => {
     const coordinator = new SyncCoordinator({
       executor: createLiveRemoteSyncExecutor({ syncer }, () => undefined),
     });
-    coordinator.recordLocalCommit(commit());
+    // S7a-4: only an mcp-origin batch may reach the live executor.
+    coordinator.recordLocalCommit({ ...commit(), origin: "mcp" });
     expect(coordinator.snapshot().pending).toHaveLength(1);
 
     const capability = createLiveRemoteSyncCapability(
@@ -604,5 +605,117 @@ describe("Stage 4 shared coordinator and write sync command", () => {
       report: { remoteSynced: false, pendingSync: true },
     });
     expect(syncCalls).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S7a-4 — upload gate (DR-S7a item 5): only an all-`mcp` batch may reach the
+// pinned `{ type: "full" }` upstream call.
+// ---------------------------------------------------------------------------
+
+describe("S7a-4 — live executor upload gate", () => {
+  type Marker = { operation: string; noteId: string; sequence: number; origin?: unknown };
+  const marker = (sequence: number, origin?: unknown, noteId = `note-${sequence}`): Marker =>
+    origin === undefined
+      ? { operation: "update", noteId, sequence }
+      : { operation: "update", noteId, sequence, origin };
+
+  function gated() {
+    const starts: unknown[] = [];
+    const executor = createLiveRemoteSyncExecutor(
+      {
+        syncer: {
+          start(options: unknown) {
+            starts.push(options);
+            return Promise.resolve(true);
+          },
+        },
+      },
+      () => undefined,
+    );
+    const run = (request: unknown) =>
+      (executor as unknown as (request: unknown) => Promise<unknown>)(request);
+    return { starts, run };
+  }
+
+  const REFUSED = { status: "refused", reason: "unapproved_pending" };
+
+  it("1. an empty pending batch syncs as before", async () => {
+    const { starts, run } = gated();
+    await expect(run({ pending: [] })).resolves.toEqual({ status: "confirmed" });
+    expect(starts).toEqual([{ type: "full" }]);
+  });
+
+  it("2. a batch of only mcp markers syncs as before", async () => {
+    const { starts, run } = gated();
+    await expect(run({ pending: [marker(1, "mcp"), marker(2, "mcp")] })).resolves.toEqual({
+      status: "confirmed",
+    });
+    expect(starts).toEqual([{ type: "full" }]);
+  });
+
+  it("3. one operator marker among mcp markers refuses without calling start", async () => {
+    const { starts, run } = gated();
+    const result = await run({ pending: [marker(1, "mcp"), marker(2, "operator")] });
+    expect(result).toEqual(REFUSED);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("4. an unknown marker refuses without calling start", async () => {
+    const { starts, run } = gated();
+    await expect(run({ pending: [marker(1, "unknown")] })).resolves.toEqual(REFUSED);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("5. an operator create placeholder refuses without calling start", async () => {
+    const { starts, run } = gated();
+    const placeholder = {
+      operation: "create",
+      noteId: "nb-pending-create-1",
+      sequence: 1,
+      origin: "operator",
+    };
+    await expect(run({ pending: [placeholder] })).resolves.toEqual(REFUSED);
+    expect(starts).toHaveLength(0);
+  });
+
+  it.each([
+    ["request undefined", undefined],
+    ["request without pending", {}],
+    ["pending is not an array", { pending: "x" }],
+    ["a marker without origin", { pending: [marker(1)] }],
+    ["origin outside the closed set", { pending: [marker(1, "admin")] }],
+    ["a non-record marker", { pending: ["mcp"] }],
+    ["65 markers", { pending: Array.from({ length: 65 }, (_, index) => marker(index + 1, "mcp")) }],
+  ])("6. %s refuses without calling start", async (_label, request) => {
+    const { starts, run } = gated();
+    await expect(run(request)).resolves.toEqual(REFUSED);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("reads only own data properties of the request and markers", async () => {
+    const { starts, run } = gated();
+    // `pending` and `origin` inherited from a prototype are not own reads.
+    const inheritedPending = Object.create({ pending: [marker(1, "mcp")] });
+    await expect(run(inheritedPending)).resolves.toEqual(REFUSED);
+    const inheritedOrigin = Object.create({ origin: "mcp" });
+    await expect(run({ pending: [inheritedOrigin] })).resolves.toEqual(REFUSED);
+    // A hostile accessor is never invoked.
+    const accessor = {};
+    Object.defineProperty(accessor, "pending", {
+      get() {
+        throw new Error("SECRET-GETTER-CANARY");
+      },
+    });
+    await expect(run(accessor)).resolves.toEqual(REFUSED);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("accepts exactly 64 mcp markers", async () => {
+    const { starts, run } = gated();
+    const pending = Array.from({ length: 64 }, (_, index) => marker(index + 1, "mcp"));
+    await expect(run({ pending })).resolves.toEqual({ status: "confirmed" });
+    expect(starts).toHaveLength(1);
   });
 });

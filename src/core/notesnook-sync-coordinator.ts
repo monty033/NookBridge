@@ -81,12 +81,15 @@ export type SyncExecutorRequest = Readonly<{
 /**
  * Executor result. `confirmed` is the only remote-success assertion. A
  * `failed` result is permanent for this attempt; `retry` is transient and may
- * carry a bounded Retry-After hint.
+ * carry a bounded Retry-After hint. `refused` means the executor declined to
+ * run because the batch holds markers it will not upload; it is never retried
+ * and never removes a marker.
  */
 export type SyncExecutorResult =
   | Readonly<{ readonly status: "confirmed" }>
   | Readonly<{ readonly status: "retry"; readonly retryAfterMs?: number }>
-  | Readonly<{ readonly status: "failed" }>;
+  | Readonly<{ readonly status: "failed" }>
+  | Readonly<{ readonly status: "refused"; readonly reason: "unapproved_pending" }>;
 
 /** Injected executor seam; the coordinator never performs remote I/O itself. */
 export type SyncExecutor = (
@@ -159,7 +162,7 @@ export type SyncCoordinatorResult =
     }>
   | Readonly<{
       readonly status: "failed";
-      readonly errorCode: "sync_failed";
+      readonly errorCode: "sync_failed" | "unapproved_pending";
       readonly localCommitted: boolean;
       readonly remoteSynced: false;
       readonly pendingSync: boolean;
@@ -529,6 +532,17 @@ export class SyncCoordinator {
       if (parsed.status === "failed") {
         return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
       }
+      if (parsed.status === "refused") {
+        // Deliberate refusal, not a transient fault: no retry, no backoff, and
+        // the batch stays queued untouched. `#drain` still extends the hold.
+        return failedResult(
+          attempt,
+          startedAt,
+          localCommitted,
+          this.#pending.length > 0,
+          "unapproved_pending",
+        );
+      }
       if (parsed.status === "retry") {
         if (attempt === this.#maxAttempts) {
           if (parsed.retryAfterMs !== undefined) {
@@ -788,6 +802,11 @@ function parseExecutorResult(value: unknown): SyncExecutorResult {
     if (status === "confirmed" || status === "failed") {
       return Object.freeze({ status });
     }
+    if (status === "refused") {
+      // Exactly one reason is defined; any other shape is an invalid result.
+      if (readProperty(record, "reason") !== "unapproved_pending") fail("sync_failed");
+      return Object.freeze({ status: "refused" as const, reason: "unapproved_pending" as const });
+    }
     if (status === "retry") {
       const retryAfterMs = readProperty(record, "retryAfterMs");
       if (retryAfterMs !== undefined) {
@@ -828,10 +847,11 @@ function failedResult(
   startedAt: number,
   localCommitted: boolean,
   pendingSync: boolean,
+  errorCode: "sync_failed" | "unapproved_pending" = "sync_failed",
 ): SyncCoordinatorResult {
   return Object.freeze({
     status: "failed" as const,
-    errorCode: "sync_failed" as const,
+    errorCode,
     localCommitted,
     remoteSynced: false as const,
     pendingSync,
