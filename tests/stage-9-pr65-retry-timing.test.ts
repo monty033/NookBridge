@@ -261,3 +261,244 @@ describe("PR-65 P1-4 — closed retry timing", () => {
     });
   });
 });
+
+describe("R3 — throttling across requests", () => {
+  function seedPending(coordinator: SyncCoordinator): void {
+    coordinator.recordLocalCommit({
+      operation: "create",
+      id: "note-R3",
+      localCommitted: true,
+      remoteSynced: false,
+      pendingSync: true,
+    });
+  }
+
+  function thrownCode(build: () => unknown): unknown {
+    try {
+      build();
+    } catch (error) {
+      return (error as { code?: unknown }).code;
+    }
+    throw new Error("expected construction to fail");
+  }
+
+  it("1: a request inside minIntervalMs of a synced drain waits the remainder before the executor", async () => {
+    let clock = 1_000;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        events.push("execute");
+        return { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+      },
+      now: () => clock,
+      minIntervalMs: 2_000,
+    });
+    seedPending(coordinator);
+
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "synced" });
+    clock = 1_500;
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "sleep:1500", "execute"]);
+  });
+
+  it("2: a request after a final-attempt Retry-After waits the remainder of the hint", async () => {
+    let clock = 1_000;
+    let calls = 0;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        calls++;
+        events.push("execute");
+        return calls === 1
+          ? { status: "retry" as const, retryAfterMs: 30_000 }
+          : { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+      },
+      now: () => clock,
+      maxAttempts: 1,
+    });
+    seedPending(coordinator);
+
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "failed" });
+    clock = 2_000;
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "sleep:29000", "execute"]);
+  });
+
+  it("3: a Retry-After above the default cap is capped in the pre-wait", async () => {
+    let clock = 1_000;
+    let calls = 0;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        calls++;
+        events.push("execute");
+        return calls === 1
+          ? { status: "retry" as const, retryAfterMs: 120_000 }
+          : { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+      },
+      now: () => clock,
+      maxAttempts: 1,
+    });
+    seedPending(coordinator);
+
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "failed" });
+    clock = 2_000;
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "sleep:29000", "execute"]);
+  });
+
+  it("4: concurrent requests during the pre-wait share one flight and one executor call", async () => {
+    let clock = 1_000;
+    const events: string[] = [];
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        events.push("execute");
+        return { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+        await gate;
+      },
+      now: () => clock,
+      minIntervalMs: 2_000,
+    });
+    seedPending(coordinator);
+    await coordinator.requestSync();
+
+    clock = 1_500;
+    const first = coordinator.requestSync();
+    const second = coordinator.requestSync();
+    const third = coordinator.requestSync();
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+    expect(events).toEqual(["execute", "sleep:1500"]);
+
+    openGate();
+    await expect(first).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "sleep:1500", "execute"]);
+  });
+
+  it("5: a request after the hold has passed does not pre-wait", async () => {
+    let clock = 1_000;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        events.push("execute");
+        return { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+      },
+      now: () => clock,
+      minIntervalMs: 2_000,
+    });
+    seedPending(coordinator);
+
+    await coordinator.requestSync();
+    clock = 3_500;
+    await expect(coordinator.requestSync()).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "execute"]);
+  });
+
+  it("6: a pre-wait sleep that rejects fails the flight without calling the executor", async () => {
+    let clock = 1_000;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        events.push("execute");
+        return { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+        throw new Error("cancelled");
+      },
+      now: () => clock,
+      minIntervalMs: 2_000,
+    });
+    seedPending(coordinator);
+
+    await coordinator.requestSync();
+    clock = 1_500;
+    await expect(coordinator.requestSync()).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "sync_failed",
+      attempts: 1,
+      remoteSynced: false,
+    });
+    expect(events).toEqual(["execute", "sleep:1500"]);
+  });
+
+  it.each([-1, 60_001, 1.5])(
+    "7: rejects minIntervalMs %s with invalid_input at construction",
+    (minIntervalMs) => {
+      expect(
+        thrownCode(
+          () =>
+            new SyncCoordinator({
+              executor: async () => ({ status: "confirmed" as const }),
+              minIntervalMs,
+            }),
+        ),
+      ).toBe("invalid_input");
+    },
+  );
+
+  it("8: without the option, an immediate second request pre-waits the 2000 ms default", async () => {
+    const clock = 1_000;
+    const events: string[] = [];
+    const coordinator = new SyncCoordinator({
+      executor: async () => {
+        events.push("execute");
+        return { status: "confirmed" as const };
+      },
+      sleep: async (delayMs) => {
+        events.push(`sleep:${delayMs}`);
+      },
+      now: () => clock,
+    });
+    seedPending(coordinator);
+
+    await coordinator.requestSync();
+    await coordinator.requestSync();
+    expect(events).toEqual(["execute", "sleep:2000", "execute"]);
+  });
+
+  it("9: the hold is in memory only, so a restarted coordinator does not pre-wait", async () => {
+    const clock = 1_000;
+    const events: string[] = [];
+    const stored: unknown[] = [];
+    const stateStore = {
+      load: () => stored.at(-1),
+      save: (state: unknown) => {
+        stored.push(state);
+      },
+    };
+    const executor = async () => {
+      events.push("execute");
+      return { status: "confirmed" as const };
+    };
+    const sleep = async (delayMs: number) => {
+      events.push(`sleep:${delayMs}`);
+    };
+    const first = new SyncCoordinator({ executor, sleep, now: () => clock, stateStore });
+    seedPending(first);
+    await first.requestSync();
+
+    const restarted = new SyncCoordinator({ executor, sleep, now: () => clock, stateStore });
+    await expect(restarted.requestSync()).resolves.toMatchObject({ status: "synced" });
+    expect(events).toEqual(["execute", "execute"]);
+  });
+});

@@ -26,6 +26,7 @@ const MAX_DELAY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 100;
 const DEFAULT_RETRY_AFTER_CAP_MS = 30_000;
+const DEFAULT_MIN_INTERVAL_MS = 2_000;
 
 /** The only local mutation categories the coordinator can queue. */
 export type SyncOperation = "create" | "append" | "update" | "delete";
@@ -98,6 +99,13 @@ export type SyncCoordinatorOptions = Readonly<{
   readonly maxAttempts?: number;
   readonly baseDelayMs?: number;
   readonly retryAfterCapMs?: number;
+  /**
+   * Minimum gap, in ms, between the end of one flight and the executor call
+   * of the next. A final-attempt Retry-After extends the hold further, capped
+   * by `retryAfterCapMs`. The hold is in memory only: a restarted coordinator
+   * starts with no hold, so a restart does not extend the throttle.
+   */
+  readonly minIntervalMs?: number;
 }>;
 
 /** Result returned when a local receipt is accepted into the queue. */
@@ -175,6 +183,12 @@ export class SyncCoordinator {
   readonly #maxAttempts: number;
   readonly #baseDelayMs: number;
   readonly #retryAfterCapMs: number;
+  readonly #minIntervalMs: number;
+  /**
+   * Earliest `now()` at which the next flight may call the executor. In
+   * memory only and never persisted, so it is lost on restart (R3).
+   */
+  #notBefore = 0;
   #pending: SyncPendingMarker[];
   #nextSequence: number;
   #inFlight: Promise<SyncCoordinatorResult> | undefined;
@@ -214,6 +228,12 @@ export class SyncCoordinator {
       0,
       MAX_DELAY_MS,
     );
+    const minIntervalMs = boundedOption(
+      readProperty(record, "minIntervalMs"),
+      DEFAULT_MIN_INTERVAL_MS,
+      0,
+      MAX_DELAY_MS,
+    );
 
     const loaded = callStoreLoad(store);
     const state = loaded === undefined ? emptyState() : validateState(loaded);
@@ -226,6 +246,7 @@ export class SyncCoordinator {
     this.#maxAttempts = maxAttempts;
     this.#baseDelayMs = baseDelayMs;
     this.#retryAfterCapMs = retryAfterCapMs;
+    this.#minIntervalMs = minIntervalMs;
     this.#pending = state.pending.map(copyMarker);
     this.#nextSequence = nextSequence(this.#pending);
     Object.freeze(this);
@@ -357,6 +378,9 @@ export class SyncCoordinator {
   /**
    * Start one drain, or return the exact existing promise for a concurrent
    * request. No request amplification occurs while a drain is in flight.
+   * A drain that starts before the throttle hold has passed waits for the
+   * remainder first (R3), so repeated requests cannot drive upstream faster
+   * than `minIntervalMs` and any server Retry-After.
    */
   requestSync(): Promise<SyncCoordinatorResult> {
     const inFlight = this.#inFlight;
@@ -375,6 +399,23 @@ export class SyncCoordinator {
     const startedAt = safeNow(this.#now);
     const batch = Object.freeze(this.#pending.map(copyMarker));
     const localCommitted = batch.length > 0;
+    try {
+      const gap = this.#notBefore - safeNow(this.#now);
+      if (gap > 0) {
+        const slept = await this.#wait(gap);
+        if (!slept) return failedResult(1, startedAt, localCommitted, this.#pending.length > 0);
+      }
+      return await this.#runAttempts(startedAt, batch, localCommitted);
+    } finally {
+      this.#extendHold(this.#minIntervalMs);
+    }
+  }
+
+  async #runAttempts(
+    startedAt: number,
+    batch: readonly SyncPendingMarker[],
+    localCommitted: boolean,
+  ): Promise<SyncCoordinatorResult> {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt++) {
       let response: SyncExecutorResult;
       try {
@@ -398,6 +439,9 @@ export class SyncCoordinator {
       }
       if (parsed.status === "retry") {
         if (attempt === this.#maxAttempts) {
+          if (parsed.retryAfterMs !== undefined) {
+            this.#extendHold(Math.min(parsed.retryAfterMs, this.#retryAfterCapMs));
+          }
           return failedResult(attempt, startedAt, localCommitted, this.#pending.length > 0);
         }
         const delay =
@@ -437,6 +481,21 @@ export class SyncCoordinator {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Push `#notBefore` out to `now() + holdMs`, never backwards. The clock is
+   * read here, at the end of the flight. An unreadable clock cannot anchor a
+   * hold, so the flight outcome is kept as it is.
+   */
+  #extendHold(holdMs: number): void {
+    let now: number;
+    try {
+      now = safeNow(this.#now);
+    } catch {
+      return;
+    }
+    this.#notBefore = Math.max(this.#notBefore, now + holdMs);
   }
 
   #removeBatch(batch: readonly SyncPendingMarker[]): void {
