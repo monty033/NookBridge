@@ -22,7 +22,7 @@ import {
 } from "../src/service/service-runtime.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
-import type { RpcRequest } from "../src/service/rpc-protocol.js";
+import { RPC_ERROR_MESSAGES, type RpcRequest } from "../src/service/rpc-protocol.js";
 import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credential-keystore.js";
 import {
   markRealCoreModule,
@@ -233,6 +233,14 @@ async function operatorWrite(runtime: ServiceRuntime): Promise<void> {
   });
 }
 
+async function rpcSync(runtime: ServiceRuntime) {
+  return handleRpcRequest(
+    { id: "sync-1", method: "notes.sync", params: {} } as RpcRequest,
+    runtime,
+    createReadWriteNoDeleteServicePolicy(),
+  );
+}
+
 describe("S7a-4 — explicit sync is gated on marker origin", () => {
   it("9. an operator write blocks the sync: failed/unapproved_pending, syncer.start never called", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
@@ -291,19 +299,99 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
     });
   });
 
-  it("11. over RPC, notes.sync after an operator write is the sync_failed envelope", async () => {
+  it("11. over RPC, notes.sync after an operator write is the unapproved_pending envelope", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
       await operatorWrite(runtime);
 
-      const response = await handleRpcRequest(
-        { id: "sync-1", method: "notes.sync", params: {} } as RpcRequest,
-        runtime,
-        createReadWriteNoDeleteServicePolicy(),
-      );
+      const response = await rpcSync(runtime);
 
-      expect(response.ok).toBe(false);
-      if (response.ok === false) expect(response.error.code).toBe("sync_failed");
+      expect(response).toEqual({
+        id: "sync-1",
+        ok: false,
+        error: {
+          code: "unapproved_pending",
+          message: RPC_ERROR_MESSAGES.unapproved_pending,
+        },
+      });
+      expect(RPC_ERROR_MESSAGES.unapproved_pending).toBe("Unapproved pending changes");
+      // Only the code and the fixed message: no marker detail of any kind.
+      expect(Object.keys(response).sort()).toEqual(["error", "id", "ok"]);
+      expect(Object.keys((response as { error: object }).error).sort()).toEqual([
+        "code",
+        "message",
+      ]);
       expect(syncStart).toHaveBeenCalledTimes(0);
     });
+  });
+
+  it("12. MCP-only markers with a failing upstream start stay sync_failed", async () => {
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      syncStart.mockResolvedValue(false);
+      await runtime.createNote!({ title: "From MCP", content: "body" });
+
+      const response = await rpcSync(runtime);
+
+      expect(response.ok).toBe(false);
+      if (response.ok === false) {
+        expect(response.error.code).toBe("sync_failed");
+        expect(response.error.message).toBe(RPC_ERROR_MESSAGES.sync_failed);
+      }
+      expect(syncStart).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("S7a-4b — runNotesSync maps only the exact errorCode", () => {
+  function runtimeReturning(result: unknown): ServiceRuntime {
+    return {
+      search: async () => [],
+      cleanup: async () => undefined,
+      requestSync: async () => result,
+    } as unknown as ServiceRuntime;
+  }
+
+  const failedBase = { status: "failed", pendingSync: true, attempts: 1 } as const;
+
+  it("13. an unknown errorCode on a failed result is sync_failed", async () => {
+    const response = await rpcSync(runtimeReturning({ ...failedBase, errorCode: "made_up" }));
+    expect(response.ok).toBe(false);
+    if (response.ok === false) expect(response.error.code).toBe("sync_failed");
+  });
+
+  it("14. a failed result with no errorCode, or a non-string one, is sync_failed", async () => {
+    for (const errorCode of [undefined, 7, null, { toString: () => "unapproved_pending" }]) {
+      const response = await rpcSync(runtimeReturning({ ...failedBase, errorCode }));
+      expect(response.ok).toBe(false);
+      if (response.ok === false) expect(response.error.code).toBe("sync_failed");
+    }
+    const bare = await rpcSync(runtimeReturning({ ...failedBase }));
+    if (bare.ok === false) expect(bare.error.code).toBe("sync_failed");
+  });
+
+  it("15. an inherited errorCode is ignored", async () => {
+    const inherited = Object.assign(Object.create({ errorCode: "unapproved_pending" }), failedBase);
+    const response = await rpcSync(runtimeReturning(inherited));
+    expect(response.ok).toBe(false);
+    if (response.ok === false) expect(response.error.code).toBe("sync_failed");
+  });
+
+  it("16. errorCode is ignored on a non-failed status", async () => {
+    const response = await rpcSync(
+      runtimeReturning({
+        status: "synced",
+        pendingSync: false,
+        attempts: 1,
+        errorCode: "unapproved_pending",
+      }),
+    );
+    expect(response.ok).toBe(true);
+  });
+
+  it("17. the exact unapproved_pending errorCode maps to its own envelope", async () => {
+    const response = await rpcSync(
+      runtimeReturning({ ...failedBase, errorCode: "unapproved_pending" }),
+    );
+    expect(response.ok).toBe(false);
+    if (response.ok === false) expect(response.error.code).toBe("unapproved_pending");
   });
 });

@@ -1409,3 +1409,69 @@ describe("R2c — operator label for a committed-but-unqueued create", () => {
     });
   });
 });
+
+describe("S7a-4b — nookctl write sync carries unapproved_pending", () => {
+  const SYNC_ENV = Object.freeze({
+    ...ENABLED_ENV,
+    NOOKBRIDGE_ENABLE_LIVE_SYNC: "1",
+  });
+
+  function syncWith(result: Record<string, unknown>) {
+    return runWriteCommand({
+      argv: ["sync"],
+      env: SYNC_ENV,
+      createWriteRuntime: () => ({
+        capability: capabilityFor(createFakeDatabase()),
+        remoteSync: {
+          requestSync: async () => result,
+        } as unknown as NonNullable<NotesnookLiveWriteRuntime["remoteSync"]>,
+      }),
+    });
+  }
+
+  const failedBase = {
+    status: "failed",
+    localCommitted: true,
+    remoteSynced: false,
+    pendingSync: true,
+    attempts: 1,
+    startedAt: 1,
+  };
+
+  it("(10) a failed/unapproved_pending result gains the reason line and stays failed", async () => {
+    const result = await syncWith({ ...failedBase, errorCode: "unapproved_pending" });
+    expect(result).toMatchObject({
+      kind: "sync-report",
+      report: { status: "failed", reason: "unapproved_pending" },
+    });
+    expect(formatWriteCommandResult(result)).toBe(
+      [
+        "nookctl write sync: failed",
+        "  remote:  failed",
+        "  pending: yes",
+        "  attempts: 1",
+        "  reason:  unapproved_pending (operator- or unknown-origin changes await approval; not retried)",
+      ].join("\n"),
+    );
+  });
+
+  it("(11) a plain failed/sync_failed result has no reason line", async () => {
+    const result = await syncWith({ ...failedBase, errorCode: "sync_failed" });
+    expect(result).toMatchObject({ kind: "sync-report", report: { status: "failed" } });
+    if (result.kind === "sync-report") expect("reason" in result.report).toBe(false);
+    expect(formatWriteCommandResult(result)).not.toContain("reason:");
+  });
+
+  it("(11b) only an exact own errorCode on a failed result adds the reason", async () => {
+    for (const odd of [
+      { ...failedBase },
+      { ...failedBase, errorCode: "made_up" },
+      { ...failedBase, errorCode: 7 },
+      { ...failedBase, status: "synced", pendingSync: false, errorCode: "unapproved_pending" },
+      Object.assign(Object.create({ errorCode: "unapproved_pending" }), failedBase),
+    ]) {
+      const result = await syncWith(odd);
+      expect(formatWriteCommandResult(result)).not.toContain("reason:");
+    }
+  });
+});

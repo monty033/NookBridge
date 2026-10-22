@@ -178,6 +178,8 @@ export type WriteSyncReport = Readonly<{
   readonly status: "idle" | "synced" | "failed";
   readonly pendingSync: boolean;
   readonly attempts: number;
+  /** Present only when the upload gate refused the sync; never retried. */
+  readonly reason?: "unapproved_pending";
 }>;
 
 export type RunWriteCommandResult =
@@ -863,10 +865,15 @@ async function dispatchSync(
       message: "nookctl write sync: synchronization result was not recognised",
     };
   }
+  const refused = status === "failed" && readOwn(result, "errorCode") === "unapproved_pending";
   return {
     kind: "sync-report",
     subcommand: "sync",
-    report: Object.freeze({ status, pendingSync, attempts }),
+    report: Object.freeze(
+      refused
+        ? { status, pendingSync, attempts, reason: "unapproved_pending" as const }
+        : { status, pendingSync, attempts },
+    ),
   };
 }
 
@@ -952,6 +959,11 @@ export function formatWriteCommandResult(result: RunWriteCommandResult): string 
         `  remote:  ${result.report.status}`,
         `  pending: ${result.report.pendingSync ? "yes" : "no"}`,
         `  attempts: ${result.report.attempts}`,
+        ...(result.report.reason === "unapproved_pending"
+          ? [
+              "  reason:  unapproved_pending (operator- or unknown-origin changes await approval; not retried)",
+            ]
+          : []),
       ].join("\n");
   }
 }

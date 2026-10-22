@@ -848,6 +848,7 @@ describe("serializeRpcResponse", () => {
       ["sync_failed", "Sync failed"],
       ["vault_locked", "Vault locked"],
       ["not_found", "Not found"],
+      ["unapproved_pending", "Unapproved pending changes"],
     ] as const;
 
     for (const [code, message] of approvedErrors) {
