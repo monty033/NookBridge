@@ -392,7 +392,7 @@ Provisioning is an administrative action, not an agent action. `nookctl provisio
 | Persistent auth/protocol failure | Stop automatic retry after a bounded policy and surface operator-visible health failure. |
 | Conflict detected | Return a conflict result with note identity/revision metadata. Do not auto-resolve. |
 
-DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged.
+DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged. Such syncs are refused with `unapproved_pending` while operator- or unknown-origin changes are pending.
 
 A future admin-only `forceSync` may bypass ordinary scheduling for repair/diagnostics, but it must not be exposed through the Hermes MCP/RPC interface.
 
@@ -762,7 +762,7 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 | **Tool** | **Class** | **Notes** |
 |---|---|---|
 | `notesnook_status` | Read | Auth state, local DB health, last sync, pending changes, conflicts count; no secrets. |
-| `notesnook_sync` | Side effect | Requests synchronization through `SyncCoordinator`; scheduling/backoff/limits still apply. Treat as approval-worthy initially. |
+| `notesnook_sync` | Side effect | Requests synchronization through `SyncCoordinator`; scheduling/backoff/limits still apply. Treat as approval-worthy initially. Refused with `unapproved_pending` while operator- or unknown-origin changes are pending, and a malformed pending batch also produces `unapproved_pending` (DR-S7a, §13.22). Do not retry; local changes are committed and safe. |
 | `notesnook_list_notebooks` | Read | IDs, titles, hierarchy metadata as needed. |
 | `notesnook_search_notes` | Read | Query + optional notebook/tag filters + limit/cursor; bounded snippets rather than bulk bodies. Title/metadata hits for locked Vault notes are suppressed during discovery; known-ID reads remain separately protected by `notesnook_get_note` and may return metadata with `contentStatus: "locked"`, never content. |
 | `notesnook_get_note` | Read | ID; returns metadata, revision, and (when `contentStatus: "ok"`) a bounded decoded Markdown view. Raw canonical form is not default; locked Vault notes return `contentStatus: "locked"` with metadata only — content is never read for a note whose metadata already reports `locked`. SHIPPED. |
@@ -2847,7 +2847,7 @@ No upload without explicit sync intent.
 1. Upstream `{type:"full"}` is called only from `createLiveRemoteSyncExecutor`, and only for an explicit `notes.sync` request (`notesnook_sync` or `nookctl write sync`). No timer, startup, post-write or reconciliation path may call it. The S7a-1 call-site lock (#232) enforces this.
 2. The read-only boundary is unchanged. It accepts only `{ type: "fetch" }`; `full`, `send` and `force` are never added to it.
 3. Upload intent is recorded per note and durably in the coordinator. MCP writes record it. Operator writes do not, unless the operator approves upload.
-4. Before `full`, the executor reads the upstream dirty set read-only. It refuses with the categorical reason `unapproved_pending` if any dirty item lacks recorded intent, or if the dirty set can't be read.
+4. Before `full`, the executor reads the upstream dirty set read-only. It refuses with the categorical reason `unapproved_pending` if any dirty item lacks recorded intent, or if the dirty set can't be read. (not built; see the implementation record below)
 5. Fallback: if the pinned core has no read-only way to read the dirty set (S7a-2 settles this), every `full` sync is refused while any operator-origin pending marker exists.
 
 ### Pending decision
@@ -2856,7 +2856,7 @@ The operator approval path in item 3 waits on **decision 5**, which is not yet a
 
 ### Known consequence
 
-After S7a-4 lands, any operator-origin pending write blocks every explicit sync (MCP and `nookctl write sync`) until decision 5 provides approval.
+Step S7a-4 (#237) landed, but it did **not** implement DR-S7a item 4; the item 5 fallback is what applies. Under that fallback, any operator- or unknown-origin pending write blocks every explicit sync (MCP and `nookctl write sync`) until decision 5 provides approval.
 
 ### Implementation order
 
@@ -2867,7 +2867,47 @@ After S7a-4 lands, any operator-origin pending write blocks every explicit sync 
 - S7a-7: docs
 - S7a-6: blocked on decision 5
 
-**Evidence class:** a decision record only; no source, VM or live evidence.
+### Implementation record (2026-10-22)
+
+DR-S7a item numbers and S7a step labels use separate numbering.
+
+| Step label | PR |
+| --- | --- |
+| Step S7a-1 | #232 |
+| Step S7a-0 | #233 |
+| Step S7a-2 | #234 |
+| Step S7a-3 | #235 |
+| Step S7a-5 | #236 |
+| Step S7a-4 | #237 |
+| Step S7a-4b | #238 |
+| Step S7a-7 | this PR |
+
+DR-S7a item 4 is not implemented: S7a-2 found no read-only dirty-set API
+(`docs/engineering/stages/stage-s7a-dirty-set.md`); item 5 applies.
+
+- **DR-S7a item 3 as built.** There is no separate ledger. Intent is an
+  MCP-origin pending marker. Origin is fixed per write capability and sticky
+  (`operator > unknown > mcp`), and operator creates are marked before they
+  mutate.
+- **DR-S7a item 5 as built.** A `full` sync is refused when any pending marker
+  is `operator` or `unknown`, including markers written before S7a-3, `nookctl
+  write` markers, and create placeholders, or when the batch is malformed. A
+  malformed batch produces `unapproved_pending`. An empty queue permits `full`.
+- **Client-visible code.** The refusal crosses the service boundary as
+  `unapproved_pending` (#238); the fixed message is
+  "Unapproved pending changes". Do not retry: local changes are committed and
+  safe.
+- **Error-code distinction.** `local_sync_marker_failed` means a marker failure
+  after a committed write. `sync_failed` on a create means the write-ahead
+  marker failed before any write, so nothing was committed and a retry is safe.
+- **Residual risk accepted by Patrick.** Content with no marker can still
+  upload — for example, file attachments queued by upstream `full` through
+  `attachments.pending`. DR-S7a item 4 would have caught it.
+- **Extended consequence.** Unknown-origin markers block sync as well as
+  operator-origin ones.
+
+**Evidence class:** source and offline tests; the #232–#238 merges were
+reviewed source only. No VM, live account, or deployment was used.
 
 # Appendix A. Research Sources
 

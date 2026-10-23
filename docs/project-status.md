@@ -12,7 +12,7 @@ make it safe or supported in every deployment.
 | Local writes and explicit outbound sync | Implemented as bounded, gated capability slices; broader account coverage is not implied. | [Stage 4 plan/receipt](engineering/stages/stage-4-write-plan.md). |
 | Local conflict observation | Implemented as a read-only local projection; a fresh fetch-only client is not expected to see another device's marker. | [Stage 5 service notes](engineering/stages/stage-5-service-boundary.md) and the implementation handoff. |
 | `nookd` service boundary and MCP proxy | Implemented as a narrow Unix-socket service and stdio proxy with policy-controlled tools. | [Architecture](architecture.md), [MCP reference](reference/mcp-tools.md), and recorded source evidence. |
-| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; source PR #125 merged `beaff27811f08bcd010e56b519ad3725053d6c9d` on 2026-09-21. The dedicated lock proof and the `pendingSync` upload gap remain open; the read-only sync proof's implicit-state-directory gap is closed — see below. |
+| Operator `notes` surface | Implemented over the operator socket, with a daemon-owned encrypted operation store and approval-gated mutations. Live-validated for the create → read round trip. | Receipts recorded 2026-09-21; source PR #125 merged `beaff27811f08bcd010e56b519ad3725053d6c9d` on 2026-09-21. The dedicated lock proof's path-resolution coverage was closed by #202–#204, with #200 proving it never trashes an unlocked note; the separate `peerCredentials` audit field was closed by R11 (#227). DR-S7a (#232–#238) closed the `pendingSync` upload gap at source for marked writes; the read-only sync proof's implicit-state-directory gap is closed — see below. |
 | NixOS reference deployment | Reference production path; host provisioning and secret wiring live in the deployment repository. | [NixOS installation](installation-nixos.md). |
 | Conventional Linux | Experimental generic systemd installer and Nix package now exist; cross-distro live/security validation remains open. | Do not declare generic-Linux support until the L1 gate passes. |
 | Docker | Planned portability target. | No Docker installation path yet. |
@@ -61,11 +61,22 @@ which includes a send phase — so a later daemon-side full sync would drain tha
 queue. The accurate position is "not automatically uploaded", not "may never be
 uploaded". This is tracked as an open defect, not a closed boundary.
 
-Also open: the dedicated lock proof (`notes locked-note-proof`) returns a
-categorical `vault_locked` for a locked note and `permission_denied` for the
-unlocked control — proven live on 1.3.9 — but the daemon still records
-`peerCredentials: "unknown"` for the peer. The proof's path-resolution coverage
-is no longer generic: #202–#204 closed it, as recorded below.
+**Update 2026-10-22.** At the time the paragraph above was written the
+`pendingSync` upload gap was open. It is now closed at source by DR-S7a
+(#232–#238) for writes that record an origin marker. Explicit full sync is
+refused with `unapproved_pending` while any pending marker is operator- or
+unknown-origin; operator writes are marked before they mutate. The operator
+approval path waits on decision 5, so those changes stay local and continue to
+block every explicit sync until it is decided. This is source evidence only:
+nothing has been deployed.
+
+Also outstanding at the time: the dedicated lock proof
+(`notes locked-note-proof`) returned a categorical `vault_locked` for a locked
+note and `permission_denied` for the unlocked control — proven live on 1.3.9 —
+but the daemon still recorded `peerCredentials: "unknown"` for the peer. The
+proof's path-resolution coverage was still generic then; #202–#204 closed it,
+while the separate `peerCredentials` audit field was closed by R11 (#227), as
+recorded below.
 
 The read-only sync proof no longer reports a pass against an implicit store. Its
 state directory used to be derived from the working directory when
@@ -127,9 +138,10 @@ steps now record `skipped`, and the proof returns `inconclusive` when the
 fetch-only sync ran against an empty store with no query, note id, or canary
 flags.
 
-The other two defects remain open and untouched: the `pendingSync` upload gap
-and the hardcoded `peerCredentials: "unknown"` audit field. The locked-note
-proof's path-resolution coverage was closed separately by #202–#204.
+The `pendingSync` upload gap is closed at source for marked writes by the
+DR-S7a chain (#232–#238), and the hardcoded `peerCredentials: "unknown"` audit
+field by R11 (#227). The locked-note proof's path-resolution coverage was
+closed separately by #202–#204.
 
 ### Locked-note proof path codes — 2026-10-20
 
@@ -144,6 +156,26 @@ exists. #200 (`adcfc56`) proves the proof never trashes an unlocked note, and
 #204 (`38499d2`) locks the closed handler and client result shape. This is
 source evidence and offline regression coverage only; no VM or live proof was
 run.
+
+### Upload gate — 2026-10-22
+
+DR-S7a closes the `pendingSync` upload gap at source for marked writes. An
+explicit full sync is refused with `unapproved_pending` while any pending marker
+is `operator` or `unknown` origin; operator writes are marked before they
+mutate. MCP-origin markers can upload only on an explicit sync that passes the
+gate, which requires that no operator- or unknown-origin marker is pending.
+Operationally, any pending operator- or unknown-origin change, including markers
+left from before S7a-3, blocks every explicit sync until decision 5 provides an
+operator approval path.
+
+The closure is limited to writes that record an origin marker. Content written
+by a path that records no marker can still upload — for example, file
+attachments queued by upstream `full` through `attachments.pending` — so this
+does not fully close the `pendingSync` upload gap; DR-S7a item 4 would be
+required for that.
+
+Nothing has been deployed. The evidence is source-only: offline tests and
+review, with no VM, live account, or deployment validation.
 
 ## Reading status claims safely
 
