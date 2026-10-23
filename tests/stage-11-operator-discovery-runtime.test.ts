@@ -37,6 +37,21 @@ function visibilityDouble(
   };
 }
 
+type Service = Parameters<typeof createOperatorDiscoveryRuntime>[0];
+
+/** Build a runtime whose allow-all filter delegates to the stubbed raw surface. */
+function runtimeFor(readOnly: Record<string, unknown>) {
+  const raw = readOnly as unknown as Service["readOnly"];
+  return createOperatorDiscoveryRuntime(
+    { readOnly: raw } as Service,
+    undefined,
+    visibilityDouble({
+      listNotes: () => raw.listNotes(),
+      searchHits: (query: string) => raw.search(query),
+    }),
+  );
+}
+
 describe("daemon operator discovery runtime", () => {
   it("expires opaque handles after their configured TTL", () => {
     let clock = 1000;
@@ -48,14 +63,12 @@ describe("daemon operator discovery runtime", () => {
   });
 
   it("mints opaque handles and paginates source-side", async () => {
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        listNotes: async () => [
-          { id: "raw-id-1", title: "One" },
-          { id: "raw-id-2", title: "Two" },
-        ],
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const runtime = runtimeFor({
+      listNotes: async () => [
+        { id: "raw-id-1", title: "One" },
+        { id: "raw-id-2", title: "Two" },
+      ],
+    });
     const first = await runtime.browse({ limit: 1 });
     expect(first.notes).toHaveLength(1);
     expect(first.notes[0]?.handle).toMatch(/^h_[A-Za-z0-9_-]+$/);
@@ -70,20 +83,18 @@ describe("daemon operator discovery runtime", () => {
   });
 
   it("resolves an opaque handle to bounded Markdown", async () => {
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        listNotes: async () => [{ id: "raw-note", title: "Body" }],
-        noteMetadata: async () => ({
-          id: "raw-note",
-          title: "Body",
-          revision: `rev_${"1".repeat(32)}`,
-        }),
-        readOperatorNoteContent: async () => ({
-          type: "html",
-          data: "<p>Hello <strong>world</strong></p>",
-        }),
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const runtime = runtimeFor({
+      listNotes: async () => [{ id: "raw-note", title: "Body" }],
+      noteMetadata: async () => ({
+        id: "raw-note",
+        title: "Body",
+        revision: `rev_${"1".repeat(32)}`,
+      }),
+      readOperatorNoteContent: async () => ({
+        type: "html",
+        data: "<p>Hello <strong>world</strong></p>",
+      }),
+    });
     const page = await runtime.browse({ limit: 1 });
     const handle = page.notes[0]?.handle;
     if (handle === undefined) throw new Error("missing test handle");
@@ -94,17 +105,15 @@ describe("daemon operator discovery runtime", () => {
   });
 
   it("scopes note handles to the peer that discovered them", async () => {
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        listNotes: async () => [{ id: "raw-note", title: "Body" }],
-        noteMetadata: async () => ({
-          id: "raw-note",
-          title: "Body",
-          revision: `rev_${"1".repeat(32)}`,
-        }),
-        readOperatorNoteContent: async () => ({ type: "html", data: "<p>Body</p>" }),
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const runtime = runtimeFor({
+      listNotes: async () => [{ id: "raw-note", title: "Body" }],
+      noteMetadata: async () => ({
+        id: "raw-note",
+        title: "Body",
+        revision: `rev_${"1".repeat(32)}`,
+      }),
+      readOperatorNoteContent: async () => ({ type: "html", data: "<p>Body</p>" }),
+    });
     const page = await runtime.browse({ limit: 1 }, PEER_A);
     const handle = page.notes[0]?.handle;
     if (handle === undefined) throw new Error("missing test handle");
@@ -113,14 +122,12 @@ describe("daemon operator discovery runtime", () => {
   });
 
   it("filters notebook search hits before minting note handles", async () => {
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        search: async () => [
-          { id: "notebook-1", title: "Notebook", source: "notebook" },
-          { id: "note-1", title: "Note", source: "note" },
-        ],
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const runtime = runtimeFor({
+      search: async () => [
+        { id: "notebook-1", title: "Notebook", source: "notebook" },
+        { id: "note-1", title: "Note", source: "note" },
+      ],
+    });
     const page = await runtime.search({ query: "n", limit: 10 });
     expect(page.notes.map((note) => note.label)).toEqual(["Note"]);
   });
@@ -198,6 +205,38 @@ describe("daemon operator discovery runtime", () => {
     expect(rawCalls).toEqual([]);
     expect(queries).toEqual(["n"]);
     expect(page.notes.map((note) => note.label)).toEqual(["Filtered note"]);
+  });
+
+  it("fails closed on browse when no visibility filter is supplied", async () => {
+    let listCalls = 0;
+    const runtime = createOperatorDiscoveryRuntime({
+      readOnly: {
+        listNotes: async () => {
+          listCalls += 1;
+          return [{ id: "raw-locked", title: "Locked title" }];
+        },
+      },
+    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const page = await runtime.browse({ limit: 10 });
+    expect(page.notes).toEqual([]);
+    expect(page.next).toBeNull();
+    expect(listCalls).toBe(0);
+  });
+
+  it("fails closed on search when no visibility filter is supplied", async () => {
+    let searchCalls = 0;
+    const runtime = createOperatorDiscoveryRuntime({
+      readOnly: {
+        search: async () => {
+          searchCalls += 1;
+          return [{ id: "raw-locked", title: "Locked title", source: "note" }];
+        },
+      },
+    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
+    const page = await runtime.search({ query: "n", limit: 10 });
+    expect(page.notes).toEqual([]);
+    expect(page.next).toBeNull();
+    expect(searchCalls).toBe(0);
   });
 
   it("mints an opaque handle instead of leaking the raw id of a created note", async () => {

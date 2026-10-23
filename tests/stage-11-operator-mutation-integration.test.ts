@@ -8,6 +8,7 @@ import {
 import { createOperatorWriteRuntime } from "../src/service/notes-operator-write-runtime.js";
 import { createNotesUndoStore, type OperationStoreFs } from "../src/service/notes-undo-store.js";
 import type { OperatorStoredContent } from "../src/service/notes-operator-write-runtime.js";
+import type { DiscoveryVisibility } from "../src/service/discovery-visibility.js";
 import type { ServiceRuntime } from "../src/service/service-runtime.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
 
@@ -19,6 +20,17 @@ const wrap = (s: string) => ({
   type: "tiptap" as const,
   data: `<div data-type="document">${s}</div>`,
 });
+
+/** Discovery fails closed without a filter, so wire an allow-all one. */
+function passThroughVisibility(readOnly: ServiceRuntime["readOnly"]): DiscoveryVisibility {
+  return {
+    listNotes: () => readOnly.listNotes(),
+    searchHits: (query: string) => readOnly.search(query),
+    filterNotebooks: async <T extends Readonly<{ id: string }>>(
+      notebooks: ReadonlyArray<T>,
+    ): Promise<ReadonlyArray<T>> => Object.freeze([...notebooks]),
+  };
+}
 
 class MemoryFs implements OperationStoreFs {
   files = new Map<string, Uint8Array>();
@@ -78,7 +90,11 @@ async function compose() {
   });
 
   const registry = createOperatorHandleRegistry();
-  const discovery = createOperatorDiscoveryRuntime({ readOnly } as ServiceRuntime, registry);
+  const discovery = createOperatorDiscoveryRuntime(
+    { readOnly } as ServiceRuntime,
+    registry,
+    passThroughVisibility(readOnly),
+  );
   const write = createOperatorWriteRuntime({
     store,
     resolveHandle: (handle, peer) => registry.resolve(handle, peer),
@@ -388,7 +404,11 @@ async function composeTwoNotes() {
     now: () => 1000,
   });
   const registry = createOperatorHandleRegistry();
-  const discovery = createOperatorDiscoveryRuntime({ readOnly } as ServiceRuntime, registry);
+  const discovery = createOperatorDiscoveryRuntime(
+    { readOnly } as ServiceRuntime,
+    registry,
+    passThroughVisibility(readOnly),
+  );
   const updates: string[] = [];
   const write = createOperatorWriteRuntime({
     store,
