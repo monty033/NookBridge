@@ -93,13 +93,10 @@ export function createOperatorDiscoveryRuntime(
   const cursors = new Map<string, CursorState>();
 
   return {
-    // Callers that omit this optional filter retain the legacy raw projection;
-    // the production `nookd` composition always supplies discovery visibility.
+    // Fail closed: without a visibility filter, discovery returns an empty
+    // page and never touches the raw read-only listing/search surfaces.
     browse: async (params, peer) => {
-      const notes =
-        visibility === undefined
-          ? await service.readOnly.listNotes()
-          : await visibility.listNotes();
+      const notes = visibility === undefined ? [] : await visibility.listNotes();
       return page(
         notes.map((note) => ({ id: note.id, title: note.title })),
         params,
@@ -108,10 +105,7 @@ export function createOperatorDiscoveryRuntime(
       );
     },
     search: async (params, peer) => {
-      const hits =
-        visibility === undefined
-          ? await service.readOnly.search(params.query)
-          : await visibility.searchHits(params.query);
+      const hits = visibility === undefined ? [] : await visibility.searchHits(params.query);
       return page(
         hits
           .filter((hit) => hit.source === "note")
