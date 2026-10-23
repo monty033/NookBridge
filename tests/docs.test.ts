@@ -8,6 +8,14 @@ const read = (relative: string): string => readFileSync(resolve(root, relative),
 
 const plan = read("docs/implementation-plan-v1.5.md");
 const status = read("docs/project-status.md");
+const mcpTools = read("docs/reference/mcp-tools.md");
+
+/** The historical operator-notes upload-gap paragraph, before the 2026-10-22 update. */
+const historicalUploadGap = (() => {
+  const start = status.indexOf("**What this does not prove.**");
+  const end = status.indexOf("**Update 2026-10-22.**");
+  return start === -1 || end === -1 ? "" : status.slice(start, end);
+})();
 
 const SECTION_36 = "## 3.6 ";
 const SECTION_37 = "## 3.7 ";
@@ -193,8 +201,111 @@ describe("DR-S7a §13.22 (S7a-0)", () => {
     expect(slice1322).not.toMatch(/password\s*[:=]/i);
   });
 
-  it("leaves the pendingSync upload gap open in project status for S7a-7", () => {
-    expect(status).toContain("`pendingSync` upload gap");
-    expect(status).toMatch(/`pendingSync` upload gap[^\n]*\b(open|remain)/i);
+  it("keeps the historical upload-gap paragraph scoped to its own section", () => {
+    expect(historicalUploadGap, "historical upload-gap paragraph is missing").not.toBe("");
+    expect(historicalUploadGap).toContain("`pendingSync: true`");
+    expect(historicalUploadGap).toContain("open defect, not a closed boundary");
+  });
+});
+
+describe("S7a-7 — upload gap closed in docs", () => {
+  it("removes the open-defect statements from project status", () => {
+    expect(status).not.toContain(
+      "The dedicated lock proof and the `pendingSync` upload gap remain open",
+    );
+    expect(status).not.toContain("The other two defects remain open and untouched");
+  });
+
+  it("records the closure, the approval boundary and the source-evidence limit", () => {
+    for (const term of ["unapproved_pending", "#238", "decision 5", "#227", "source evidence"]) {
+      expect(status, `project status is missing ${term}`).toContain(term);
+    }
+  });
+
+  it("states the residual limit of the marked-write closure", () => {
+    expect(status.replace(/\s+/g, " ")).toContain(
+      "does not fully close the `pendingSync` upload gap",
+    );
+    expect(status).toContain("DR-S7a item 4");
+    expect(status).toContain("attachments.pending");
+  });
+
+  it("keeps the historical acknowledgement", () => {
+    expect(status).toContain("That was wrong.");
+  });
+
+  it("documents the sync refusal and the create error distinction", () => {
+    const syncRow = mcpTools
+      .split("\n")
+      .find((candidate) => candidate.startsWith("| `notesnook_sync`"));
+
+    expect(syncRow, "missing notesnook_sync row").toBeDefined();
+    expect(syncRow, "sync row must mention the refusal").toContain("unapproved_pending");
+    expect(syncRow, "sync row must cover a malformed batch").toContain("malformed");
+    expect(syncRow, "sync row must tell the caller not to retry").toContain("Do not retry");
+
+    expect(mcpTools).toContain("Unapproved pending changes");
+
+    const sentences = mcpTools.split(/(?<=[.!?])\s+/);
+    expect(
+      sentences.some(
+        (sentence) =>
+          sentence.includes("sync_failed") && sentence.includes("nothing was committed"),
+      ),
+      "expected a sentence distinguishing sync_failed from a committed write",
+    ).toBe(true);
+
+    expect(mcpTools).toContain("local_sync_marker_failed");
+  });
+
+  it("documents the refusal in the §6.1 sync row", () => {
+    const syncRow = plan
+      .split("\n")
+      .find((candidate) => candidate.startsWith("| `notesnook_sync`"));
+
+    expect(syncRow, "missing §6.1 notesnook_sync row").toBeDefined();
+    expect(syncRow, "§6.1 sync row must mention the refusal").toContain("unapproved_pending");
+    expect(syncRow, "§6.1 sync row must cover a malformed batch").toContain("malformed");
+    expect(syncRow, "§6.1 sync row must tell the caller not to retry").toContain("Do not retry");
+    expect(syncRow, "§6.1 sync row must cite the decision record").toContain("§13.22");
+  });
+
+  it("extends the §3.6 supersession note with the refusal", () => {
+    expect(syncPolicy, "§3.6 slice is empty").not.toBe("");
+    expect(syncPolicy).toContain("unapproved_pending");
+  });
+
+  it("records the implementation in §13.22", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    for (const term of [
+      "Implementation record",
+      "#234",
+      "#235",
+      "#236",
+      "#237",
+      "#238",
+      "item 5 applies",
+      "unknown",
+      "source only",
+      "separate numbering",
+      "Step S7a-4",
+    ]) {
+      expect(slice1322, `§13.22 is missing ${term}`).toContain(term);
+    }
+  });
+
+  it("keeps DR-S7a item 4 and the approval line verbatim", () => {
+    expect(slice1322, "§13.22 slice is empty").not.toBe("");
+
+    expect(slice1322).toContain(
+      "Before `full`, the executor reads the upstream dirty set read-only. It refuses with the categorical reason `unapproved_pending` if any dirty item lacks recorded intent, or if the dirty set can't be read.",
+    );
+    expect(slice1322).toContain("(not built; see the implementation record below)");
+    expect(slice1322).toContain("approved by Patrick (decision 1)");
+
+    for (const forbidden of ["--approve-upload", "uploadIntent", "notes.approve"]) {
+      expect(slice1322, `§13.22 must not name ${forbidden}`).not.toContain(forbidden);
+    }
   });
 });

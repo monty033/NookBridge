@@ -18,7 +18,7 @@ not automatically authorized for every deployed client.
 | `notesnook_append_note` | Append bounded Markdown. | Requires note identifier and expected revision. Authorization required. |
 | `notesnook_update_note` | Update selected note fields. | Requires note identifier, expected revision, and a non-empty closed patch. Authorization required. |
 | `notesnook_delete_note` | Move one exact-path note to trash. | Destructive, policy-controlled operation. It is not included in `readWriteNoDelete`. |
-| `notesnook_sync` | Request outbound synchronization. | Explicit, policy-controlled operation; no caller-selected sync mode. |
+| `notesnook_sync` | Request outbound synchronization. | Explicit, policy-controlled operation; no caller-selected sync mode. Refused with `unapproved_pending` while operator- or unknown-origin changes are pending, and a malformed pending batch also produces `unapproved_pending`. Do not retry; local changes are committed and safe; tell the user. |
 
 The Markdown returned by `notesnook_get_note` is a bounded, read-only projection and may be approximate: decoration is dropped and attachments may be represented by placeholders. It is not an edit preimage.
 
@@ -61,6 +61,16 @@ was not persisted ("Local change committed; sync intent not persisted"). The
 change exists locally, so do not retry the write: a retried
 `notesnook_create_note` would create a duplicate note. The same code is used at
 every layer (RPC, audit outcome, socket client, MCP).
+
+`unapproved_pending` means the sync was refused while operator- or
+unknown-origin changes were pending, or because the pending batch was malformed.
+The fixed message is "Unapproved pending changes". Do not retry; the local
+changes are committed and safe; tell the user.
+
+The create outcomes are distinct. `local_sync_marker_failed` means a
+marker failure **after** a committed write (do not retry the create).
+`sync_failed` on a create means the write-ahead marker failed **before** any
+write: nothing was committed, so a retry is safe.
 
 Write operations use optimistic revision checks. A stale revision, conflict,
 locked Vault, unavailable service, or failed synchronization is an outcome to
