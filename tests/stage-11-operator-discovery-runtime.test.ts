@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +7,9 @@ import {
   createOperatorHandleRegistry,
   operatorPeerKey,
 } from "../src/service/operator-discovery-runtime.js";
+import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
+import { NotesnookReadOnlyProjectionError } from "../src/core/notesnook-readonly-projection.js";
+import { serializeRpcResponse } from "../src/service/rpc-protocol.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 import type { DiscoveryVisibility } from "../src/service/discovery-visibility.js";
 
@@ -53,6 +57,34 @@ function runtimeFor(readOnly: Record<string, unknown>) {
       searchHits: (query: string) => raw.search(query),
     }),
   );
+}
+
+const REVISION = `rev_${"1".repeat(32)}`;
+
+/**
+ * Stored content the strict native decoder refuses: `style` is outside its
+ * inert attribute allowlist.  The read-only renderer can still approximate it
+ * (decoration dropped, images/attachments summarised, no URLs or references).
+ */
+const STRICT_REJECTED_CONTENT = Object.freeze({
+  type: "html",
+  data:
+    '<p style="color:red">Hello <strong>world</strong></p>' +
+    '<p><img src="https://example.com/x.png" alt="x"></p>' +
+    '<div data-type="attachment" data-id="ref-local-1" data-name="report.pdf">x</div>',
+});
+
+/** Browse one note so a real peer-scoped handle can address it, then read it. */
+async function viewFixture(reader: (id: string) => Promise<unknown>) {
+  const runtime = runtimeFor({
+    listNotes: async () => [{ id: "raw-note", title: "Body" }],
+    noteMetadata: async () => ({ id: "raw-note", title: "Body", revision: REVISION }),
+    readOperatorNoteContent: reader,
+  });
+  const page = await runtime.browse({ limit: 1 }, PEER_A);
+  const handle = page.notes[0]?.handle;
+  if (handle === undefined) throw new Error("missing test handle");
+  return { runtime, handle };
 }
 
 describe("daemon operator discovery runtime", () => {
@@ -108,6 +140,74 @@ describe("daemon operator discovery runtime", () => {
     expect(view?.id).toBe(handle);
     expect(view?.markdown).toContain("Hello **world**");
     expect(view?.markdown).not.toContain("raw-note");
+  });
+
+  it("falls back to tolerant Markdown when the strict decoder rejects stored content", async () => {
+    // D6-2: `<p style="color:red">` is outside the strict decoder's inert
+    // attribute allowlist.  The view must degrade to the same read-only
+    // approximation notes.get uses instead of failing the whole read.
+    const { runtime, handle } = await viewFixture(async () => STRICT_REJECTED_CONTENT);
+    const view = await runtime.view?.({ id: handle }, PEER_A);
+    expect(view?.markdown).toBe("Hello **world**\n\n[image]\n\n[attachment: report.pdf]");
+    // Approximation only: no source URLs and no opaque references escape.
+    expect(view?.markdown).not.toContain("example.com");
+    expect(view?.markdown).not.toContain("ref-local-1");
+  });
+
+  it("keeps the view result shape and byte accounting on the tolerant path", async () => {
+    const { runtime, handle } = await viewFixture(async () => STRICT_REJECTED_CONTENT);
+    const view = await runtime.view?.({ id: handle }, PEER_A);
+    // No approximation flag and no extra fields: the schema is unchanged.
+    expect(Object.keys(view ?? {}).sort()).toEqual(["contentBytes", "id", "markdown", "revision"]);
+    expect(view?.contentBytes).toBe(Buffer.byteLength(view?.markdown ?? "", "utf8"));
+  });
+
+  it("serializes a tolerant view as a kind:view RPC result", async () => {
+    const { runtime, handle } = await viewFixture(async () => STRICT_REJECTED_CONTENT);
+    const response = await createOperatorDiscoveryHandler(runtime)(
+      { id: "view-tolerant", method: "notes.get-view", params: { id: handle } },
+      PEER_A,
+    );
+    expect(response).toMatchObject({ ok: true, result: { kind: "view", id: handle } });
+    const frame = serializeRpcResponse(response);
+    const length = new DataView(frame.buffer, frame.byteOffset, 4).getUint32(0, false);
+    const parsed = JSON.parse(
+      Buffer.from(frame)
+        .subarray(4, length + 4)
+        .toString("utf8"),
+    ) as {
+      readonly result: {
+        readonly kind: string;
+        readonly id: string;
+        readonly revision: string;
+        readonly markdown: string;
+        readonly contentBytes: number;
+      };
+    };
+    expect(parsed.result.kind).toBe("view");
+    expect(Object.keys(parsed.result).sort()).toEqual([
+      "contentBytes",
+      "id",
+      "kind",
+      "markdown",
+      "revision",
+    ]);
+    expect(parsed.result.contentBytes).toBe(Buffer.byteLength(parsed.result.markdown, "utf8"));
+  });
+
+  it("does not intercept a locked-note refusal with the tolerant fallback", async () => {
+    // The projection raises `vault_locked` from the reader call itself.  The
+    // fallback only wraps decode/serialize, so the lock still refuses the view.
+    const locked = new NotesnookReadOnlyProjectionError("vault_locked");
+    const { runtime, handle } = await viewFixture(async () => {
+      throw locked;
+    });
+    await expect(runtime.view?.({ id: handle }, PEER_A)).rejects.toBe(locked);
+    const response = await createOperatorDiscoveryHandler(runtime)(
+      { id: "view-locked", method: "notes.get-view", params: { id: handle } },
+      PEER_A,
+    );
+    expect(response).toMatchObject({ ok: false, error: { code: "vault_locked" } });
   });
 
   it("scopes note handles to the peer that discovered them", async () => {

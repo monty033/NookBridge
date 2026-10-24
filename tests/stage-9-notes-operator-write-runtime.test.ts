@@ -144,6 +144,17 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(0);
   });
 
+  it("keeps the preimage strict for content the tolerant read fallback can view", async () => {
+    // D6-2 lock: the operator get-view may approximate content the strict
+    // decoder refuses, but a preimage is an edit baseline.  It must still
+    // refuse that content rather than hand back an approximation.
+    const f = await fixture({ native: '<p style="color:red">before</p>' });
+    await expect(runtime(f).editPreimage({ id: HANDLE }, PEER)).rejects.toMatchObject({
+      code: "service_unavailable",
+    });
+    expect(f.state.writes).toBe(0);
+  });
+
   it("refuses an edit whose expected revision is stale, without writing", async () => {
     const f = await fixture();
     f.state.revision = REVISION_3;
