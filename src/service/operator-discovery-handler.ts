@@ -31,33 +31,33 @@ export interface OperatorNoteView {
 export interface OperatorDiscoveryRuntime {
   readonly browse: (
     params: Readonly<{ cursor?: string; limit?: number }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorDiscoveryPage>;
   readonly search: (
     params: Readonly<{ query: string; cursor?: string; limit?: number }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorDiscoveryPage>;
   readonly view?: (
     params: Readonly<{ id: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorNoteView>;
   readonly editPreimage?: (
     params: Readonly<{ id: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<RpcNotesEditPreimageResult>;
   readonly applyEdit?: (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<RpcNotesApplyEditResult>;
   readonly applyUndo?: (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<RpcNotesApplyUndoResult>;
   readonly operationStatus?: (
     params: Readonly<{ operationHandle: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<RpcNotesOperationStatusResult>;
-  readonly operationList?: (peer?: OperatorPeer) => Promise<RpcNotesOperationListResult>;
+  readonly operationList?: (peer: OperatorPeer) => Promise<RpcNotesOperationListResult>;
   readonly create?: (
     params: Readonly<{
       title: string;
@@ -65,7 +65,7 @@ export interface OperatorDiscoveryRuntime {
       notebookId?: string;
       listKind?: NotesnookListKind;
     }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<RpcCreatedNoteResult>;
 }
 

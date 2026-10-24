@@ -5,6 +5,9 @@ import {
   settingsOperationForMethod,
 } from "../src/service/operator-authorization-context.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
+import type { OperatorPeer } from "../src/service/operator-server.js";
+
+const PEER: OperatorPeer = Object.freeze({ uid: 1001, gid: 100, groups: ["nookbridge-operators"] });
 
 const resolveHandle = (handle: string): string | undefined =>
   handle === "h_one" ? "note_one" : undefined;
@@ -24,6 +27,7 @@ describe("operator request lock context", () => {
       resolveOperatorRequestLockState({
         method: "notes.apply-edit",
         request: mutating({ id: "h_one" }),
+        peer: PEER,
         resolveHandle,
         readNoteLockState: read,
       }),
@@ -47,6 +51,7 @@ describe("operator request lock context", () => {
         resolveOperatorRequestLockState({
           method: testCase.method,
           request: testCase.request,
+          peer: PEER,
           resolveHandle,
           readNoteLockState: read,
         }),
@@ -60,6 +65,7 @@ describe("operator request lock context", () => {
       resolveOperatorRequestLockState({
         method: "notes.apply-edit",
         request: mutating({ id: "h_one" }),
+        peer: PEER,
         resolveHandle,
         resolveOperationNoteId: undefined,
         readNoteLockState: undefined,
@@ -78,6 +84,7 @@ describe("operator request lock context", () => {
       resolveOperatorRequestLockState({
         method: "notes.apply-undo",
         request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+        peer: PEER,
         resolveHandle,
         resolveOperationNoteId: (handle) =>
           handle === operationHandle ? "note_from_op" : undefined,
@@ -97,6 +104,7 @@ describe("operator request lock context", () => {
         resolveOperatorRequestLockState({
           method: "notes.apply-undo",
           request: { id: "r1", method: "notes.apply-undo", params: { operationHandle } },
+          peer: PEER,
           resolveHandle,
           resolveOperationNoteId,
           readNoteLockState: read,
@@ -130,6 +138,7 @@ describe("operator request lock context", () => {
       resolveOperatorRequestNotebookPolicy({
         method: "notes.apply-edit",
         request: mutating({ id: "h_one" }),
+        peer: PEER,
         resolveHandle,
         readNoteNotebookPath: async () => "Private/Secrets",
         evaluateNotebookPolicy: evaluate,
@@ -148,6 +157,7 @@ describe("operator request lock context", () => {
           method: "notes.create",
           params: { notebookId: "nb_private", title: "T", content: "C" },
         },
+        peer: PEER,
         resolveHandle,
         resolveNotebookPath: async (id) => (id === "nb_private" ? "Private/Secrets" : undefined),
         readNoteNotebookPath: undefined,
@@ -164,6 +174,7 @@ describe("operator request lock context", () => {
       resolveOperatorRequestNotebookPolicy({
         method: "notes.apply-edit",
         request: mutating({ id: "h_one" }),
+        peer: PEER,
         resolveHandle,
         readNoteNotebookPath: undefined,
         evaluateNotebookPolicy: undefined,
