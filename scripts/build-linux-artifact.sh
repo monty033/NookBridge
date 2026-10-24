@@ -116,9 +116,16 @@ build_node_real=$(readlink -f "$build_node" 2>/dev/null) || fail
 [[ -f "$build_node_real" && ! -L "$build_node_real" && -x "$build_node_real" ]] || fail
 if [[ -n "$runtime_tarball" ]]; then
   [[ -f "$runtime_tarball" && ! -L "$runtime_tarball" ]] || fail
+  # The shipped runtime version is read from the archive name rather than repeated
+  # here: a hardcoded literal silently stops matching the moment the archive pin
+  # moves, and the failure then looks like a corrupt tarball instead of a stale pin.
+  runtime_version=$(basename "$runtime_tarball" 2>/dev/null) || fail
+  runtime_version=${runtime_version#node-v}
+  runtime_version=${runtime_version%-linux-x64.tar.gz}
+  [[ "$runtime_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail
   runtime_extract_dir=$(mktemp -d)
   runtime_node="$runtime_extract_dir/node"
-  tar -xOf "$runtime_tarball" 'node-v22.23.2-linux-x64/bin/node' > "$runtime_node" 2>/dev/null || fail
+  tar -xOf "$runtime_tarball" "node-v${runtime_version}-linux-x64/bin/node" > "$runtime_node" 2>/dev/null || fail
   chmod 0555 "$runtime_node"
 else
   runtime_node=$legacy_node_runtime
@@ -143,9 +150,18 @@ git_commit=$(git -C "$source_dir" rev-parse --verify HEAD 2>/dev/null) || fail
 [[ "$git_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail
 
 node_version=$($build_node_real --version 2>/dev/null) || fail
-[[ "$node_version" == v22.23.2 ]] || fail
+[[ "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail
 node_abi=$($build_node_real -p 'process.versions.modules' 2>/dev/null) || fail
 [[ "$node_abi" =~ ^[0-9]+$ ]] || fail
+# The build tool and the shipped runtime must share a Node major, not a patch
+# release.  Node fixes its module ABI per major, so a build node one patch ahead
+# still produces native modules the shipped runtime loads, while a major
+# difference would ship modules compiled against the wrong ABI.
+node_major=${node_version#v}
+node_major=${node_major%%.*}
+runtime_major=${runtime_version:-}
+runtime_major=${runtime_major%%.*}
+[[ -z "$runtime_major" || "$node_major" == "$runtime_major" ]] || fail
 
 required_paths=(
   "$source_dir/dist/nookd.js"
@@ -240,7 +256,7 @@ cat > "$release_root/release.json" <<EOF
     "libc": "glibc"
   },
   "node": {
-    "version": "22.23.2",
+    "version": "${runtime_version:-${node_version#v}}",
     "abi": "node-v$node_abi"
   },
   "minGlibc": "$min_glibc",

@@ -372,3 +372,91 @@ describe("Linux artifact builder", () => {
     expect(verifier).toContain("app/operator-peercred-helper");
   });
 });
+
+describe("Linux artifact builder runtime pinning", () => {
+  function runtimeTarballFor(root: string, version: string): string {
+    const packDir = join(root, `runtime-pack-${version}`);
+    const memberDir = join(packDir, `node-v${version}-linux-x64`, "bin");
+    mkdirSync(memberDir, { recursive: true });
+    const nodeBinary = join(memberDir, "node");
+    writeFileSync(nodeBinary, "#!/bin/sh\nexit 0\n");
+    execFileSync("chmod", ["0755", nodeBinary]);
+    const tarball = join(root, `node-v${version}-linux-x64.tar.gz`);
+    execFileSync("tar", ["-czf", tarball, "-C", packDir, `node-v${version}-linux-x64`]);
+    return tarball;
+  }
+
+  function buildNodeFor(root: string, version: string): string {
+    const stub = join(root, `build-node-v${version}`);
+    writeFileSync(
+      stub,
+      `#!/bin/sh\ncase "$1" in\n  --version) printf 'v${version}\\n' ;;\n  -p) printf '127\\n' ;;\n  *) exit 1 ;;\nesac\n`,
+    );
+    execFileSync("chmod", ["0755", stub]);
+    return stub;
+  }
+
+  function runBuilder(
+    fixture: { source: string; helper: string; output: string },
+    buildNode: string,
+    runtimeTarball: string,
+  ) {
+    return spawnSync(
+      "bash",
+      [
+        builder,
+        "--source-dir",
+        fixture.source,
+        "--build-node",
+        buildNode,
+        "--runtime-tarball",
+        runtimeTarball,
+        "--operator-peercred-helper",
+        fixture.helper,
+        "--output-dir",
+        fixture.output,
+        "--version",
+        "1.2.3",
+        "--source-date-epoch",
+        "1790000000",
+        "--min-glibc",
+        "2.31",
+        "--min-libstdcxx",
+        "GLIBCXX_3.4.29",
+      ],
+      { encoding: "utf8" },
+    );
+  }
+
+  // A patch-ahead build tool must be accepted: Node fixes its module ABI per major,
+  // so the native modules this build compiles still load in the shipped runtime.
+  // Binding the two by exact version made the artifact build fail the moment the
+  // CI runner's Node moved ahead of the product pin.
+  it("accepts a build node one patch ahead of the shipped runtime", () => {
+    const fixture = createSourceFixture();
+    const root = join(fixture.source, "..");
+    const result = runBuilder(
+      fixture,
+      buildNodeFor(root, "22.23.3"),
+      runtimeTarballFor(root, "22.23.2"),
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("nookbridge-artifact build ok\n");
+  });
+
+  it("refuses a build node whose major differs from the shipped runtime", () => {
+    const fixture = createSourceFixture();
+    const root = join(fixture.source, "..");
+    const result = runBuilder(
+      fixture,
+      buildNodeFor(root, "20.19.0"),
+      runtimeTarballFor(root, "22.23.2"),
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nookbridge-artifact build failed\n");
+  });
+});
