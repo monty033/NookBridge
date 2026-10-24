@@ -40,13 +40,13 @@ jobs:
           done
       - name: Verify pinned Node runtime and prepare portable runtime
         env:
-          NODE_VERSION: 22.23.2
-          # The digest of node-v22.23.2-linux-x64.tar.gz, checked against both the
+          NODE_VERSION: 22.23.3
+          # The digest of node-v22.23.3-linux-x64.tar.gz, checked against both the
           # published SHASUMS256.txt and a download of the archive itself. It is a
           # constant of this workflow rather than something the network reports at run
           # time, so the check needs no network and a substituted archive cannot be
           # blessed by a substituted checksum file.
-          NODE_ARCHIVE_SHA256: b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
+          NODE_ARCHIVE_SHA256: 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -68,8 +68,8 @@ jobs:
           esac
           test "$(node --version)" = "v${NODE_VERSION}" \
             || { printf 'the runner provides %s, not v%s\n' "$(node --version)" "$NODE_VERSION" >&2; exit 1; }
-          test "$(npm --version)" = "10.9.8" \
-            || { printf 'the runner provides npm %s, not 10.9.8\n' "$(npm --version)" >&2; exit 1; }
+          test "$(npm --version)" = "10.9.9" \
+            || { printf 'the runner provides npm %s, not 10.9.9\n' "$(npm --version)" >&2; exit 1; }
           # The portable runtime the artifact ships is the upstream archive, verified
           # against the digest pinned above. The check itself needs no network, so a
           # runner that already holds the archive reaches nodejs.org not at all; the
@@ -222,7 +222,7 @@ jobs:
               exit 1
               ;;
           esac
-          RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"
+          RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.3-linux-x64.tar.gz"
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           GLIBC_BASELINE="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
           LIBSTDCXX_BASELINE="$(strings "$(g++ -print-file-name=libstdc++.so.6)" | grep -E '^GLIBCXX_[0-9]+(\.[0-9]+){1,2}$' | sort -V | tail -n 1)"
@@ -773,7 +773,7 @@ jobs:
           done
       - name: Verify pinned Node runtime
         env:
-          NODE_VERSION: 22.23.2
+          NODE_VERSION: 22.23.3
           GITHUB_TOKEN: ""
         run: |
           set -eu
@@ -795,8 +795,8 @@ jobs:
           esac
           test "$(node --version)" = "v${NODE_VERSION}" \
             || { printf 'the runner provides %s, not v%s\n' "$(node --version)" "$NODE_VERSION" >&2; exit 1; }
-          test "$(npm --version)" = "10.9.8" \
-            || { printf 'the runner provides npm %s, not 10.9.8\n' "$(npm --version)" >&2; exit 1; }
+          test "$(npm --version)" = "10.9.9" \
+            || { printf 'the runner provides npm %s, not 10.9.9\n' "$(npm --version)" >&2; exit 1; }
 
       - name: Checkout promotion tooling
         env:
