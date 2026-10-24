@@ -648,13 +648,14 @@ describe("Linux artifact manifest contract", () => {
         (step.name ?? "").startsWith("Verify pinned Node runtime"),
       )!;
       const body = runtimeStep.run ?? "";
-      expect(body).toContain('test "$(node --version)" = "v${NODE_VERSION}"');
-      expect(body).toContain('test "$(npm --version)" = "10.9.9"');
+      expect(body).toContain('case "$runner_node_version" in');
+      expect(body).toContain('"v${NODE_VERSION%%.*}."*)');
+      expect(body).toContain('case "$runner_npm_version" in');
       expect(body).toContain("refusing to build with a Node inside a workflow-writable directory");
       expect(body).not.toContain('>> "$GITHUB_PATH"');
       expect(body).not.toContain("export PATH=");
       expect(body).not.toContain("tar -xzf");
-      expect(runtimeStep.env?.NODE_VERSION).toBe("22.23.3");
+      expect(runtimeStep.env?.NODE_VERSION).toBe("22.23.2");
 
       if (jobName === "linux-artifact") {
         // The archive that ships in the artifact is verified against a digest that is a
@@ -1749,7 +1750,7 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     // The archive the packaging step consumes must be the one this step staged, at the
     // same deterministic path, and the runtime that runs the build must not be an
     // unpacked copy of it: the upstream binary cannot execute on this NixOS runner.
-    expect(raw).toContain('RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.3-linux-x64.tar.gz"');
+    expect(raw).toContain('RUNTIME_TARBALL="${RUNNER_TEMP:-/tmp}/node-v22.23.2-linux-x64.tar.gz"');
     expect(raw).toContain('archive_path="${RUNNER_TEMP:-/tmp}/$archive_name"');
     expect(raw).toContain("cached_sha256");
     expect(raw).not.toContain("tar -xzf");

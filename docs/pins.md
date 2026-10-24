@@ -38,6 +38,13 @@ The runtime rows above reflect exact versions in `package.json`; the SQLite
 extension versions were originally validated against the `@notesnook/core@8.1.3`
 devDependencies block.
 
+The shipped Node runtime is the exact version in the release workflow
+(`NODE_VERSION`, `22.23.2`), pinned by digest. The *build tool* only has to share
+that major version: Node fixes its module ABI per major, so a CI runner one patch
+ahead still produces native modules the shipped runtime loads. Binding the two by
+exact version made the artifact build fail as soon as the runner's Node moved
+ahead of this pin, while a major mismatch still fails the build.
+
 ## Build / tooling
 
 | Item | Value | Source of truth |
