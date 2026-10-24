@@ -1756,4 +1756,70 @@ printf '{"prerelease":%s,"draft":false,"target_commitish":"0123456789abcdef01234
     expect(raw).not.toContain("tar -xzf");
     expect(raw).not.toContain('echo "$node_root/bin" >> "$GITHUB_PATH"');
   });
+
+  /**
+   * T12 — shipped dependency inventory.  Verifying the tarball says nothing about
+   * what it contains, so the committed licence checker has to run against the
+   * extracted payload; otherwise a package that ships without a declared licence
+   * reaches a release unnoticed.
+   */
+  it("verifies the shipped dependency inventory of the artifact it just built", () => {
+    const workflow = parseYaml(readFileSync(linuxArtifactWorkflow, "utf8")) as {
+      jobs: Record<
+        string,
+        { steps: { name?: string; if?: string; env?: Record<string, string>; run?: string }[] }
+      >;
+    };
+
+    const steps = workflow.jobs["linux-artifact"]!.steps;
+    const buildIndex = steps.findIndex(
+      (step) => step.name === "Build and verify x86_64 glibc artifact",
+    );
+    const inventoryIndex = steps.findIndex(
+      (step) => step.name === "Verify shipped dependency inventory",
+    );
+
+    expect(buildIndex).toBeGreaterThanOrEqual(0);
+    // The checker reads the artifact the build step produced, so it cannot run
+    // anywhere else in the list.
+    expect(inventoryIndex).toBe(buildIndex + 1);
+
+    const buildStep = steps[buildIndex]!;
+    const inventoryStep = steps[inventoryIndex]!;
+    // Same gate as the build: the artifact only exists on the refs it builds on.
+    expect(inventoryStep.if).toBe(buildStep.if);
+    expect(inventoryStep.if).toBe(
+      "startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/runner-test/') || github.ref == 'refs/heads/main'",
+    );
+    expect(inventoryStep.env?.GITHUB_TOKEN).toBe("");
+
+    const run = inventoryStep.run ?? "";
+    // Anchored to a whole line: a mention inside a comment must not satisfy this.
+    expect(run).toMatch(/^set -eu$/m);
+    // Each step runs in a fresh shell, so the version is derived here as well.
+    expect(run).toContain('case "$GITHUB_REF" in');
+    expect(run).toContain('VERSION="${GITHUB_REF#refs/tags/v}"');
+    expect(run).toContain('VERSION="ci-${GITHUB_SHA:0:12}"');
+    expect(run).toContain("unexpected artifact-build ref");
+    expect(run).toContain('ARTIFACT="$PWD/artifacts/nookbridge-v${VERSION}-linux-x64-gnu.tar.gz"');
+    // The tree is checked in a scratch directory, which is removed on exit.
+    expect(run).toMatch(/^EXTRACT="\$\(mktemp -d\)"$/m);
+    expect(run).toContain('tar --gzip -xf "$ARTIFACT" -C "$EXTRACT"');
+    // The archive extracted here is the release artifact. The upstream Node runtime
+    // tarball must never be unpacked on this runner: its binary cannot execute here,
+    // which is what the file-level `tar -xzf` guard protects.
+    expect(run).not.toContain("RUNTIME_TARBALL");
+    expect(run).toMatch(/trap 'rm -rf "\$EXTRACT"' EXIT/);
+    // The checker, its tree, and its committed inventory are all named here, so a
+    // rename on any of the three does not silently drop the check.
+    expect(run).toContain("scripts/verify-artifact-inventory.mjs");
+    expect(run).toContain("app/node_modules");
+    expect(run).toContain('"$EXTRACT/nookbridge-v${VERSION}/app/node_modules"');
+    expect(run).toContain("docs/engineering/stages/stage-9-production-licenses.csv");
+    // `set -e` is what turns a checker failure into a failed job, so no fallback
+    // may mask its exit status — including the quieter spellings.
+    expect(run).not.toContain("|| true");
+    expect(run).not.toMatch(/\|\|\s*(:|exit\s+0)/);
+    expect(run).not.toContain("set +e");
+  });
 });
