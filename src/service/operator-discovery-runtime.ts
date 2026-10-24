@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { decodeNoteDocumentNative } from "../core/note-document-native.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
+import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
 import type { ServiceRuntime } from "./service-runtime.js";
 import type { DiscoveryVisibility } from "./discovery-visibility.js";
 import type {
@@ -145,8 +146,18 @@ export function createOperatorDiscoveryRuntime(
       if (metadata === undefined) throw new Error("note unavailable");
       const content = await reader(noteId);
       const revision = metadata.revision ?? `rev_${"0".repeat(32)}`;
-      const decoded = decodeNoteDocumentNative(content, { noteId, revision });
-      const markdown = serializeNoteDocumentMarkdown(decoded.document);
+      let markdown: string;
+      try {
+        const decoded = decodeNoteDocumentNative(content, { noteId, revision });
+        markdown = serializeNoteDocumentMarkdown(decoded.document);
+      } catch {
+        // Read-only approximation, the same one `notes.get` uses.  Content the
+        // strict decoder refuses still gets a bounded view; the fallback wraps
+        // only decode/serialize, never the reader above, so a locked-note
+        // refusal is untouched.  It is NOT an edit preimage and must never feed
+        // editPreimage/applyEdit/applyUndo, which stay strict.
+        markdown = tolerantViewMarkdown(content);
+      }
       return {
         id,
         revision,
@@ -217,6 +228,26 @@ export function createOperatorDiscoveryRuntime(
     });
     return cursor;
   }
+}
+
+/**
+ * Bounded, approximate Markdown for view-only use.
+ *
+ * Mirrors `readBoundedNoteContent` in the RPC handler: only a stored-content
+ * envelope the read projection could have produced is accepted, and the
+ * tolerant renderer drops decoration, summarises images and attachments, and
+ * never emits source URLs, data or opaque references.  The result is an
+ * approximation, not an edit baseline.
+ */
+function tolerantViewMarkdown(content: unknown): string {
+  if (content === null || typeof content !== "object") throw new Error("content unavailable");
+  const candidate = content as { readonly type?: unknown; readonly data?: unknown };
+  if (
+    (candidate.type !== "tiptap" && candidate.type !== "html") ||
+    typeof candidate.data !== "string"
+  )
+    throw new Error("content unavailable");
+  return noteHtmlReadonlyMarkdown(candidate.data);
 }
 
 function normalizeLimit(limit: number | undefined): number {
