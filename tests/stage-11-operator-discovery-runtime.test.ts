@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createOperatorDiscoveryRuntime,
   createOperatorHandleRegistry,
+  operatorPeerKey,
 } from "../src/service/operator-discovery-runtime.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 import type { DiscoveryVisibility } from "../src/service/discovery-visibility.js";
@@ -69,15 +72,18 @@ describe("daemon operator discovery runtime", () => {
         { id: "raw-id-2", title: "Two" },
       ],
     });
-    const first = await runtime.browse({ limit: 1 });
+    const first = await runtime.browse({ limit: 1 }, PEER_A);
     expect(first.notes).toHaveLength(1);
     expect(first.notes[0]?.handle).toMatch(/^h_[A-Za-z0-9_-]+$/);
     expect(first.notes[0]?.handle).not.toContain("raw-id-1");
     expect(first.next).toMatch(/^cur_/);
-    const second = await runtime.browse({
-      ...(first.next === null ? {} : { cursor: first.next }),
-      limit: 1,
-    });
+    const second = await runtime.browse(
+      {
+        ...(first.next === null ? {} : { cursor: first.next }),
+        limit: 1,
+      },
+      PEER_A,
+    );
     expect(second.notes[0]?.label).toBe("Two");
     expect(second.next).toBeNull();
   });
@@ -95,10 +101,10 @@ describe("daemon operator discovery runtime", () => {
         data: "<p>Hello <strong>world</strong></p>",
       }),
     });
-    const page = await runtime.browse({ limit: 1 });
+    const page = await runtime.browse({ limit: 1 }, PEER_A);
     const handle = page.notes[0]?.handle;
     if (handle === undefined) throw new Error("missing test handle");
-    const view = await runtime.view?.({ id: handle });
+    const view = await runtime.view?.({ id: handle }, PEER_A);
     expect(view?.id).toBe(handle);
     expect(view?.markdown).toContain("Hello **world**");
     expect(view?.markdown).not.toContain("raw-note");
@@ -128,7 +134,7 @@ describe("daemon operator discovery runtime", () => {
         { id: "note-1", title: "Note", source: "note" },
       ],
     });
-    const page = await runtime.search({ query: "n", limit: 10 });
+    const page = await runtime.search({ query: "n", limit: 10 }, PEER_A);
     expect(page.notes.map((note) => note.label)).toEqual(["Note"]);
   });
 
@@ -158,16 +164,19 @@ describe("daemon operator discovery runtime", () => {
         searchHits: async () => [],
       }),
     );
-    const first = await runtime.browse({ limit: 1 });
+    const first = await runtime.browse({ limit: 1 }, PEER_A);
     expect(rawCalls).toEqual([]);
     expect(first.notes).toHaveLength(1);
     expect(first.notes[0]?.label).toBe("Filtered one");
     expect(first.notes[0]?.handle).not.toContain("filtered-id-1");
     expect(first.next).toMatch(/^cur_/);
-    const second = await runtime.browse({
-      ...(first.next === null ? {} : { cursor: first.next }),
-      limit: 1,
-    });
+    const second = await runtime.browse(
+      {
+        ...(first.next === null ? {} : { cursor: first.next }),
+        limit: 1,
+      },
+      PEER_A,
+    );
     expect(second.notes[0]?.label).toBe("Filtered two");
     expect(second.next).toBeNull();
   });
@@ -201,42 +210,10 @@ describe("daemon operator discovery runtime", () => {
         },
       }),
     );
-    const page = await runtime.search({ query: "n", limit: 10 });
+    const page = await runtime.search({ query: "n", limit: 10 }, PEER_A);
     expect(rawCalls).toEqual([]);
     expect(queries).toEqual(["n"]);
     expect(page.notes.map((note) => note.label)).toEqual(["Filtered note"]);
-  });
-
-  it("fails closed on browse when no visibility filter is supplied", async () => {
-    let listCalls = 0;
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        listNotes: async () => {
-          listCalls += 1;
-          return [{ id: "raw-locked", title: "Locked title" }];
-        },
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
-    const page = await runtime.browse({ limit: 10 });
-    expect(page.notes).toEqual([]);
-    expect(page.next).toBeNull();
-    expect(listCalls).toBe(0);
-  });
-
-  it("fails closed on search when no visibility filter is supplied", async () => {
-    let searchCalls = 0;
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        search: async () => {
-          searchCalls += 1;
-          return [{ id: "raw-locked", title: "Locked title", source: "note" }];
-        },
-      },
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
-    const page = await runtime.search({ query: "n", limit: 10 });
-    expect(page.notes).toEqual([]);
-    expect(page.next).toBeNull();
-    expect(searchCalls).toBe(0);
   });
 
   it("mints an opaque handle instead of leaking the raw id of a created note", async () => {
@@ -245,22 +222,119 @@ describe("daemon operator discovery runtime", () => {
     // cross the socket.  Every other surface mints a handle, so create must too -
     // and the handle must resolve, so hiding the id costs the caller nothing.
     const resolved: string[] = [];
-    const runtime = createOperatorDiscoveryRuntime({
-      readOnly: {
-        listNotes: async () => [],
-        noteMetadata: async (id: string) => {
-          resolved.push(id);
-          return { id, title: "Created", revision: `rev_${"2".repeat(32)}` };
+    const runtime = createOperatorDiscoveryRuntime(
+      {
+        readOnly: {
+          listNotes: async () => [],
+          noteMetadata: async (id: string) => {
+            resolved.push(id);
+            return { id, title: "Created", revision: `rev_${"2".repeat(32)}` };
+          },
+          readOperatorNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
         },
-        readOperatorNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
-      },
-      createNote: async () => ({ id: "raw-created-1", titleBytes: 5, contentBytes: 10 }),
-    } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0]);
-    const created = await runtime.create?.({ title: "Created", content: "<p>x</p>" });
+        createNote: async () => ({ id: "raw-created-1", titleBytes: 5, contentBytes: 10 }),
+      } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0],
+      undefined,
+      visibilityDouble({ listNotes: async () => [], searchHits: async () => [] }),
+    );
+    const created = await runtime.create?.({ title: "Created", content: "<p>x</p>" }, PEER_A);
     if (created === undefined) throw new Error("missing create result");
     expect(created.id).toMatch(/^h_[A-Za-z0-9_-]+$/);
     expect(created.id).not.toContain("raw-created-1");
-    await runtime.view?.({ id: created.id });
+    await runtime.view?.({ id: created.id }, PEER_A);
     expect(resolved).toEqual(["raw-created-1"]);
+  });
+
+  describe("peerless identity is rejected (D3-1)", () => {
+    const BAD_PEERS: ReadonlyArray<[string, unknown]> = [
+      ["undefined", undefined],
+      ["negative uid", { uid: -1, gid: 1, groups: [] }],
+      ["fractional gid", { uid: 1, gid: 1.5, groups: [] }],
+      ["unsafe uid", { uid: Number.MAX_SAFE_INTEGER + 1, gid: 1, groups: [] }],
+      ["non-array groups", { uid: 1, gid: 1, groups: "x" }],
+      ["non-string group", { uid: 1, gid: 1, groups: [1] }],
+      ["null", null],
+    ];
+
+    it("operatorPeerKey keeps the owner-key format and rejects invalid peers", () => {
+      expect(operatorPeerKey({ uid: 1, gid: 2, groups: ["b", "a"] })).toBe("1:2:a,b");
+      expect(operatorPeerKey({ uid: 0, gid: 0, groups: [] })).toBe("0:0:");
+      expect(() => operatorPeerKey(undefined)).toThrow("permission_denied");
+      for (const [, bad] of BAD_PEERS)
+        expect(() => operatorPeerKey(bad as OperatorPeer)).toThrow("permission_denied");
+    });
+
+    it("registry mint throws and resolve returns undefined for an invalid peer", () => {
+      const registry = createOperatorHandleRegistry();
+      expect(() => registry.mint("n", undefined)).toThrow("permission_denied");
+      const handle = registry.mint("n", PEER_A);
+      expect(registry.resolve(handle, undefined)).toBeUndefined();
+      for (const [, bad] of BAD_PEERS)
+        expect(registry.resolve(handle, bad as OperatorPeer)).toBeUndefined();
+    });
+
+    it("entry points reject before any downstream call", async () => {
+      const calls = {
+        list: 0,
+        search: 0,
+        meta: 0,
+        content: 0,
+        create: 0,
+        filterList: 0,
+        filterSearch: 0,
+      };
+      const runtime = createOperatorDiscoveryRuntime(
+        {
+          readOnly: {
+            listNotes: async () => ((calls.list += 1), []),
+            search: async () => ((calls.search += 1), []),
+            noteMetadata: async () => ((calls.meta += 1), undefined),
+            readOperatorNoteContent: async () => ((calls.content += 1), { type: "html", data: "" }),
+          },
+          createNote: async () => (
+            (calls.create += 1), { id: "x", titleBytes: 0, contentBytes: 0 }
+          ),
+        } as unknown as Service,
+        undefined,
+        visibilityDouble({
+          listNotes: async () => ((calls.filterList += 1), []),
+          searchHits: async () => ((calls.filterSearch += 1), []),
+        }),
+      );
+      for (const [, bad] of BAD_PEERS) {
+        const peer = bad as OperatorPeer;
+        await expect(runtime.browse({ limit: 1 }, peer)).rejects.toThrow("permission_denied");
+        await expect(runtime.search({ query: "n", limit: 1 }, peer)).rejects.toThrow(
+          "permission_denied",
+        );
+        await expect(runtime.view?.({ id: "h_x" }, peer)).rejects.toThrow("permission_denied");
+        await expect(runtime.create?.({ title: "t", content: "c" }, peer)).rejects.toThrow(
+          "permission_denied",
+        );
+      }
+      expect(calls).toEqual({
+        list: 0,
+        search: 0,
+        meta: 0,
+        content: 0,
+        create: 0,
+        filterList: 0,
+        filterSearch: 0,
+      });
+    });
+
+    it("requires a visibility filter at the type level", () => {
+      // @ts-expect-error visibility is required; there is no unfiltered factory
+      const build = () => createOperatorDiscoveryRuntime({} as Service, undefined);
+      expect(build).toBeTypeOf("function");
+    });
+
+    it("keeps no shared legacy identity in the source", () => {
+      const source = readFileSync(
+        resolve(import.meta.dirname, "../src/service/operator-discovery-runtime.ts"),
+        "utf8",
+      );
+      expect(source).not.toContain("legacy");
+    });
   });
 });

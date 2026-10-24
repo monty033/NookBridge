@@ -30,14 +30,27 @@ type CursorState = Readonly<{ query?: string; offset: number; owner: string; exp
  */
 export interface OperatorHandleRegistry {
   /** Mint a fresh opaque handle for a note id, evicting the oldest if needed. */
-  readonly mint: (noteId: string, peer?: OperatorPeer) => string;
+  readonly mint: (noteId: string, peer: OperatorPeer | undefined) => string;
   /** Resolve an opaque handle only for its owning peer. */
-  readonly resolve: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly resolve: (handle: string, peer: OperatorPeer | undefined) => string | undefined;
 }
 
-export function operatorPeerKey(peer?: OperatorPeer): string {
-  if (peer === undefined) return "legacy";
-  return `${peer.uid}:${peer.gid}:${[...peer.groups].sort().join(",")}`;
+export function operatorPeerKey(peer: OperatorPeer | undefined): string {
+  const candidate = peer as unknown as Partial<OperatorPeer> | null | undefined;
+  if (
+    candidate === null ||
+    typeof candidate !== "object" ||
+    !isId(candidate.uid) ||
+    !isId(candidate.gid) ||
+    !Array.isArray(candidate.groups) ||
+    !candidate.groups.every((group) => typeof group === "string")
+  )
+    throw new OperatorWriteError("permission_denied");
+  return `${candidate.uid}:${candidate.gid}:${[...candidate.groups].sort().join(",")}`;
+}
+
+function isId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Build a process-local, peer-scoped handle registry. */
@@ -54,7 +67,7 @@ export function createOperatorHandleRegistry(
     for (const [handle, entry] of handles) if (entry.expiresAt <= current) handles.delete(handle);
   };
 
-  const mint = (noteId: string, peer?: OperatorPeer): string => {
+  const mint = (noteId: string, peer: OperatorPeer | undefined): string => {
     sweep();
     const owner = operatorPeerKey(peer);
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -73,10 +86,16 @@ export function createOperatorHandleRegistry(
 
   return Object.freeze({
     mint,
-    resolve: (handle: string, peer?: OperatorPeer): string | undefined => {
+    resolve: (handle: string, peer: OperatorPeer | undefined): string | undefined => {
+      let owner: string;
+      try {
+        owner = operatorPeerKey(peer);
+      } catch {
+        return undefined;
+      }
       sweep();
       const entry = handles.get(handle);
-      return entry?.owner === operatorPeerKey(peer) ? entry.noteId : undefined;
+      return entry?.owner === owner ? entry.noteId : undefined;
     },
   });
 }
@@ -88,15 +107,15 @@ export function createOperatorHandleRegistry(
 export function createOperatorDiscoveryRuntime(
   service: ServiceRuntime,
   registry: OperatorHandleRegistry = createOperatorHandleRegistry(),
-  visibility?: DiscoveryVisibility,
+  visibility: DiscoveryVisibility,
 ): OperatorDiscoveryRuntime {
   const cursors = new Map<string, CursorState>();
 
   return {
-    // Fail closed: without a visibility filter, discovery returns an empty
-    // page and never touches the raw read-only listing/search surfaces.
+    // Every entry point validates the peer before any downstream call.
     browse: async (params, peer) => {
-      const notes = visibility === undefined ? [] : await visibility.listNotes();
+      requirePeer(peer);
+      const notes = await visibility.listNotes();
       return page(
         notes.map((note) => ({ id: note.id, title: note.title })),
         params,
@@ -105,7 +124,8 @@ export function createOperatorDiscoveryRuntime(
       );
     },
     search: async (params, peer) => {
-      const hits = visibility === undefined ? [] : await visibility.searchHits(params.query);
+      requirePeer(peer);
+      const hits = await visibility.searchHits(params.query);
       return page(
         hits
           .filter((hit) => hit.source === "note")
@@ -116,6 +136,7 @@ export function createOperatorDiscoveryRuntime(
       );
     },
     view: async ({ id }, peer) => {
+      requirePeer(peer);
       const noteId = registry.resolve(id, peer);
       if (noteId === undefined) throw new OperatorWriteError("not_found");
       const reader = service.readOnly.readOperatorNoteContent;
@@ -134,6 +155,7 @@ export function createOperatorDiscoveryRuntime(
       };
     },
     create: async (params, peer) => {
+      requirePeer(peer);
       if (service.createNote === undefined) throw new Error("create unavailable");
       const result = await service.createNote(params);
       return {
@@ -181,7 +203,7 @@ export function createOperatorDiscoveryRuntime(
 
   function mintCursor(
     state: Readonly<{ query?: string; offset: number }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer | undefined,
   ): string {
     const cursor = `cur_${randomBytes(18).toString("base64url")}`;
     if (cursors.size >= MAX_CURSOR_COUNT) {
@@ -202,4 +224,9 @@ function normalizeLimit(limit: number | undefined): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIMIT)
     throw new Error("limit unavailable");
   return limit;
+}
+
+function requirePeer(peer: OperatorPeer | undefined): asserts peer is OperatorPeer {
+  if (peer === undefined) throw new OperatorWriteError("permission_denied");
+  operatorPeerKey(peer);
 }
