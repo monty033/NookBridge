@@ -64,6 +64,28 @@ reader from a failed read with an optional categorical `contentReason`, but
 never includes that field for locked or oversize content results. Older
 reason-omitting result shapes remain valid; see the [MCP tool reference](reference/mcp-tools.md).
 
+## Operator surface
+
+Operator reads of a specific note - `nookctl notes get` and the edit preimage that `nookctl notes edit` fetches - are refused with `permission_denied` unless the note's handle was issued to the same caller, the note's notebook path resolves, and the notebook policy allows `read`.
+
+A note that is not in any notebook (a root-level note) is always refused for these operator reads, and so is a note whose notebook cannot be resolved.
+
+The operator socket serves only callers whose peer credentials resolve; a connection whose credentials cannot be read is closed before any request is handled.
+
+Inside the daemon, the discovery runtime's `browse`, `search`, `view` and `create` entry points each refuse a call that carries no well-formed caller identity with `permission_denied`; there is no shared or anonymous identity.
+
+Note handles, browse and search cursors, and recorded operations belong to the caller that created them and do not resolve for any other caller.
+
+The locked-note proof reports, for one exact note path, only `pathBytes` and one result each for `read`, `update` and `delete`. Each result is one of exactly five codes: `vault_locked`, `ok`, `not_found`, `permission_denied`, `service_unavailable`. The report never includes note text, titles, identifiers, revisions, paths, or error messages.
+
+The proof never modifies an unlocked note: for an unlocked target it reports `read: ok` and `permission_denied` for `update` and `delete` without attempting either.
+
+For a locked target it attempts update and delete only with a deliberately mismatched revision.
+
+The proof is authorized before its path is resolved: the caller needs read, edit and delete permission for that path, and a path the caller may not access returns `permission_denied` whether or not the note exists.
+
+`nookctl notes get` returns the strict Markdown projection when the note decodes under the strict rules; otherwise it returns a read-only approximation in which unrecognised formatting is dropped, images appear as `[image]`, attachments appear as `[attachment: <name>]` or `[attachment]`, and no source URLs or attachment data are included. The approximation is not an edit preimage: `nookctl notes edit` still uses the strict decoding and reports such a note as unavailable for editing.
+
 For detailed threat model, review evidence, and fail-closed requirements, see
 the [implementation plan](implementation-plan-v1.5.md#9-security-and-privacy-model)
 and [security reviews](security-reviews.md).
