@@ -101,9 +101,9 @@ export interface OperatorWriteRuntimeOptions {
   readonly source: OperatorWriteSource;
   readonly store: OperatorOperationStore;
   /** Daemon-side opaque handle resolution; raw note ids never cross the socket. */
-  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   /** Mint an opaque note handle for a newly-created note. */
-  readonly mintHandle?: (noteId: string, peer?: OperatorPeer) => string;
+  readonly mintHandle?: (noteId: string, peer: OperatorPeer) => string;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly audit?: (event: OperatorWriteAuditEvent) => void;
@@ -166,25 +166,25 @@ export interface OperatorWriteRuntime {
       notebookId?: string;
       listKind?: NotesnookListKind;
     }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorCreateApplied>;
   readonly editPreimage: (
     params: Readonly<{ id: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorEditPreimage>;
   readonly applyEdit: (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorEditApplied>;
   readonly applyUndo: (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorUndoApplied>;
   readonly operationStatus: (
     params: Readonly<{ operationHandle: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ) => Promise<OperatorOperationStatus>;
-  readonly operationList: (peer?: OperatorPeer) => Promise<OperatorOperationList>;
+  readonly operationList: (peer: OperatorPeer) => Promise<OperatorOperationList>;
 }
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -212,7 +212,7 @@ export class OperatorWriteError extends Error {
  * Owner key for a well-formed peer. Anything else is refused, so a peerless
  * caller can never share an owner with, or see the operations of, another.
  */
-function ownerKey(peer?: OperatorPeer): string {
+function ownerKey(peer: OperatorPeer): string {
   if (
     typeof peer !== "object" ||
     peer === null ||
@@ -290,7 +290,7 @@ export function createOperatorWriteRuntime(
     }
   }
 
-  function resolve(id: unknown, peer?: OperatorPeer): string {
+  function resolve(id: unknown, peer: OperatorPeer): string {
     if (typeof id !== "string" || id.length === 0 || id.length > 256)
       return fail("invalid_request");
     const noteId = options.resolveHandle(id, peer);
@@ -314,7 +314,7 @@ export function createOperatorWriteRuntime(
             notebookId?: string;
             listKind?: NotesnookListKind;
           }>,
-          peer?: OperatorPeer,
+          peer: OperatorPeer,
         ): Promise<OperatorCreateApplied> => {
           const owner = ownerKey(peer);
           let record: OperationRecord;
@@ -381,7 +381,7 @@ export function createOperatorWriteRuntime(
 
   const editPreimage = async (
     params: Readonly<{ id: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ): Promise<OperatorEditPreimage> => {
     ownerKey(peer);
     const noteId = resolve(params?.id, peer);
@@ -403,7 +403,7 @@ export function createOperatorWriteRuntime(
 
   const applyEdit = async (
     params: Readonly<{ id: string; expectedRevision: string; markdown: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ): Promise<OperatorEditApplied> => {
     ownerKey(peer);
     const noteId = resolve(params?.id, peer);
@@ -620,7 +620,7 @@ export function createOperatorWriteRuntime(
 
   const applyUndo = async (
     params: Readonly<{ id?: string; operationHandle: string; expectedRevision?: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ): Promise<OperatorUndoApplied> => {
     ownerKey(peer);
     if (
@@ -777,7 +777,7 @@ export function createOperatorWriteRuntime(
 
   const operationStatus = async (
     params: Readonly<{ operationHandle: string }>,
-    peer?: OperatorPeer,
+    peer: OperatorPeer,
   ): Promise<OperatorOperationStatus> => {
     ownerKey(peer);
     if (
@@ -808,7 +808,7 @@ export function createOperatorWriteRuntime(
     };
   };
 
-  const operationList = async (peer?: OperatorPeer): Promise<OperatorOperationList> => {
+  const operationList = async (peer: OperatorPeer): Promise<OperatorOperationList> => {
     ownerKey(peer);
     let records: ReadonlyArray<OperationRecord>;
     try {

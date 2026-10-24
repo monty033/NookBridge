@@ -59,12 +59,12 @@ function requestStringField(
 export function targetNoteId(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest;
-  readonly peer: OperatorPeer | undefined;
-  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly peer: OperatorPeer;
+  readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
     | ((
         operationHandle: string,
-        peer?: OperatorPeer,
+        peer: OperatorPeer,
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
 }): string | undefined | Promise<string | undefined> {
@@ -90,12 +90,12 @@ export function targetNoteId(input: {
 export async function resolveOperatorRequestLockState(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest | undefined;
-  readonly peer?: OperatorPeer;
-  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly peer: OperatorPeer;
+  readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
     | ((
         operationHandle: string,
-        peer?: OperatorPeer,
+        peer: OperatorPeer,
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteLockState: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
@@ -151,12 +151,12 @@ export function settingsOperationForMethod(method: OperatorMethod): SettingsOper
 export async function resolveOperatorRequestNotebookPolicy(input: {
   readonly method: OperatorMethod;
   readonly request: RpcRequest | undefined;
-  readonly peer?: OperatorPeer;
-  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly peer: OperatorPeer;
+  readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   readonly resolveOperationNoteId?:
     | ((
         operationHandle: string,
-        peer?: OperatorPeer,
+        peer: OperatorPeer,
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteNotebookPath: ((noteId: string) => Promise<string | undefined>) | undefined;

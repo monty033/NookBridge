@@ -49,12 +49,12 @@ export const OPERATOR_MUTATION_GROUP = "nookbridge-operators";
 
 export interface OperatorAuthorizerDependencies {
   /** Resolve a note handle to a note id, per peer. */
-  readonly resolveHandle: (handle: string, peer?: OperatorPeer) => string | undefined;
+  readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   /** Resolve an operation handle to its note, scoped to its owner. */
   readonly resolveOperationNoteId?:
     | ((
         operationHandle: string,
-        peer?: OperatorPeer,
+        peer: OperatorPeer,
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
   /** Trusted lock-state reader. */
