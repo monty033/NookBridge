@@ -9,6 +9,26 @@ const read = (relative: string): string => readFileSync(resolve(root, relative),
 const plan = read("docs/implementation-plan-v1.5.md");
 const status = read("docs/project-status.md");
 const mcpTools = read("docs/reference/mcp-tools.md");
+const security = read("docs/security-and-privacy.md");
+const cli = read("docs/reference/cli.md");
+
+const OPERATOR_SURFACE = "## Operator surface";
+const operatorSurfaceStart = security.indexOf(OPERATOR_SURFACE);
+const finalThreatParagraph = security.indexOf("For detailed threat model", operatorSurfaceStart);
+const operatorSurface =
+  operatorSurfaceStart === -1 || finalThreatParagraph === -1
+    ? ""
+    : security.slice(operatorSurfaceStart, finalThreatParagraph);
+
+const INPUT_RULES = "## Input rules";
+const inputRulesStart = cli.indexOf(INPUT_RULES);
+const productionWrappers = cli.indexOf("## Production wrappers", inputRulesStart);
+const inputRules =
+  inputRulesStart === -1 || productionWrappers === -1
+    ? ""
+    : cli.slice(inputRulesStart, productionWrappers);
+
+const notesCliRow = cli.split("\n").find((candidate) => candidate.startsWith("| `notes`"));
 
 /** The historical operator-notes upload-gap paragraph, before the 2026-10-22 update. */
 const historicalUploadGap = (() => {
@@ -307,5 +327,82 @@ describe("S7a-7 — upload gap closed in docs", () => {
     for (const forbidden of ["--approve-upload", "uploadIntent", "notes.approve"]) {
       expect(slice1322, `§13.22 must not name ${forbidden}`).not.toContain(forbidden);
     }
+  });
+});
+
+describe("DOC-1 - operator surface propositions", () => {
+  const propositions: ReadonlyArray<readonly [string, string]> = [
+    [
+      "S1",
+      "Operator reads of a specific note - `nookctl notes get` and the edit preimage that `nookctl notes edit` fetches - are refused with `permission_denied` unless the note's handle was issued to the same caller, the note's notebook path resolves, and the notebook policy allows `read`.",
+    ],
+    [
+      "S2",
+      "A note that is not in any notebook (a root-level note) is always refused for these operator reads, and so is a note whose notebook cannot be resolved.",
+    ],
+    [
+      "S3",
+      "The operator socket serves only callers whose peer credentials resolve; a connection whose credentials cannot be read is closed before any request is handled.",
+    ],
+    [
+      "S4",
+      "Inside the daemon, the discovery runtime's `browse`, `search`, `view` and `create` entry points each refuse a call that carries no well-formed caller identity with `permission_denied`; there is no shared or anonymous identity.",
+    ],
+    [
+      "S5",
+      "Note handles, browse and search cursors, and recorded operations belong to the caller that created them and do not resolve for any other caller.",
+    ],
+    [
+      "S6",
+      "The locked-note proof reports, for one exact note path, only `pathBytes` and one result each for `read`, `update` and `delete`. Each result is one of exactly five codes: `vault_locked`, `ok`, `not_found`, `permission_denied`, `service_unavailable`. The report never includes note text, titles, identifiers, revisions, paths, or error messages.",
+    ],
+    [
+      "S7",
+      "The proof never modifies an unlocked note: for an unlocked target it reports `read: ok` and `permission_denied` for `update` and `delete` without attempting either.",
+    ],
+    [
+      "S8",
+      "For a locked target it attempts update and delete only with a deliberately mismatched revision.",
+    ],
+    [
+      "S9",
+      "The proof is authorized before its path is resolved: the caller needs read, edit and delete permission for that path, and a path the caller may not access returns `permission_denied` whether or not the note exists.",
+    ],
+    [
+      "S10",
+      "`nookctl notes get` returns the strict Markdown projection when the note decodes under the strict rules; otherwise it returns a read-only approximation in which unrecognised formatting is dropped, images appear as `[image]`, attachments appear as `[attachment: <name>]` or `[attachment]`, and no source URLs or attachment data are included. The approximation is not an edit preimage: `nookctl notes edit` still uses the strict decoding and reports such a note as unavailable for editing.",
+    ],
+  ];
+
+  it("places exactly one operator surface section before the final threat-model paragraph", () => {
+    expect(
+      security.split(OPERATOR_SURFACE),
+      "expected exactly one operator surface heading",
+    ).toHaveLength(2);
+    expect(operatorSurfaceStart, "operator surface heading is missing").toBeGreaterThan(-1);
+    expect(
+      finalThreatParagraph,
+      "final threat-model paragraph is missing after the operator surface",
+    ).toBeGreaterThan(operatorSurfaceStart);
+    expect(operatorSurface, "operator surface slice is empty").not.toBe("");
+  });
+
+  it.each(propositions)("pins operator surface proposition %s verbatim", (label, sentence) => {
+    expect(operatorSurface, "operator surface slice is empty").not.toBe("");
+    expect(operatorSurface, `operator surface is missing ${label}`).toContain(sentence);
+  });
+
+  it("appends the exact-path exception to the CLI input rules", () => {
+    expect(inputRules, "CLI input rules slice is empty").not.toBe("");
+    expect(inputRules).toContain(
+      "Two notes commands take an exact note path as an ordinary argument: `nookctl notes locked-note-proof --path <path>` and `nookctl notes path-diagnostic --path <path>`. The path is visible in the process arguments, so use them only with canary or diagnostic paths. `locked-note-proof` also requires `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`.",
+    );
+  });
+
+  it("appends the approximation caveat to the notes row's safety column", () => {
+    expect(notesCliRow, "missing `notes` CLI row").toBeDefined();
+    expect(notesCliRow).toContain(
+      "`get` may return a read-only approximation that is not an edit preimage; see [security and privacy](../security-and-privacy.md#operator-surface).",
+    );
   });
 });

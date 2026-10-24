@@ -12,7 +12,7 @@ version's help for exact syntax and availability.
 | `sync` | Development/acceptance read-only synchronization. | Live operations are explicitly gated. |
 | `write` | Bounded acceptance write workflow. | Explicitly gated; do not pass note content through argv or environment. |
 | `conflicts` | Read-only local conflict-marker observation. | Explicitly gated; never resolves a conflict. |
-| `notes` | Bounded browse, search, get, edit, and undo operations. | Search/content arrive through bounded stdin; edit and undo require `--approve-edit`. |
+| `notes` | Bounded browse, search, get, edit, and undo operations. | Search/content arrive through bounded stdin; edit and undo require `--approve-edit`. `get` may return a read-only approximation that is not an edit preimage; see [security and privacy](../security-and-privacy.md#operator-surface). |
 | `tree` | Bounded notebook/filetree navigation. | Opaque handles and cursors only. |
 | `settings` | Inspect and validate settings. | Nix-managed installs reject CLI edits; change deployment configuration instead. |
 | `recover-local-state` | Inspect, quarantine/reinitialize, or roll back damaged state. | Default is read-only; mutation requires the exact approval flag and must be operator-reviewed. `bundle reinitialize` also requires `--accept-unsynced-loss`, which acknowledges that unsynced local state is discarded. |
@@ -25,6 +25,8 @@ command arguments. The CLI intentionally rejects many such carriers. Where a
 notes command accepts a query or content, it requires bounded standard input;
 where it can mutate state, it additionally requires the documented approval
 flag.
+
+Two notes commands take an exact note path as an ordinary argument: `nookctl notes locked-note-proof --path <path>` and `nookctl notes path-diagnostic --path <path>`. The path is visible in the process arguments, so use them only with canary or diagnostic paths. `locked-note-proof` also requires `NOOKBRIDGE_ENABLE_LIVE_SYNC=1`.
 
 ## Production wrappers
 
