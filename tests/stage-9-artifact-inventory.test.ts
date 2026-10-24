@@ -102,6 +102,13 @@ function runFixtureCli(fixture: { nodeModulesDir: string; inventoryCsv: string }
   return runCli(["--node-modules", fixture.nodeModulesDir, "--inventory", fixture.inventoryCsv]);
 }
 
+// The single owner-approved override the checker ships. The script keys it by
+// exact name@version and records the parent package as the source of the
+// licence, because the platform subpackage omits the field upstream.
+const overridePackage = { name: "sqlite-regex-linux-x64", version: "0.2.4-alpha.1" };
+const overrideProvenance =
+  "sqlite-regex@0.2.4-alpha.1 declares (MIT OR Apache-2.0); this platform subpackage omits the field upstream";
+
 describe("Stage 9 artifact dependency inventory", () => {
   it("accepts an inventory that matches the shipped tree", async () => {
     const fixture = createFixture();
@@ -185,6 +192,124 @@ describe("Stage 9 artifact dependency inventory", () => {
     expect(cli.status).toBe(1);
     expect(cli.stdout).toContain("unlicensed:");
     expect(cli.stdout).toContain("c@3.0.0");
+  });
+
+  it("records an owner-approved override for a package that ships no license", async () => {
+    const fixture = createFixture();
+    writePackage(fixture.nodeModulesDir, overridePackage.name, overridePackage.version, undefined);
+    writeInventory(fixture.inventoryCsv, [
+      ...completeRows(),
+      { ...overridePackage, license: "MIT OR Apache-2.0" },
+    ]);
+
+    const result = await verifyArtifactInventory({
+      nodeModulesDir: fixture.nodeModulesDir,
+      inventoryCsv: fixture.inventoryCsv,
+    });
+
+    expect(result).toEqual({ ok: true, missing: [], extra: [], unlicensed: [] });
+
+    const cli = runFixtureCli(fixture);
+    expect(cli.status).toBe(0);
+    expect(cli.stderr).toBe("");
+    // The audit trail names the applied override, its source, and its approval
+    // date, and the success line keeps its exact shape.
+    expect(cli.stdout).toBe(
+      [
+        "license overrides applied (1):",
+        `  ${overridePackage.name}@${overridePackage.version} -> MIT OR Apache-2.0`,
+        `    source: ${overrideProvenance}`,
+        "    approved: 2026-10-24",
+        "artifact inventory ok (5 packages)",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("still reports packages with no license and no override as unlicensed", async () => {
+    const fixture = createFixture();
+    writePackage(fixture.nodeModulesDir, "e", "5.0.0", undefined);
+    // Same name as the override, different version: the table is keyed by the
+    // exact name@version, so a near miss must not inherit the exception.
+    writePackage(fixture.nodeModulesDir, overridePackage.name, "0.2.4-alpha.2", undefined);
+    writeInventory(fixture.inventoryCsv, [
+      ...completeRows(),
+      { name: "e", version: "5.0.0", license: "MIT" },
+      { name: overridePackage.name, version: "0.2.4-alpha.2", license: "MIT" },
+    ]);
+
+    const result = await verifyArtifactInventory({
+      nodeModulesDir: fixture.nodeModulesDir,
+      inventoryCsv: fixture.inventoryCsv,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual([]);
+    expect(result.extra).toEqual([]);
+    expect(result.unlicensed).toEqual(["e@5.0.0", "sqlite-regex-linux-x64@0.2.4-alpha.2"]);
+
+    const cli = runFixtureCli(fixture);
+    expect(cli.status).toBe(1);
+    expect(cli.stdout).toContain("unlicensed:");
+    expect(cli.stdout).toContain("  e@5.0.0\n");
+    expect(cli.stdout).toContain("  sqlite-regex-linux-x64@0.2.4-alpha.2\n");
+    expect(cli.stdout).not.toContain("license overrides applied");
+    expect(cli.stdout).not.toContain("artifact inventory ok");
+  });
+
+  it("does not mask a package that declares its own license", async () => {
+    const fixture = createFixture();
+    writePackage(
+      fixture.nodeModulesDir,
+      overridePackage.name,
+      overridePackage.version,
+      "GPL-3.0-only",
+    );
+    writeInventory(fixture.inventoryCsv, [
+      ...completeRows(),
+      { ...overridePackage, license: "GPL-3.0-only" },
+    ]);
+
+    const result = await verifyArtifactInventory({
+      nodeModulesDir: fixture.nodeModulesDir,
+      inventoryCsv: fixture.inventoryCsv,
+    });
+
+    expect(result).toEqual({ ok: true, missing: [], extra: [], unlicensed: [] });
+
+    const cli = runFixtureCli(fixture);
+    expect(cli.status).toBe(0);
+    // The declared licence wins: no override is applied or reported for a
+    // package that states terms of its own.
+    expect(cli.stdout).toBe("artifact inventory ok (5 packages)\n");
+    expect(cli.stdout).not.toContain("MIT OR Apache-2.0");
+    expect(cli.stdout).not.toContain("license overrides applied");
+  });
+
+  it("keeps applied overrides auditable when the run fails for another reason", () => {
+    const fixture = createFixture();
+    writePackage(fixture.nodeModulesDir, overridePackage.name, overridePackage.version, undefined);
+    writePackage(fixture.nodeModulesDir, "e", "5.0.0", undefined);
+    writeInventory(fixture.inventoryCsv, [
+      ...completeRows(),
+      { ...overridePackage, license: "MIT OR Apache-2.0" },
+      { name: "e", version: "5.0.0", license: "MIT" },
+    ]);
+
+    const cli = runFixtureCli(fixture);
+
+    expect(cli.status).toBe(1);
+    expect(cli.stdout).toContain("unlicensed 1)");
+    expect(cli.stdout).toContain("license overrides applied (1):");
+    expect(cli.stdout).toContain(
+      `  ${overridePackage.name}@${overridePackage.version} -> MIT OR Apache-2.0`,
+    );
+    expect(cli.stdout).toContain(`    source: ${overrideProvenance}`);
+    expect(cli.stdout).toContain("    approved: 2026-10-24");
+    // The overridden package is audited above, not hidden in the failure lists:
+    // only the genuinely unlicensed package is reported.
+    expect(cli.stdout).toContain("unlicensed:\n  e@5.0.0\n");
+    expect(cli.stdout).not.toContain(`  ${overridePackage.name}@${overridePackage.version}\n`);
   });
 
   it("refuses a symlinked package without following it", () => {

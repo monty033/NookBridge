@@ -34,6 +34,38 @@ function usableLicense(license) {
   return undefined;
 }
 
+/**
+ * Owner-approved licence overrides for shipped packages whose published
+ * metadata carries no usable licence field.
+ *
+ * Every entry is keyed by the exact `name@version` the artifact ships, so an
+ * override can never silently span a version bump: a new release must be
+ * reviewed again. Each entry records the licence to record, where that licence
+ * comes from (provenance), and the date the repository owner approved it, so
+ * the exception stays auditable from the CLI output alone.
+ *
+ * An override is consulted only when the installed package declares no usable
+ * licence of its own. A package that states a licence always wins, so the table
+ * cannot mask different terms.
+ *
+ * To add an entry: review the upstream evidence, add the exact key, the licence
+ * string, the provenance naming the source package (including the fact that the
+ * field is missing upstream), and today's approval date. To retire an entry:
+ * delete it once upstream declares the field; the package then reports as
+ * unlicensed again if it still does not.
+ */
+const LICENSE_OVERRIDES = new Map([
+  [
+    "sqlite-regex-linux-x64@0.2.4-alpha.1",
+    Object.freeze({
+      license: "MIT OR Apache-2.0",
+      provenance:
+        "sqlite-regex@0.2.4-alpha.1 declares (MIT OR Apache-2.0); this platform subpackage omits the field upstream",
+      approvedOn: "2026-10-24",
+    }),
+  ],
+]);
+
 function lstatOrFail(path, message) {
   try {
     return lstatSync(path);
@@ -119,9 +151,15 @@ function visitPackage(packageDir, displayPath, tree) {
     `${displayPath}/package.json`,
   );
   tree.count += 1;
-  tree.packages.add(packageKey(metadata.name, metadata.version));
+  const key = packageKey(metadata.name, metadata.version);
+  tree.packages.add(key);
   if (metadata.license === undefined) {
-    tree.unlicensed.add(packageKey(metadata.name, metadata.version));
+    const override = LICENSE_OVERRIDES.get(key);
+    if (override === undefined) {
+      tree.unlicensed.add(key);
+    } else {
+      tree.overrides.set(key, override);
+    }
   }
 
   const nested = join(packageDir, "node_modules");
@@ -247,12 +285,15 @@ function inspectArtifact({ nodeModulesDir, inventoryCsv }) {
     throw inventoryError("node_modules is not a directory");
   }
 
-  const tree = { count: 0, packages: new Set(), unlicensed: new Set() };
+  const tree = { count: 0, packages: new Set(), unlicensed: new Set(), overrides: new Map() };
   walkNodeModules(nodeModulesDir, "", tree);
 
   const missing = [...tree.packages].filter((key) => !inventory.has(key)).sort();
   const extra = [...inventory].filter((key) => !tree.packages.has(key)).sort();
   const unlicensed = [...tree.unlicensed].sort();
+  const overrides = [...tree.overrides]
+    .map(([key, override]) => ({ key, ...override }))
+    .sort((left, right) => left.key.localeCompare(right.key));
 
   return {
     result: {
@@ -262,6 +303,7 @@ function inspectArtifact({ nodeModulesDir, inventoryCsv }) {
       unlicensed,
     },
     total: tree.count,
+    overrides,
   };
 }
 
@@ -274,15 +316,31 @@ function inspectArtifact({ nodeModulesDir, inventoryCsv }) {
  * not ship must not appear in release evidence. Symlinks are refused rather
  * than followed so a packaging mistake cannot pull an out-of-tree package into
  * the comparison.
+ *
+ * A package with no licence of its own is reported in `unlicensed` unless an
+ * owner-approved override covers its exact `name@version`; those applications
+ * are audited in the CLI output rather than in this result.
  */
 export function verifyArtifactInventory({ nodeModulesDir, inventoryCsv }) {
   const { result } = inspectArtifact({ nodeModulesDir, inventoryCsv });
   return result;
 }
 
-function formatFailure(result) {
+function formatOverrides(overrides) {
+  if (overrides.length === 0) return [];
+  const lines = [`license overrides applied (${overrides.length}):`];
+  for (const override of overrides) {
+    lines.push(`  ${override.key} -> ${override.license}`);
+    lines.push(`    source: ${override.provenance}`);
+    lines.push(`    approved: ${override.approvedOn}`);
+  }
+  return lines;
+}
+
+function formatFailure(result, overrides) {
   const lines = [
     `artifact inventory mismatch (missing ${result.missing.length}, extra ${result.extra.length}, unlicensed ${result.unlicensed.length})`,
+    ...formatOverrides(overrides),
   ];
   for (const [label, entries] of [
     ["missing", result.missing],
@@ -329,12 +387,15 @@ function parseArguments(argv) {
 function runCli(argv) {
   try {
     const options = parseArguments(argv);
-    const { result, total } = inspectArtifact(options);
+    const { result, total, overrides } = inspectArtifact(options);
     if (result.ok) {
+      // Applied overrides print before the success line so the exception stays
+      // auditable in release logs, while the success line keeps its exact shape.
+      for (const line of formatOverrides(overrides)) console.log(line);
       console.log(`artifact inventory ok (${total} packages)`);
       return 0;
     }
-    for (const line of formatFailure(result)) console.log(line);
+    for (const line of formatFailure(result, overrides)) console.log(line);
     return 1;
   } catch (error) {
     // Error messages are deliberately categorical: release logs carry package
