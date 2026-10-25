@@ -31,19 +31,34 @@ function attempt(envelope: unknown): { threw: boolean; stringifyCalls: number } 
   let threw = false;
   try {
     protocol.serializeRpcResponse(envelope as never);
-  } catch {
+  } catch (error) {
+    // Only the size rejection counts as a refusal; any other protocol or
+    // validation error is a broken fixture and must fail loudly.
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/response (field )?exceeds maximum response bytes/.test(message)) throw error;
     threw = true;
   }
   return { threw, stringifyCalls: calls - before };
 }
 
 const quote = '"'.repeat(256);
-const notebook = { id: quote, title: quote, dateCreated: 1.5e18, dateModified: 1.5e18 };
-const notebooks = (n: number) => ({
-  id: "iiiiiiiiii",
+/** 24-byte rendering of a finite non-negative double (17 digits at exponent -6). */
+const WIDE_NUMBER = 0.0000012345678901234567;
+const notebooksOf = (n: number, requestId: string, timestamp: number) => ({
+  id: requestId,
   ok: true,
-  result: { kind: "notebooks", notebooks: Array.from({ length: n }, () => ({ ...notebook })) },
+  result: {
+    kind: "notebooks",
+    notebooks: Array.from({ length: n }, () => ({
+      id: quote,
+      title: quote,
+      dateCreated: timestamp,
+      dateModified: timestamp,
+    })),
+  },
 });
+const notebooks = (n: number) => notebooksOf(n, "iiiiiiiiii", 1.5e18);
+const notebooksWide = (n: number) => notebooksOf(n, "r".repeat(282), WIDE_NUMBER);
 const operatorPage = (n: number) => ({
   id: "iiiiiiiiii",
   ok: true,
@@ -105,6 +120,26 @@ describe("preflight refuses before JSON.stringify (patched before import)", () =
 
   it("notebooks: every count serializes or is refused pre-stringify", () => {
     expect(sweep((n) => notebooks(n), 64)).toBe(58);
+  });
+
+  it("notebooks with 24-byte timestamps: 58 would overflow after stringify, so it is refused before", () => {
+    expect(String(WIDE_NUMBER)).toHaveLength(24);
+    expect(attempt(notebooksWide(58))).toEqual({ threw: true, stringifyCalls: 0 });
+    expect(attempt(notebooksWide(57))).toEqual({ threw: false, stringifyCalls: 1 });
+    expect(sweep((n) => notebooksWide(n), 64)).toBe(57);
+  });
+
+  it("edit and undo results (hard-coded appliedFields) still serialize", () => {
+    for (const kind of ["edit", "undo"] as const) {
+      const result = {
+        kind,
+        id: "n1",
+        appliedFields: ["content"],
+        revision: "rev_0123456789abcdef0123456789abcdef",
+        contentBytes: 1,
+      };
+      expect(attempt({ id: "x", ok: true, result })).toEqual({ threw: false, stringifyCalls: 1 });
+    }
   });
 
   it("operator page: every count serializes or is refused pre-stringify", () => {

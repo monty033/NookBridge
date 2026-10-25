@@ -1017,7 +1017,8 @@ type PreflightSum = { n: number; s: number };
  * Upper bound on the fixed envelope around an array-bearing result, beyond
  * the string fields and per-item structure:
  * `{"id":"","ok":true,"result":{"kind":"operation-list","handles":[],"unresolvedHandles":[]}}`
- * is the longest at about 90 bytes; operator-page adds `"next":null`.
+ * is about 90 bytes; the measured fixed envelopes across all array-bearing
+ * kinds (`update` is the longest at 93) are 57 to 93 bytes, all within 160.
  */
 const PREFLIGHT_ARRAY_ENVELOPE_BYTES = 160;
 
@@ -1028,17 +1029,19 @@ const PREFLIGHT_ARRAY_ENVELOPE_BYTES = 160;
  *
  *   - search hit `{"title":""},`                       = 13
  *   - notebook `{"id":"","title":"","dateCreated":N,"dateModified":N},`
- *     = 52 fixed + two numbers of at most 23 bytes
- *     (`1.7976931348623157e+308`, the longest finite JS number)  = 98
+ *     = 52 fixed + two numbers of at most 24 bytes each: a finite
+ *     non-negative double renders as `1.7976931348623157e+308` (23 bytes)
+ *     or, in fixed notation, 17 significant digits at exponent -6, e.g.
+ *     `0.0000012345678901234567` (24 bytes)                      = 100
  *   - operator page note `{"handle":"","label":"","bytes":N},` = 38 fixed
- *     + a byte count that equals `label` UTF-8 bytes (at most 768, three
- *     digits), bounded here at 5 digits                         = 43
+ *     + a byte count that equals `label` UTF-8 bytes (at most
+ *     `maxTitleBytes` = 256, three digits), bounded here at 5 digits = 43
  *   - handle `"",`                                           = 3
  *   - applied field `"notebookId",` (longest allowlisted name)  = 13
  */
 const PREFLIGHT_ITEM_STRUCTURE_BYTES = objectFreeze({
   searchHit: 13,
-  notebook: 98,
+  notebook: 100,
   operatorPageNote: 43,
   handle: 3,
   appliedField: 13,
@@ -2634,6 +2637,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       };
       resultPayload.kind = "edit";
       resultPayload.id = noteId;
+      preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.appliedField);
       resultPayload.appliedFields = ["content"];
       resultPayload.revision = revision;
       resultPayload.contentBytes = contentBytes;
@@ -2690,6 +2694,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       };
       resultPayload.kind = "undo";
       if (noteId !== undefined) resultPayload.id = noteId;
+      preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.appliedField);
       resultPayload.appliedFields = ["content"];
       resultPayload.revision = revision;
       resultPayload.contentBytes = contentBytes;
