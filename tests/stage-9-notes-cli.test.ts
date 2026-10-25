@@ -1220,6 +1220,51 @@ describe("formatNotesResult — closed output boundary", () => {
     expect(output).not.toContain("secret title");
   });
 
+  it("prints the opaque cursor directly after `next: available`", () => {
+    // Without this line the operator can see that another page exists but
+    // has no value to pass to `--cursor`, so page two is unreachable.
+    const output = formatNotesResult({
+      kind: "page",
+      notes: [{ handle: "hnd_ok_12345678", label: "secret title", bytes: 12 }],
+      next: "crs_ok_12345678",
+    });
+    const lines = output.split("\n");
+    const nextIndex = lines.indexOf("next: available");
+    expect(nextIndex).toBeGreaterThanOrEqual(0);
+    expect(lines[nextIndex + 1]).toBe("cursor: crs_ok_12345678");
+    expect(output).not.toContain("secret title");
+  });
+
+  it("prints no cursor line when there is no further page", () => {
+    const output = formatNotesResult({ kind: "page", notes: [], next: null });
+    expect(output).toContain("next: none");
+    expect(output.split("\n").some((line) => line.startsWith("cursor:"))).toBe(false);
+  });
+
+  it("keeps the error path for a cursor that fails validation", () => {
+    const output = formatNotesResult({ kind: "page", notes: [], next: "/etc/passwd" });
+    expect(output).toBe("nookctl notes: error\n");
+    expect(output).not.toContain("cursor:");
+  });
+
+  it("reads the cursor accessor exactly once", () => {
+    // A getter that passes the bound check and then changes would let an
+    // unbounded value through if the formatter read it again for output.
+    let reads = 0;
+    const page = {
+      kind: "page" as const,
+      notes: [],
+      get next(): string {
+        reads += 1;
+        return reads === 1 ? "crs_ok_12345678" : "/etc/passwd";
+      },
+    };
+    const output = formatNotesResult(page);
+    expect(reads).toBe(1);
+    expect(output).toContain("cursor: crs_ok_12345678");
+    expect(output).not.toContain("/etc/passwd");
+  });
+
   it("reports an empty result set as empty rather than as an error", () => {
     // `empty` is a declared variant of NotesCategoricalResult and the page
     // mapper emits it whenever the daemon returns no rows.  With no formatter

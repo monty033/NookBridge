@@ -265,6 +265,70 @@ describe("tree runner and dispatcher", () => {
 });
 
 describe("tree formatter", () => {
+  it("prints the opaque cursor directly after `next: available`", () => {
+    const output = formatTreeResult({
+      kind: "page",
+      entries: [
+        {
+          handle: "st_0123456789abcdef",
+          kind: "state-root",
+          label: "state-root",
+          mode: "directory",
+          owner: "owner",
+          sizeClass: "bounded",
+          childCount: 0,
+        },
+      ],
+      next: "crs_0123456789abcdef",
+    });
+    const lines = output.split("\n");
+    const nextIndex = lines.indexOf("next: available");
+    expect(nextIndex).toBeGreaterThanOrEqual(0);
+    expect(lines[nextIndex + 1]).toBe("cursor: crs_0123456789abcdef");
+  });
+
+  it("prints no cursor line when there is no further page", () => {
+    const output = formatTreeResult({
+      kind: "page",
+      entries: [
+        {
+          handle: "st_0123456789abcdef",
+          kind: "state-root",
+          label: "state-root",
+          mode: "directory",
+          owner: "owner",
+          sizeClass: "bounded",
+          childCount: 0,
+        },
+      ],
+      next: null,
+    });
+    expect(output).toContain("next: none");
+    expect(output.split("\n").some((line) => line.startsWith("cursor:"))).toBe(false);
+  });
+
+  it("keeps the error path for a cursor that fails validation", () => {
+    const output = formatTreeResult({ kind: "page", entries: [], next: "/etc/passwd" });
+    expect(output).toBe("nookctl tree: error\n");
+    expect(output).not.toContain("cursor:");
+  });
+
+  it("reads the cursor accessor exactly once", () => {
+    let reads = 0;
+    const page = {
+      kind: "page" as const,
+      entries: [],
+      get next(): string {
+        reads += 1;
+        return reads === 1 ? "crs_0123456789abcdef" : "/etc/passwd";
+      },
+    };
+    const output = formatTreeResult(page);
+    expect(reads).toBe(1);
+    expect(output).toContain("cursor: crs_0123456789abcdef");
+    expect(output).not.toContain("/etc/passwd");
+  });
+
   it("collapses malformed or sensitive records to categorical error", () => {
     expect(
       formatTreeResult({

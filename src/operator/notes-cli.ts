@@ -502,6 +502,10 @@ export function formatNotesResult(
       case "help":
         return formatNotesHelp();
       case "page": {
+        // Read the accessor once: validation and output must see the same
+        // value, or a getter could pass the bound check and then emit
+        // something unbounded.
+        const next = result.next;
         if (
           !Array.isArray(result.notes) ||
           result.notes.length > 100 ||
@@ -509,7 +513,7 @@ export function formatNotesResult(
             (note) =>
               note !== null && typeof note === "object" && isBoundedOpaqueValue(note.handle),
           ) ||
-          (result.next !== null && !isBoundedOpaqueValue(result.next))
+          (next !== null && !isBoundedOpaqueValue(next))
         ) {
           return "nookctl notes: error\n";
         }
@@ -517,7 +521,8 @@ export function formatNotesResult(
           "nookctl notes: page",
           `count: ${result.notes.length}`,
           ...result.notes.map((note) => `handle: ${note.handle}`),
-          `next: ${result.next === null ? "none" : "available"}`,
+          `next: ${next === null ? "none" : "available"}`,
+          ...(next === null ? [] : [`cursor: ${next}`]),
           "",
         ].join("\n");
       }

@@ -229,20 +229,24 @@ export function formatTreeResult(result: TreeResult): string {
     switch (result.kind) {
       case "help":
         return result.text;
-      case "page":
+      case "page": {
+        // Read the accessor once so validation and output agree.
+        const next = result.next;
         if (
           result.entries.length > TREE_LIST_MAX_LIMIT ||
           !result.entries.every(validEntry) ||
-          (result.next !== null && !isTreeCursor(result.next))
+          (next !== null && !isTreeCursor(next))
         )
           return "nookctl tree: error\n";
         return [
           "nookctl tree: page",
           `count: ${result.entries.length}`,
           ...result.entries.map(formatEntry),
-          `next: ${result.next === null ? "none" : "available"}`,
+          `next: ${next === null ? "none" : "available"}`,
+          ...(next === null ? [] : [`cursor: ${next}`]),
           "",
         ].join("\n");
+      }
       case "empty":
         return "nookctl tree: empty\n";
       case "denied":
