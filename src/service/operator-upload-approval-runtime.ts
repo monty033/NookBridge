@@ -29,7 +29,6 @@ export type OperatorUploadApprovalCoordinator = Pick<
 >;
 
 export interface OperatorUploadApprovalRuntime {
-  readonly blockingSummary: (peer: OperatorPeer) => Promise<SyncBlockingSummary>;
   readonly approveUpload: (
     params: RpcOperatorApproveUploadParams,
     peer: OperatorPeer,
@@ -50,14 +49,6 @@ export function createOperatorUploadApprovalRuntime(
   }
 
   return Object.freeze({
-    blockingSummary: async (peer: OperatorPeer): Promise<SyncBlockingSummary> => {
-      requirePeer(peer);
-      try {
-        return coordinator.blockingSummary();
-      } catch {
-        throw new OperatorWriteError("service_unavailable");
-      }
-    },
     approveUpload: async (
       params: RpcOperatorApproveUploadParams,
       peer: OperatorPeer,
@@ -115,8 +106,8 @@ function toPreviewResult(result: SyncBlockingSummary): RpcNotesApproveUploadPrev
     typeof result !== "object" ||
     !Number.isSafeInteger(result.total) ||
     result.total < 0 ||
-    result.highestSequence !== null &&
-      (!Number.isSafeInteger(result.highestSequence) || result.highestSequence < 1)
+    (result.highestSequence !== null &&
+      (!Number.isSafeInteger(result.highestSequence) || result.highestSequence < 1))
   ) {
     throw new OperatorWriteError("service_unavailable");
   }

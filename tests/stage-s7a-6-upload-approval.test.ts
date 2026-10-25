@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { createLiveRemoteSyncExecutor } from "../src/core/notesnook-live-remote-sync.js";
+import { createNotesnookLocalWriteComposition } from "../src/core/notesnook-write-composition.js";
 import {
   SyncCoordinator,
   type SyncLocalCommit,
@@ -31,7 +32,14 @@ import {
 import { createNotesCommandRuntimeFromOperatorSocket } from "../src/operator/notes-production-runtime.js";
 import { createOperatorAuthorizer } from "../src/service/operator-authorizer.js";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
+import {
+  createOperatorWriteRuntime,
+  type OperatorOperationStore,
+  type OperatorStoredContent,
+  type OperatorWriteSource,
+} from "../src/service/notes-operator-write-runtime.js";
 import { createOperatorUploadApprovalRuntime } from "../src/service/operator-upload-approval-runtime.js";
+import type { OperationRecord, OperationState } from "../src/service/notes-undo-store.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
@@ -72,6 +80,93 @@ function harness(store: ReturnType<typeof jsonStore> = jsonStore()) {
       minIntervalMs: 0,
     });
   return { start, store, build, coordinator: build() };
+}
+
+function operatorRuntime(coordinator: SyncCoordinator) {
+  const handle = `op_${"b".repeat(64)}`;
+  let revision = `rev_${"a".repeat(32)}`;
+  let content: OperatorStoredContent = {
+    type: "tiptap",
+    data: '<div data-type="document"><p>before</p></div>',
+  };
+  const composition = createNotesnookLocalWriteComposition({
+    adapter: {
+      createNote: async () => ({}) as never,
+      appendNote: async () => ({}) as never,
+      updateNote: async (command: { readonly id: string }) => ({
+        operation: "update" as const,
+        id: command.id,
+        appliedFields: ["storedContent" as const],
+        localCommitted: true as const,
+        remoteSynced: false as const,
+        pendingSync: true as const,
+      }),
+    } as never,
+    coordinator,
+    origin: "operator",
+  });
+  const source: OperatorWriteSource = {
+    read: async (noteId) =>
+      noteId === "note-a" ? { revision, content: { ...content } } : undefined,
+    update: async (command) => {
+      if (command.noteId !== "note-a" || command.expectedRevision !== revision) {
+        return { kind: "conflict" as const };
+      }
+      await composition.updateNote({
+        id: command.noteId,
+        expectedRevision: command.expectedRevision as never,
+        patch: { storedContent: command.content },
+      });
+      content = { ...command.content };
+      revision = revision.endsWith("a".repeat(32))
+        ? `rev_${"c".repeat(32)}`
+        : `rev_${"d".repeat(32)}`;
+      return { kind: "updated" as const, revision };
+    },
+  };
+  let record: OperationRecord | undefined;
+  const store: OperatorOperationStore = {
+    insert: async (input) => {
+      const next: OperationRecord = {
+        handle,
+        kind: input.kind,
+        payload: input.payload,
+        state: "prepared",
+        createdAt: 1,
+        expiresAt: 60_001,
+      };
+      record = next;
+      return next;
+    },
+    get: async (requested) => {
+      if (record === undefined || requested !== handle) throw new Error("not found");
+      return record;
+    },
+    list: async () => (record === undefined ? [] : [record]),
+    transition: async (
+      requested,
+      expected: OperationState,
+      next: OperationState,
+      payload?: string,
+    ) => {
+      if (record === undefined || requested !== handle || record.state !== expected) {
+        throw new Error("conflict");
+      }
+      const updated = { ...record, state: next, ...(payload === undefined ? {} : { payload }) };
+      record = updated;
+      return updated;
+    },
+  };
+  return {
+    runtime: createOperatorWriteRuntime({
+      source,
+      store,
+      resolveHandle: (noteHandle) => (noteHandle === "h_note-a" ? "note-a" : undefined),
+      now: () => 1,
+      ttlMs: 60_000,
+    }),
+    handle,
+  };
 }
 
 function codeOf(fn: () => unknown): string {
@@ -212,6 +307,21 @@ describe("S7a-6a upload approval", () => {
       coordinator.recordLocalCommit(commit("update", "sentinel-note-id", "operator"));
       expect(JSON.stringify(coordinator.blockingSummary())).not.toContain("sentinel-note-id");
     });
+
+    it("1/F1: rejects a replay bound above the current queue, while the current bound approves", () => {
+      const { coordinator } = harness();
+      coordinator.recordLocalCommit(commit("update", "note-a", "operator"));
+
+      expect(codeOf(() => coordinator.approvePending({ throughSequence: 2 }))).toBe(
+        "invalid_input",
+      );
+      expect(coordinator.snapshot().pending[0]?.approved).toBeUndefined();
+
+      expect(coordinator.approvePending({ throughSequence: 1 })).toEqual({
+        approved: 1,
+        throughSequence: 1,
+      });
+    });
   });
 
   describe("row 2: markers above N stay unapproved", () => {
@@ -289,6 +399,102 @@ describe("S7a-6a upload approval", () => {
         [2, undefined],
       ]);
       expect(coordinator.blockingSummary()).toMatchObject({ total: 1, highestSequence: 2 });
+    });
+
+    it.each(["update", "append"] as const)(
+      "3/F2: recordIntent with the same %s operation and note supersedes approval",
+      (operation) => {
+        const { coordinator } = harness();
+        coordinator.recordLocalCommit(commit(operation, "note-a", "operator"));
+        const first = coordinator.snapshot().pending[0];
+        expect(first).toBeDefined();
+        coordinator.approvePending({ throughSequence: first?.sequence ?? 0 });
+
+        const second = coordinator.recordIntent({
+          operation,
+          noteId: "note-a",
+          origin: "mcp",
+        });
+
+        expect(second).toMatchObject({ operation, noteId: "note-a", origin: "operator" });
+        expect(second.approved).toBeUndefined();
+        expect(second.sequence).toBeGreaterThan(first?.sequence ?? 0);
+        expect(coordinator.snapshot().pending).toEqual([
+          expect.objectContaining({
+            operation,
+            noteId: "note-a",
+            origin: "operator",
+            approved: true,
+          }),
+          expect.objectContaining({
+            operation,
+            noteId: "note-a",
+            origin: "operator",
+          }),
+        ]);
+
+        coordinator.recordLocalCommit(commit(operation, "note-a", "mcp"));
+        const [committed] = coordinator.snapshot().pending;
+        expect(committed?.sequence).toBeGreaterThan(second.sequence);
+        expect(committed?.approved).toBeUndefined();
+      },
+    );
+
+    it("3/F2: the apply-edit commit path supersedes an approved marker", async () => {
+      const { coordinator } = harness();
+      const { runtime } = operatorRuntime(coordinator);
+      const initial = await runtime.editPreimage({ id: "h_note-a" }, OPERATOR_PEER);
+      const first = await runtime.applyEdit(
+        {
+          id: "h_note-a",
+          expectedRevision: `rev_${"a".repeat(32)}`,
+          markdown: initial.markdown.replace("before", "after"),
+        },
+        OPERATOR_PEER,
+      );
+      expect(first.kind).toBe("edit");
+      const approvedSequence = coordinator.snapshot().pending[0]?.sequence ?? 0;
+      coordinator.approvePending({ throughSequence: approvedSequence });
+
+      const preimage = await runtime.editPreimage({ id: "h_note-a" }, OPERATOR_PEER);
+      await runtime.applyEdit(
+        {
+          id: "h_note-a",
+          expectedRevision: `rev_${"c".repeat(32)}`,
+          markdown: preimage.markdown.replace("after", "after-again"),
+        },
+        OPERATOR_PEER,
+      );
+
+      const [marker] = coordinator.snapshot().pending;
+      expect(marker?.sequence).toBeGreaterThan(approvedSequence);
+      expect(marker?.approved).toBeUndefined();
+      expect(coordinator.blockingSummary()).toMatchObject({ total: 1 });
+    });
+
+    it("3/F2: the apply-undo commit path supersedes an approved marker", async () => {
+      const { coordinator } = harness();
+      const { runtime, handle } = operatorRuntime(coordinator);
+      const initial = await runtime.editPreimage({ id: "h_note-a" }, OPERATOR_PEER);
+      const first = await runtime.applyEdit(
+        {
+          id: "h_note-a",
+          expectedRevision: `rev_${"a".repeat(32)}`,
+          markdown: initial.markdown.replace("before", "after"),
+        },
+        OPERATOR_PEER,
+      );
+      expect(first.kind).toBe("edit");
+      const approvedSequence = coordinator.snapshot().pending[0]?.sequence ?? 0;
+      coordinator.approvePending({ throughSequence: approvedSequence });
+
+      const undone = await runtime.applyUndo({ operationHandle: handle }, OPERATOR_PEER);
+      expect(undone.kind).toBe("undo");
+
+      const [marker] = coordinator.snapshot().pending;
+      expect(marker?.sequence).toBeGreaterThan(approvedSequence);
+      expect(marker?.approved).toBeUndefined();
+      expect(coordinator.blockingSummary()).toMatchObject({ total: 1 });
     });
 
     it("3: resolving a create intent writes a fresh, unapproved marker", async () => {
@@ -475,18 +681,20 @@ describe("S7a-6a upload approval", () => {
 
   describe("row 9: approval is not an MCP method", () => {
     it("9: the MCP RPC handler refuses notes.approve-upload with invalid_request", async () => {
-      const request = {
-        id: "mcp-approval",
-        method: "notes.approve-upload",
-        params: { throughSequence: 1 },
-      } as RpcRequest;
-      const response = await handleRpcRequest(
-        request,
-        { requestSync: async () => ({ status: "synced", pendingSync: false, attempts: 1 }) } as never,
-        createReadWriteNoDeleteServicePolicy(),
-      );
+      for (const [id, params] of [
+        ["mcp-approval", { throughSequence: 1 }],
+        ["mcp-approval-preview", {}],
+      ] as const) {
+        const response = await handleRpcRequest(
+          { id, method: "notes.approve-upload", params } as RpcRequest,
+          {
+            requestSync: async () => ({ status: "synced", pendingSync: false, attempts: 1 }),
+          } as never,
+          createReadWriteNoDeleteServicePolicy(),
+        );
 
-      expect(response).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+        expect(response).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+      }
     });
   });
 
@@ -506,6 +714,15 @@ describe("S7a-6a upload approval", () => {
       });
       expect(result).toEqual({ kind: "invalid-input" });
       expect(factory).not.toHaveBeenCalled();
+
+      const unseen = await runNotesCommand({
+        argv: ["approve-upload"],
+        env: {},
+        createRuntime: factory,
+        interactive: { tty: true, confirmUpload: async () => "7" },
+      });
+      expect(unseen).toEqual({ kind: "invalid-input" });
+      expect(factory).not.toHaveBeenCalled();
     });
 
     it("10: confirms only when the typed sequence exactly matches the listing", async () => {
@@ -524,7 +741,11 @@ describe("S7a-6a upload approval", () => {
         argv: ["approve-upload"],
         env: {},
         createRuntime: factory,
-        interactive: { tty: true, confirmUpload: async () => "6" },
+        interactive: {
+          tty: true,
+          showUploadSummary: () => undefined,
+          confirmUpload: async () => "6",
+        },
       });
       expect(wrong).toEqual({ kind: "invalid-input" });
       expect(approveUpload).not.toHaveBeenCalled();
@@ -537,7 +758,7 @@ describe("S7a-6a upload approval", () => {
         argv: ["approve-upload"],
         env: {},
         createRuntime: factory,
-        interactive: { tty: true, confirmUpload },
+        interactive: { tty: true, showUploadSummary: () => undefined, confirmUpload },
       });
       expect(right).toEqual({ kind: "approved", approved: 2, throughSequence: 7 });
       expect(approveUpload).toHaveBeenCalledWith({ throughSequence: 7 });
@@ -566,12 +787,33 @@ describe("S7a-6a upload approval", () => {
         argv: ["approve-upload"],
         env: {},
         createRuntime: async () => runtime,
-        interactive: { tty: true, confirmUpload },
+        interactive: { tty: true, showUploadSummary: () => undefined, confirmUpload },
       });
 
       expect(result).toEqual({ kind: "nothing-to-approve" });
       expect(confirmUpload).not.toHaveBeenCalled();
       expect(calls).toEqual([{ method: "notes.approve-upload", params: {} }]);
+    });
+
+    it("10/nit: a refused preview maps to the same denied category as approval", async () => {
+      const confirmUpload = vi.fn(async () => "7");
+      const runtime = createNotesCommandRuntimeFromOperatorSocket({
+        request: async () => ({ ok: false as const, code: "permission_denied" as const }),
+      });
+
+      const result = await runNotesCommand({
+        argv: ["approve-upload"],
+        env: {},
+        createRuntime: async () => runtime,
+        interactive: {
+          tty: true,
+          showUploadSummary: () => undefined,
+          confirmUpload,
+        },
+      });
+
+      expect(result).toEqual({ kind: "denied" });
+      expect(confirmUpload).not.toHaveBeenCalled();
     });
   });
 
@@ -600,20 +842,15 @@ describe("S7a-6a upload approval", () => {
         argv: ["approve-upload"],
         env: {},
         createRuntime: async () => runtime,
-        interactive: { tty: true, confirmUpload: confirmation },
+        interactive: {
+          tty: true,
+          showUploadSummary: () => undefined,
+          confirmUpload: confirmation,
+        },
       });
       const output = formatNotesResult(result);
-      const auditRecord = JSON.stringify({
-        method: "notes.approve-upload",
-        outcome: result.kind,
-        approved: result.kind === "approved" ? result.approved : undefined,
-        throughSequence: result.kind === "approved" ? result.throughSequence : undefined,
-      });
-
       expect(output).not.toContain(sentinelId);
       expect(output).not.toContain(sentinelTitle);
-      expect(auditRecord).not.toContain(sentinelId);
-      expect(auditRecord).not.toContain(sentinelTitle);
     });
   });
 
@@ -668,7 +905,11 @@ describe("S7a-6a upload approval", () => {
         argv: ["approve-upload"],
         env: {},
         createRuntime: async () => runtime,
-        interactive: { tty: true, confirmUpload: async () => "1" },
+        interactive: {
+          tty: true,
+          showUploadSummary: () => undefined,
+          confirmUpload: async () => "1",
+        },
       });
 
       expect(result).toEqual({ kind: "approved", approved: 1, throughSequence: 1 });
@@ -685,7 +926,6 @@ describe("S7a-6a upload approval", () => {
       const mcp = readRepositoryFile("docs/reference/mcp-tools.md");
       const privacy = readRepositoryFile("docs/security-and-privacy.md");
       const plan = readRepositoryFile("docs/implementation-plan-v1.5.md");
-      const docsTests = readRepositoryFile("tests/docs.test.ts");
 
       expect(cli).toContain(
         "`nookctl notes approve-upload` accepts no arguments. It refuses when stdin or\nstdout is not a terminal, or when the typed confirmation does not exactly match\nthe highest sequence shown in its metadata-only listing.",
@@ -694,7 +934,7 @@ describe("S7a-6a upload approval", () => {
         "`nookctl notes approve-upload` first requests a read-only preview over the\noperator socket; an empty preview prints `nothing to approve` and never prompts\nor submits an approval.",
       );
       expect(mcp).toContain(
-        "Only the interactive operator CLI can approve those markers; MCP has no approval method.",
+        "Any operator-role client on the daemon's operator socket may approve those markers; MCP has no approval method, and only the CLI requires a terminal.",
       );
       expect(privacy).toContain(
         "The listing,\nconfirmation, result, and audit record contain no note identifiers, titles, or\npaths. MCP has no approval method.",
@@ -702,9 +942,6 @@ describe("S7a-6a upload approval", () => {
       expect(plan).toContain("### Decision 5 — operator upload approval");
       expect(plan).not.toContain("### Pending decision");
       expect(plan).toContain("The former\nstatement that operator-origin writes had **no approval path** is therefore\nresolved");
-      expect(docsTests).toContain('not.toContain("uploadIntent")');
-      expect(docsTests).toContain('not.toMatch(/notes\\.approve(?!-upload)/)');
-      expect(docsTests).not.toContain('"--approve-upload",\n      "uploadIntent"');
     });
   });
 

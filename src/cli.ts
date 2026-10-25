@@ -107,6 +107,8 @@ type Args = {
   treeArgs?: readonly string[];
 };
 
+const MAX_UPLOAD_CONFIRMATION_BYTES = 128;
+
 function normalizeCliArgv(argv: unknown): string[] {
   if (typeof argv !== "object" || argv === null || !Array.isArray(argv)) {
     throw new Error("invalid CLI input");
@@ -528,9 +530,15 @@ async function confirmNotesUpload(
         settle(value);
       };
       readline.once("close", () => finish(undefined));
-      readline.question("Type the highest sequence number to approve: ", (value: string) =>
-        finish(value),
-      );
+      readline.question("Type the highest sequence number to approve: ", (value: string) => {
+        try {
+          finish(
+            Buffer.byteLength(value, "utf8") <= MAX_UPLOAD_CONFIRMATION_BYTES ? value : undefined,
+          );
+        } catch {
+          finish(undefined);
+        }
+      });
     });
   } catch {
     return undefined;
@@ -550,7 +558,9 @@ function printNotesUploadSummary(summary: UploadBlockingSummary): void {
       `  delete: ${summary.byOperation.delete}`,
       `  operator: ${summary.byOrigin.operator}`,
       `  unknown: ${summary.byOrigin.unknown}`,
-      `  highest sequence: ${String(summary.highestSequence)}`,
+      ...(summary.highestSequence === null
+        ? []
+        : [`  highest sequence: ${String(summary.highestSequence)}`]),
     ].join("\n") + "\n",
   );
 }

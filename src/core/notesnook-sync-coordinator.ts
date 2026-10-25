@@ -512,6 +512,11 @@ export class SyncCoordinator {
     ) {
       fail("invalid_input");
     }
+    const highestSequence = this.#pending.reduce(
+      (highest, marker) => Math.max(highest, marker.sequence),
+      0,
+    );
+    if (throughSequence > highestSequence) fail("invalid_input");
 
     let approved = 0;
     const nextPending = this.#pending.map((marker) => {

@@ -66,7 +66,7 @@ export interface NotesOperatorWriteOptions {
    */
   readonly createBody?: (markdown: string) => Promise<NotesEditorOutcome>;
   /** Test/embedded seam for the daemon's metadata-only blocking summary. */
-  readonly blockingSummary?: () => Promise<UploadBlockingSummary>;
+  readonly blockingSummary?: () => Promise<UploadBlockingSummary | NotesCategoricalResult>;
 }
 
 type NotesReadOnlySurface = Pick<
@@ -310,7 +310,7 @@ export function createNotesCommandRuntimeFromOperatorSocket(
     blockingSummary: async () => {
       if (options.blockingSummary !== undefined) return options.blockingSummary();
       const preview = await client.request("notes.approve-upload", {});
-      if (!preview.ok) throw new Error("operator upload preview failed");
+      if (!preview.ok) return mapOperatorError(preview);
       if (preview.result.kind !== "approve-upload-preview")
         throw new Error("operator upload preview response is invalid");
       return toUploadBlockingSummary(preview.result);

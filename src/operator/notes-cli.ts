@@ -370,7 +370,7 @@ export interface NotesCommandRuntime {
    */
   readonly undo: (command: { readonly operationHandle: string }) => Promise<NotesCategoricalResult>;
   /** Metadata-only blocking summary; it carries no note identifiers or titles. */
-  readonly blockingSummary?: () => Promise<UploadBlockingSummary>;
+  readonly blockingSummary?: () => Promise<UploadBlockingSummary | NotesCategoricalResult>;
   /** Apply the operator-confirmed sequence bound. */
   readonly approveUpload?: (command: {
     readonly throughSequence: number;
@@ -1263,7 +1263,8 @@ export async function runNotesCommand(
     command.kind === "approve-upload" &&
     (normalized.interactive === undefined ||
       normalized.interactive.tty !== true ||
-      typeof normalized.interactive.confirmUpload !== "function")
+      typeof normalized.interactive.confirmUpload !== "function" ||
+      typeof normalized.interactive.showUploadSummary !== "function")
   ) {
     return { kind: "invalid-input" };
   }
@@ -1332,25 +1333,30 @@ async function runApproveUpload(
   runtime: NotesCommandRuntime,
   interactive: RunNotesCommandOptions["interactive"],
 ): Promise<NotesCategoricalResult> {
+  const showUploadSummary = interactive?.showUploadSummary;
   if (
     interactive === undefined ||
     interactive.tty !== true ||
     typeof interactive.confirmUpload !== "function" ||
+    typeof showUploadSummary !== "function" ||
     typeof runtime.blockingSummary !== "function" ||
     typeof runtime.approveUpload !== "function"
   ) {
     return { kind: "invalid-input" };
   }
 
-  let summary: UploadBlockingSummary;
+  let preview: UploadBlockingSummary | NotesCategoricalResult;
   try {
-    summary = await runtime.blockingSummary();
+    preview = await runtime.blockingSummary();
   } catch {
     return { kind: "error", exitCode: 3, message: "nookctl notes: runtime error" };
   }
-  if (!isUploadBlockingSummary(summary)) return { kind: "invalid-input" };
+  if (!isUploadBlockingSummary(preview)) {
+    return isUploadApprovalError(preview) ? preview : { kind: "invalid-input" };
+  }
+  const summary = preview;
   try {
-    interactive.showUploadSummary?.(summary);
+    showUploadSummary(summary);
   } catch {
     return { kind: "invalid-input" };
   }
@@ -1370,6 +1376,30 @@ async function runApproveUpload(
     return await runtime.approveUpload({ throughSequence: summary.highestSequence });
   } catch {
     return { kind: "error", exitCode: 3, message: "nookctl notes: runtime error" };
+  }
+}
+
+function isUploadApprovalError(value: unknown): value is NotesCategoricalResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  switch (candidate.kind) {
+    case "missing":
+    case "denied":
+    case "invalid-input":
+    case "locked":
+    case "conflict":
+      return true;
+    case "error":
+      return (
+        candidate.exitCode === 3 &&
+        (candidate.message === "sync failed" ||
+          candidate.message === "nookctl notes: runtime unavailable") &&
+        (candidate.reason === undefined ||
+          candidate.reason === "sync_failed" ||
+          candidate.reason === "service_unavailable")
+      );
+    default:
+      return false;
   }
 }
 

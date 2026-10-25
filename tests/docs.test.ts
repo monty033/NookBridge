@@ -175,11 +175,12 @@ describe("DR-S7a §13.22 (S7a-0)", () => {
     }
   });
 
-  it("records decision 5 without naming an alternate approval mechanism", () => {
+  it("records the resolved decision 5 approval mechanism", () => {
     expect(slice1322, "§13.22 slice is empty").not.toBe("");
 
     expect(slice1322).toContain("decision 5");
-    expect(slice1322).toContain("no approval path");
+    expect(slice1322).toContain("### Decision 5 — operator upload approval");
+    expect(slice1322).toContain("notes.approve-upload");
 
     expect(slice1322).not.toContain("uploadIntent");
     expect(slice1322).not.toMatch(/notes\.approve(?!-upload)/);
