@@ -419,11 +419,13 @@ describe("R16 exact response byte accounting §13.23", () => {
     expect(slice1323).toContain("replaces the flat 6x");
     expect(slice1323).toContain("unchanged at 65,536");
     expect(slice1323).toContain("charges the request id");
+    expect(slice1323).toContain("per-item structure");
+    expect(slice1323).toContain("about 64,466");
   });
 
   it("states the exact content bound verbatim and cross-references it", () => {
     expect(security).toContain(
-      "The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance and the note's metadata, measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.",
+      "The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance, the echoed request id, and the note's charged metadata (id, title, revision and notebook id), measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.",
     );
     expect(mcpTools).toContain("../security-and-privacy.md#privacy-boundary-for-agents");
   });

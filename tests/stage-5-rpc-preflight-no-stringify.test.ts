@@ -1,0 +1,117 @@
+/**
+ * R16: the response preflight must refuse an over-budget envelope BEFORE
+ * JSON.stringify runs.  The protocol module binds `JSON.stringify` once at
+ * load time, so a spy installed after import can never observe it.  This
+ * file therefore installs a counting wrapper FIRST and imports the module
+ * dynamically afterwards.  The control case proves the wrapper really does
+ * observe the serializer's call, so the "not called" assertions cannot
+ * silently become vacuous.
+ */
+import { beforeAll, describe, expect, it } from "vitest";
+
+import type * as ProtocolModule from "../src/service/rpc-protocol.js";
+
+type Protocol = typeof ProtocolModule;
+
+const realStringify = JSON.stringify;
+let calls = 0;
+let protocol: Protocol;
+
+beforeAll(async () => {
+  JSON.stringify = ((...args: Parameters<typeof JSON.stringify>) => {
+    calls += 1;
+    return realStringify(...args);
+  }) as typeof JSON.stringify;
+  protocol = await import("../src/service/rpc-protocol.js");
+});
+
+/** Outcome of one serialization: did it throw, and did it reach JSON.stringify. */
+function attempt(envelope: unknown): { threw: boolean; stringifyCalls: number } {
+  const before = calls;
+  let threw = false;
+  try {
+    protocol.serializeRpcResponse(envelope as never);
+  } catch {
+    threw = true;
+  }
+  return { threw, stringifyCalls: calls - before };
+}
+
+const quote = '"'.repeat(256);
+const notebook = { id: quote, title: quote, dateCreated: 1.5e18, dateModified: 1.5e18 };
+const notebooks = (n: number) => ({
+  id: "iiiiiiiiii",
+  ok: true,
+  result: { kind: "notebooks", notebooks: Array.from({ length: n }, () => ({ ...notebook })) },
+});
+const operatorPage = (n: number) => ({
+  id: "iiiiiiiiii",
+  ok: true,
+  result: {
+    kind: "operator-page",
+    notes: Array.from({ length: n }, () => ({ handle: quote, label: quote, bytes: 256 })),
+    next: null,
+  },
+});
+const operationList = (handles: number, unresolved: number) => ({
+  id: "iiiiiiiiii",
+  ok: true,
+  result: {
+    kind: "operation-list",
+    handles: Array.from({ length: handles }, () => quote),
+    unresolvedHandles: Array.from({ length: unresolved }, () => quote),
+  },
+});
+
+/**
+ * Invariant for an array-producing method: every count either serializes or
+ * is refused with ZERO stringify calls (never "stringify then reject"), and
+ * the boundary is crossed exactly once.  Returns the largest count that fits.
+ */
+function sweep(build: (n: number) => unknown, max: number): number {
+  let largestFit = -1;
+  let refused = false;
+  for (let n = 1; n <= max; n += 1) {
+    const outcome = attempt(build(n));
+    if (outcome.threw) {
+      expect(outcome.stringifyCalls, `n=${n} was stringified before being rejected`).toBe(0);
+      refused = true;
+    } else {
+      expect(outcome.stringifyCalls).toBe(1);
+      expect(refused, `n=${n} fits after a smaller count was refused`).toBe(false);
+      largestFit = n;
+    }
+  }
+  expect(refused, "sweep never reached the response bound").toBe(true);
+  return largestFit;
+}
+
+describe("preflight refuses before JSON.stringify (patched before import)", () => {
+  it("control: the wrapper observes a real serializer call", () => {
+    const outcome = attempt({ id: "ok", ok: true, result: { kind: "search", notes: [] } });
+    expect(outcome).toEqual({ threw: false, stringifyCalls: 1 });
+  });
+
+  it("rejects an over-length id with no stringify call", () => {
+    const huge = "x".repeat(protocol.STAGE5_RPC_LIMITS.maxResponseBytes + 1);
+    const outcome = attempt({ id: huge, ok: true, result: { kind: "search", notes: [] } });
+    expect(outcome).toEqual({ threw: true, stringifyCalls: 0 });
+  });
+
+  it("notebooks: 59 of the reviewer's shape is refused pre-stringify, 58 fits", () => {
+    expect(attempt(notebooks(59))).toEqual({ threw: true, stringifyCalls: 0 });
+    expect(attempt(notebooks(58))).toEqual({ threw: false, stringifyCalls: 1 });
+  });
+
+  it("notebooks: every count serializes or is refused pre-stringify", () => {
+    expect(sweep((n) => notebooks(n), 64)).toBe(58);
+  });
+
+  it("operator page: every count serializes or is refused pre-stringify", () => {
+    expect(sweep((n) => operatorPage(n), 100)).toBeGreaterThan(0);
+  });
+
+  it("operation list: every unresolved-handle count serializes or is refused pre-stringify", () => {
+    expect(sweep((n) => operationList(64, n), 64)).toBeGreaterThan(0);
+  });
+});
