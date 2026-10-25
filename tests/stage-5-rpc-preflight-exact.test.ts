@@ -129,6 +129,36 @@ describe("fitsResponsePreflight boundary", () => {
   });
 });
 
+describe("fitsResponsePreflight with array structure", () => {
+  // 10 notebooks of 256-quote ids/titles (1,024 string bytes each) behind a
+  // 54,200-character request id: 54,200 + 10,240 = 64,440 string bytes, so
+  // the flat 1,024 allowance fits but 10 x 100 structure bytes (allowance
+  // 1,160) does not.
+  const quote = '"'.repeat(256);
+  const requestId = "r".repeat(54_200);
+  const notebooks = Array.from({ length: 10 }, () => ({
+    id: quote,
+    title: quote,
+    dateCreated: 1.5e18,
+    dateModified: 1.5e18,
+  }));
+  const fields = [requestId, ...notebooks.flatMap((n) => [n.id, n.title])];
+
+  it("agrees with the serializer once structure is supplied", () => {
+    expect(fitsResponsePreflight(fields)).toBe(true);
+    expect(fitsResponsePreflight(fields, 10 * 100)).toBe(false);
+    expect(() =>
+      serializeRpcResponse({ id: requestId, ok: true, result: { kind: "notebooks", notebooks } }),
+    ).toThrow(/rpc protocol/);
+  });
+
+  it("keeps the 1,024 floor for small structure", () => {
+    expect(fitsResponsePreflight(["a"], 100)).toBe(true);
+    expect(fitsResponsePreflight(["a".repeat(MAX - OVERHEAD)], 100)).toBe(true);
+    expect(fitsResponsePreflight(["a".repeat(MAX - OVERHEAD + 1)], 100)).toBe(false);
+  });
+});
+
 describe("notes.get exact accounting", () => {
   it("returns ok for an ~11 KB pure-ASCII note", async () => {
     const response = await handleRpcRequest(getRequest("get-1"), noteRuntime(htmlOf(11_000)));

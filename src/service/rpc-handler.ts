@@ -1758,11 +1758,11 @@ async function readBoundedNoteContent(
     // over-budget note degrades to "oversize" instead of the serializer
     // rejecting the entire envelope.  The response envelope echoes the
     // request id, so it is charged too.  If the request id alone is so long
-    // that even the oversize envelope cannot fit (about 64,466 characters
-    // for a typical note), no response -- error envelopes included -- can
-    // echo it, and the connection closes; that is the protocol-wide
-    // behaviour for an unanswerable id, not something this producer can
-    // degrade.
+    // that even the oversize note envelope cannot pass preflight (about
+    // 64,466 characters for a typical note), the serializer rejects it.
+    // A smaller error envelope could still echo ids slightly longer than
+    // that, but the servers never retry with one after a size rejection
+    // (nookd-server destroys the connection), so the connection closes.
     const charged: string[] = [requestId];
     for (const key of ["id", "title", "revision", "notebookId"] as const) {
       const value = note[key];

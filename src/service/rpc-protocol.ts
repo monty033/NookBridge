@@ -966,18 +966,23 @@ export function jsonStringUtf8Bytes(value: string, budget: number): number {
  * pass `preflightResponseStringField` accounting?  Producers (e.g. the
  * `notes.get` handler) use this to degrade categorically -- returning
  * `contentStatus: "oversize"` -- instead of building an envelope the
- * serializer would reject wholesale.  It shares the guard's constants
- * and byte accounting so the two cannot drift apart.
+ * serializer would reject wholesale.  It shares the guard's constants,
+ * byte accounting and allowance rule (`preflightOverheadBytes`) so the two
+ * cannot drift apart.  `structureBytes` is the total per-item array
+ * structure the caller's response would charge (default 0, i.e. a
+ * non-array result); with it the predicate applies the same
+ * `max(1024, structure + 160)` allowance the serializer does.
  */
-export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
+export function fitsResponsePreflight(fields: ReadonlyArray<string>, structureBytes = 0): boolean {
   let sum = 0;
+  const overhead = preflightOverheadBytes(structureBytes);
   for (const value of fields) {
     const bytes = jsonStringUtf8Bytes(value, STAGE5_RPC_LIMITS.maxResponseBytes);
     if (bytes > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
     sum += bytes;
-    if (sum + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
+    if (sum + overhead > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
   }
-  return true;
+  return sum + overhead <= STAGE5_RPC_LIMITS.maxResponseBytes;
 }
 
 /**
@@ -1017,8 +1022,10 @@ type PreflightSum = { n: number; s: number };
  * Upper bound on the fixed envelope around an array-bearing result, beyond
  * the string fields and per-item structure:
  * `{"id":"","ok":true,"result":{"kind":"operation-list","handles":[],"unresolvedHandles":[]}}`
- * is about 90 bytes; the measured fixed envelopes across all array-bearing
- * kinds (`update` is the longest at 93) are 57 to 93 bytes, all within 160.
+ * is 90 bytes.  Measured fixed envelopes (with a 24-byte number where the
+ * kind has one) are: search 56, notebooks 63, operator-page 75,
+ * operation-list 88, update 113, edit/undo 125.  The longest is 125, so 160
+ * leaves a 35-byte margin.
  */
 const PREFLIGHT_ARRAY_ENVELOPE_BYTES = 160;
 
@@ -1033,9 +1040,10 @@ const PREFLIGHT_ARRAY_ENVELOPE_BYTES = 160;
  *     non-negative double renders as `1.7976931348623157e+308` (23 bytes)
  *     or, in fixed notation, 17 significant digits at exponent -6, e.g.
  *     `0.0000012345678901234567` (24 bytes)                      = 100
- *   - operator page note `{"handle":"","label":"","bytes":N},` = 38 fixed
- *     + a byte count that equals `label` UTF-8 bytes (at most
- *     `maxTitleBytes` = 256, three digits), bounded here at 5 digits = 43
+ *   - operator page note `{"handle":"","label":"","bytes":N},` = 34 fixed
+ *     + up to 3 digits (the count equals `label` UTF-8 bytes, at most
+ *     `maxTitleBytes` = 256) + comma = 37 real maximum; deliberately
+ *     over-charged at                                              = 43
  *   - handle `"",`                                           = 3
  *   - applied field `"notebookId",` (longest allowlisted name)  = 13
  */
@@ -1048,6 +1056,17 @@ const PREFLIGHT_ITEM_STRUCTURE_BYTES = objectFreeze({
 });
 
 /**
+ * Envelope allowance for a response charging `structureBytes` of array
+ * structure: the fixed 1,024 bytes when there is none, otherwise the larger
+ * of 1,024 and the structure plus the fixed array envelope.
+ */
+function preflightOverheadBytes(structureBytes: number): number {
+  return structureBytes === 0
+    ? PREFLIGHT_ENVELOPE_OVERHEAD_BYTES
+    : mathMax(PREFLIGHT_ENVELOPE_OVERHEAD_BYTES, structureBytes + PREFLIGHT_ARRAY_ENVELOPE_BYTES);
+}
+
+/**
  * Reject before JSON.stringify when strings + structure + the envelope
  * allowance cannot fit.  The flat 1,024-byte allowance is a floor; once
  * array structure is charged the allowance is the larger of that floor and
@@ -1056,11 +1075,7 @@ const PREFLIGHT_ITEM_STRUCTURE_BYTES = objectFreeze({
  * non-array results.
  */
 function assertPreflightSumFits(rawSum: PreflightSum): void {
-  const overhead =
-    rawSum.s === 0
-      ? PREFLIGHT_ENVELOPE_OVERHEAD_BYTES
-      : mathMax(PREFLIGHT_ENVELOPE_OVERHEAD_BYTES, rawSum.s + PREFLIGHT_ARRAY_ENVELOPE_BYTES);
-  if (rawSum.n + overhead > STAGE5_RPC_LIMITS.maxResponseBytes) {
+  if (rawSum.n + preflightOverheadBytes(rawSum.s) > STAGE5_RPC_LIMITS.maxResponseBytes) {
     throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
   }
 }

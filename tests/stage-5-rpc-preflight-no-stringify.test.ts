@@ -7,7 +7,7 @@
  * observe the serializer's call, so the "not called" assertions cannot
  * silently become vacuous.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type * as ProtocolModule from "../src/service/rpc-protocol.js";
 
@@ -23,6 +23,10 @@ beforeAll(async () => {
     return realStringify(...args);
   }) as typeof JSON.stringify;
   protocol = await import("../src/service/rpc-protocol.js");
+});
+
+afterAll(() => {
+  JSON.stringify = realStringify;
 });
 
 /** Outcome of one serialization: did it throw, and did it reach JSON.stringify. */
