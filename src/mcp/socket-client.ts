@@ -983,7 +983,9 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       }
       if (
         typeof resultRecord.markdown !== "string" ||
-        resultRecord.markdown.length === 0 ||
+        // A title-only note is legitimately empty: `markdown: ""` with
+        // `markdownBytes: 0` is a valid `contentStatus: "ok"` result. The
+        // byte-length agreement below still pins the accounting exactly.
         Buffer.byteLength(resultRecord.markdown, "utf8") > STAGE5_RPC_LIMITS.maxResponseBytes ||
         typeof resultRecord.markdownBytes !== "number" ||
         !Number.isInteger(resultRecord.markdownBytes) ||

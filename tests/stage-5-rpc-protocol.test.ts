@@ -691,6 +691,77 @@ describe("serializeRpcResponse", () => {
       } as never),
     ).toThrow();
   });
+  describe("notes.get markdown allowance", () => {
+    const noteEnvelope = (markdown: string, markdownBytes: number) =>
+      ({
+        id: "note-content",
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Memo" },
+          contentStatus: "ok",
+          markdown,
+          markdownBytes,
+        },
+      }) as unknown as RpcResponseEnvelope;
+
+    const wireResult = (bytes: Uint8Array): Record<string, unknown> => {
+      const declared = readFrameLength(bytes);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + declared))) as {
+        result: Record<string, unknown>;
+      };
+      return parsed.result;
+    };
+
+    it("accepts a title-only note's empty markdown with zero bytes", () => {
+      // Owner ruling: title-only note is legitimately empty content. The
+      // serializer must not turn it into a closed connection.
+      expect(wireResult(serializeRpcResponse(noteEnvelope("", 0)))).toEqual({
+        kind: "note",
+        note: { id: "note-1", title: "Memo" },
+        contentStatus: "ok",
+        markdown: "",
+        markdownBytes: 0,
+      });
+    });
+
+    it("still accepts non-empty markdown with matching byte accounting", () => {
+      expect(wireResult(serializeRpcResponse(noteEnvelope("safe", 4)))).toMatchObject({
+        contentStatus: "ok",
+        markdown: "safe",
+        markdownBytes: 4,
+      });
+    });
+
+    it.each([
+      ["BEL", "\u0007"],
+      ["SOH", "\u0001"],
+      ["DEL", "\u007f"],
+    ])("still rejects a %s control character in note markdown", (_name, markdown) => {
+      expect(() =>
+        serializeRpcResponse(noteEnvelope(markdown, Buffer.byteLength(markdown, "utf8"))),
+      ).toThrow();
+    });
+
+    it("does not widen the operator view or preimage markdown projection", () => {
+      for (const kind of ["view", "preimage"] as const) {
+        expect(() =>
+          serializeRpcResponse({
+            id: `${kind}-empty`,
+            ok: true,
+            result: {
+              kind,
+              id: "note-1",
+              revision: "rev_0123456789abcdef0123456789abcdef",
+              markdown: "",
+              contentBytes: 0,
+            },
+          } as unknown as RpcResponseEnvelope),
+        ).toThrow();
+      }
+    });
+  });
+
   it("serializes a success envelope with the documented fields", () => {
     const envelope: RpcResponseEnvelope = {
       id: "a",
