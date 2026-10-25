@@ -175,20 +175,14 @@ describe("DR-S7a §13.22 (S7a-0)", () => {
     }
   });
 
-  it("records the pending decision and names no approval mechanism", () => {
+  it("records decision 5 without naming an alternate approval mechanism", () => {
     expect(slice1322, "§13.22 slice is empty").not.toBe("");
 
     expect(slice1322).toContain("decision 5");
     expect(slice1322).toContain("no approval path");
 
-    for (const forbidden of [
-      "--approve-upload",
-      "uploadIntent",
-      "approve-upload",
-      "notes.approve",
-    ]) {
-      expect(slice1322, `§13.22 must not name ${forbidden}`).not.toContain(forbidden);
-    }
+    expect(slice1322).not.toContain("uploadIntent");
+    expect(slice1322).not.toMatch(/notes\.approve(?!-upload)/);
   });
 
   it("puts S7a-5 before S7a-4 in the implementation order and says S7a-4 merges after", () => {
@@ -328,9 +322,8 @@ describe("S7a-7 — upload gap closed in docs", () => {
     expect(slice1322).toContain("(not built; see the implementation record below)");
     expect(slice1322).toContain("approved by Patrick (decision 1)");
 
-    for (const forbidden of ["--approve-upload", "uploadIntent", "notes.approve"]) {
-      expect(slice1322, `§13.22 must not name ${forbidden}`).not.toContain(forbidden);
-    }
+    expect(slice1322).not.toContain("uploadIntent");
+    expect(slice1322).not.toMatch(/notes\.approve(?!-upload)/);
   });
 });
 

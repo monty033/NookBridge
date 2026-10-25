@@ -432,6 +432,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
         structural.request.method === "notes.apply-undo" ||
         structural.request.method === "notes.operation-status" ||
         structural.request.method === "notes.operation-list" ||
+        structural.request.method === "notes.approve-upload" ||
         structural.request.method === "notes.browse" ||
         structural.request.method === "notes.search-operator"
       ) {
@@ -932,6 +933,7 @@ async function runAuthorizedRpcMethod(
     case "notes.apply-undo":
     case "notes.operation-status":
     case "notes.operation-list":
+    case "notes.approve-upload":
     case "notes.browse":
     case "notes.search-operator":
       return buildErrorEnvelope(id, "permission_denied");

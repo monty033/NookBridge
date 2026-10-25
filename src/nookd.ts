@@ -70,6 +70,10 @@ import {
 } from "./service/notes-operation-store-fs.js";
 import { createOperatorAuthorizer } from "./service/operator-authorizer.js";
 import {
+  createOperatorUploadApprovalRuntime,
+  type OperatorUploadApprovalCoordinator,
+} from "./service/operator-upload-approval-runtime.js";
+import {
   FAIL_CLOSED_DISCOVERY_VISIBILITY,
   createDiscoveryVisibility,
 } from "./service/discovery-visibility.js";
@@ -137,7 +141,10 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "listNotebooksForSettings"
       | "resolveNotebookPath"
     >
-  >;
+  > & {
+    /** Shared coordinator capability used by the operator approval method. */
+    readonly operatorUploadApproval?: OperatorUploadApprovalCoordinator;
+  };
 
 type OperatorWriteSourceInputs = Readonly<{
   operatorCreateNote: NookdStartupRuntime["operatorCreateNote"];
@@ -404,6 +411,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let readOnly: ServiceRuntime["readOnly"] | undefined;
   let listNotebooksForSettings: NonNullable<NookdStartupRuntime["listNotebooksForSettings"]>;
   let resolveNotebookPath: NookdStartupRuntime["resolveNotebookPath"];
+  let operatorUploadApproval: NookdStartupRuntime["operatorUploadApproval"];
   let notebookIndex: NotebookIndex;
   // Hoisted out of the settings try-block: the operator authorizer needs it to
   // decide per-notebook overrides, and it would otherwise be block-scoped.
@@ -431,6 +439,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedRequestSync = runtime.requestSync;
     const capturedListNotebooksForSettings = runtime.listNotebooksForSettings;
     const capturedResolveNotebookPath = runtime.resolveNotebookPath;
+    const capturedOperatorUploadApproval = runtime.operatorUploadApproval;
     const capturedCleanup = runtime.cleanup;
     if (
       (capturedReadOnly !== undefined &&
@@ -457,7 +466,12 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
       (capturedRequestSync !== undefined && typeof capturedRequestSync !== "function") ||
       typeof capturedListNotebooksForSettings !== "function" ||
       (capturedResolveNotebookPath !== undefined &&
-        typeof capturedResolveNotebookPath !== "function")
+        typeof capturedResolveNotebookPath !== "function") ||
+      (capturedOperatorUploadApproval !== undefined &&
+        (typeof capturedOperatorUploadApproval !== "object" ||
+          capturedOperatorUploadApproval === null ||
+          typeof capturedOperatorUploadApproval.approvePending !== "function" ||
+          typeof capturedOperatorUploadApproval.blockingSummary !== "function"))
     ) {
       throw new Error("invalid service runtime");
     }
@@ -477,6 +491,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     requestSync = capturedRequestSync;
     listNotebooksForSettings = capturedListNotebooksForSettings;
     resolveNotebookPath = capturedResolveNotebookPath;
+    operatorUploadApproval = capturedOperatorUploadApproval;
     runtimeCleanup = capturedCleanup;
 
     settingsPhase = true;
@@ -655,6 +670,13 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
                     applyUndo: operatorWrite.applyUndo,
                     operationStatus: operatorWrite.operationStatus,
                     operationList: operatorWrite.operationList,
+                  }),
+              ...(operatorUploadApproval === undefined
+                ? {}
+                : {
+                    approveUpload: createOperatorUploadApprovalRuntime(
+                      operatorUploadApproval,
+                    ).approveUpload,
                   }),
             });
           })(),

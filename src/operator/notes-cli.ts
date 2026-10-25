@@ -232,6 +232,10 @@ export type ParsedNotesCommand =
       subcommand: "undo";
       /** `status`/`list` print pending operations; absent means interactive. */
       selector?: "status" | "list";
+    }>
+  | Readonly<{
+      kind: "approve-upload";
+      subcommand: "approve-upload";
     }>;
 
 export type ParseNotesCommandResult =
@@ -294,6 +298,8 @@ export type NotesCategoricalResult =
       unresolvedHandles: readonly string[];
     }>
   | Readonly<{ kind: "undone" }>
+  | Readonly<{ kind: "approved"; approved: number; throughSequence: number }>
+  | Readonly<{ kind: "nothing-to-approve" }>
   | Readonly<{ kind: "conflict" }>
   | Readonly<{ kind: "denied" }>
   | Readonly<{ kind: "invalid-input" }>
@@ -363,7 +369,20 @@ export interface NotesCommandRuntime {
    * committed record, so no note id or revision crosses the boundary.
    */
   readonly undo: (command: { readonly operationHandle: string }) => Promise<NotesCategoricalResult>;
+  /** Metadata-only blocking summary; it carries no note identifiers or titles. */
+  readonly blockingSummary?: () => Promise<UploadBlockingSummary>;
+  /** Apply the operator-confirmed sequence bound. */
+  readonly approveUpload?: (command: {
+    readonly throughSequence: number;
+  }) => Promise<NotesCategoricalResult>;
 }
+
+export type UploadBlockingSummary = Readonly<{
+  readonly total: number;
+  readonly byOperation: Readonly<{ create: number; append: number; update: number; delete: number }>;
+  readonly byOrigin: Readonly<{ operator: number; unknown: number }>;
+  readonly highestSequence: number | null;
+}>;
 
 /**
  * Closed verdict for the bounded stdin search query.  `query` carries
@@ -425,6 +444,12 @@ export type RunNotesCommandOptions = Readonly<{
   readonly interactive?: Readonly<{
     readonly tty: boolean;
     readonly select?: (handles: readonly string[]) => Promise<string | undefined>;
+    /** Typed confirmation for upload approval; the runner checks exact equality. */
+    readonly confirmUpload?: (
+      summary: UploadBlockingSummary,
+    ) => Promise<string | undefined>;
+    /** Print the daemon-supplied summary before confirmation, if applicable. */
+    readonly showUploadSummary?: (summary: UploadBlockingSummary) => void;
   }>;
   /**
    * Constructed ONLY after the parser, the credential-carrier policy,
@@ -454,6 +479,7 @@ export function formatNotesHelp(): string {
     `  nookctl notes create ${APPROVE_EDIT_FLAG} [--notebook-id <id>]`,
     `  nookctl notes edit --handle <opaque-handle> ${APPROVE_EDIT_FLAG}`,
     `  nookctl notes undo ${APPROVE_EDIT_FLAG} [--status|--list]`,
+    "  nookctl notes approve-upload",
     "",
     "Options:",
     "  --cursor <opaque-cursor>   pagination cursor from a prior `notes` page",
@@ -472,6 +498,7 @@ export function formatNotesHelp(): string {
     "  create                     new note in $EDITOR (approval-gated)",
     "  edit                       bounded edit in $EDITOR (approval-gated)",
     "  undo                       reverse a prior edit (approval-gated, by opaque handle)",
+    "  approve-upload             approve pending uploads through a typed sequence (TTY only)",
     "",
     "Notes:",
     "  - queries arrive only via bounded stdin",
@@ -573,6 +600,17 @@ export function formatNotesResult(
       }
       case "undone":
         return "nookctl notes: undone\n";
+      case "approved":
+        if (
+          !Number.isSafeInteger(result.approved) ||
+          result.approved < 0 ||
+          !Number.isSafeInteger(result.throughSequence) ||
+          result.throughSequence < 1
+        )
+          return "nookctl notes: error\n";
+        return `nookctl notes: approved\ncount: ${result.approved}\nthrough-sequence: ${result.throughSequence}\n`;
+      case "nothing-to-approve":
+        return "nookctl notes: nothing to approve\n";
       case "conflict":
         return "nookctl notes: conflict\n";
       case "denied":
@@ -713,6 +751,12 @@ export function parseNotesCommand(
         return parseEdit(stringArgv.slice(1));
       case "undo":
         return parseUndo(stringArgv.slice(1));
+      case "approve-upload":
+        if (stringArgv.length !== 1) return invalidParseInput();
+        return {
+          kind: "parsed",
+          command: { kind: "approve-upload", subcommand: "approve-upload" },
+        };
       case "delete":
         // `notes.delete` is structurally absent.  We deliberately do
         // NOT mention the token in the error message.
@@ -1212,6 +1256,18 @@ export async function runNotesCommand(
     return { kind: "invalid-input" };
   }
 
+  // Approval is a human terminal capability.  Refuse before runtime
+  // construction when either terminal side is absent or no confirmation seam
+  // exists; in particular, never invent a sequence bound for an empty queue.
+  if (
+    command.kind === "approve-upload" &&
+    (normalized.interactive === undefined ||
+      normalized.interactive.tty !== true ||
+      typeof normalized.interactive.confirmUpload !== "function")
+  ) {
+    return { kind: "invalid-input" };
+  }
+
   // The runtime factory is constructed ONLY after parse + approval
   // gate have both passed.  Read-only commands (`browse`, `search`,
   // `get`) and `undo --status`/`--list` are ungated but they still go
@@ -1258,6 +1314,8 @@ export async function runNotesCommand(
         );
       case "undo":
         return await runUndo(runtime, command, normalized.interactive);
+      case "approve-upload":
+        return await runApproveUpload(runtime, normalized.interactive);
     }
   } catch {
     // Any runtime throw collapses to the closed categorical `error`.
@@ -1268,6 +1326,93 @@ export async function runNotesCommand(
       message: "nookctl notes: runtime error",
     };
   }
+}
+
+async function runApproveUpload(
+  runtime: NotesCommandRuntime,
+  interactive: RunNotesCommandOptions["interactive"],
+): Promise<NotesCategoricalResult> {
+  if (
+    interactive === undefined ||
+    interactive.tty !== true ||
+    typeof interactive.confirmUpload !== "function" ||
+    typeof runtime.blockingSummary !== "function" ||
+    typeof runtime.approveUpload !== "function"
+  ) {
+    return { kind: "invalid-input" };
+  }
+
+  let summary: UploadBlockingSummary;
+  try {
+    summary = await runtime.blockingSummary();
+  } catch {
+    return { kind: "error", exitCode: 3, message: "nookctl notes: runtime error" };
+  }
+  if (!isUploadBlockingSummary(summary)) return { kind: "invalid-input" };
+  try {
+    interactive.showUploadSummary?.(summary);
+  } catch {
+    return { kind: "invalid-input" };
+  }
+  if (summary.total === 0 || summary.highestSequence === null) {
+    return { kind: "nothing-to-approve" };
+  }
+
+  let typed: string | undefined;
+  try {
+    typed = await interactive.confirmUpload(summary);
+  } catch {
+    typed = undefined;
+  }
+  if (typed !== String(summary.highestSequence)) return { kind: "invalid-input" };
+
+  try {
+    return await runtime.approveUpload({ throughSequence: summary.highestSequence });
+  } catch {
+    return { kind: "error", exitCode: 3, message: "nookctl notes: runtime error" };
+  }
+}
+
+function isUploadBlockingSummary(value: unknown): value is UploadBlockingSummary {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const total = candidate.total;
+  const highestSequence = candidate.highestSequence;
+  if (
+    typeof total !== "number" ||
+    !Number.isSafeInteger(total) ||
+    total < 0 ||
+    (highestSequence !== null &&
+      (typeof highestSequence !== "number" ||
+        !Number.isSafeInteger(highestSequence) ||
+        highestSequence < 1))
+  ) {
+    return false;
+  }
+  const operation = candidate.byOperation;
+  const origin = candidate.byOrigin;
+  if (
+    operation === null ||
+    typeof operation !== "object" ||
+    Array.isArray(operation) ||
+    origin === null ||
+    typeof origin !== "object" ||
+    Array.isArray(origin)
+  ) {
+    return false;
+  }
+  const operationRecord = operation as Record<string, unknown>;
+  const originRecord = origin as Record<string, unknown>;
+  return (
+    ["create", "append", "update", "delete"].every((key) => {
+      const count = operationRecord[key];
+      return typeof count === "number" && Number.isSafeInteger(count) && count >= 0;
+    }) &&
+    ["operator", "unknown"].every((key) => {
+      const count = originRecord[key];
+      return typeof count === "number" && Number.isSafeInteger(count) && count >= 0;
+    })
+  );
 }
 
 /**

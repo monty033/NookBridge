@@ -31,6 +31,7 @@ export const OPERATOR_MUTATING_METHODS: ReadonlyArray<OperatorMethod> = Object.f
   "notes.apply-edit",
   "notes.apply-undo",
   "notes.create",
+  "notes.approve-upload",
 ] satisfies OperatorMethod[]);
 
 /** The published operation-handle shape; matches the write runtime's own token. */

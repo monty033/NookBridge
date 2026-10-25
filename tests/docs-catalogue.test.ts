@@ -38,6 +38,7 @@ function tableToolNames(text: string): Set<string> {
 const section33 = section(plan, "## 3.3 ", "## 3.4 ");
 const section61 = section(plan, "## 6.1 ", "## 6.2 ");
 const section1312 = section(plan, "## 13.12 ", "## 13.13 ");
+const section1322 = section(plan, "## 13.22 ", "## 13.23 ");
 
 /** Every literal in the closed `RpcMethod` union in the wire contract. */
 function rpcMethodLiterals(source: string): string[] {
@@ -83,8 +84,8 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
   });
 
   it("§3.3 or §6.1 names every RpcMethod literal in backticks", () => {
-    expect(rpcMethods).toHaveLength(19);
-    const surface = `${section33}\n${section61}`;
+    expect(rpcMethods).toHaveLength(20);
+    const surface = `${section33}\n${section61}\n${section1322}`;
     for (const method of rpcMethods) {
       expect(surface, `RPC method \`${method}\` is undocumented`).toContain(`\`${method}\``);
     }
@@ -109,14 +110,17 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
   });
 
   it("names every operator method the code exports, including the shared one", () => {
-    // The operator surface carries nine methods across OPERATOR_METHODS (seven,
+    // The operator surface carries ten methods across OPERATOR_METHODS (eight,
     // including notes.create, which is shared with the daemon) and
-    // OPERATOR_DISCOVERY_METHODS (two). A doc listing only the eight
-    // operator-only ones is ambiguous about a closed vocabulary.
-    expect(OPERATOR_TRANSPORT_METHODS).toHaveLength(9);
+    // OPERATOR_DISCOVERY_METHODS (two). A doc listing only the nine
+    // operator-only ones is ambiguous about a closed vocabulary. Decision 5
+    // documents the new approval method in §13.22, so include that section in
+    // the closed catalogue surface without weakening the exact method loop.
+    expect(OPERATOR_TRANSPORT_METHODS).toHaveLength(10);
     expect(OPERATOR_TRANSPORT_METHODS).toContain("notes.create");
+    const operatorSurface = `${section33}\n${section1322}`;
     for (const method of OPERATOR_TRANSPORT_METHODS) {
-      expect(section33, `operator method not documented: ${method}`).toContain(`\`${method}\``);
+      expect(operatorSurface, `operator method not documented: ${method}`).toContain(`\`${method}\``);
     }
   });
 

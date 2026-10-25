@@ -118,7 +118,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       // A handle minted for another peer, a forged or malformed one, or no
       // target at all yields no lock or notebook context, which the evaluator
       // would read as "nothing to refuse"; deny instead.
-      if (method !== "notes.create") {
+      if (method !== "notes.create" && method !== "notes.approve-upload") {
         if (!(await requestTargetKnown(deps, request, peer, method))) {
           return { allowed: false, reason: "permission_denied" };
         }
@@ -126,7 +126,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
           return { allowed: false, reason: "permission_denied" };
         }
       }
-      if (notebookPolicy === undefined) {
+      if (method !== "notes.approve-upload" && notebookPolicy === undefined) {
         return { allowed: false, reason: "permission_denied" };
       }
     }

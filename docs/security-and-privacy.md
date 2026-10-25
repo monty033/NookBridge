@@ -82,6 +82,17 @@ The locked-note proof reports, for one exact note path, only `pathBytes` and one
 
 The proof never modifies an unlocked note: for an unlocked target it reports `read: ok` and `permission_denied` for `update` and `delete` without attempting either.
 
+Outbound upload approval is a separate operator capability. `nookctl notes
+approve-upload` runs only on an interactive terminal, displays metadata-only
+blocking counts and the highest pending sequence, and requires the operator to
+type that sequence exactly. It approves only operator- and unknown-origin
+markers through the displayed bound; later writes remain blocked. The listing,
+confirmation, result, and audit record contain no note identifiers, titles, or
+paths. MCP has no approval method.
+
+The empty-parameter form is a read-only preview: it returns those counts and
+the highest sequence without changing markers or saving state.
+
 For a locked target it attempts update and delete only with a deliberately mismatched revision.
 
 The proof is authorized before its path is resolved: the caller needs read, edit and delete permission for that path, and a path the caller may not access returns `permission_denied` whether or not the note exists.

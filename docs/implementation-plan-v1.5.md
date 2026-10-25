@@ -2839,7 +2839,8 @@ D1-1, D3-1, D3-3, D6-x, S7a-x, R3–R5, R8–R13, R15, DOC-1, and G1a–G8 remai
 
 ## 13.22 Decision record DR-S7a — no upload without explicit sync intent
 
-**Status:** approved by Patrick (decision 1), 2026-10-21.
+**Status:** approved by Patrick (decision 1), 2026-10-21; operator approval
+was resolved by decision 5, 2026-10-25.
 **Mode:** decision record; no source change in this section.
 
 No upload without explicit sync intent.
@@ -2850,13 +2851,25 @@ No upload without explicit sync intent.
 4. Before `full`, the executor reads the upstream dirty set read-only. It refuses with the categorical reason `unapproved_pending` if any dirty item lacks recorded intent, or if the dirty set can't be read. (not built; see the implementation record below)
 5. Fallback: if the pinned core has no read-only way to read the dirty set (S7a-2 settles this), every `full` sync is refused while any operator-origin pending marker exists.
 
-### Pending decision
+### Decision 5 — operator upload approval
 
-The operator approval path in item 3 waits on **decision 5**, which is not yet approved: whether to add an upload-intent parameter to the frozen T00 D2 operator vocabulary. Until then, operator-origin writes have **no approval path**. They stay local-only and, under items 4 and 5, block `full` sync. No mechanism is specified.
+Decision 5 adds the operator-only `notes.approve-upload` method. The operator
+confirms it from an interactive `nookctl notes approve-upload` terminal after
+the daemon displays metadata-only blocking counts and the highest sequence.
+The method's empty-parameter form is a read-only preview that returns those
+counts and the highest sequence without changing markers or saving state.
+Approval covers operator- and unknown-origin markers through that displayed
+sequence, persists on those markers, and does not remove them. A later write
+gets a fresh unapproved marker and continues to block `full`. The former
+statement that operator-origin writes had **no approval path** is therefore
+resolved; MCP still has no approval method.
+
+The result carries only bounded counts and sequence numbers. No note id, title,
+path, or note content crosses the approval surface or its audit record.
 
 ### Known consequence
 
-Step S7a-4 (#237) landed, but it did **not** implement DR-S7a item 4; the item 5 fallback is what applies. Under that fallback, any operator- or unknown-origin pending write blocks every explicit sync (MCP and `nookctl write sync`) until decision 5 provides approval.
+Step S7a-4 (#237) landed, but it did **not** implement DR-S7a item 4; the item 5 fallback is what applies. Under that fallback, any operator- or unknown-origin pending write blocks every explicit sync (MCP and `nookctl write sync`) until the operator approves through the displayed sequence.
 
 ### Implementation order
 
@@ -2864,8 +2877,8 @@ Step S7a-4 (#237) landed, but it did **not** implement DR-S7a item 4; the item 5
 - S7a-3: intent ledger
 - S7a-5: intent recorded by origin
 - S7a-4: executor preflight gate. It merges **after** S7a-5; otherwise every sync would be refused because MCP writes don't yet record intent.
+- S7a-6: operator upload approval, bounded by the displayed sequence
 - S7a-7: docs
-- S7a-6: blocked on decision 5
 
 ### Implementation record (2026-10-22)
 

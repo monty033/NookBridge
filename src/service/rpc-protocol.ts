@@ -291,6 +291,11 @@ export interface RpcOperatorApplyUndoParams {
   readonly expectedRevision?: string;
 }
 
+/** Closed upload-approval request: an empty preview or a sequence bound. */
+export type RpcOperatorApproveUploadParams =
+  | Record<string, never>
+  | Readonly<{ throughSequence: number }>;
+
 export interface RpcOperatorPageParams {
   readonly cursor?: string;
   readonly limit?: number;
@@ -336,6 +341,7 @@ export type RpcMethod =
   | "notes.apply-undo"
   | "notes.operation-status"
   | "notes.operation-list"
+  | "notes.approve-upload"
   | "notes.browse"
   | "notes.search-operator";
 
@@ -436,6 +442,11 @@ export interface RpcNotesOperationListRequest {
   readonly method: "notes.operation-list";
   readonly params: Record<string, never>;
 }
+export interface RpcNotesApproveUploadRequest {
+  readonly id: string;
+  readonly method: "notes.approve-upload";
+  readonly params: RpcOperatorApproveUploadParams;
+}
 export interface RpcNotesBrowseRequest {
   readonly id: string;
   readonly method: "notes.browse";
@@ -466,6 +477,7 @@ export type RpcRequest =
   | RpcNotesApplyUndoRequest
   | RpcNotesOperationStatusRequest
   | RpcNotesOperationListRequest
+  | RpcNotesApproveUploadRequest
   | RpcNotesBrowseRequest
   | RpcNotesSearchOperatorRequest;
 
@@ -686,6 +698,34 @@ export interface RpcNotesOperationListResult {
   readonly unresolvedHandles?: ReadonlyArray<string>;
 }
 
+/** Counts-only result of an operator upload-approval preview. */
+export interface RpcNotesApproveUploadPreviewResult {
+  readonly kind: "approve-upload-preview";
+  readonly total: number;
+  readonly byOperation: Readonly<{
+    readonly create: number;
+    readonly append: number;
+    readonly update: number;
+    readonly delete: number;
+  }>;
+  readonly byOrigin: Readonly<{
+    readonly operator: number;
+    readonly unknown: number;
+  }>;
+  readonly highestSequence: number | null;
+}
+
+/** Counts-only result of an operator upload approval. */
+export interface RpcNotesApproveUploadResult {
+  readonly kind: "approve-upload";
+  readonly approved: number;
+  readonly throughSequence: number;
+}
+
+export type RpcNotesApproveUploadResponse =
+  | RpcNotesApproveUploadPreviewResult
+  | RpcNotesApproveUploadResult;
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
@@ -705,6 +745,7 @@ export type RpcResult =
   | RpcNotesApplyUndoResult
   | RpcNotesOperationStatusResult
   | RpcNotesOperationListResult
+  | RpcNotesApproveUploadResponse
   | RpcOperatorDiscoveryPageResult;
 
 export interface RpcSuccessEnvelope {
@@ -1198,6 +1239,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.apply-undo" &&
     method !== "notes.operation-status" &&
     method !== "notes.operation-list" &&
+    method !== "notes.approve-upload" &&
     method !== "notes.browse" &&
     method !== "notes.search-operator"
   ) {
@@ -1777,6 +1819,25 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       throw rpcProtocolError("rpc protocol: operation-list params must be empty");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
+  } else if (method === "notes.approve-upload") {
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    if (paramKeys.length === 0) {
+      // Empty params are the read-only preview form.  A sequence field is
+      // deliberately not optional here: its presence selects the approval
+      // form, so `{ throughSequence: undefined }` cannot cross this boundary.
+    } else if (paramKeys.length === 1 && paramKeys[0] === "throughSequence") {
+      const throughSequence = paramsRecord.throughSequence;
+      if (
+        typeof throughSequence !== "number" ||
+        !Number.isSafeInteger(throughSequence) ||
+        throughSequence < 1
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload sequence is invalid");
+      }
+      paramsObj.throughSequence = throughSequence;
+    } else {
+      throw rpcProtocolError("rpc protocol: approve-upload params have unexpected fields");
+    }
   } else {
     if (paramKeys.length !== 0) {
       throw rpcProtocolError("rpc protocol: parameterless request has unexpected fields");
@@ -2843,6 +2904,134 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       resultPayload.kind = "operation-list";
       resultPayload.handles = cleanHandles;
       resultPayload.unresolvedHandles = cleanUnresolvedHandles;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "approve-upload-preview") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "total", "byOperation", "byOrigin", "highestSequence"],
+        "rpc protocol: approve-upload preview result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 5 ||
+        !keysAreExactly(resultKeys, ["kind", "total", "byOperation", "byOrigin", "highestSequence"])
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload preview result has unexpected fields");
+      }
+      const total = resultRecord.total;
+      const byOperation = resultRecord.byOperation;
+      const byOrigin = resultRecord.byOrigin;
+      const highestSequence = resultRecord.highestSequence;
+      if (
+        typeof total !== "number" ||
+        !Number.isSafeInteger(total) ||
+        total < 0 ||
+        byOperation === null ||
+        typeof byOperation !== "object" ||
+        arrayIsArray(byOperation) ||
+        byOrigin === null ||
+        typeof byOrigin !== "object" ||
+        arrayIsArray(byOrigin) ||
+        (highestSequence !== null &&
+          (typeof highestSequence !== "number" ||
+            !Number.isSafeInteger(highestSequence) ||
+            highestSequence < 1))
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload preview result is invalid");
+      }
+      const operationRecord = byOperation as Record<string, JsonValue>;
+      const originRecord = byOrigin as Record<string, JsonValue>;
+      const operationKeys = validateClosedObject(
+        operationRecord,
+        ["create", "append", "update", "delete"],
+        "rpc protocol: approve-upload preview operation counts have unexpected fields",
+      );
+      const originKeys = validateClosedObject(
+        originRecord,
+        ["operator", "unknown"],
+        "rpc protocol: approve-upload preview origin counts have unexpected fields",
+      );
+      if (
+        operationKeys.length !== 4 ||
+        !keysAreExactly(operationKeys, ["create", "append", "update", "delete"]) ||
+        originKeys.length !== 2 ||
+        !keysAreExactly(originKeys, ["operator", "unknown"])
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload preview counts have unexpected fields");
+      }
+      const operationValues = {
+        create: operationRecord.create,
+        append: operationRecord.append,
+        update: operationRecord.update,
+        delete: operationRecord.delete,
+      };
+      const originValues = {
+        operator: originRecord.operator,
+        unknown: originRecord.unknown,
+      };
+      for (const count of [
+        operationValues.create,
+        operationValues.append,
+        operationValues.update,
+        operationValues.delete,
+      ]) {
+        if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+          throw rpcProtocolError("rpc protocol: approve-upload preview operation count is invalid");
+        }
+      }
+      for (const count of [originValues.operator, originValues.unknown]) {
+        if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+          throw rpcProtocolError("rpc protocol: approve-upload preview origin count is invalid");
+        }
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "approve-upload-preview";
+        total: number;
+        byOperation: typeof operationValues;
+        byOrigin: typeof originValues;
+        highestSequence: number | null;
+      };
+      resultPayload.kind = "approve-upload-preview";
+      resultPayload.total = total;
+      resultPayload.byOperation = operationValues;
+      resultPayload.byOrigin = originValues;
+      resultPayload.highestSequence = highestSequence as number | null;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "approve-upload") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "approved", "throughSequence"],
+        "rpc protocol: approve-upload result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 3 ||
+        !keysAreExactly(resultKeys, ["kind", "approved", "throughSequence"])
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload result has unexpected fields");
+      }
+      const approved = resultRecord.approved;
+      const throughSequence = resultRecord.throughSequence;
+      if (
+        typeof approved !== "number" ||
+        !Number.isSafeInteger(approved) ||
+        approved < 0 ||
+        typeof throughSequence !== "number" ||
+        !Number.isSafeInteger(throughSequence) ||
+        throughSequence < 1
+      ) {
+        throw rpcProtocolError("rpc protocol: approve-upload result is invalid");
+      }
+      const resultPayload = objectCreate(null) as {
+        kind: "approve-upload";
+        approved: number;
+        throughSequence: number;
+      };
+      resultPayload.kind = "approve-upload";
+      resultPayload.approved = approved;
+      resultPayload.throughSequence = throughSequence;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 

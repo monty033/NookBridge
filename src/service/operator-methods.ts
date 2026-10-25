@@ -1,7 +1,7 @@
 /**
  * T04 — canonical operator RPC vocabulary.
  *
- * T00 freezes seven operator mutation/view methods. The browse/search methods
+ * T00 freezes eight operator mutation/view methods. The browse/search methods
  * are a separate discovery transport vocabulary: they are not D2 methods and
  * are kept distinct so the frozen contract cannot silently widen.
  */
@@ -16,6 +16,7 @@ export const OPERATOR_METHODS = Object.freeze([
   "notes.create",
   "notes.operation-status",
   "notes.operation-list",
+  "notes.approve-upload",
 ] as const);
 
 export const OPERATOR_DISCOVERY_METHODS = Object.freeze([
