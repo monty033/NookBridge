@@ -2909,6 +2909,18 @@ DR-S7a item 4 is not implemented: S7a-2 found no read-only dirty-set API
 **Evidence class:** source and offline tests; the #232–#238 merges were
 reviewed source only. No VM, live account, or deployment was used.
 
+## 13.23 Decision record R16 — exact JSON-encoded byte accounting for the response preflight
+
+**Status:** decision 10 acknowledged by Patrick, 2026-10-24.
+**Mode:** protocol hardening; privacy-relevant (content-exposure path).
+
+1. Exact JSON-encoded byte accounting replaces the flat 6x-per-code-unit charge in the response preflight. `jsonStringUtf8Bytes` counts the UTF-8 bytes `JSON.stringify` emits for each response-owned string field; the walk cap is 1x `maxResponseBytes`.
+2. `maxResponseBytes` is unchanged at 65,536, as are the 1,024-byte envelope allowance and `MAX_NOTES_GET_MARKDOWN_BYTES`.
+3. The handler now charges the request id in `notes.get`, so a long request id degrades the result to `contentStatus: "oversize"` instead of the serializer rejecting the whole envelope.
+4. Failure stays closed: if the bound under-counts, the post-stringify check rejects the response.
+
+**Evidence class:** source and offline tests; no VM, live account, or deployment was used.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.

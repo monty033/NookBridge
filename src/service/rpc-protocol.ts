@@ -890,22 +890,74 @@ function getIntrinsicUint8ArrayMetadata(input: Uint8Array): {
 }
 
 /**
- * Maximum UTF-16 code units we are willing to walk via Buffer.byteLength
- * during the preflight response-size guard.  Anything larger is rejected
- * with a cheap O(1) length check before the walk runs, so a hostile
- * multi-megabyte input cannot force a multi-megabyte Buffer.byteLength
- * walk either.
+ * Maximum UTF-16 code units we are willing to walk during the preflight
+ * response-size guard.  Every code unit encodes to at least one UTF-8 byte
+ * in the JSON output, so a string longer than `maxResponseBytes` code units
+ * can never fit.  It is rejected with a cheap O(1) length check before the
+ * walk runs, so a hostile multi-megabyte input cannot force a
+ * multi-megabyte walk either.
  */
-const PREFLIGHT_UTF16_WALK_CAP = STAGE5_RPC_LIMITS.maxResponseBytes * 6;
+const PREFLIGHT_UTF16_WALK_CAP = STAGE5_RPC_LIMITS.maxResponseBytes;
 
 /**
  * Conservative envelope overhead used by the preflight response-size
- * guard when summing worst-case JSON-escaped field sizes against
+ * guard when summing exact JSON-encoded field sizes against
  * `maxResponseBytes`. The envelope adds the literal JSON key names,
  * value separators, and per-hit field structure. 1024 bytes is
  * sufficient for the success envelope and the error envelope.
  */
 const PREFLIGHT_ENVELOPE_OVERHEAD_BYTES = 1024;
+
+/**
+ * Exact UTF-8 byte length of the JSON string-literal CONTENT (the two
+ * surrounding quotes are not counted) that `JSON.stringify` produces for
+ * `value`, i.e. `Buffer.byteLength(JSON.stringify(value), "utf8") - 2`.
+ *
+ * Per code unit (well-formed `JSON.stringify`):
+ *   - `"` `\` and `\b \f \n \r \t`      -> 2 bytes (short escape)
+ *   - other U+0000..U+001F                -> 6 bytes (`\u00XX`)
+ *   - U+0020..U+007F (except `"` `\`)     -> 1 byte
+ *   - U+0080..U+07FF                      -> 2 bytes
+ *   - valid surrogate pair (2 units)      -> 4 bytes
+ *   - lone surrogate                      -> 6 bytes (`\uDXXX`)
+ *   - everything else (BMP, U+2028/9 too) -> 3 bytes
+ *
+ * The walk is index-based over `charCodeAt` (no string iterator, no
+ * `Buffer.byteLength`).  It is O(1)-rejected above the code-unit cap and
+ * stops as soon as the running total exceeds `budget`, returning a value
+ * greater than `budget` (the partial total, or `budget + 1` for the cap).
+ * It never reads, copies, or echoes the contents anywhere.
+ */
+export function jsonStringUtf8Bytes(value: string, budget: number): number {
+  const length = value.length;
+  if (length > PREFLIGHT_UTF16_WALK_CAP) return budget + 1;
+  let total = 0;
+  for (let i = 0; i < length; i += 1) {
+    const unit = value.charCodeAt(i);
+    if (unit < 0x80) {
+      if (unit >= 0x20) total += unit === 0x22 || unit === 0x5c ? 2 : 1;
+      else total += unit >= 0x08 && unit <= 0x0d && unit !== 0x0b ? 2 : 6;
+    } else if (unit < 0x800) {
+      total += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdfff) {
+      if (unit <= 0xdbff && i + 1 < length) {
+        const next = value.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          total += 4;
+          i += 1;
+        } else {
+          total += 6;
+        }
+      } else {
+        total += 6;
+      }
+    } else {
+      total += 3;
+    }
+    if (total > budget) return total;
+  }
+  return total;
+}
 
 /**
  * Pure predicate mirroring the preflight response-size guard: would a
@@ -914,15 +966,14 @@ const PREFLIGHT_ENVELOPE_OVERHEAD_BYTES = 1024;
  * `notes.get` handler) use this to degrade categorically -- returning
  * `contentStatus: "oversize"` -- instead of building an envelope the
  * serializer would reject wholesale.  It shares the guard's constants
- * so the two cannot drift apart.
+ * and byte accounting so the two cannot drift apart.
  */
 export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
   let sum = 0;
   for (const value of fields) {
-    if (value.length > PREFLIGHT_UTF16_WALK_CAP) return false;
-    const escapedUpperBound = value.length * 6;
-    if (escapedUpperBound > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
-    sum += escapedUpperBound;
+    const bytes = jsonStringUtf8Bytes(value, STAGE5_RPC_LIMITS.maxResponseBytes);
+    if (bytes > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
+    sum += bytes;
     if (sum + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) return false;
   }
   return true;
@@ -930,7 +981,7 @@ export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
 
 /**
  * Run the preflight response-size guard on a single response-owned
- * string field. The guard updates a running worst-case JSON-size sum
+ * string field. The guard updates a running exact JSON-encoded byte sum
  * that the serializer uses to reject envelopes that could exceed
  * `maxResponseBytes` BEFORE any JSON.stringify allocation.
  *
@@ -938,29 +989,22 @@ export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
  *   - The first check is O(1) on the string's UTF-16 code-unit length
  *     so a multi-megabyte hostile string never reaches any further
  *     processing.
- *   - Six output code units per input code unit covers JSON escaping
- *     (`\\uXXXX`) conservatively, including structural characters.
+ *   - The walk (`jsonStringUtf8Bytes`) counts the exact UTF-8 bytes
+ *     `JSON.stringify` will emit for the field, escapes included, and
+ *     stops once the field alone exceeds the response cap.
  *
  * The guard never reads, copies, or echoes the field's contents into
  * the thrown error.
  */
 function preflightResponseStringField(value: string, rawSum: { n: number }): void {
-  // Cheap O(1) UTF-16 code-unit cap.  Rejects multi-megabyte hostile
-  // inputs before any linear walk runs.
-  if (value.length > PREFLIGHT_UTF16_WALK_CAP) {
+  const bytes = jsonStringUtf8Bytes(value, STAGE5_RPC_LIMITS.maxResponseBytes);
+  if (bytes > STAGE5_RPC_LIMITS.maxResponseBytes) {
     throw rpcProtocolError("rpc protocol: response field exceeds maximum response bytes");
   }
-  // Six output code units per input code unit is a conservative upper
-  // bound for JSON escaping.  The preceding cap keeps this multiplication
-  // small and safe before JSON.stringify is reached.
-  const escapedUpperBound = value.length * 6;
-  if (escapedUpperBound > STAGE5_RPC_LIMITS.maxResponseBytes) {
-    throw rpcProtocolError("rpc protocol: response field exceeds maximum response bytes");
-  }
-  rawSum.n += escapedUpperBound;
-  // Conservative upper-bound sum: if the worst-case escaped output plus
-  // fixed envelope overhead exceeds the response cap, reject before
-  // JSON.stringify rather than allocating a potentially oversized string.
+  rawSum.n += bytes;
+  // Exact sum: if the escaped output plus fixed envelope overhead exceeds
+  // the response cap, reject before JSON.stringify rather than allocating
+  // a potentially oversized string.
   if (rawSum.n + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) {
     throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
   }
