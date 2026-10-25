@@ -47,6 +47,12 @@ import {
   buildNookMcpServer,
 } from "../src/mcp/nook-mcp-server.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
+import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
+import {
+  serializeRpcResponse,
+  type RpcRequest,
+  type RpcResponseEnvelope,
+} from "../src/service/rpc-protocol.js";
 import {
   NOOK_MCP_MAX_QUERY_BYTES,
   decodeMcpJsonRpcMessages,
@@ -77,13 +83,16 @@ afterEach(() => {
 /**
  * Spin up a one-shot local Unix socket "daemon" that responds to
  * a single framed request with a forged success or error envelope.
- * The test supplies the bytes that come back.
+ * The test supplies the bytes that come back.  The handler may be
+ * asynchronous so a test can drive the real `handleRpcRequest` +
+ * `serializeRpcResponse` pair behind the socket.
  */
 async function startFakeDaemon(
-  handler: (request: { id: string; method: string; params: { query: string } }) => {
-    ok: boolean;
-    frame: Buffer;
-  },
+  handler: (request: {
+    id: string;
+    method: string;
+    params: { query: string };
+  }) => { ok: boolean; frame: Buffer } | Promise<{ ok: boolean; frame: Buffer }>,
 ): Promise<string> {
   const dir = makeTempDir();
   const socketPath = join(dir, "fake-nookd.sock");
@@ -101,10 +110,17 @@ async function startFakeDaemon(
         method: string;
         params: { query: string };
       };
-      const response = handler(parsed);
-      socket.write(response.frame);
-      // Keep socket alive briefly so the client can read, then close.
-      setTimeout(() => socket.end(), 5);
+      void Promise.resolve(handler(parsed))
+        .then((response) => {
+          socket.write(response.frame);
+          // Keep socket alive briefly so the client can read, then close.
+          setTimeout(() => socket.end(), 5);
+        })
+        .catch(() => {
+          // A handler that rejects (e.g. the serializer refused the
+          // envelope) models a daemon that closes without replying.
+          socket.destroy();
+        });
     };
     socket.on("data", onData);
   });
@@ -198,6 +214,29 @@ describe("nookd socket client — note revision projection", () => {
       }
     },
   );
+
+  it("rejects a note whose markdown byte count disagrees with its content", async () => {
+    // Empty markdown is now allowed, so the byte-length agreement is the
+    // check that still pins the projection: "safe" is 4 bytes, not 5.
+    const socketPath = await startFakeDaemon((request) =>
+      framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "note",
+          note: { id: "note-1", title: "Title" },
+          contentStatus: "ok",
+          markdown: "safe",
+          markdownBytes: 5,
+        },
+      }),
+    );
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.getNote("note-1");
+
+    expect(result.ok).toBe(false);
+  });
 
   it.each(["reader_unavailable", "read_failed"] as const)(
     "forwards %s through notesnook_get_note MCP output",
@@ -317,6 +356,60 @@ describe("nookd socket client — note revision projection", () => {
     const result = await client.getNote("note-1");
 
     expect(result).toEqual({ ok: false, code: "service_unavailable" });
+  });
+
+  it("round-trips a title-only note through handler, serializer, client and MCP", async () => {
+    // The whole chain: the real handler builds contentStatus "ok" with an
+    // empty body, the real serializer frames it, the real client decodes it,
+    // and the MCP tool reports it as a success rather than
+    // `service_unavailable`.
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      noteMetadata: async (id) => ({ id, title: "Title" }),
+      readOnly: {
+        readOperatorNoteContent: async () => ({ type: "html" as const, data: "" }),
+      },
+    };
+    const socketPath = await startFakeDaemon(async (request) => {
+      const response = await handleRpcRequest(
+        {
+          id: request.id,
+          method: "notes.get",
+          params: { id: "note-1" },
+        } as RpcRequest,
+        runtime,
+      );
+      return {
+        ok: response.ok,
+        frame: Buffer.from(serializeRpcResponse(response as RpcResponseEnvelope)),
+      };
+    });
+    const client = new NookdSocketClient({ socketPath });
+
+    const result = await client.getNote("note-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected a successful empty-note result");
+    expect(result.envelope.result).toMatchObject({
+      kind: "note",
+      note: { id: "note-1", title: "Title" },
+      contentStatus: "ok",
+      markdown: "",
+      markdownBytes: 0,
+    });
+
+    const server = buildNookMcpServer({ client });
+    const call = await server.callTool("notesnook_get_note", { id: "note-1" });
+    expect(call.isError).toBeFalsy();
+    const block = call.content[0];
+    if (block?.type !== "text") throw new Error("missing MCP text result");
+    expect(JSON.parse(block.text)).toEqual({
+      kind: "note",
+      note: { id: "note-1", title: "Title" },
+      contentStatus: "ok",
+      markdown: "",
+      markdownBytes: 0,
+    });
   });
 });
 

@@ -1736,7 +1736,12 @@ async function readBoundedNoteContent(
     let markdown: string;
     try {
       const decoded = decodeNoteDocumentNative(envelope, { noteId, revision });
-      markdown = serializeNoteDocumentMarkdown(decoded.document);
+      // A title-only note decodes to a valid but blockless document. Per the
+      // empty-note ruling its Markdown projection is the empty string, not
+      // merely the version header, so `notes.get` can return
+      // `contentStatus: "ok"` with `markdown: ""` / `markdownBytes: 0`.
+      markdown =
+        decoded.document.blocks.length === 0 ? "" : serializeNoteDocumentMarkdown(decoded.document);
     } catch {
       // Read-only approximation is deliberately a fallback; edit/write decoding stays strict.
       if (!envelope || typeof envelope !== "object") throw new Error("unavailable");

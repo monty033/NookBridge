@@ -1,11 +1,17 @@
 /** Regression coverage for exact-path notes.get across RPC and MCP boundaries. */
 import { describe, expect, it, vi } from "vitest";
+import { TextDecoder } from "node:util";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 import { buildNookMcpServer } from "../src/mcp/nook-mcp-server.js";
-import { STAGE5_RPC_LIMITS, type RpcRequest } from "../src/service/rpc-protocol.js";
+import {
+  STAGE5_RPC_LIMITS,
+  serializeRpcResponse,
+  type RpcRequest,
+  type RpcResponseEnvelope,
+} from "../src/service/rpc-protocol.js";
 
 const request = (params: Record<string, unknown>) =>
   ({ id: "get-1", method: "notes.get", params }) as unknown as RpcRequest;
@@ -164,6 +170,29 @@ describe("notes.get exact path", () => {
     expect(await handleRpcRequest(request({ path: "Private/Memo" }), r)).toMatchObject({
       ok: false,
       error: { code: expected },
+    });
+  });
+  it("returns ok with empty markdown for a title-only note and survives serialization", async () => {
+    const response = await handleRpcRequest(
+      request({ path: "Private/Memo" }),
+      runtime({
+        readOnly: {
+          readOperatorNoteContent: async () => ({ type: "html" as const, data: "" }),
+        },
+      }),
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      result: { kind: "note", contentStatus: "ok", markdown: "", markdownBytes: 0 },
+    });
+    const frame = serializeRpcResponse(response as RpcResponseEnvelope);
+    const wire = JSON.parse(new TextDecoder().decode(frame.subarray(4))) as {
+      result?: Record<string, unknown>;
+    };
+    expect(wire.result).toMatchObject({
+      contentStatus: "ok",
+      markdown: "",
+      markdownBytes: 0,
     });
   });
   it("rejects mixed or empty path/id forms", async () => {

@@ -2059,10 +2059,16 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         resultPayload.contentReason = contentReason as "reader_unavailable" | "read_failed";
       }
       if (hasContent) {
+        // A title-only note is legitimately empty: the note-content path
+        // accepts `markdown: ""` with `markdownBytes: 0`. Control-character
+        // and size rejections below are unchanged; only the non-empty rule
+        // is relaxed for this field (owner ruling). The operator `view` and
+        // `preimage` markdown projections keep requiring a non-empty body.
         assertBoundedMarkdown(
           resultRecord.markdown,
           STAGE5_RPC_LIMITS.maxResponseBytes,
           "note content",
+          { allowEmpty: true },
         );
         preflightResponseStringField(resultRecord.markdown as string, rawSum);
         if (
@@ -2979,8 +2985,14 @@ function assertBoundedMarkdown(
   value: JsonValue | undefined,
   maxBytes: number,
   label: string,
+  options: { readonly allowEmpty?: boolean } = {},
 ): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || hasDisallowedControlCharacter(value)) {
+  const allowEmpty = options.allowEmpty === true;
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value.length === 0) ||
+    hasDisallowedControlCharacter(value)
+  ) {
     throw rpcProtocolError(`rpc protocol: ${label} is invalid`);
   }
   if (value.length > maxBytes || utf8ByteLength(value, maxBytes) > maxBytes) {

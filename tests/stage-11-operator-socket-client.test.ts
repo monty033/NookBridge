@@ -151,6 +151,33 @@ describe("operator socket client", () => {
       },
     );
   });
+
+  /**
+   * The empty-note ruling covers the `notes.get` content response only.
+   * The operator editor projection (`notes.get-view` / `notes.edit-preimage`)
+   * must keep requiring a non-empty body, so an empty view still fails
+   * closed at the serializer instead of being silently widened.
+   */
+  it("does not widen the operator view projection to empty markdown", async () => {
+    await withServer(
+      {
+        browse: async () => ({ notes: [], next: null }),
+        search: async () => ({ notes: [], next: null }),
+        view: async () => ({
+          id: HANDLE,
+          revision: `rev_${"a".repeat(32)}`,
+          markdown: "",
+          contentBytes: 0,
+        }),
+      },
+      async (client) => {
+        await expect(client.request("notes.get-view", { id: HANDLE })).resolves.toEqual({
+          ok: false,
+          code: "service_unavailable",
+        });
+      },
+    );
+  });
 });
 
 /**
