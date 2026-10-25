@@ -223,8 +223,12 @@ describe("nookd Unix socket server", () => {
   it("closes a response that cannot satisfy the response byte bound", async () => {
     const { socketPath } = await fixture(async () => []);
     const socket = await connect(socketPath);
-    const oversizedId = "x".repeat(50_000);
-    socket.write(requestBytes(oversizedId, "needle"));
+    // Shortest id whose request still fits one frame but whose response
+    // (exact id bytes + 1,024 envelope allowance) exceeds the response bound.
+    const oversizedId = "x".repeat(STAGE5_RPC_LIMITS.maxResponseBytes - 1024 + 1);
+    const request = requestBytes(oversizedId, "needle");
+    expect(request.length - 4).toBeLessThanOrEqual(STAGE5_RPC_LIMITS.maxFrameBytes);
+    socket.write(request);
 
     await waitForClose(socket);
     expect(socket.destroyed).toBe(true);

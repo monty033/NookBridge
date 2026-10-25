@@ -61,7 +61,11 @@ const section37 = plan.indexOf(SECTION_37);
 const syncPolicy = plan.slice(section36, section37);
 
 const section1322 = plan.indexOf(SECTION_1322);
-const slice1322 = section1322 === -1 ? "" : plan.slice(section1322, appendix);
+const section1323 = plan.indexOf("## 13.23 ");
+const slice1323 = section1323 === -1 ? "" : plan.slice(section1323, appendix);
+
+const slice1322 =
+  section1322 === -1 ? "" : plan.slice(section1322, section1323 === -1 ? appendix : section1323);
 
 /** §13.22's implementation order, from its heading to the end of the slice. */
 const implementationOrder1322 = (() => {
@@ -404,5 +408,23 @@ describe("DOC-1 - operator surface propositions", () => {
     expect(notesCliRow).toContain(
       "`get` may return a read-only approximation that is not an edit preimage; see [security and privacy](../security-and-privacy.md#operator-surface).",
     );
+  });
+});
+
+describe("R16 exact response byte accounting §13.23", () => {
+  it("records the R16 decision in §13.23, before Appendix A", () => {
+    expect(section1323, "§13.23 heading is missing").toBeGreaterThan(section1322);
+    expect(slice1323).toContain("Decision record R16");
+    expect(slice1323).toContain("decision 10 acknowledged by Patrick, 2026-10-24");
+    expect(slice1323).toContain("replaces the flat 6x");
+    expect(slice1323).toContain("unchanged at 65,536");
+    expect(slice1323).toContain("charges the request id");
+  });
+
+  it("states the exact content bound verbatim and cross-references it", () => {
+    expect(security).toContain(
+      "The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance and the note's metadata, measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.",
+    );
+    expect(mcpTools).toContain("../security-and-privacy.md#privacy-boundary-for-agents");
   });
 });

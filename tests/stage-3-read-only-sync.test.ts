@@ -2116,14 +2116,16 @@ describe("notes.get bounded content read", () => {
   });
 
   it("degrades to oversize (and still serializes) when content is under the byte cap but the whole response would not fit", async () => {
-    // Three 5k-char paragraphs (~15k bytes): well under maxResponseBytes, so
-    // a markdown-only bound would call this "ok" -- but the serializer's
-    // preflight charges 6x per char for JSON escaping, which overflows.
+    // Eight 5k-char paragraphs of double quotes: 8 x 5,000 = 40,000 quotes
+    // (~40 KB as Markdown, plus a few separator bytes), under
+    // maxResponseBytes (65,536), so a markdown-only bound would call this
+    // "ok". But JSON escapes each `"` as `\"` (2 bytes), so the encoded
+    // body costs ~80,000 bytes > 65,536 - 1,024 and the response cannot fit.
     // (Paragraphs, not one block: the native decoder rejects very long
     // single text blocks, which would yield "unavailable" instead.)
-    const paragraph = `<p>${"a".repeat(5_000)}</p>`;
+    const paragraph = `<p>${'"'.repeat(5_000)}</p>`;
     const live = createFakeLiveDatabase({
-      contentRecord: { type: "html", data: paragraph.repeat(3) },
+      contentRecord: { type: "html", data: paragraph.repeat(8) },
     });
     const projected = flattenLiveDatabaseToReadOnly(live);
     const adapter = createNotesnookReadOnlyAdapter({ source: projected });

@@ -1652,6 +1652,7 @@ async function runNotesGet(
     runtime,
     noteId,
     note,
+    id,
   );
   const descriptors: PropertyDescriptorMap = {
     kind: { value: "note", enumerable: true, configurable: false, writable: false },
@@ -1706,6 +1707,7 @@ async function readBoundedNoteContent(
   runtime: RpcHandlerRuntimeLike,
   noteId: string,
   note: Record<string, unknown>,
+  requestId: string,
 ): Promise<{
   readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
   readonly contentReason?: "reader_unavailable" | "read_failed";
@@ -1754,8 +1756,9 @@ async function readBoundedNoteContent(
     // serializer's preflight over every response-owned string field it
     // will charge (see normaliseNoteResult in rpc-protocol.ts), so an
     // over-budget note degrades to "oversize" instead of the serializer
-    // rejecting the entire envelope.
-    const charged: string[] = [];
+    // rejecting the entire envelope.  The response envelope echoes the
+    // request id, so it is charged too.
+    const charged: string[] = [requestId];
     for (const key of ["id", "title", "revision", "notebookId"] as const) {
       const value = note[key];
       if (typeof value === "string") charged.push(value);

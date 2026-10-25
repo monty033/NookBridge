@@ -1455,9 +1455,9 @@ describe("security regression: preflight response-size guard", () => {
     });
   });
 
-  it("bounds the preflight walk with a cheap UTF-16 .length cap (rejects without Buffer.byteLength walk on a 4x-overlength string)", () => {
-    // A string whose UTF-16 .length is over the cheap cap (maxResponseBytes *6).
-    // The preflight must reject before the Buffer.byteLength walk runs.
+  it("bounds the preflight walk with a cheap UTF-16 .length cap (rejects without any linear walk on a 7x-overlength string)", () => {
+    // A string whose UTF-16 .length is over the cheap cap (maxResponseBytes, 1x).
+    // The preflight must reject before the byte-accounting walk runs.
     // We use a string of length maxResponseBytes *7 (458,752 UTF-16 units)
     // which is over the cheap cap and must short-circuit immediately.
     const huge = "x".repeat(STAGE5_RPC_LIMITS.maxResponseBytes * 7);
