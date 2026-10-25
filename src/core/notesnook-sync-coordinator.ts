@@ -60,6 +60,31 @@ export type SyncPendingMarker = Readonly<{
   readonly noteId: string;
   readonly sequence: number;
   readonly origin: SyncOrigin;
+  /**
+   * Operator approval for upload. Absent means not approved. Only
+   * `approvePending` sets it, and only to `true`; a marker written afterwards
+   * is a new marker and starts unapproved.
+   */
+  readonly approved?: boolean;
+}>;
+
+/** Result of `approvePending`: counts and the sequence bound only. */
+export type SyncApproveResult = Readonly<{
+  /** Markers newly approved by this call. */
+  readonly approved: number;
+  readonly throughSequence: number;
+}>;
+
+/**
+ * Metadata-only summary of the markers that currently block upload: those
+ * whose origin is not `mcp` and which are not approved. No ids, no paths.
+ */
+export type SyncBlockingSummary = Readonly<{
+  readonly total: number;
+  readonly byOperation: Readonly<Record<SyncOperation, number>>;
+  readonly byOrigin: Readonly<{ readonly operator: number; readonly unknown: number }>;
+  /** Highest sequence among blocking markers, or `null` when none block. */
+  readonly highestSequence: number | null;
 }>;
 
 /** The complete metadata-only state accepted by an injected store. */
@@ -471,6 +496,67 @@ export class SyncCoordinator {
   }
 
   /**
+   * Approve for upload every operator- and unknown-origin marker whose
+   * sequence is at or below `throughSequence`. Markers above it, and any
+   * marker written later, stay unapproved. Nothing is removed and no executor
+   * runs. `mcp` markers never need approval and are left untouched. A failed
+   * save leaves the queue as it was.
+   */
+  approvePending(request: { readonly throughSequence: number }): SyncApproveResult {
+    const record = requireRecord(request, "approval request");
+    const throughSequence = readProperty(record, "throughSequence");
+    if (
+      typeof throughSequence !== "number" ||
+      !Number.isSafeInteger(throughSequence) ||
+      throughSequence < 1
+    ) {
+      fail("invalid_input");
+    }
+
+    let approved = 0;
+    const nextPending = this.#pending.map((marker) => {
+      const settled = marker.origin === "mcp" || marker.approved === true;
+      if (settled || marker.sequence > throughSequence) return marker;
+      approved++;
+      return freezeMarker({
+        operation: marker.operation,
+        noteId: marker.noteId,
+        sequence: marker.sequence,
+        origin: marker.origin,
+        approved: true,
+      });
+    });
+    if (approved > 0) {
+      persist(this.#store, freezeState(nextPending));
+      this.#pending = nextPending;
+    }
+    return Object.freeze({ approved, throughSequence });
+  }
+
+  /** Counts of the markers that currently block upload, by operation and origin. */
+  blockingSummary(): SyncBlockingSummary {
+    const byOperation = { create: 0, append: 0, update: 0, delete: 0 };
+    const byOrigin = { operator: 0, unknown: 0 };
+    let total = 0;
+    let highestSequence: number | null = null;
+    for (const marker of this.#pending) {
+      if (marker.origin === "mcp" || marker.approved === true) continue;
+      total++;
+      byOperation[marker.operation]++;
+      byOrigin[marker.origin]++;
+      if (highestSequence === null || marker.sequence > highestSequence) {
+        highestSequence = marker.sequence;
+      }
+    }
+    return Object.freeze({
+      total,
+      byOperation: Object.freeze(byOperation),
+      byOrigin: Object.freeze(byOrigin),
+      highestSequence,
+    });
+  }
+
+  /**
    * Start one drain, or return the exact existing promise for a concurrent
    * request. No request amplification occurs while a drain is in flight.
    * A drain that starts before the throttle hold has passed waits for the
@@ -725,6 +811,9 @@ function validateState(value: unknown): SyncCoordinatorState {
     const sequence = readProperty(markerRecord, "sequence");
     // Markers persisted before origins existed load as "unknown" (fail closed).
     const origin = parseOrigin(markerRecord);
+    // Absent means not approved; anything but a boolean is rejected.
+    const approved = readProperty(markerRecord, "approved");
+    if (approved !== undefined && typeof approved !== "boolean") fail("invalid_input");
     if (
       !isOperation(operation) ||
       typeof noteId !== "string" ||
@@ -735,7 +824,15 @@ function validateState(value: unknown): SyncCoordinatorState {
     ) {
       fail("invalid_input");
     }
-    pending.push(freezeMarker({ operation, noteId, sequence, origin }));
+    pending.push(
+      freezeMarker({
+        operation,
+        noteId,
+        sequence,
+        origin,
+        ...(approved === true ? { approved } : {}),
+      }),
+    );
   }
   return freezeState(pending);
 }
@@ -750,6 +847,7 @@ function copyMarker(marker: SyncPendingMarker): SyncPendingMarker {
     noteId: marker.noteId,
     sequence: marker.sequence,
     origin: marker.origin,
+    ...(marker.approved === true ? { approved: true } : {}),
   });
 }
 
