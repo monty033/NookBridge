@@ -62,6 +62,7 @@ const stringFromCodePoint = String.fromCodePoint;
 const stringSlice = String.prototype.slice;
 const numberFromString = Number;
 const numberIsFinite = Number.isFinite;
+const mathMax = Math.max;
 
 // ---------------------------------------------------------------------------
 // Published limits — frozen constants the rest of the protocol is bounded by.
@@ -996,18 +997,74 @@ export function fitsResponsePreflight(fields: ReadonlyArray<string>): boolean {
  * The guard never reads, copies, or echoes the field's contents into
  * the thrown error.
  */
-function preflightResponseStringField(value: string, rawSum: { n: number }): void {
+function preflightResponseStringField(value: string, rawSum: PreflightSum): void {
   const bytes = jsonStringUtf8Bytes(value, STAGE5_RPC_LIMITS.maxResponseBytes);
   if (bytes > STAGE5_RPC_LIMITS.maxResponseBytes) {
     throw rpcProtocolError("rpc protocol: response field exceeds maximum response bytes");
   }
   rawSum.n += bytes;
-  // Exact sum: if the escaped output plus fixed envelope overhead exceeds
-  // the response cap, reject before JSON.stringify rather than allocating
-  // a potentially oversized string.
-  if (rawSum.n + PREFLIGHT_ENVELOPE_OVERHEAD_BYTES > STAGE5_RPC_LIMITS.maxResponseBytes) {
+  assertPreflightSumFits(rawSum);
+}
+
+/**
+ * Running preflight totals: `n` is the exact JSON-encoded size of the
+ * response-owned string fields; `s` is the upper-bounded structural size
+ * (keys, separators, numeric renderings, punctuation) of array items.
+ */
+type PreflightSum = { n: number; s: number };
+
+/**
+ * Upper bound on the fixed envelope around an array-bearing result, beyond
+ * the string fields and per-item structure:
+ * `{"id":"","ok":true,"result":{"kind":"operation-list","handles":[],"unresolvedHandles":[]}}`
+ * is the longest at about 90 bytes; operator-page adds `"next":null`.
+ */
+const PREFLIGHT_ARRAY_ENVELOPE_BYTES = 160;
+
+/**
+ * Per-item structural upper bounds, in bytes, charged by every
+ * array-producing loop.  Each counts the item's punctuation, key names and
+ * trailing comma; string VALUES are charged separately and exactly.
+ *
+ *   - search hit `{"title":""},`                       = 13
+ *   - notebook `{"id":"","title":"","dateCreated":N,"dateModified":N},`
+ *     = 52 fixed + two numbers of at most 23 bytes
+ *     (`1.7976931348623157e+308`, the longest finite JS number)  = 98
+ *   - operator page note `{"handle":"","label":"","bytes":N},` = 38 fixed
+ *     + a byte count that equals `label` UTF-8 bytes (at most 768, three
+ *     digits), bounded here at 5 digits                         = 43
+ *   - handle `"",`                                           = 3
+ *   - applied field `"notebookId",` (longest allowlisted name)  = 13
+ */
+const PREFLIGHT_ITEM_STRUCTURE_BYTES = objectFreeze({
+  searchHit: 13,
+  notebook: 98,
+  operatorPageNote: 43,
+  handle: 3,
+  appliedField: 13,
+});
+
+/**
+ * Reject before JSON.stringify when strings + structure + the envelope
+ * allowance cannot fit.  The flat 1,024-byte allowance is a floor; once
+ * array structure is charged the allowance is the larger of that floor and
+ * the structural total plus the fixed array envelope, so structure is
+ * never silently dropped and the allowance is never widened for
+ * non-array results.
+ */
+function assertPreflightSumFits(rawSum: PreflightSum): void {
+  const overhead =
+    rawSum.s === 0
+      ? PREFLIGHT_ENVELOPE_OVERHEAD_BYTES
+      : mathMax(PREFLIGHT_ENVELOPE_OVERHEAD_BYTES, rawSum.s + PREFLIGHT_ARRAY_ENVELOPE_BYTES);
+  if (rawSum.n + overhead > STAGE5_RPC_LIMITS.maxResponseBytes) {
     throw rpcProtocolError("rpc protocol: response exceeds maximum response bytes");
   }
+}
+
+function preflightItemStructure(rawSum: PreflightSum, bytes: number): void {
+  rawSum.s += bytes;
+  assertPreflightSumFits(rawSum);
 }
 
 /**
@@ -1782,8 +1839,9 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   // multi-megabyte hostile `id` before JSON.stringify would allocate
   // the payload.  The same guard is re-invoked for `code` / `message`
   // on the error path and for `title` on each hit.
-  const rawSum = objectCreate(null) as { n: number };
+  const rawSum = objectCreate(null) as PreflightSum;
   rawSum.n = 0;
+  rawSum.s = 0;
   preflightResponseStringField(id, rawSum);
 
   const ok = env.ok;
@@ -1838,6 +1896,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         const title = noteRecord.title;
         assertBoundedString(title, STAGE5_RPC_LIMITS.maxTitleBytes, "search hit title");
         preflightResponseStringField(title, rawSum);
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.searchHit);
         const cleanNote = objectCreate(null) as { title: string };
         cleanNote.title = title;
         cleanNotes[index] = cleanNote;
@@ -1899,6 +1958,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         if (!reflectApply(objectHasOwnProperty, notebooks, [index]))
           throw rpcProtocolError("rpc protocol: notebooks result has sparse entries");
         const clean = normaliseNotebookResult(notebooks[index], rawSum);
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.notebook);
         cleanNotebooks[index] = clean;
       }
       const resultPayload = objectCreate(null) as {
@@ -2157,6 +2217,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         ) {
           throw rpcProtocolError("rpc protocol: update result appliedFields entry is invalid");
         }
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.appliedField);
         cleanAppliedFields.push(entry);
       }
       objectSetPrototypeOf(cleanAppliedFields, null);
@@ -2433,6 +2494,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
           throw rpcProtocolError("rpc protocol: operator page note bytes are invalid");
         preflightResponseStringField(handle, rawSum);
         preflightResponseStringField(label, rawSum);
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.operatorPageNote);
         cleanNotes.push({ handle, label, bytes });
       }
       if (next !== null) preflightResponseStringField(next, rawSum);
@@ -2713,6 +2775,8 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         ) {
           throw rpcProtocolError("rpc protocol: operation-list handle is invalid");
         }
+        preflightResponseStringField(handleValue, rawSum);
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.handle);
         cleanHandles.push(handleValue);
       }
       objectSetPrototypeOf(cleanHandles, null);
@@ -2739,6 +2803,8 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         ) {
           throw rpcProtocolError("rpc protocol: operation-list unresolved handle is invalid");
         }
+        preflightResponseStringField(handleValue, rawSum);
+        preflightItemStructure(rawSum, PREFLIGHT_ITEM_STRUCTURE_BYTES.handle);
         cleanUnresolvedHandles.push(handleValue);
       }
       objectSetPrototypeOf(cleanUnresolvedHandles, null);
@@ -2844,7 +2910,7 @@ export const serializeRpcResponse = wrapProtocolBoundary(serializeRpcResponseInt
 function serializeSuccessFrame(
   id: string,
   resultPayload: Record<string, unknown>,
-  rawSum: { n: number },
+  rawSum: PreflightSum,
 ): Uint8Array {
   const successEnvelope = objectCreate(null) as {
     id: string;
@@ -2919,7 +2985,7 @@ function validateOptionalMetadataNumber(
 
 function normaliseNotebookResult(
   value: JsonValue | undefined,
-  rawSum: { n: number },
+  rawSum: PreflightSum,
 ): Record<string, JsonValue> {
   if (value === null || typeof value !== "object" || arrayIsArray(value)) {
     throw rpcProtocolError("rpc protocol: notebook summary must be an object");
@@ -2949,7 +3015,7 @@ function normaliseNotebookResult(
 
 function normaliseNoteResult(
   value: JsonValue | undefined,
-  rawSum: { n: number },
+  rawSum: PreflightSum,
 ): Record<string, JsonValue> {
   if (value === null || typeof value !== "object" || arrayIsArray(value)) {
     throw rpcProtocolError("rpc protocol: note metadata must be an object");

@@ -1757,7 +1757,12 @@ async function readBoundedNoteContent(
     // will charge (see normaliseNoteResult in rpc-protocol.ts), so an
     // over-budget note degrades to "oversize" instead of the serializer
     // rejecting the entire envelope.  The response envelope echoes the
-    // request id, so it is charged too.
+    // request id, so it is charged too.  If the request id alone is so long
+    // that even the oversize envelope cannot fit (about 64,466 characters
+    // for a typical note), no response -- error envelopes included -- can
+    // echo it, and the connection closes; that is the protocol-wide
+    // behaviour for an unanswerable id, not something this producer can
+    // degrade.
     const charged: string[] = [requestId];
     for (const key of ["id", "title", "revision", "notebookId"] as const) {
       const value = note[key];

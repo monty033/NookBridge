@@ -86,20 +86,16 @@ describe("jsonStringUtf8Bytes", () => {
     }
   });
 
-  it("stops past the budget and rejects over-length strings without JSON.stringify", () => {
+  it("stops past the budget and rejects over-length strings", () => {
     expect(jsonStringUtf8Bytes("\u0001".repeat(100), 10)).toBeGreaterThan(10);
-    const spy = vi.spyOn(JSON, "stringify");
-    try {
-      const huge = "x".repeat(MAX + 1);
-      expect(jsonStringUtf8Bytes(huge, MAX)).toBeGreaterThan(MAX);
-      expect(fitsResponsePreflight([huge])).toBe(false);
-      expect(() =>
-        serializeRpcResponse({ id: huge, ok: true, result: { kind: "search", notes: [] } }),
-      ).toThrow(/rpc protocol/);
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
+    const huge = "x".repeat(MAX + 1);
+    expect(jsonStringUtf8Bytes(huge, MAX)).toBeGreaterThan(MAX);
+    expect(fitsResponsePreflight([huge])).toBe(false);
+    expect(() =>
+      serializeRpcResponse({ id: huge, ok: true, result: { kind: "search", notes: [] } }),
+    ).toThrow(/rpc protocol/);
+    // That no JSON.stringify call happens is asserted non-vacuously in
+    // stage-5-rpc-preflight-no-stringify.test.ts, which patches it before import.
   });
 });
 
@@ -174,6 +170,26 @@ describe("notes.get exact accounting", () => {
       result: { kind: "note", contentStatus: "oversize" },
     });
     expect(() => serializeRpcResponse(response)).not.toThrow();
+  });
+});
+
+describe("notes.get request id at the echo limit", () => {
+  // The oversize envelope echoes the request id plus note id, title and
+  // revision, so it fits only while id + metadata + 1,024 <= 65,536.
+  const limit = MAX - OVERHEAD - fixedBytes("");
+
+  it("still degrades to oversize and serializes at the longest echoable id", async () => {
+    const requestId = "r".repeat(limit);
+    const response = await handleRpcRequest(getRequest(requestId), noteRuntime(htmlOf(10)));
+    expect(response).toMatchObject({ ok: true, result: { contentStatus: "oversize" } });
+    expect(() => serializeRpcResponse(response)).not.toThrow();
+  });
+
+  it("cannot be echoed one character longer: the serializer rejects (connection closes)", async () => {
+    const requestId = "r".repeat(limit + 1);
+    const response = await handleRpcRequest(getRequest(requestId), noteRuntime(htmlOf(10)));
+    expect(response).toMatchObject({ ok: true, result: { contentStatus: "oversize" } });
+    expect(() => serializeRpcResponse(response)).toThrow(/rpc protocol/);
   });
 });
 

@@ -42,7 +42,7 @@ self-hosted deployments: access is managed via Notesnook's own per-note Vault
 lock and the deployment's permission settings, not by withholding content
 from every caller.
 
-The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance and the note's metadata, measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.
+The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance, the echoed request id, and the note's charged metadata (id, title, revision and notebook id), measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.
 
 Discovery is filtered separately from content reads. Production discovery —
 `notesnook_search_notes`, notebook listing, and operator `browse`/`search` —
