@@ -107,9 +107,10 @@ function record(value: unknown, keys: readonly string[]): Record<string, unknown
 }
 function bindingKey(value: unknown): string {
   const r = record(snapshot(value), ["noteId", "revision"]);
-  if (typeof r.noteId !== "string" || !r.noteId || typeof r.revision !== "string" || !r.revision)
-    fail();
-  return JSON.stringify([r.noteId, r.revision]);
+  const noteId = r.noteId;
+  const revision = r.revision;
+  if (typeof noteId !== "string" || !noteId || typeof revision !== "string" || !revision) fail();
+  return JSON.stringify([noteId, revision]);
 }
 function bounded(stored: NotesnookStoredContent): NotesnookStoredContent {
   if (Buffer.byteLength(JSON.stringify(stored)) > MAX_NOTE_DOCUMENT_NATIVE_BYTES) fail();
@@ -485,22 +486,24 @@ function references(doc: NoteDocumentV1): string[] {
 function decodeBlocks(
   nodes: HtmlNode[],
   payloads: Map<string, string>,
+  binding: string,
   topLevel = false,
 ): NoteBlock[] {
   return elements(nodes).map((n) => {
     try {
-      return decodeBlock(n, payloads, topLevel);
+      return decodeBlock(n, payloads, binding, topLevel);
     } catch (error) {
       if (!(error instanceof Preserve)) throw error;
-      // Deterministic, position-mixed token.  The operator preimage contract
-      // spans two independent decodes of the same stored content: one mints the
-      // markdown, a later one validates it.  A random token could never be
-      // re-derived by the second decode, so every note carrying an opaque block
-      // was permanently uneditable.  `payloads` is created per decode, so its
-      // size is this reference's traversal index — deterministic for identical
-      // input, and distinct for two identical subtrees in one document.
+      // Deterministic, revision-bound, position-mixed token. The operator
+      // preimage contract spans two independent decodes of the same stored
+      // content: one mints the Markdown, a later one validates it. A random
+      // token could never be re-derived by the second decode, while a token
+      // that omitted the binding could be replayed from an older revision.
+      // `payloads` is created per decode, so its size is this reference's
+      // traversal index — deterministic for identical input and binding, and
+      // distinct for two identical subtrees in one document.
       const token = createHash("sha256")
-        .update(`${payloads.size}\u0000${n.raw}`)
+        .update(JSON.stringify([binding, payloads.size, n.raw]))
         .digest("hex")
         .slice(0, 36);
       payloads.set(token, n.raw);
@@ -512,7 +515,12 @@ function decodeBlocks(
     }
   });
 }
-function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false): NoteBlock {
+function decodeBlock(
+  n: Element,
+  payloads: Map<string, string>,
+  binding: string,
+  topLevel = false,
+): NoteBlock {
   if (n.tag === "hr") {
     const canonicalStyle =
       "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
@@ -581,7 +589,7 @@ function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false
   }
   if (n.tag === "blockquote") {
     attrs(n);
-    return { type: "blockquote", blocks: decodeBlocks(n.children, payloads) };
+    return { type: "blockquote", blocks: decodeBlocks(n.children, payloads, binding) };
   }
   if (n.tag === "pre") {
     attrs(n);
@@ -624,7 +632,7 @@ function decodeBlock(n: Element, payloads: Map<string, string>, topLevel = false
     return {
       type: "callout",
       variant: variant as "info" | "warning" | "success" | "danger",
-      blocks: decodeBlocks(n.children, payloads),
+      blocks: decodeBlocks(n.children, payloads, binding),
     };
   }
   return preserve();
@@ -655,7 +663,10 @@ export function decodeNoteDocumentNative(
     )
       content = roots[0]!.children;
     const payloads = new Map<string, string>();
-    const document: NoteDocumentV1 = { version: 1, blocks: decodeBlocks(content, payloads, true) };
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: decodeBlocks(content, payloads, key, true),
+    };
     validateNoteDocument(document);
     const context: NativeNoteContext = Object.freeze({ version: 1 });
     contexts.set(context, {

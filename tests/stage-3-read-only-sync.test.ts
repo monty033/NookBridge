@@ -8,6 +8,7 @@
 
 import { TextDecoder } from "node:util";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -2076,6 +2077,40 @@ describe("notes.get bounded content read", () => {
     expect(wire.result?.contentStatus).toBe("ok");
     expect(wire.result?.markdown).toContain("Hello world");
     expect(wire.result?.markdownBytes).toBe(response.result.markdownBytes);
+  });
+
+  it("binds notes.get opaque sentinels to the note id and revision", async () => {
+    const rawImage =
+      '<img src="https://example.com/image.png" alt="image" data-path="/private/notes/image.bin">';
+    const live = createFakeLiveDatabase({
+      contentRecord: { type: "html", data: rawImage },
+    });
+    const projected = flattenLiveDatabaseToReadOnly(live);
+    const adapter = createNotesnookReadOnlyAdapter({ source: projected });
+    const runtime = {
+      search: adapter.search.bind(adapter),
+      noteMetadata: adapter.noteMetadata.bind(adapter),
+      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+    };
+    const metadata = await adapter.noteMetadata("note-1");
+    if (metadata === undefined || metadata.revision === undefined)
+      throw new Error("missing test revision");
+    const response = await handleRpcRequest(
+      { id: "rpc-get-opaque", method: "notes.get", params: { id: "note-1" } },
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.note.revision).toBe(metadata.revision);
+    const expected = createHash("sha256")
+      .update(JSON.stringify([JSON.stringify(["note-1", metadata.revision]), 0, rawImage]))
+      .digest("hex")
+      .slice(0, 36);
+    expect(response.result.contentStatus).toBe("ok");
+    expect(response.result.markdown).toBe(
+      `---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque img\nref:1:native-html:${expected}\n:::\n`,
+    );
+    expect(response.result.markdown).not.toContain("/private/notes/");
   });
 
   it("withholds content for a locked note without ever calling the content reader", async () => {
