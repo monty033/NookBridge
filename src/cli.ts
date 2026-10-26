@@ -25,6 +25,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -71,6 +72,7 @@ import {
   runNotesCommand,
   MAX_NOTES_QUERY_BYTES,
   type NotesCommandRuntime,
+  type UploadBlockingSummary,
 } from "./operator/notes-cli.js";
 import {
   createProductionLockedNoteProofRuntime,
@@ -104,6 +106,8 @@ type Args = {
   settingsArgs?: readonly string[];
   treeArgs?: readonly string[];
 };
+
+const MAX_UPLOAD_CONFIRMATION_BYTES = 128;
 
 function normalizeCliArgv(argv: unknown): string[] {
   if (typeof argv !== "object" || argv === null || !Array.isArray(argv)) {
@@ -449,6 +453,17 @@ async function runNotes(args: Args): Promise<number> {
   // stdin read here would both block the command and reintroduce the
   // forbidden body/token transport.
   let cleanup: (() => void | Promise<void>) | undefined;
+  const interactive = createNotesUndoSelection({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  const notesInteractive = interactive.tty
+    ? {
+        ...interactive,
+        showUploadSummary: printNotesUploadSummary,
+        confirmUpload: () => confirmNotesUpload(process.stdin, process.stdout),
+      }
+    : interactive;
   const result = await runNotesCommand({
     argv,
     env: environment,
@@ -457,10 +472,7 @@ async function runNotes(args: Args): Promise<number> {
     // an interactive terminal.  When either stream is not a TTY the seam
     // reports `{ tty: false }` and the command fails categorical rather
     // than reversing an operation nobody chose.
-    interactive: createNotesUndoSelection({
-      input: process.stdin,
-      output: process.stdout,
-    }),
+    interactive: notesInteractive,
     createRuntime: async () => {
       const injected = _internal.notesRuntimeFactory;
       if (injected !== undefined) return injected();
@@ -496,6 +508,61 @@ async function runNotes(args: Args): Promise<number> {
       }
     }
   }
+}
+
+async function confirmNotesUpload(
+  input: typeof process.stdin,
+  output: typeof process.stdout,
+): Promise<string | undefined> {
+  if (input.isTTY !== true || output.isTTY !== true) return undefined;
+  let readline: ReturnType<typeof createInterface>;
+  try {
+    readline = createInterface({ input, output, terminal: false });
+  } catch {
+    return undefined;
+  }
+  try {
+    return await new Promise<string | undefined>((settle) => {
+      let settled = false;
+      const finish = (value: string | undefined): void => {
+        if (settled) return;
+        settled = true;
+        settle(value);
+      };
+      readline.once("close", () => finish(undefined));
+      readline.question("Type the highest sequence number to approve: ", (value: string) => {
+        try {
+          finish(
+            Buffer.byteLength(value, "utf8") <= MAX_UPLOAD_CONFIRMATION_BYTES ? value : undefined,
+          );
+        } catch {
+          finish(undefined);
+        }
+      });
+    });
+  } catch {
+    return undefined;
+  } finally {
+    readline.close();
+  }
+}
+
+function printNotesUploadSummary(summary: UploadBlockingSummary): void {
+  process.stdout.write(
+    [
+      "Pending uploads:",
+      `  total: ${summary.total}`,
+      `  create: ${summary.byOperation.create}`,
+      `  append: ${summary.byOperation.append}`,
+      `  update: ${summary.byOperation.update}`,
+      `  delete: ${summary.byOperation.delete}`,
+      `  operator: ${summary.byOrigin.operator}`,
+      `  unknown: ${summary.byOrigin.unknown}`,
+      ...(summary.highestSequence === null
+        ? []
+        : [`  highest sequence: ${String(summary.highestSequence)}`]),
+    ].join("\n") + "\n",
+  );
 }
 
 function readBoundedNotesStdin(maxBytes: number): string | undefined {

@@ -5,7 +5,8 @@
  * settings evaluator and routes the canonical operator RPC vocabulary
  * (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`,
  * `notes.apply-undo`, `notes.create`, `notes.operation-status`,
- * `notes.operation-list`) through a distinct evaluator that enforces
+ * `notes.operation-list`, `notes.approve-upload`) through a distinct evaluator
+ * that enforces
  * operator identity, notebook policy, and lock-state hooks.
  *
  * The seam is the second half of the authorization boundary; the
@@ -75,6 +76,7 @@ describe("operator policy — closed method vocabulary", () => {
       "notes.create",
       "notes.operation-status",
       "notes.operation-list",
+      "notes.approve-upload",
     ]);
   });
 

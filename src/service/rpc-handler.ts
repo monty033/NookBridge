@@ -409,35 +409,17 @@ export async function handleRpcRequest<T extends RpcRequest>(
         )) as unknown as RpcHandlerResponse<T>;
       }
 
-      // T04 — the MCP endpoint rejects every canonical operator
-      // method categorically.  Operator methods are routed to the
-      // separate operator listener (and operator policy evaluator)
-      // — they must never reach the MCP handler.
-      //
-      // In practice this block is UNREACHABLE for operator methods:
-      // `validateRequestStructurally` above admits only the eleven
-      // daemon methods, so an operator method is already refused with
-      // `invalid_request` before it gets here.  That is the stronger
-      // outcome — an operator method is indistinguishable from any
-      // other unknown method, so probing cannot reveal that an
-      // operator endpoint exists on this host.  The check is kept as
-      // defence in depth in case the structural allowlist is ever
-      // widened; `tests/stage-11-t10-mcp-non-regression.test.ts`
-      // derives its cases from OPERATOR_METHODS so a widening cannot
-      // silently open this boundary.
+      // Only the two id-keyed write methods reach this block. Operator
+      // methods are already refused as `invalid_request` by the structural
+      // allowlist above (they must be indistinguishable from unknown
+      // methods), so this guard is what narrows the union to requests that
+      // carry `params.id` — it is the narrowing, not a second refusal.
       if (
-        structural.request.method === "notes.get-view" ||
-        structural.request.method === "notes.edit-preimage" ||
-        structural.request.method === "notes.apply-edit" ||
-        structural.request.method === "notes.apply-undo" ||
-        structural.request.method === "notes.operation-status" ||
-        structural.request.method === "notes.operation-list" ||
-        structural.request.method === "notes.browse" ||
-        structural.request.method === "notes.search-operator"
+        structural.request.method !== "notes.append" &&
+        structural.request.method !== "notes.update"
       ) {
-        return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        return buildErrorEnvelope(id, "invalid_request") as unknown as RpcHandlerResponse<T>;
       }
-
       const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
       if (!resolved.ok)
         return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
@@ -932,6 +914,7 @@ async function runAuthorizedRpcMethod(
     case "notes.apply-undo":
     case "notes.operation-status":
     case "notes.operation-list":
+    case "notes.approve-upload":
     case "notes.browse":
     case "notes.search-operator":
       return buildErrorEnvelope(id, "permission_denied");

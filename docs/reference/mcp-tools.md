@@ -18,7 +18,7 @@ not automatically authorized for every deployed client.
 | `notesnook_append_note` | Append bounded Markdown. | Requires note identifier and expected revision. Authorization required. |
 | `notesnook_update_note` | Update selected note fields. | Requires note identifier, expected revision, and a non-empty closed patch. Authorization required. |
 | `notesnook_delete_note` | Move one exact-path note to trash. | Destructive, policy-controlled operation. It is not included in `readWriteNoDelete`. |
-| `notesnook_sync` | Request outbound synchronization. | Explicit, policy-controlled operation; no caller-selected sync mode. Refused with `unapproved_pending` while operator- or unknown-origin changes are pending, and a malformed pending batch also produces `unapproved_pending`. Do not retry; local changes are committed and safe; tell the user. |
+| `notesnook_sync` | Request outbound synchronization. | Explicit, policy-controlled operation; no caller-selected sync mode. Refused with `unapproved_pending` while operator- or unknown-origin changes are pending, and a malformed pending batch also produces `unapproved_pending`. Any operator-role client on the daemon's operator socket may approve those markers; MCP has no approval method, and only the CLI requires a terminal. Do not retry; local changes are committed and safe; tell the user. |
 
 The Markdown returned by `notesnook_get_note` is a bounded, read-only projection and may be approximate: decoration is dropped and attachments may be represented by placeholders. It is not an edit preimage.
 
@@ -66,6 +66,12 @@ every layer (RPC, audit outcome, socket client, MCP).
 unknown-origin changes were pending, or because the pending batch was malformed.
 The fixed message is "Unapproved pending changes". Do not retry; the local
 changes are committed and safe; tell the user.
+
+Approval is bounded by the highest blocking sequence shown to the operator.
+Writes made after that listing remain unapproved and continue to block sync.
+
+The approval method's empty-parameter form is a read-only preview that returns
+blocking counts and the highest sequence without changing markers or saving state.
 
 The create outcomes are distinct. `local_sync_marker_failed` means a
 marker failure **after** a committed write (do not retry the create).

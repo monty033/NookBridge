@@ -11,6 +11,7 @@ import {
   isBoundedOpaqueValue,
   type NotesCategoricalResult,
   type NotesCommandRuntime,
+  type UploadBlockingSummary,
 } from "./notes-cli.js";
 import {
   createNotesReadRuntime,
@@ -25,6 +26,7 @@ import type {
   NotesnookReadOnlyNoteMetadata,
   NotesnookReadOnlySearchHit,
 } from "../core/notesnook-readonly-adapter.js";
+import type { RpcNotesApproveUploadPreviewResult } from "../service/rpc-protocol.js";
 
 const HANDLE_PREFIX = "not_";
 const HANDLE_FRAME_PREFIX = Buffer.from("NBH1", "ascii");
@@ -63,6 +65,8 @@ export interface NotesOperatorWriteOptions {
    * the same reviewed runner as {@link NotesOperatorWriteOptions.editBody}.
    */
   readonly createBody?: (markdown: string) => Promise<NotesEditorOutcome>;
+  /** Test/embedded seam for the daemon's metadata-only blocking summary. */
+  readonly blockingSummary?: () => Promise<UploadBlockingSummary | NotesCategoricalResult>;
 }
 
 type NotesReadOnlySurface = Pick<
@@ -303,6 +307,24 @@ export function createNotesCommandRuntimeFromOperatorSocket(
       if (undone.result.kind !== "undo") return UNAVAILABLE_RESULT;
       return { kind: "undone" };
     },
+    blockingSummary: async () => {
+      if (options.blockingSummary !== undefined) return options.blockingSummary();
+      const preview = await client.request("notes.approve-upload", {});
+      if (!preview.ok) return mapOperatorError(preview);
+      if (preview.result.kind !== "approve-upload-preview")
+        throw new Error("operator upload preview response is invalid");
+      return toUploadBlockingSummary(preview.result);
+    },
+    approveUpload: async (command: { readonly throughSequence: number }) => {
+      const approved = await client.request("notes.approve-upload", command);
+      if (!approved.ok) return mapOperatorError(approved);
+      if (approved.result.kind !== "approve-upload") return UNAVAILABLE_RESULT;
+      return {
+        kind: "approved",
+        approved: approved.result.approved,
+        throughSequence: approved.result.throughSequence,
+      };
+    },
   };
   return Object.freeze(runtime);
 }
@@ -390,6 +412,25 @@ function mapOperatorError(
   }
   // A malformed injected result is not a trusted diagnostic category.
   return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
+}
+
+function toUploadBlockingSummary(
+  result: RpcNotesApproveUploadPreviewResult,
+): UploadBlockingSummary {
+  return {
+    total: result.total,
+    byOperation: {
+      create: result.byOperation.create,
+      append: result.byOperation.append,
+      update: result.byOperation.update,
+      delete: result.byOperation.delete,
+    },
+    byOrigin: {
+      operator: result.byOrigin.operator,
+      unknown: result.byOrigin.unknown,
+    },
+    highestSequence: result.highestSequence,
+  };
 }
 
 function mapReadResult(result: NotesReadRuntimeResult): NotesCategoricalResult {

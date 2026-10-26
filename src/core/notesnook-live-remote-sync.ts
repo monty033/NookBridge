@@ -9,7 +9,7 @@
  *
  * Upload gate (DR-S7a item 5): the executor reads the marker batch the
  * coordinator hands it and refuses, without touching upstream, unless every
- * marker is `origin: "mcp"`.
+ * marker is `origin: "mcp"` or carries operator approval (`approved: true`).
  */
 
 import { NotesnookWriteContractError } from "./notesnook-write-contract.js";
@@ -58,15 +58,17 @@ function boundedAttempts(value: unknown): value is number {
 const MAX_GATED_MARKERS = 64;
 
 /**
- * True only when `request.pending` is a bounded array of markers that are all
- * `origin: "mcp"`. An empty batch passes. Everything else is false, so the
- * gate fails closed: a missing or malformed request, a non-array `pending`, a
- * batch over the cap, a non-record marker, and any origin other than `"mcp"`
- * (`"operator"`, `"unknown"`, an absent origin, or a value outside the closed
- * set). Reads are own data properties only, so a getter, a prototype-supplied
- * field or a hostile Proxy trap is never trusted or invoked.
+ * True only when `request.pending` is a bounded array of markers that are each
+ * `origin: "mcp"`, or `"operator"`/`"unknown"` with `approved === true`. An
+ * empty batch passes. Everything else is false, so the gate fails closed: a
+ * missing or malformed request, a non-array `pending`, a batch over the cap, a
+ * non-record marker, an unapproved operator or unknown marker (including any
+ * `approved` that is not the boolean `true`), an absent origin, and a value
+ * outside the closed set even if marked approved. Reads are own data
+ * properties only, so a getter, a prototype-supplied field or a hostile Proxy
+ * trap is never trusted or invoked.
  */
-function pendingIsAllMcp(request: unknown): boolean {
+function pendingIsReleasable(request: unknown): boolean {
   try {
     if (!isRecord(request)) return false;
     const pending = readOwnData(request, "pending");
@@ -83,7 +85,14 @@ function pendingIsAllMcp(request: unknown): boolean {
     for (let index = 0; index < length; index++) {
       const marker = readOwnData(pending, String(index));
       if (!isRecord(marker)) return false;
-      if (readOwnData(marker, "origin") !== "mcp") return false;
+      const origin = readOwnData(marker, "origin");
+      if (origin === "mcp") continue;
+      if (
+        (origin !== "operator" && origin !== "unknown") ||
+        readOwnData(marker, "approved") !== true
+      ) {
+        return false;
+      }
     }
     return true;
   } catch {
@@ -198,7 +207,7 @@ export function createLiveRemoteSyncExecutor(
       ensureOpen();
       // Upload gate (DR-S7a item 5). Decided from the markers alone, and
       // before `boundStart` so a refusal can never reach upstream.
-      if (!pendingIsAllMcp(request)) {
+      if (!pendingIsReleasable(request)) {
         return Object.freeze({
           status: "refused" as const,
           reason: "unapproved_pending" as const,

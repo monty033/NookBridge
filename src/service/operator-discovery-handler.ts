@@ -7,6 +7,8 @@ import type {
   RpcNotesEditPreimageResult,
   RpcNotesOperationListResult,
   RpcNotesOperationStatusResult,
+  RpcOperatorApproveUploadParams,
+  RpcNotesApproveUploadResponse,
   RpcRequest,
 } from "./rpc-protocol.js";
 import { RPC_ERROR_MESSAGES } from "./rpc-protocol.js";
@@ -58,6 +60,10 @@ export interface OperatorDiscoveryRuntime {
     peer: OperatorPeer,
   ) => Promise<RpcNotesOperationStatusResult>;
   readonly operationList?: (peer: OperatorPeer) => Promise<RpcNotesOperationListResult>;
+  readonly approveUpload?: (
+    params: RpcOperatorApproveUploadParams,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesApproveUploadResponse>;
   readonly create?: (
     params: Readonly<{
       title: string;
@@ -108,6 +114,10 @@ export function createOperatorDiscoveryHandler(
         if (runtime.operationList === undefined) return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.operationList(peer));
       }
+      if (request.method === "notes.approve-upload") {
+        if (runtime.approveUpload === undefined) return failure(request.id, "service_unavailable");
+        return mutationSuccess(request.id, await runtime.approveUpload(request.params, peer));
+      }
       if (request.method === "notes.create") {
         if (runtime.create === undefined) return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.create(request.params, peer));
@@ -151,6 +161,7 @@ function mutationSuccess(
     | RpcNotesApplyUndoResult
     | RpcNotesOperationStatusResult
     | RpcNotesOperationListResult
+    | RpcNotesApproveUploadResponse
     | RpcCreatedNoteResult,
 ): RpcAnyResponseEnvelope {
   return { id, ok: true, result } as RpcAnyResponseEnvelope;
