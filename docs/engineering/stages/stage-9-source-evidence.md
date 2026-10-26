@@ -158,7 +158,7 @@ keeps the remaining Stage 9 gates explicit.
 | Gate | Current status |
 | --- | --- |
 | Source parity at deployed pin | **PASS** — fresh 1,512-test receipt above |
-| Current-pin isolation VM | **PASS** |
+| Current-pin isolation VM | **PASS at the 2026-09-07 pin only** — see the 2026-10-26 correction below; it was never evidence for a later pin |
 | Target-host runtime and remote-deletion canary | **PASS WITH FOLLOW-UP** |
 | Red-team coverage for outbound sync/reconcile and deployed `readWriteNoDelete` policy | **PASS WITH FOLLOW-UP** — allowlist/denial/sync probes, 104 focused tests, and live create/append/update plus phone-deletion reconciliation pass; separate local-write race remains |
 | Target-host resource-soak coverage (RT-4) | **PASS WITH FOLLOW-UP** — 100-request bounded soak; long-duration study remains |
@@ -200,3 +200,41 @@ names.
 These facts close the update-compensation deployment and reconciliation slice.
 They do not close the broader Stage 9 VM, privileged red-team, recovery, or
 licensing gates listed above.
+
+## Correction: the isolation VM row and the pin in force (2026-10-26)
+
+The table above records an isolation VM `PASS` produced against
+`9260c6c507db02555046a905d8e7d77ad74865f0` on 2026-09-07. That result is
+accurate for that commit and is not withdrawn here. The row was, however, read
+as evidence for later pins, and it never was.
+
+**At the pin currently consumed by nix-config (`2d06784`, nix-config
+`3a8a9f73`), the isolation check does not pass as it stands on nix-config
+`master`.** It fails at the fixture boundary with `notes boundary fixture
+failed`. The cause is a stale assertion, not a product defect: three assertions
+pin the categorical `invalid-input` result for the retired `--stdin`/`--token`
+carriers, and the packaged CLI stopped emitting that category in `845bb3d`
+(operator create slice), returning a categorical exit-2 `error` instead. The
+refusal still occurs before any runtime is constructed.
+
+The assertion correction is nix-config PR #451 (head `e408039c`), which changes
+no product behaviour. With that correction in place the check passes:
+
+- command: `nix build --no-link .#checks.x86_64-linux.nookbridge-isolation`
+- pin under test: `2d067841b496243baaf2a6967eff30e52aa6f052`, nix-config base
+  `3a8a9f73621c56189e968b51d5d7e09184b9da43`
+- date: 2026-10-26; exit code 0; 34 subtests executed
+- environment: the deployment host, emulated (no `/dev/kvm` device is present;
+  the framework's `kvm` declaration is a scheduler feature, not a QEMU flag)
+
+Sequence and limits, stated plainly: PR #451 was **not merged** when this note
+was written, so no commit on nix-config `master` reproduces a passing isolation
+VM at the pin in force. Once it merges, the check must be re-run from the merged
+`master` and that run recorded here in place of this paragraph. Nothing in this
+correction involves a deployment, a live account, a live state read, or a note
+mutation; the evidence is a throwaway VM against the packaged CLI.
+
+The lesson worth carrying forward: a receipt row that names a gate but not the
+run that produced it will drift from reality, and will keep being read as
+current long after it stops being true. Future rows should cite the command,
+the pin, the date, and the exit status.
