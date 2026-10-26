@@ -217,8 +217,9 @@ carriers, and the packaged CLI stopped emitting that category in `845bb3d`
 (operator create slice), returning a categorical exit-2 `error` instead. The
 refusal still occurs before any runtime is constructed.
 
-The assertion correction is nix-config PR #451 (head `e408039c`), which changes
-no product behaviour. With that correction in place the check passes:
+The assertion correction is nix-config PR #451 (head `e408039c`, merged as
+`2c6c4a92`), which changes no product behaviour. With that correction in place
+the check passes:
 
 - command: `nix build --no-link .#checks.x86_64-linux.nookbridge-isolation`
 - pin under test: `2d067841b496243baaf2a6967eff30e52aa6f052`, nix-config base
@@ -227,12 +228,19 @@ no product behaviour. With that correction in place the check passes:
 - environment: the deployment host, emulated (no `/dev/kvm` device is present;
   the framework's `kvm` declaration is a scheduler feature, not a QEMU flag)
 
-Sequence and limits, stated plainly: PR #451 was **not merged** when this note
-was written, so no commit on nix-config `master` reproduces a passing isolation
-VM at the pin in force. Once it merges, the check must be re-run from the merged
-`master` and that run recorded here in place of this paragraph. Nothing in this
-correction involves a deployment, a live account, a live state read, or a note
-mutation; the evidence is a throwaway VM against the packaged CLI.
+**Confirmed from merged `master`.** PR #451 merged as `2c6c4a92`; the check was
+then evaluated and built from merged nix-config `master`
+(`a8cbece2bcc444f22ff5385acc92d485d3106cf0`, which differs from the PR head
+`e408039c` only by an unrelated frigate note). The merged `master` and the
+reviewed branch produce a bit-identical test derivation, and the built artifact
+is `/nix/store/xw2al2fd4h2955wsm3chl3q7j7jmlbxz-vm-test-run-nookbridge-isolation`
+— the same output, with the same 34 logged subtests, that passed during review.
+So a passing isolation VM at the pin in force is reproducible from `master` as
+of that commit.
+
+Nothing in this correction involves a deployment, a live account, a live state
+read, or a note mutation; the evidence is a throwaway VM against the packaged
+CLI.
 
 The lesson worth carrying forward: a receipt row that names a gate but not the
 run that produced it will drift from reality, and will keep being read as
