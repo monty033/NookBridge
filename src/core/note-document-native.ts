@@ -107,9 +107,10 @@ function record(value: unknown, keys: readonly string[]): Record<string, unknown
 }
 function bindingKey(value: unknown): string {
   const r = record(snapshot(value), ["noteId", "revision"]);
-  if (typeof r.noteId !== "string" || !r.noteId || typeof r.revision !== "string" || !r.revision)
-    fail();
-  return JSON.stringify([r.noteId, r.revision]);
+  const noteId = r.noteId;
+  const revision = r.revision;
+  if (typeof noteId !== "string" || !noteId || typeof revision !== "string" || !revision) fail();
+  return JSON.stringify([noteId, revision]);
 }
 function bounded(stored: NotesnookStoredContent): NotesnookStoredContent {
   if (Buffer.byteLength(JSON.stringify(stored)) > MAX_NOTE_DOCUMENT_NATIVE_BYTES) fail();

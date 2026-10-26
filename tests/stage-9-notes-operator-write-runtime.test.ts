@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
@@ -8,14 +9,34 @@ import {
   type OperatorWriteSource,
 } from "../src/service/notes-operator-write-runtime.js";
 import { createNotesUndoStore, type OperationStoreFs } from "../src/service/notes-undo-store.js";
+import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
 
 const HANDLE = "h_noteone";
 const NOTE_ID = "note-1";
+const NOTE_A = "note-a";
+const NOTE_B = "note-b";
+const HANDLE_A = "h_notea";
+const HANDLE_B = "h_noteb";
 const REVISION_1 = `rev_${"1".repeat(32)}`;
 const REVISION_2 = `rev_${"2".repeat(32)}`;
 const REVISION_3 = `rev_${"3".repeat(32)}`;
 const PEER = { uid: 1000, gid: 1000, groups: ["nookbridge-operators"] };
 const OTHER = { uid: 1001, gid: 1000, groups: ["nookbridge-operators"] };
+
+function threeOpaqueBlocks() {
+  const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
+  const attachment =
+    '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
+  const embed =
+    '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>';
+  return { image, attachment, embed, native: `<p>before</p>${image}${attachment}${embed}` };
+}
+
+function refAt(refs: readonly string[], index: number): string {
+  const ref = refs[index];
+  if (ref === undefined) throw new Error(`missing opaque placeholder ${index}`);
+  return ref;
+}
 
 const wrap = (s: string) => ({
   type: "tiptap" as const,
@@ -75,6 +96,39 @@ async function fixture(options: { readonly native?: string } = {}) {
     now: () => 1000,
   });
   return { state, events, source, store };
+}
+
+async function twoNoteFixture() {
+  const native = threeOpaqueBlocks().native;
+  const states = new Map<string, { revision: string; content: OperatorStoredContent; writes: number }>([
+    [NOTE_A, { revision: REVISION_1, content: wrap(native), writes: 0 }],
+    [NOTE_B, { revision: REVISION_1, content: wrap(native), writes: 0 }],
+  ]);
+  const events: string[] = [];
+  const source: OperatorWriteSource = {
+    async read(noteId: string) {
+      const state = states.get(noteId);
+      return state === undefined
+        ? undefined
+        : { revision: state.revision, content: { ...state.content } };
+    },
+    async update(command) {
+      events.push(`update:${command.noteId}:${command.expectedRevision}`);
+      const state = states.get(command.noteId);
+      if (state === undefined) return { kind: "missing" as const };
+      if (command.expectedRevision !== state.revision) return { kind: "conflict" as const };
+      state.writes += 1;
+      state.content = { ...command.content };
+      state.revision = command.expectedRevision === REVISION_1 ? REVISION_2 : REVISION_3;
+      return { kind: "updated" as const, revision: state.revision };
+    },
+  };
+  const store = await createNotesUndoStore({
+    fs: new MemoryFs(),
+    daemonKey: new Uint8Array(32).fill(9),
+    now: () => 1000,
+  });
+  return { state: states.get(NOTE_B)!, states, events, source, store };
 }
 
 const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {}) =>
@@ -225,21 +279,103 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(1);
   });
 
+  it("binds opaque sentinels to the exact note-id and revision preimage", async () => {
+    const { image } = threeOpaqueBlocks();
+    const f = await fixture({ native: image });
+    const preimage = await runtime(f).editPreimage({ id: HANDLE }, PEER);
+    const match = preimage.markdown.match(
+      /^:::nookbridge opaque img\nref:1:native-html:([A-Za-z0-9_-]+)\n:::$/m,
+    );
+    if (match === null) throw new Error("missing image opaque sentinel");
+    const expected = createHash("sha256")
+      .update(`${JSON.stringify([NOTE_ID, REVISION_1])}\u0000${0}\u0000${image}`)
+      .digest("hex")
+      .slice(0, 36);
+    expect(match[1]).toBe(expected);
+    expect(() =>
+      decodeNoteDocumentNative(wrap(image), {
+        noteId: NOTE_ID,
+        revision: 1 as unknown as string,
+      }),
+    ).toThrow();
+  });
+
+  it("refuses opaque sentinels minted for note A when applied to note B", async () => {
+    // Mutation target: dropping noteId from bindingKey must make this replay
+    // look valid; the categorical refusal and zero-write assertions catch it.
+    const f = await twoNoteFixture();
+    const rt = runtime(f, {
+      resolveHandle: (handle: string) =>
+        handle === HANDLE_A ? NOTE_A : handle === HANDLE_B ? NOTE_B : undefined,
+    });
+    const preimageA = await rt.editPreimage({ id: HANDLE_A }, PEER);
+    const beforeB = Buffer.from(f.states.get(NOTE_B)!.content.data, "utf8");
+    const revisionB = f.states.get(NOTE_B)!.revision;
+
+    await expect(
+      rt.applyEdit(
+        { id: HANDLE_B, expectedRevision: revisionB, markdown: preimageA.markdown },
+        PEER,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(f.states.get(NOTE_A)!.writes).toBe(0);
+    expect(f.states.get(NOTE_B)!.writes).toBe(0);
+    expect(Buffer.from(f.states.get(NOTE_B)!.content.data, "utf8")).toEqual(beforeB);
+    expect(await f.store.list()).toEqual([]);
+  });
+
+  it("edits text while preserving opaque blocks nested in blockquotes and callouts", async () => {
+    // Mutation target: omitting binding from either recursive decode must make
+    // this otherwise ordinary text edit fail closed or lose the opaque bytes.
+    const { image, embed } = threeOpaqueBlocks();
+    const native =
+      `<blockquote><p>before</p>${image}</blockquote>` +
+      `<div data-type="callout" data-variant="warning"><p>callout</p>${embed}</div>`;
+    const f = await fixture({ native });
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    const placeholders = preimage.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
+    expect(placeholders, "expected nested opaque placeholders").toHaveLength(2);
+    for (const [index, raw] of [image, embed].entries()) {
+      const token = createHash("sha256")
+        .update(`${JSON.stringify([NOTE_ID, REVISION_1])}\u0000${index}\u0000${raw}`)
+        .digest("hex")
+        .slice(0, 36);
+      expect(preimage.markdown, `missing nested sentinel ${index}`).toContain(
+        `ref:1:native-html:${token}`,
+      );
+    }
+
+    const result = await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: preimage.revision,
+        markdown: preimage.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
+
+    expect(result.kind).toBe("edit");
+    expect(Buffer.from(f.state.content.data, "utf8")).toEqual(
+      Buffer.from(
+        wrap(
+          `<blockquote><p>after</p>${image}</blockquote><div data-type="callout" data-variant="warning"><p>callout</p>${embed}</div>`,
+        ).data,
+        "utf8",
+      ),
+    );
+  });
+
   it("baseline: edits text while preserving image, attachment, and embed blocks byte-for-byte", async () => {
-    const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
-    const attachment =
-      '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
-    const embed =
-      '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>';
-    const originalData = `<p>before</p>${image}${attachment}${embed}`;
-    const f = await fixture({ native: originalData });
+    const { image, attachment, embed, native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
     const rt = runtime(f);
 
     const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
     const placeholders = preimage.markdown.match(
       /^:::nookbridge opaque [A-Za-z][A-Za-z0-9_-]*\nref:1:(?:native-html|native-tiptap):[A-Za-z0-9_-]+\n:::$/gm,
     );
-    expect(placeholders).toHaveLength(3);
+    expect(placeholders, "expected three opaque placeholders").toHaveLength(3);
     expect(preimage.markdown).not.toContain("example.com");
     expect(preimage.markdown).not.toContain("attachment-opaque");
     expect(preimage.markdown).not.toContain("image-opaque");
@@ -267,30 +403,30 @@ describe("daemon operator write runtime", () => {
       "moved",
       (refs: readonly string[], markdown: string) =>
         markdown
-          .replace(refs[0]!, "TEMP")
-          .replace(refs[1]!, refs[0]!)
-          .replace("TEMP", refs[1]!),
+          .replace(refAt(refs, 0), "TEMP")
+          .replace(refAt(refs, 1), refAt(refs, 0))
+          .replace("TEMP", refAt(refs, 1)),
     ],
     [
       "deleted",
-      (refs: readonly string[], markdown: string) => markdown.replace(`\n\n${refs[1]!}`, ""),
+      (refs: readonly string[], markdown: string) => markdown.replace(refAt(refs, 1), ""),
     ],
     [
       "duplicated",
       (refs: readonly string[], markdown: string) =>
-        markdown.replace(refs[1]!, `${refs[1]}\n\n${refs[1]}`),
+        markdown.replace(refAt(refs, 1), `${refAt(refs, 1)}\n\n${refAt(refs, 1)}`),
     ],
     [
-      "altered nodeType",
+      "altered valid nodeType",
       (refs: readonly string[], markdown: string) =>
-        markdown.replace(refs[0]!, refs[0]!.replace("opaque img", "opaque altered-node")),
+        markdown.replace(refAt(refs, 0), refAt(refs, 0).replace("opaque img", "opaque embed")),
     ],
     [
       "altered sentinel",
       (refs: readonly string[], markdown: string) =>
         markdown.replace(
-          refs[0]!,
-          refs[0]!.replace(
+          refAt(refs, 0),
+          refAt(refs, 0).replace(
             /ref:1:native-html:[A-Za-z0-9_-]+/,
             "ref:1:native-tiptap:altered-sentinel",
           ),
@@ -302,22 +438,20 @@ describe("daemon operator write runtime", () => {
         `${markdown}\n:::nookbridge opaque forged\nref:1:native-html:forged-placeholder\n:::\n`,
     ],
   ] as const)("refuses a %s opaque placeholder before any mutation", async (_name, mutate) => {
-    const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
-    const attachment =
-      '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
-    const embed =
-      '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>';
-    const f = await fixture({ native: `<p>before</p>${image}${attachment}${embed}` });
+    const { native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
     const rt = runtime(f);
     const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
-    const refs = preimage.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g) ?? [];
+    const refs = preimage.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
+    expect(refs, "expected opaque placeholders before mutation").not.toBeNull();
+    if (refs === null) throw new Error("missing opaque placeholders before mutation");
     const before = Buffer.from(f.state.content.data, "utf8");
 
     await expect(
       rt.applyEdit(
         {
           id: HANDLE,
-          expectedRevision: REVISION_1,
+          expectedRevision: preimage.revision,
           markdown: mutate(refs, preimage.markdown),
         },
         PEER,
@@ -326,17 +460,20 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(0);
     expect(Buffer.from(f.state.content.data, "utf8")).toEqual(before);
     expect(await f.store.list()).toEqual([]);
+    const decoded = decodeNoteDocumentNative(f.state.content, {
+      noteId: NOTE_ID,
+      revision: REVISION_1,
+    });
+    const imageBlock = decoded.document.blocks.find((block) => block.type === "opaque");
+    if (imageBlock?.type !== "opaque") throw new Error("stored image did not decode as opaque");
+    expect(imageBlock.nodeType).toBe("img");
   });
 
   it("refuses a valid opaque placeholder from an older revision before any mutation", async () => {
     // Mutation target: removing the revision from the native sentinel hash
     // makes this stale Markdown pass the parser and causes a second write.
-    const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
-    const attachment =
-      '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
-    const embed =
-      '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>';
-    const f = await fixture({ native: `<p>before</p>${image}${attachment}${embed}` });
+    const { native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
     const rt = runtime(f);
     const oldPreimage = await rt.editPreimage({ id: HANDLE }, PEER);
     await rt.applyEdit(
@@ -522,12 +659,8 @@ describe("daemon operator write runtime", () => {
   });
 
   it("undoes an opaque-block edit to the exact original native bytes", async () => {
-    const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
-    const attachment =
-      '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
-    const embed =
-      '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>';
-    const f = await fixture({ native: `<p>before</p>${image}${attachment}${embed}` });
+    const { image, attachment, embed, native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
     const original = Buffer.from(f.state.content.data, "utf8");
     const rt = runtime(f);
     const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
@@ -545,6 +678,22 @@ describe("daemon operator write runtime", () => {
       PEER,
     );
     expect(Buffer.from(f.state.content.data, "utf8")).toEqual(original);
+
+    const fresh = await rt.editPreimage({ id: HANDLE }, PEER);
+    expect(fresh.revision).toBe(REVISION_3);
+    const further = await rt.applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: fresh.revision,
+        markdown: fresh.markdown.replace("before", "final"),
+      },
+      PEER,
+    );
+    expect(further.kind).toBe("edit");
+    expect(f.state.writes).toBe(3);
+    expect(Buffer.from(f.state.content.data, "utf8")).toEqual(
+      Buffer.from(wrap(`<p>final</p>${image}${attachment}${embed}`).data, "utf8"),
+    );
   });
 
   it("refuses undo after a concurrent change and retains the record", async () => {

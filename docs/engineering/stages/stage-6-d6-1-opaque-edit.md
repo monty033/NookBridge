@@ -14,9 +14,15 @@ therefore fail with the existing `invalid_request` category and leave the note
 and operation store unchanged.
 
 When only ordinary text changes, the native serializer restores every trusted
-opaque block from its private context exactly as stored. Undo uses the durable
-native preimage and restores those bytes exactly. The read-only `notes.get-view`
-projection remains unchanged and no MCP schema is changed by this slice.
+opaque block from its private context exactly as stored. The placeholder shape
+and projection schema remain unchanged, but sentinels are now revision-scoped;
+the placeholder node-type label is metadata and is deliberately not a separate
+component of the token preimage.
+Undo uses the durable native preimage and restores those bytes exactly. A
+preimage minted before this change, including one held by an unresolved pending
+operation, now fails closed and must be re-minted. The read-only `notes.get-view`
+route retains its bounded projection shape, and no MCP schema is changed by this
+slice.
 
 The operator-runtime regression coverage is in
 `tests/stage-9-notes-operator-write-runtime.test.ts`; the read-only projection

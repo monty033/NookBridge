@@ -146,15 +146,35 @@ describe("daemon operator discovery runtime", () => {
     const { runtime, handle } = await viewFixture(async () => ({
       type: "html",
       data:
-        '<p>before</p><img src="https://example.com/image.png" alt="image">' +
-        '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>' +
+        '<p>before</p><img src="https://example.com/image.png" alt="image" data-note="image-opaque" data-path="/private/notes/image.bin">' +
+        '<div data-type="attachment" data-id="attachment-opaque" data-path="/private/notes/report.pdf"><a href="https://example.com/file.bin">file.bin</a></div>' +
         '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
     }));
     const view = await runtime.view?.({ id: handle }, PEER_A);
+    expect(view?.id).toBe(handle);
+    expect(view?.id).not.toBe("raw-note");
     expect(view?.markdown).toContain("before");
-    expect(view?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g)).toHaveLength(3);
+    const placeholders = view?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
+    expect(placeholders, "expected three get-view opaque sentinels").toHaveLength(3);
+    expect(placeholders).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^:::nookbridge opaque img\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/,
+        ),
+        expect.stringMatching(
+          /^:::nookbridge opaque div\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/,
+        ),
+      ]),
+    );
+    expect(placeholders?.every((placeholder) =>
+      /^:::nookbridge opaque [A-Za-z][A-Za-z0-9_-]*\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/.test(
+        placeholder,
+      ),
+    )).toBe(true);
     expect(view?.markdown).not.toContain("example.com");
     expect(view?.markdown).not.toContain("attachment-opaque");
+    expect(view?.markdown).not.toContain("image-opaque");
+    expect(view?.markdown).not.toContain("/private/notes/");
     expect(Object.keys(view ?? {}).sort()).toEqual([
       "contentBytes",
       "id",
