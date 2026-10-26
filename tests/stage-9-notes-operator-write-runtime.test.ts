@@ -203,15 +203,17 @@ describe("daemon operator write runtime", () => {
     // D6-2 lock: the operator get-view may approximate content the strict
     // decoder refuses, but a preimage is an edit baseline.  It must still
     // refuse that content rather than hand back an approximation.
-    const f = await fixture({ native: '<p style="color:red">before</p>' });
+    const f = await fixture({ native: '<p><a href="javascript:alert(1)">before</a></p>' });
     await expect(runtime(f).editPreimage({ id: HANDLE }, PEER)).rejects.toMatchObject({
       code: "service_unavailable",
+      message: "service_unavailable",
     });
     expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
   });
 
   it("refuses an edit when only the tolerant read decoder can view the stored content", async () => {
-    const f = await fixture({ native: '<p style="color:red">before</p>' });
+    const f = await fixture({ native: '<p><a href="javascript:alert(1)">before</a></p>' });
     await expect(
       runtime(f).applyEdit(
         { id: HANDLE, expectedRevision: REVISION_1, markdown: "# after" },
@@ -741,39 +743,9 @@ describe("daemon operator write runtime", () => {
     );
   });
 
-  it("undoes a pre-D6-1 durable opaque preimage without revalidating Markdown sentinels", async () => {
-    const { image, attachment, embed, native } = threeOpaqueBlocks();
-    const f = await fixture({ native });
-    const original = Buffer.from(f.state.content.data, "utf8");
-    const originalContent = { ...f.state.content };
-    f.state.content = wrap(`<p>after</p>${image}${attachment}${embed}`);
-    f.state.revision = REVISION_2;
-    const owner = `${PEER.uid}:${PEER.gid}:${PEER.groups.join(",")}`;
-    const record = await f.store.insert({
-      kind: "edit",
-      payload: JSON.stringify({
-        owner,
-        noteId: NOTE_ID,
-        revision: REVISION_1,
-        content: originalContent,
-        postRevision: REVISION_2,
-      }),
-      ttlMs: 60_000,
-    });
-    await f.store.transition(record.handle, "prepared", "committing", undefined, owner);
-    await f.store.transition(record.handle, "committing", "committed", undefined, owner);
-
-    await expect(
-      runtime(f).applyUndo(
-        { id: HANDLE, operationHandle: record.handle, expectedRevision: REVISION_2 },
-        PEER,
-      ),
-    ).resolves.toMatchObject({ kind: "undo" });
-    expect(Buffer.from(f.state.content.data, "utf8")).toEqual(original);
-  });
-
-  it("leaves a pre-D6-1 unresolved opaque operation stranded for reconciliation", async () => {
+  it("does not permit undo of an unresolved operation", async () => {
     const f = await fixture();
+    f.state.revision = REVISION_2;
     const owner = `${PEER.uid}:${PEER.gid}:${PEER.groups.join(",")}`;
     const record = await f.store.insert({
       kind: "edit",

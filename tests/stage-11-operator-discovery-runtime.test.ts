@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -62,14 +63,14 @@ function runtimeFor(readOnly: Record<string, unknown>) {
 const REVISION = `rev_${"1".repeat(32)}`;
 
 /**
- * Stored content the strict native decoder refuses: `style` is outside its
- * inert attribute allowlist.  The read-only renderer can still approximate it
- * (decoration dropped, images/attachments summarised, no URLs or references).
+ * Stored content the strict native decoder refuses: the `javascript:` URL is
+ * outside its safe URL allowlist.  The read-only renderer can still
+ * approximate it (unsafe link dropped, images/attachments summarised).
  */
 const STRICT_REJECTED_CONTENT = Object.freeze({
   type: "html",
   data:
-    '<p style="color:red">Hello <strong>world</strong></p>' +
+    '<p><a href="javascript:alert(1)">Hello <strong>world</strong></a></p>' +
     '<p><img src="https://example.com/x.png" alt="x"></p>' +
     '<div data-type="attachment" data-id="ref-local-1" data-name="report.pdf">x</div>',
 });
@@ -151,6 +152,18 @@ describe("daemon operator discovery runtime", () => {
         '<div data-type="attachment" data-id="attachment-opaque" data-path="/private/notes/report.pdf"><a href="https://example.com/file.bin">file.bin</a></div>' +
         '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
     };
+    const opaque = [
+      '<img src="https://example.com/image.png" alt="image" data-note="image-opaque" data-path="/private/notes/image.bin">',
+      '<div data-type="attachment" data-id="attachment-opaque" data-path="/private/notes/report.pdf"><a href="https://example.com/file.bin">file.bin</a></div>',
+      '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
+    ];
+    const expectedToken = (revision: string, index: number): string =>
+      createHash("sha256")
+        .update(
+          `${JSON.stringify(["raw-note", revision])}\u0000${index}\u0000${opaque[index]}`,
+        )
+        .digest("hex")
+        .slice(0, 36);
     const runtime = runtimeFor({
       listNotes: async () => [{ id: "raw-note", title: "Body" }],
       noteMetadata: async () => ({ id: "raw-note", title: "Body", revision }),
@@ -172,15 +185,26 @@ describe("daemon operator discovery runtime", () => {
     expect(placeholders?.map((placeholder) =>
       /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)\n/.exec(placeholder)?.[1],
     )).toEqual(["img", "div", "div"]);
-    expect(placeholders?.[0]).toBe(
-      ":::nookbridge opaque img\nref:1:native-html:eaf5b9e606c79c799b7015fdb195bf493218\n:::",
-    );
     const divTokens = placeholders
       ?.filter((placeholder) => placeholder.startsWith(":::nookbridge opaque div\n"))
       .map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]);
     expect(divTokens).toHaveLength(2);
     expect(new Set(divTokens).size).toBe(2);
+    expect(
+      placeholders?.map(
+        (placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1],
+      ),
+    ).toEqual([0, 1, 2].map((index) => expectedToken(REVISION, index)));
+    expect(placeholders?.[0]).toBe(
+      ":::nookbridge opaque img\nref:1:native-html:eaf5b9e606c79c799b7015fdb195bf493218\n:::",
+    );
     expect(second?.markdown).not.toBe(first?.markdown);
+    const secondPlaceholders = second?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
+    expect(
+      secondPlaceholders?.map(
+        (placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1],
+      ),
+    ).toEqual([0, 1, 2].map((index) => expectedToken(`rev_${"2".repeat(32)}`, index)));
     expect(second?.markdown).toContain(
       ":::nookbridge opaque img\nref:1:native-html:a60b598d586ac6dff01fb64ee603a6670b0c\n:::",
     );
@@ -197,9 +221,9 @@ describe("daemon operator discovery runtime", () => {
   });
 
   it("falls back to tolerant Markdown when the strict decoder rejects stored content", async () => {
-    // D6-2: `<p style="color:red">` is outside the strict decoder's inert
-    // attribute allowlist.  The view must degrade to the same read-only
-    // approximation notes.get uses instead of failing the whole read.
+    // D6-2: `javascript:` is outside the strict decoder's safe URL allowlist.
+    // The view must degrade to the same read-only approximation notes.get uses
+    // instead of failing the whole read.
     const { runtime, handle } = await viewFixture(async () => STRICT_REJECTED_CONTENT);
     const view = await runtime.view?.({ id: handle }, PEER_A);
     expect(view?.markdown).toBe("Hello **world**\n\n[image]\n\n[attachment: report.pdf]");

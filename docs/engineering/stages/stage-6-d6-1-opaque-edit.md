@@ -22,14 +22,17 @@ the placeholder node-type label is not a separate component of the native hash,
 but it remains part of the ordered structural preimage comparison, so changing
 `img` to `embed` is refused. `notes.get` and `notes.get-view` use the same
 `[noteId, revision]` binding when strict decoding succeeds; their tolerant
-read-only fallback emits no opaque sentinels and is not apply-ready. If the
-stored content is available only through that tolerant decoder, the operator
-write path reports `service_unavailable` before any mutation. Undo uses the
-durable native preimage and restores those bytes exactly. A pre-D6-1
-Markdown preimage is rejected by `apply-edit`, but undo does not revalidate
-Markdown sentinels: a committed pre-D6-1 operation remains undoable because its
-durable native preimage is sufficient. An unresolved pre-D6-1 pending operation
-is not eligible for `apply-undo`; it remains unresolved for reconciliation.
+read-only fallback emits no opaque sentinels and is not apply-ready. A note
+carrying any attribute outside the strict allowlist cannot be edited through
+this surface; the operator must inspect it directly or re-apply the change by
+hand after correcting the unsupported content. If the stored content is
+available only through that tolerant decoder, the operator write path reports
+`service_unavailable` before any mutation. Undo uses the durable native
+preimage and restores those bytes exactly; `apply-undo` takes no Markdown, so
+there are no sentinels to revalidate. An unresolved operation is permanently
+inert and cannot be undone: the note remains at its last known state, and the
+operator's only recourse is to inspect state directly or re-apply the change by
+hand.
 The read-only `notes.get-view` route retains its bounded projection shape, and
 no MCP schema is changed by this slice.
 
