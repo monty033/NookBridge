@@ -142,6 +142,27 @@ describe("daemon operator discovery runtime", () => {
     expect(view?.markdown).not.toContain("raw-note");
   });
 
+  it("keeps get-view as the unchanged read-only approximation for preserved blocks", async () => {
+    const { runtime, handle } = await viewFixture(async () => ({
+      type: "html",
+      data:
+        '<p>before</p><img src="https://example.com/image.png" alt="image">' +
+        '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>' +
+        '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
+    }));
+    const view = await runtime.view?.({ id: handle }, PEER_A);
+    expect(view?.markdown).toContain("before");
+    expect(view?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g)).toHaveLength(3);
+    expect(view?.markdown).not.toContain("example.com");
+    expect(view?.markdown).not.toContain("attachment-opaque");
+    expect(Object.keys(view ?? {}).sort()).toEqual([
+      "contentBytes",
+      "id",
+      "markdown",
+      "revision",
+    ]);
+  });
+
   it("falls back to tolerant Markdown when the strict decoder rejects stored content", async () => {
     // D6-2: `<p style="color:red">` is outside the strict decoder's inert
     // attribute allowlist.  The view must degrade to the same read-only

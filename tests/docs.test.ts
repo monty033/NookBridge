@@ -11,6 +11,7 @@ const status = read("docs/project-status.md");
 const mcpTools = read("docs/reference/mcp-tools.md");
 const security = read("docs/security-and-privacy.md");
 const cli = read("docs/reference/cli.md");
+const d61 = read("docs/engineering/stages/stage-6-d6-1-opaque-edit.md");
 
 const OPERATOR_SURFACE = "## Operator surface";
 const operatorSurfaceStart = security.indexOf(OPERATOR_SURFACE);
@@ -138,6 +139,14 @@ describe("roadmap reconciliation §13.21 (R14)", () => {
     expect(slice).not.toMatch(/rev_[0-9a-f]{32}/);
     expect(slice).not.toMatch(/NOOKBRIDGE_DATABASE_KEY=/);
     expect(slice).not.toMatch(/password\s*[:=]/i);
+  });
+});
+
+describe("D6-1 opaque-block editing documentation", () => {
+  it("pins the resolved editability and exact-preservation decision", () => {
+    expect(d61).toContain(
+      "Notes containing images, attachments or embeds are editable, and their preserved blocks are kept exactly as stored.",
+    );
   });
 });
 

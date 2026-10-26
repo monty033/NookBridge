@@ -12,6 +12,8 @@ instructions.
 - [Stage 4 write plan](stage-4-write-plan.md) — bounded writes and explicit outbound sync.
 - [Stage 5 service boundary](stage-5-service-boundary.md) — trusted daemon and local IPC decisions.
 - [Stage 6 MCP proxy](stage-6-mcp-proxy.md) — historical read-only proxy baseline and addendum.
+- [D6-1 opaque-block editing](stage-6-d6-1-opaque-edit.md) — revision-bound placeholders and exact
+  native-block preservation.
 - [Stage S7a-2 dirty set](stage-s7a-dirty-set.md) — whether the pinned core can list unsynced items read-only (outcome NO).
 - [Stage 9 recovery](stage-9-recovery.md), [canary](stage-9-canary.md), [dependencies](stage-9-dependencies.md), [source evidence](stage-9-source-evidence.md), and [red-team review](stage-9-red-team.md).
 - [Stage 9.5 review prompt](stage-9-5-astra-review-prompt.md) — review procedure and preserved prompt text.
