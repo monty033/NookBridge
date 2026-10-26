@@ -159,9 +159,7 @@ describe("daemon operator discovery runtime", () => {
     ];
     const expectedToken = (revision: string, index: number): string =>
       createHash("sha256")
-        .update(
-          `${JSON.stringify(["raw-note", revision])}\u0000${index}\u0000${opaque[index]}`,
-        )
+        .update(JSON.stringify([JSON.stringify(["raw-note", revision]), index, opaque[index]]))
         .digest("hex")
         .slice(0, 36);
     const runtime = runtimeFor({
@@ -177,6 +175,8 @@ describe("daemon operator discovery runtime", () => {
     const second = await runtime.view?.({ id: handle }, PEER_A);
     expect(first?.id).toBe(handle);
     expect(second?.id).toBe(handle);
+    expect(first?.revision).toBe(REVISION);
+    expect(second?.revision).toBe(revision);
     expect(first?.markdown).toContain("before");
     const placeholders = first?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
     expect(placeholders, "expected three get-view opaque sentinels").toHaveLength(3);
@@ -196,7 +196,7 @@ describe("daemon operator discovery runtime", () => {
       ),
     ).toEqual([0, 1, 2].map((index) => expectedToken(REVISION, index)));
     expect(placeholders?.[0]).toBe(
-      ":::nookbridge opaque img\nref:1:native-html:eaf5b9e606c79c799b7015fdb195bf493218\n:::",
+      ":::nookbridge opaque img\nref:1:native-html:18c406028970c0744a52089cf4fb7b38e266\n:::",
     );
     expect(second?.markdown).not.toBe(first?.markdown);
     const secondPlaceholders = second?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
@@ -206,7 +206,7 @@ describe("daemon operator discovery runtime", () => {
       ),
     ).toEqual([0, 1, 2].map((index) => expectedToken(`rev_${"2".repeat(32)}`, index)));
     expect(second?.markdown).toContain(
-      ":::nookbridge opaque img\nref:1:native-html:a60b598d586ac6dff01fb64ee603a6670b0c\n:::",
+      ":::nookbridge opaque img\nref:1:native-html:d398d39ea6428ead70fc54475b5a361f4410\n:::",
     );
     expect(first?.markdown).not.toContain("example.com");
     expect(first?.markdown).not.toContain("attachment-opaque");

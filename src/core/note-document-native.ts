@@ -503,7 +503,7 @@ function decodeBlocks(
       // traversal index — deterministic for identical input and binding, and
       // distinct for two identical subtrees in one document.
       const token = createHash("sha256")
-        .update(`${binding}\u0000${payloads.size}\u0000${n.raw}`)
+        .update(JSON.stringify([binding, payloads.size, n.raw]))
         .digest("hex")
         .slice(0, 36);
       payloads.set(token, n.raw);

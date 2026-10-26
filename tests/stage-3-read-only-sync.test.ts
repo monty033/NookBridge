@@ -2101,8 +2101,9 @@ describe("notes.get bounded content read", () => {
       createReadWriteNoDeleteServicePolicy(),
     );
     if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    expect(response.result.note.revision).toBe(metadata.revision);
     const expected = createHash("sha256")
-      .update(`${JSON.stringify(["note-1", metadata.revision])}\u0000${0}\u0000${rawImage}`)
+      .update(JSON.stringify([JSON.stringify(["note-1", metadata.revision]), 0, rawImage]))
       .digest("hex")
       .slice(0, 36);
     expect(response.result.contentStatus).toBe("ok");

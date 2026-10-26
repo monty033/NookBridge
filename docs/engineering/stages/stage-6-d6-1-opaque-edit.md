@@ -7,13 +7,14 @@ attachment data, or path.
 
 Opaque placeholders are revision-bound. The native decoder derives each
 sentinel from the note binding, the depth-first traversal index, and the stored
-block bytes. A traversal-order change therefore silently invalidates every
-live preimage and turns an ordinary edit into `invalid_request`. The operator
-edit path compares the complete ordered sentinel set against the trusted
-preimage before it creates an operation record or calls the content writer.
-Moved, deleted, duplicated, altered, forged, and stale placeholders therefore
-fail with the existing `invalid_request` category and leave the note and
-operation store unchanged.
+block bytes. The operator edit path compares a depth-first ordered structural
+reference list against the trusted preimage; each entry includes the opaque
+block's document path, node type, version, source, and token. Reordering or
+re-nesting a block therefore invalidates the preimage even when its global
+traversal index and sentinel bytes are unchanged, while a traversal-order
+change also invalidates every live preimage. Moved, deleted, duplicated,
+altered, forged, and stale placeholders therefore fail with the existing
+`invalid_request` category and leave the note and operation store unchanged.
 
 When only ordinary text changes, the native serializer restores every trusted
 opaque block from its private context exactly as stored. The placeholder shape
@@ -24,15 +25,16 @@ but it remains part of the ordered structural preimage comparison, so changing
 `[noteId, revision]` binding when strict decoding succeeds; their tolerant
 read-only fallback emits no opaque sentinels and is not apply-ready. A note
 carrying any attribute outside the strict allowlist cannot be edited through
-this surface; the operator must inspect it directly or re-apply the change by
-hand after correcting the unsupported content. If the stored content is
+this surface; the operator must inspect it directly or re-apply the change in
+Notesnook after correcting the unsupported content. If the stored content is
 available only through that tolerant decoder, the operator write path reports
 `service_unavailable` before any mutation. Undo uses the durable native
 preimage and restores those bytes exactly; `apply-undo` takes no Markdown, so
-there are no sentinels to revalidate. An unresolved operation is permanently
-inert and cannot be undone: the note remains at its last known state, and the
-operator's only recourse is to inspect state directly or re-apply the change by
-hand.
+there are no sentinels to revalidate. An unresolved operation is inert and
+cannot be undone through this surface. The daemon will not reconcile it, and
+it is reaped on expiry; it neither retries nor reverses the write and cannot
+tell the operator whether it landed. The only recourse is to inspect state
+directly or re-apply the change in Notesnook.
 The read-only `notes.get-view` route retains its bounded projection shape, and
 no MCP schema is changed by this slice.
 

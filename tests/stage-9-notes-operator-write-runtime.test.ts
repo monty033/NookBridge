@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import {
   createOperatorWriteRuntime,
   type OperatorStoredContent,
@@ -294,6 +296,38 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(1);
   });
 
+  it("accepts the Markdown and revision returned by notes.get", async () => {
+    const { native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
+    const response = await handleRpcRequest(
+      { id: "rpc-get-handoff", method: "notes.get", params: { id: NOTE_ID } },
+      {
+        search: async () => [],
+        noteMetadata: async () => ({ id: NOTE_ID, title: "Title", revision: REVISION_1 }),
+        readOnly: { readOperatorNoteContent: async () => f.state.content },
+      },
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
+    if (
+      response.result.contentStatus !== "ok" ||
+      typeof response.result.markdown !== "string" ||
+      typeof response.result.note.revision !== "string"
+    )
+      throw new Error("expected apply-ready notes.get response");
+
+    const result = await runtime(f).applyEdit(
+      {
+        id: HANDLE,
+        expectedRevision: response.result.note.revision,
+        markdown: response.result.markdown.replace("before", "after"),
+      },
+      PEER,
+    );
+    expect(result.kind).toBe("edit");
+    expect(f.state.writes).toBe(1);
+  });
+
   it("binds opaque sentinels to the exact note-id and revision preimage", async () => {
     const { image } = threeOpaqueBlocks();
     const f = await fixture({ native: image });
@@ -303,7 +337,7 @@ describe("daemon operator write runtime", () => {
     );
     if (match === null) throw new Error("missing image opaque sentinel");
     const expected = createHash("sha256")
-      .update(`${JSON.stringify([NOTE_ID, REVISION_1])}\u0000${0}\u0000${image}`)
+      .update(JSON.stringify([JSON.stringify([NOTE_ID, REVISION_1]), 0, image]))
       .digest("hex")
       .slice(0, 36);
     expect(match[1]).toBe(expected);
@@ -387,7 +421,7 @@ describe("daemon operator write runtime", () => {
     expect(placeholders, "expected nested opaque placeholders").toHaveLength(2);
     for (const [index, raw] of [image, embed].entries()) {
       const token = createHash("sha256")
-        .update(`${JSON.stringify([NOTE_ID, REVISION_1])}\u0000${index}\u0000${raw}`)
+        .update(JSON.stringify([JSON.stringify([NOTE_ID, REVISION_1]), index, raw]))
         .digest("hex")
         .slice(0, 36);
       expect(preimage.markdown, `missing nested sentinel ${index}`).toContain(
@@ -455,6 +489,17 @@ describe("daemon operator write runtime", () => {
           .replace("TEMP", refAt(refs, 1)),
     ],
     [
+      "re-nested",
+      (refs: readonly string[], markdown: string) =>
+        markdown.replace(
+          refAt(refs, 0),
+          refAt(refs, 0)
+            .split("\n")
+            .map((line) => `> ${line}`)
+            .join("\n"),
+        ),
+    ],
+    [
       "deleted",
       (refs: readonly string[], markdown: string) => markdown.replace(refAt(refs, 1), ""),
     ],
@@ -473,16 +518,16 @@ describe("daemon operator write runtime", () => {
       (refs: readonly string[], markdown: string) =>
         markdown.replace(
           refAt(refs, 0),
-          refAt(refs, 0).replace(
-            /ref:1:native-html:[A-Za-z0-9_-]+/,
-            "ref:1:native-tiptap:altered-sentinel",
-          ),
+          refAt(refs, 0).replace(/ref:1:native-html:/, "ref:1:native-tiptap:"),
         ),
     ],
     [
       "forged",
-      (_refs: readonly string[], markdown: string) =>
-        `${markdown}\n:::nookbridge opaque forged\nref:1:native-html:forged-placeholder\n:::\n`,
+      (refs: readonly string[], markdown: string) => {
+        const token = /native-html:([A-Za-z0-9_-]+)/.exec(refAt(refs, 0))?.[1];
+        if (token === undefined) throw new Error("missing trusted opaque token");
+        return `${markdown}\n:::nookbridge opaque forged\nref:1:native-html:${token}\n:::\n`;
+      },
     ],
   ] as const)("refuses a %s opaque placeholder before any mutation", async (_name, mutate) => {
     const { native } = threeOpaqueBlocks();
