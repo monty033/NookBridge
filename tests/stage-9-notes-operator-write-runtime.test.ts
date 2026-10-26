@@ -24,7 +24,8 @@ const PEER = { uid: 1000, gid: 1000, groups: ["nookbridge-operators"] };
 const OTHER = { uid: 1001, gid: 1000, groups: ["nookbridge-operators"] };
 
 function threeOpaqueBlocks() {
-  const image = '<img src="https://example.com/image.png" alt="image" data-note="image-opaque">';
+  const image =
+    '<img src="https://example.com/image.png" alt="image" data-note="image-opaque" data-path="/private/notes/image.bin">';
   const attachment =
     '<div data-type="attachment" data-id="attachment-opaque"><a href="https://example.com/file.bin">file.bin</a></div>';
   const embed =
@@ -128,7 +129,7 @@ async function twoNoteFixture() {
     daemonKey: new Uint8Array(32).fill(9),
     now: () => 1000,
   });
-  return { state: states.get(NOTE_B)!, states, events, source, store };
+  return { states, events, source, store };
 }
 
 const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {}) =>
@@ -207,6 +208,18 @@ describe("daemon operator write runtime", () => {
       code: "service_unavailable",
     });
     expect(f.state.writes).toBe(0);
+  });
+
+  it("refuses an edit when only the tolerant read decoder can view the stored content", async () => {
+    const f = await fixture({ native: '<p style="color:red">before</p>' });
+    await expect(
+      runtime(f).applyEdit(
+        { id: HANDLE, expectedRevision: REVISION_1, markdown: "# after" },
+        PEER,
+      ),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
   });
 
   it("refuses an edit whose expected revision is stale, without writing", async () => {
@@ -292,17 +305,47 @@ describe("daemon operator write runtime", () => {
       .digest("hex")
       .slice(0, 36);
     expect(match[1]).toBe(expected);
-    expect(() =>
+    let thrown: unknown;
+    try {
       decodeNoteDocumentNative(wrap(image), {
         noteId: NOTE_ID,
         revision: 1 as unknown as string,
-      }),
-    ).toThrow();
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: "unsupported_content" });
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("Native note content is not supported");
+    expect((thrown as Error).message).not.toContain(image);
+  });
+
+  it("refuses a pre-D6-1 opaque sentinel on the edit path", async () => {
+    const { image } = threeOpaqueBlocks();
+    const f = await fixture({ native: `<p>before</p>${image}` });
+    const preimage = await runtime(f).editPreimage({ id: HANDLE }, PEER);
+    const legacy = createHash("sha256")
+      .update(`${0}\u0000${image}`)
+      .digest("hex")
+      .slice(0, 36);
+    const markdown = preimage.markdown
+      .replace(/ref:1:native-html:[A-Za-z0-9_-]+/, `ref:1:native-html:${legacy}`)
+      .replace("before", "after");
+
+    await expect(
+      runtime(f).applyEdit(
+        { id: HANDLE, expectedRevision: preimage.revision, markdown },
+        PEER,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_request", message: "invalid_request" });
+    expect(f.state.writes).toBe(0);
+    expect(await f.store.list()).toEqual([]);
   });
 
   it("refuses opaque sentinels minted for note A when applied to note B", async () => {
-    // Mutation target: dropping noteId from bindingKey must make this replay
-    // look valid; the categorical refusal and zero-write assertions catch it.
+    // Mutation target: dropping noteId from bindingKey must make this real
+    // text edit look valid; the pinned sentinels and categorical refusal catch
+    // that binding regression rather than a no-op refusal.
     const f = await twoNoteFixture();
     const rt = runtime(f, {
       resolveHandle: (handle: string) =>
@@ -314,10 +357,14 @@ describe("daemon operator write runtime", () => {
 
     await expect(
       rt.applyEdit(
-        { id: HANDLE_B, expectedRevision: revisionB, markdown: preimageA.markdown },
+        {
+          id: HANDLE_B,
+          expectedRevision: revisionB,
+          markdown: preimageA.markdown.replace("before", "after"),
+        },
         PEER,
       ),
-    ).rejects.toMatchObject({ code: "invalid_request" });
+    ).rejects.toMatchObject({ code: "invalid_request", message: "invalid_request" });
     expect(f.states.get(NOTE_A)!.writes).toBe(0);
     expect(f.states.get(NOTE_B)!.writes).toBe(0);
     expect(Buffer.from(f.states.get(NOTE_B)!.content.data, "utf8")).toEqual(beforeB);
@@ -325,8 +372,8 @@ describe("daemon operator write runtime", () => {
   });
 
   it("edits text while preserving opaque blocks nested in blockquotes and callouts", async () => {
-    // Mutation target: omitting binding from either recursive decode must make
-    // this otherwise ordinary text edit fail closed or lose the opaque bytes.
+    // Mutation target: dropping binding from either recursive decode makes the
+    // pinned traversal-index sentinels disagree and refuses this edit.
     const { image, embed } = threeOpaqueBlocks();
     const native =
       `<blockquote><p>before</p>${image}</blockquote>` +
@@ -379,6 +426,7 @@ describe("daemon operator write runtime", () => {
     expect(preimage.markdown).not.toContain("example.com");
     expect(preimage.markdown).not.toContain("attachment-opaque");
     expect(preimage.markdown).not.toContain("image-opaque");
+    expect(preimage.markdown).not.toContain("/private/notes/");
 
     const result = await rt.applyEdit(
       {
@@ -393,9 +441,6 @@ describe("daemon operator write runtime", () => {
     expect(Buffer.from(f.state.content.data, "utf8")).toEqual(
       Buffer.from(wrap(`<p>after</p>${image}${attachment}${embed}`).data, "utf8"),
     );
-    expect(Buffer.from(f.state.content.data, "utf8").includes(Buffer.from(image))).toBe(true);
-    expect(Buffer.from(f.state.content.data, "utf8").includes(Buffer.from(attachment))).toBe(true);
-    expect(Buffer.from(f.state.content.data, "utf8").includes(Buffer.from(embed))).toBe(true);
   });
 
   it.each([
@@ -694,6 +739,63 @@ describe("daemon operator write runtime", () => {
     expect(Buffer.from(f.state.content.data, "utf8")).toEqual(
       Buffer.from(wrap(`<p>final</p>${image}${attachment}${embed}`).data, "utf8"),
     );
+  });
+
+  it("undoes a pre-D6-1 durable opaque preimage without revalidating Markdown sentinels", async () => {
+    const { image, attachment, embed, native } = threeOpaqueBlocks();
+    const f = await fixture({ native });
+    const original = Buffer.from(f.state.content.data, "utf8");
+    const originalContent = { ...f.state.content };
+    f.state.content = wrap(`<p>after</p>${image}${attachment}${embed}`);
+    f.state.revision = REVISION_2;
+    const owner = `${PEER.uid}:${PEER.gid}:${PEER.groups.join(",")}`;
+    const record = await f.store.insert({
+      kind: "edit",
+      payload: JSON.stringify({
+        owner,
+        noteId: NOTE_ID,
+        revision: REVISION_1,
+        content: originalContent,
+        postRevision: REVISION_2,
+      }),
+      ttlMs: 60_000,
+    });
+    await f.store.transition(record.handle, "prepared", "committing", undefined, owner);
+    await f.store.transition(record.handle, "committing", "committed", undefined, owner);
+
+    await expect(
+      runtime(f).applyUndo(
+        { id: HANDLE, operationHandle: record.handle, expectedRevision: REVISION_2 },
+        PEER,
+      ),
+    ).resolves.toMatchObject({ kind: "undo" });
+    expect(Buffer.from(f.state.content.data, "utf8")).toEqual(original);
+  });
+
+  it("leaves a pre-D6-1 unresolved opaque operation stranded for reconciliation", async () => {
+    const f = await fixture();
+    const owner = `${PEER.uid}:${PEER.gid}:${PEER.groups.join(",")}`;
+    const record = await f.store.insert({
+      kind: "edit",
+      payload: JSON.stringify({
+        owner,
+        noteId: NOTE_ID,
+        revision: REVISION_1,
+        content: f.state.content,
+        postRevision: REVISION_2,
+      }),
+      ttlMs: 60_000,
+    });
+    await f.store.transition(record.handle, "prepared", "committing", undefined, owner);
+    await f.store.transition(record.handle, "committing", "unresolved", undefined, owner);
+
+    await expect(
+      runtime(f).applyUndo(
+        { id: HANDLE, operationHandle: record.handle, expectedRevision: REVISION_2 },
+        PEER,
+      ),
+    ).rejects.toMatchObject({ code: "conflict", message: "conflict" });
+    await expect(f.store.get(record.handle)).resolves.toMatchObject({ state: "unresolved" });
   });
 
   it("refuses undo after a concurrent change and retains the record", async () => {

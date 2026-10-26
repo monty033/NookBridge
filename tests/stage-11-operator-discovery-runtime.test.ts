@@ -142,40 +142,53 @@ describe("daemon operator discovery runtime", () => {
     expect(view?.markdown).not.toContain("raw-note");
   });
 
-  it("keeps get-view as the unchanged read-only approximation for preserved blocks", async () => {
-    const { runtime, handle } = await viewFixture(async () => ({
-      type: "html",
+  it("keeps get-view read-only while binding preserved-block sentinels to revision", async () => {
+    let revision = REVISION;
+    const content = {
+      type: "html" as const,
       data:
         '<p>before</p><img src="https://example.com/image.png" alt="image" data-note="image-opaque" data-path="/private/notes/image.bin">' +
         '<div data-type="attachment" data-id="attachment-opaque" data-path="/private/notes/report.pdf"><a href="https://example.com/file.bin">file.bin</a></div>' +
         '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
-    }));
-    const view = await runtime.view?.({ id: handle }, PEER_A);
-    expect(view?.id).toBe(handle);
-    expect(view?.id).not.toBe("raw-note");
-    expect(view?.markdown).toContain("before");
-    const placeholders = view?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
+    };
+    const runtime = runtimeFor({
+      listNotes: async () => [{ id: "raw-note", title: "Body" }],
+      noteMetadata: async () => ({ id: "raw-note", title: "Body", revision }),
+      readOperatorNoteContent: async () => content,
+    });
+    const page = await runtime.browse({ limit: 1 }, PEER_A);
+    const handle = page.notes[0]?.handle;
+    if (handle === undefined) throw new Error("missing test handle");
+    const first = await runtime.view?.({ id: handle }, PEER_A);
+    revision = `rev_${"2".repeat(32)}`;
+    const second = await runtime.view?.({ id: handle }, PEER_A);
+    expect(first?.id).toBe(handle);
+    expect(second?.id).toBe(handle);
+    expect(first?.markdown).toContain("before");
+    const placeholders = first?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
     expect(placeholders, "expected three get-view opaque sentinels").toHaveLength(3);
-    expect(placeholders).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(
-          /^:::nookbridge opaque img\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/,
-        ),
-        expect.stringMatching(
-          /^:::nookbridge opaque div\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/,
-        ),
-      ]),
+    if (placeholders === null || placeholders === undefined)
+      throw new Error("missing get-view opaque sentinels");
+    expect(placeholders?.map((placeholder) =>
+      /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)\n/.exec(placeholder)?.[1],
+    )).toEqual(["img", "div", "div"]);
+    expect(placeholders?.[0]).toBe(
+      ":::nookbridge opaque img\nref:1:native-html:eaf5b9e606c79c799b7015fdb195bf493218\n:::",
     );
-    expect(placeholders?.every((placeholder) =>
-      /^:::nookbridge opaque [A-Za-z][A-Za-z0-9_-]*\nref:1:native-html:[A-Za-z0-9_-]+\n:::$/.test(
-        placeholder,
-      ),
-    )).toBe(true);
-    expect(view?.markdown).not.toContain("example.com");
-    expect(view?.markdown).not.toContain("attachment-opaque");
-    expect(view?.markdown).not.toContain("image-opaque");
-    expect(view?.markdown).not.toContain("/private/notes/");
-    expect(Object.keys(view ?? {}).sort()).toEqual([
+    const divTokens = placeholders
+      ?.filter((placeholder) => placeholder.startsWith(":::nookbridge opaque div\n"))
+      .map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]);
+    expect(divTokens).toHaveLength(2);
+    expect(new Set(divTokens).size).toBe(2);
+    expect(second?.markdown).not.toBe(first?.markdown);
+    expect(second?.markdown).toContain(
+      ":::nookbridge opaque img\nref:1:native-html:a60b598d586ac6dff01fb64ee603a6670b0c\n:::",
+    );
+    expect(first?.markdown).not.toContain("example.com");
+    expect(first?.markdown).not.toContain("attachment-opaque");
+    expect(first?.markdown).not.toContain("image-opaque");
+    expect(first?.markdown).not.toContain("/private/notes/");
+    expect(Object.keys(first ?? {}).sort()).toEqual([
       "contentBytes",
       "id",
       "markdown",
