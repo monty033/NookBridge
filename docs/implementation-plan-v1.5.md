@@ -2835,7 +2835,7 @@ Source evidence only. Each row is a merged commit on `upstream/main`, and the su
 
 ### Still open
 
-D1-1, D3-1, D3-3, D6-x, S7a-x, R3–R5, R8–R13, R15, DOC-1, and G1a–G8 remain open. The step plan for those items is not duplicated here.
+D6-1, and the G2, G3 and G5–G8 release gates, remain open; G4 remains open unless nix-config #449 is accepted as its evidence. Everything else in the earlier list has merged and is recorded here so the list stops being read as current: D1-1 (#240), D3-1 (#241), D3-3 (#243), DOC-1 (#244), R3 (#230), R4 (#218), R5 (#223), R8 (#220), R9a/R9b (#221/#224), R10a/R10b (#222/#219), R11 (#227), R12 (#229), R13 (#226), R15 (#225), G1a (#228), and G1b (#247). The step plan for the remaining items is not duplicated here.
 
 ## 13.22 Decision record DR-S7a — no upload without explicit sync intent
 
@@ -2893,7 +2893,8 @@ DR-S7a item numbers and S7a step labels use separate numbering.
 | Step S7a-5 | #236 |
 | Step S7a-4 | #237 |
 | Step S7a-4b | #238 |
-| Step S7a-7 | this PR |
+| Step S7a-6 | #254 |
+| Step S7a-7 | #239 |
 
 DR-S7a item 4 is not implemented: S7a-2 found no read-only dirty-set API
 (`docs/engineering/stages/stage-s7a-dirty-set.md`); item 5 applies.
