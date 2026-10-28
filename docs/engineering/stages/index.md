@@ -16,6 +16,7 @@ instructions.
   native-block preservation.
 - [Stage S7a-2 dirty set](stage-s7a-dirty-set.md) — whether the pinned core can list unsynced items read-only (outcome NO).
 - [Stage 9 recovery](stage-9-recovery.md), [canary](stage-9-canary.md), [dependencies](stage-9-dependencies.md), [source evidence](stage-9-source-evidence.md), and [red-team review](stage-9-red-team.md).
+- [Stage 9 security review](stage-9-security-review.md) — independent read-only review at `126e8089`: 16 findings, all open evidence to be verified; ordering in plan §13.24–§13.25.
 - [Stage 9.5 review prompt](stage-9-5-astra-review-prompt.md) — review procedure and preserved prompt text.
 
 The stage-9 production-license CSV and the stage-9.5 text prompt are supporting
