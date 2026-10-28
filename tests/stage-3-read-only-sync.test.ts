@@ -484,6 +484,8 @@ function createFakeLiveDatabase(
     breadcrumbsThrows?: boolean;
     contentRecord?: Readonly<Record<string, unknown>>;
     omitNotebookReference?: boolean;
+    notebookListIds?: readonly string[];
+    relationNotebookIds?: readonly string[];
   } = {},
 ): NotesnookLiveDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -550,9 +552,10 @@ function createFakeLiveDatabase(
       }),
     },
     notebooks: {
-      all: { ids: async () => ["nb-1"] },
+      all: { ids: async () => options.notebookListIds ?? ["nb-1"] },
       notebook: async (id: string) => notebooks.get(id),
-      notes: async (id: string) => (id === "nb-1" ? ["note-1"] : []),
+      notes: async (id: string) =>
+        (options.notebookListIds ?? ["nb-1"]).includes(id) && id === "nb-1" ? ["note-1"] : [],
       ...(options.breadcrumbsThrows
         ? {
             breadcrumbs: async () => {
@@ -573,8 +576,9 @@ function createFakeLiveDatabase(
         marker: "relation-array",
         has(this: { marker: string }, id: string) {
           if (this.marker !== "relation-array") throw new Error("relations.has lost binding");
+          const memberships = options.relationNotebookIds ?? ["nb-1"];
           return Promise.resolve(
-            reference.id === "nb-1" &&
+            memberships.includes(reference.id) &&
               reference.type === "notebook" &&
               type === "note" &&
               id === "note-1",
@@ -606,6 +610,37 @@ describe("Stage 3 production projection and sync gate", () => {
       notebookId: "nb-1",
       revision: createRevisionToken({ id: "note-1", dateEdited: 22 }),
     });
+  });
+
+  it("surfaces every notebook a note is attached to, not just the first", async () => {
+    const source = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({
+        omitNotebookReference: true,
+        notebookListIds: ["nb-1", "nb-2"],
+        relationNotebookIds: ["nb-1", "nb-2"],
+      }),
+    );
+
+    await expect(source.noteMetadata("note-1")).resolves.toMatchObject({
+      id: "note-1",
+      notebookId: "nb-1",
+      notebookIds: ["nb-1", "nb-2"],
+    });
+  });
+
+  it("does not let a note's own notebook field hide a second membership", async () => {
+    // The note record carries `notebookId: nb-1`.  That is one membership, not
+    // the whole set: with relations reporting nb-2 as well, both must surface,
+    // or a policy denying nb-2 would never be consulted.
+    const source = flattenLiveDatabaseToReadOnly(
+      createFakeLiveDatabase({
+        notebookListIds: ["nb-1", "nb-2"],
+        relationNotebookIds: ["nb-1", "nb-2"],
+      }),
+    );
+
+    const metadata = await source.noteMetadata("note-1");
+    expect(metadata?.notebookIds).toEqual(["nb-1", "nb-2"]);
   });
 
   it("derives notebook membership from relations when notebooks.notes is unavailable", async () => {

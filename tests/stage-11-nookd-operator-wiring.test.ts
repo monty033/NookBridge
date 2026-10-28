@@ -636,3 +636,85 @@ describe("nookd operator wiring — D2 target reads (D2-2)", () => {
     },
   );
 });
+
+describe("nookd multi-notebook operator wiring", () => {
+  const MULTI_SETTINGS = JSON.stringify({
+    version: 1,
+    defaults: { read: true, edit: true, create: false, delete: false },
+    overrides: [{ notebooks: ["Root/Secret"], edit: false }],
+  });
+
+  /**
+   * Drive the production-wired operator authorizer for a note attached to
+   * `notebookIds`.  Returns the authorizer's verdict so the caller can compare
+   * a single-membership control against a multi-membership note.
+   */
+  async function authorizeWithMembership(notebookIds: readonly string[]) {
+    vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
+    const primaryNotebookId = notebookIds[0] ?? NOTEBOOK_ID;
+    const metadata = {
+      id: NOTE_ID,
+      title: "Probe",
+      revision: "rev-1",
+      notebookId: primaryNotebookId,
+      notebookIds,
+    };
+    const runtime: NookdStartupRuntime = Object.freeze({
+      search: vi.fn(async () => [{ title: "result" }]),
+      cleanup: vi.fn(async () => undefined),
+      listNotebooksForSettings: vi.fn(async () => [{ id: NOTEBOOK_ID, title: "Root" }]),
+      resolveNotebookPath: vi.fn(async (id: string) => (id === "secret" ? "Root/Secret" : "Root")),
+      noteMetadata: vi.fn(async () => metadata),
+      readOnly: Object.freeze({
+        listNotes: vi.fn(async () => [{ id: NOTE_ID, title: "Probe" }]),
+        listNotebooks: vi.fn(async () => [{ id: NOTEBOOK_ID }]),
+        search: vi.fn(async () => [{ id: NOTE_ID, title: "Probe", source: "note" as const }]),
+        noteMetadata: vi.fn(async () => metadata),
+        readNoteLockState: vi.fn(async () => "unlocked" as const),
+        findNoteIdsByNotebook: vi.fn(async () => [NOTE_ID]),
+        hasNoteInNotebook: vi.fn(async () => true),
+        readOperatorNoteContent: vi.fn(async () => "{}"),
+      }) as never,
+    });
+    const factories: NookdStartupFactories = {
+      loadConfig: vi.fn((_: string): LoadServiceConfigResult => ({ ok: true, config: CONFIG })),
+      createKeyStore: vi.fn(() => productionKeys),
+      createRuntime: vi.fn(async () => runtime),
+      readSettingsFile: vi.fn(() => MULTI_SETTINGS),
+      startServer: vi.fn(
+        async (_options: StartNookdServerOptions): Promise<NookdServerHandle> => ({
+          socketPath: CONFIG.socketPath,
+          shutdown: vi.fn(async () => undefined),
+          close: vi.fn(async () => undefined),
+        }),
+      ),
+    };
+
+    const handle = await startNookd({ configPath: CONFIG_PATH, factories });
+    try {
+      const operator = vi.mocked(factories.startServer).mock.calls[0]?.[0]?.operator;
+      expect(operator).toBeDefined();
+      const browse = await operator!.handle(
+        { id: "browse-1", method: "notes.browse", params: {} } as never,
+        OPERATOR,
+      );
+      const notes = (browse as unknown as { result: { notes: { handle: string }[] } }).result.notes;
+      return await operator!.authorize("notes.apply-edit", OPERATOR, {
+        id: "edit-1",
+        method: "notes.apply-edit",
+        params: { id: notes[0]?.handle },
+      } as never);
+    } finally {
+      await handle.shutdown();
+    }
+  }
+
+  it("refuses an edit when a second attached notebook denies it", async () => {
+    // Control: the same note with only the allowed notebook is admitted, so the
+    // refusal below is caused by the second membership and not a broken fixture.
+    await expect(authorizeWithMembership(["root"])).resolves.toMatchObject({ allowed: true });
+    await expect(authorizeWithMembership(["root", "secret"])).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+});

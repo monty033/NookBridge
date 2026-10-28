@@ -646,6 +646,46 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               if (typeof notebookId !== "string" || notebookId.length === 0) return undefined;
               return resolveNotebookPath?.(notebookId);
             },
+            // The operator seam decides deny-wins over every notebook the note
+            // is attached to, including the ones only enumeration discovers.
+            // Unknown or truncated membership returns undefined, which the
+            // seam treats as a refusal rather than a skip.
+            readNoteNotebookPaths: async (noteId) => {
+              const metadata = await readOnly.noteMetadata(noteId);
+              const record = metadata as
+                | {
+                    notebookId?: unknown;
+                    notebookIds?: unknown;
+                    notebookMembershipComplete?: unknown;
+                  }
+                | undefined;
+              if (record === undefined) return undefined;
+              if (record.notebookMembershipComplete === false) return undefined;
+              const notebookIds: string[] = [];
+              if (typeof record.notebookId === "string" && record.notebookId.length > 0) {
+                notebookIds.push(record.notebookId);
+              }
+              if (Array.isArray(record.notebookIds)) {
+                for (const value of record.notebookIds) {
+                  if (
+                    typeof value === "string" &&
+                    value.length > 0 &&
+                    !notebookIds.includes(value)
+                  ) {
+                    notebookIds.push(value);
+                  }
+                }
+              }
+              if (notebookIds.length === 0) return undefined;
+              const paths: string[] = [];
+              for (const id of notebookIds) {
+                const path = await resolveNotebookPath?.(id);
+                // One unresolvable notebook makes the whole decision unknown.
+                if (typeof path !== "string" || path.length === 0) return undefined;
+                if (!paths.includes(path)) paths.push(path);
+              }
+              return paths;
+            },
             resolveNotebookPath,
             evaluateNotebookPolicy:
               settingsEvaluator === undefined

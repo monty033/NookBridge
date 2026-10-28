@@ -410,7 +410,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
 
     const response = await handleRpcRequest(
       request("notes.delete", { path: "General/Bernie Test Locked" }),
-      makeRuntime({ resolveNotePath, deleteNote }),
+      makeRuntime({ notebookIndex: makeIndex(), resolveNotePath, deleteNote }),
       createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
@@ -441,12 +441,17 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     );
     const response = await handleRpcRequest(
       request("notes.delete", { path: "Roadmap" }),
-      makeRuntime({ resolveNotePath, deleteNote }),
+      makeRuntime({ notebookIndex: makeIndex(), resolveNotePath, deleteNote }),
       createCustomServicePolicy([...RWND, "notes.delete"], evaluator),
     );
 
     expect(response).toMatchObject({ ok: true, result: { kind: "delete", id: "note-1" } });
-    expect(calls).toEqual([{ op: "delete", ctx: { noteTitle: "Roadmap" } }]);
+    // Two authorizations now: the caller-supplied (root-level) context, then
+    // the resolved note's actual notebook context before mutating.
+    expect(calls).toEqual([
+      { op: "delete", ctx: { noteTitle: "Roadmap" } },
+      { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
+    ]);
     expect(resolveNotePath).toHaveBeenCalledWith("Roadmap");
     expect(deleteNote).toHaveBeenCalledWith({ id: "note-1", expectedRevision: REVISION });
   });

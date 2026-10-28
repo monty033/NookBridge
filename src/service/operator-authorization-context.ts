@@ -161,6 +161,15 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
       ) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly readNoteNotebookPath: ((noteId: string) => Promise<string | undefined>) | undefined;
+  /**
+   * Every notebook path the note is directly attached to.  When supplied, this
+   * replaces the single-path lookup and the policy must allow in all of them.
+   * Returning `undefined` means membership could not be established, which is
+   * a refusal, not a skip.
+   */
+  readonly readNoteNotebookPaths?:
+    | ((noteId: string) => Promise<readonly string[] | undefined>)
+    | undefined;
   readonly resolveNotebookPath?:
     | ((notebookId: string) => string | undefined | Promise<string | undefined>)
     | undefined;
@@ -186,7 +195,6 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
       allow: input.evaluateNotebookPolicy("create", notebookPath),
     };
   }
-  if (input.readNoteNotebookPath === undefined) return undefined;
   const noteId = await targetNoteId({
     method: input.method,
     request: input.request,
@@ -195,6 +203,22 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
     resolveOperationNoteId: input.resolveOperationNoteId,
   });
   if (noteId === undefined) return undefined;
+
+  const evaluate = input.evaluateNotebookPolicy;
+  const operation = settingsOperationForMethod(input.method);
+  if (input.readNoteNotebookPaths !== undefined) {
+    const paths = await input.readNoteNotebookPaths(noteId);
+    // Unknown membership is a refusal: skipping the policy here would let a
+    // note in a denied notebook through on partial knowledge.
+    if (paths === undefined || paths.length === 0) return { notebookPath: "", allow: false };
+    const first = paths[0] as string;
+    const denied = paths.find((path) => !evaluate(operation, path));
+    return {
+      notebookPath: denied ?? first,
+      allow: denied === undefined,
+    };
+  }
+  if (input.readNoteNotebookPath === undefined) return undefined;
   const notebookPath = await input.readNoteNotebookPath(noteId);
   if (notebookPath === undefined) return undefined;
   return {

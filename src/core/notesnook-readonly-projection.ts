@@ -314,32 +314,46 @@ export function flattenLiveDatabaseToReadOnly(
     return resolved;
   };
   /**
-   * Resolve a note's notebook and, separately, whether its absence from
-   * every notebook is CONFIRMED.  Absence is confirmed only when the
-   * relations probe is available, the notebook list was not cut off at
-   * the enumeration cap, and every notebook (via relations and, when
-   * present, `notebooks.notes`) positively reported the note as not a
-   * member.  Any thrown error propagates (fail closed); an unavailable
-   * source or a capped list yields `absent: false`.
+   * Resolve EVERY notebook a note is directly attached to, and separately
+   * whether its absence from all of them is CONFIRMED.
+   *
+   * `complete` reports whether the enumeration can be trusted as the whole
+   * membership set: the notebook list was not cut off at the enumeration cap
+   * and at least one membership source is available.  Authorization must
+   * fail closed when it is false, because a partial set would let a denied
+   * notebook go unevaluated.
+   *
+   * Absence is confirmed only when the relations probe is available, the
+   * list was complete, and every notebook positively reported the note as
+   * not a member.  Any thrown error propagates (fail closed).
    */
   const resolveNotebookMembership = async (
     noteId: string,
-  ): Promise<{ readonly notebookId?: string; readonly absent: boolean }> => {
-    if (notebookNotesFn === undefined && relationsFromFn === undefined) return { absent: false };
+  ): Promise<{
+    readonly notebookIds: readonly string[];
+    readonly absent: boolean;
+    readonly complete: boolean;
+  }> => {
+    const sourcesAvailable = notebookNotesFn !== undefined || relationsFromFn !== undefined;
+    if (!sourcesAvailable) return { notebookIds: [], absent: false, complete: false };
     // Strict: an unavailable or malformed index must never look like an empty
     // vault, or absence would be "confirmed" against nothing.
     const allNotebookIds = await readStrictSelectorIds(notebooksAll, "notebooks.all.ids");
     const notebookIds = truncateIds(allNotebookIds, MAX_LIST_NOTEBOOKS);
-    // Reaching the cap means the list may have been truncated, so
-    // "no notebook contains it" cannot be proven.
+    // Reaching the cap means the list may have been truncated, so neither
+    // "no notebook contains it" nor "these are all its notebooks" can be
+    // proven.
     const listComplete = allNotebookIds.length < MAX_LIST_NOTEBOOKS;
+    const found: string[] = [];
+    const remember = (notebookId: string): void => {
+      if (!found.includes(notebookId)) found.push(notebookId);
+    };
     if (relationsFromFn !== undefined) {
       for (const notebookId of notebookIds) {
-        if (await notebookHasNoteViaRelations(notebookId, noteId))
-          return { notebookId, absent: false };
+        if (await notebookHasNoteViaRelations(notebookId, noteId)) remember(notebookId);
       }
     }
-    if (notebookNotesFn !== undefined) {
+    if (found.length === 0 && notebookNotesFn !== undefined) {
       for (const notebookId of notebookIds) {
         const rawNoteIds = await callThrough(
           notebookNotesFn,
@@ -352,11 +366,15 @@ export function flattenLiveDatabaseToReadOnly(
           );
         }
         for (const candidateId of rawNoteIds) {
-          if (candidateId === noteId) return { notebookId, absent: false };
+          if (candidateId === noteId) remember(notebookId);
         }
       }
     }
-    return { absent: listComplete && relationsFromFn !== undefined };
+    return {
+      notebookIds: found,
+      absent: found.length === 0 && listComplete && relationsFromFn !== undefined,
+      complete: listComplete && sourcesAvailable,
+    };
   };
   // Build the closed seam.  Every method is async; every throw /
   // reject maps to a categorical projection error.  Upstream
@@ -740,17 +758,33 @@ export function flattenLiveDatabaseToReadOnly(
       if (note === undefined || note === null) return undefined as never;
       const metadata = coerceUpstreamNoteToMetadata(note, true);
       if (metadata === undefined) return undefined as never;
-      const membership =
-        metadata.notebookId === undefined
-          ? await resolveNotebookMembership(id)
-          : { notebookId: metadata.notebookId, absent: false };
-      const notebookId = membership.notebookId;
+      // The note record's own `notebookId` is one membership, not the whole
+      // set: a note can sit in several notebooks and only the relations probe
+      // knows about the others.  Union the scalar with the enumeration rather
+      // than letting it short-circuit the lookup, which is what let a denied
+      // notebook go unevaluated.
+      const membership = await resolveNotebookMembership(id);
+      const scalarNotebookId = metadata.notebookId;
+      const notebookIds =
+        scalarNotebookId !== undefined && !membership.notebookIds.includes(scalarNotebookId)
+          ? [scalarNotebookId, ...membership.notebookIds]
+          : membership.notebookIds;
+      // `notebookId` stays the first notebook for compatibility with callers
+      // that only ever saw one.  `notebookIds` appears only when the note is
+      // genuinely attached to more than one notebook - the case the
+      // first-match rule used to hide.  `notebookMembershipComplete` appears
+      // only when the enumeration could NOT be trusted, so authorization
+      // fails closed; its absence means the set is trustworthy.  Keeping the
+      // single-notebook shape byte-identical is deliberate.
+      const incomplete = membership.complete ? {} : { notebookMembershipComplete: false };
       const enrichedMetadata =
-        notebookId !== undefined
-          ? { ...metadata, notebookId }
-          : membership.absent
-            ? { ...metadata, notebookAbsenceConfirmed: true }
-            : metadata;
+        notebookIds.length > 1
+          ? { ...metadata, notebookId: notebookIds[0], notebookIds, ...incomplete }
+          : notebookIds.length === 1
+            ? { ...metadata, notebookId: notebookIds[0], ...incomplete }
+            : membership.absent
+              ? { ...metadata, notebookAbsenceConfirmed: true }
+              : { ...metadata, ...incomplete };
       const locked = await readLockedState(contentFindByNoteIdFn, id);
       return (locked === true ? { ...enrichedMetadata, locked: true } : enrichedMetadata) as never;
     },
