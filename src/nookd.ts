@@ -54,6 +54,7 @@ import {
   type NotebookRecord,
 } from "./settings/notebook-index.js";
 import { createOperatorDiscoveryHandler } from "./service/operator-discovery-handler.js";
+import { runOperatorPathDiagnostic } from "./service/rpc-handler.js";
 import {
   createOperatorDiscoveryRuntime,
   createOperatorHandleRegistry,
@@ -671,12 +672,17 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
                     operationStatus: operatorWrite.operationStatus,
                     operationList: operatorWrite.operationList,
                   }),
+              ...(pathDiagnostic === undefined
+                ? {}
+                : {
+                    pathDiagnostic: (request) =>
+                      runOperatorPathDiagnostic(request as never, serverRuntime),
+                  }),
               ...(operatorUploadApproval === undefined
                 ? {}
                 : {
-                    approveUpload: createOperatorUploadApprovalRuntime(
-                      operatorUploadApproval,
-                    ).approveUpload,
+                    approveUpload:
+                      createOperatorUploadApprovalRuntime(operatorUploadApproval).approveUpload,
                   }),
             });
           })(),

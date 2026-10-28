@@ -89,7 +89,6 @@ describe("operator transport — method-only admission", () => {
       "notes.append",
       "notes.delete",
       "notes.locked_note_proof",
-      "notes.path_diagnostic",
       "notes.sync",
     ];
     for (const method of refused) {

@@ -298,16 +298,20 @@ For Stages 0–4 only, development may temporarily instantiate the application l
 
 ## 3.3 Local IPC contract
 
-The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations. The non-operator RPC surface is exactly eleven methods: `notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.locked_note_proof`, `notes.path_diagnostic`, and `notes.sync`. The daemon socket parser and handler admit all eleven subject to the service policy; nine of them have MCP tools, while `notes.locked_note_proof` and `notes.path_diagnostic` have no MCP tool and are issued by `nookctl` over that same daemon socket.
+The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations. The daemon socket parser recognises eleven method names: the ten non-operator methods `notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.locked_note_proof`, `notes.sync`, plus `notes.path_diagnostic`, which is an operator method parsed here only so the daemon can refuse it cleanly instead of dropping the connection. The service policy admits the first ten and refuses `notes.path_diagnostic` with `permission_denied`; it is absent from every daemon allowlist (`readOnly`, `readWriteNoDelete`, `custom`). Nine of the ten have MCP tools; `notes.locked_note_proof` has no MCP tool and is issued by `nookctl` over the daemon socket. `notes.path_diagnostic` has no MCP tool and is issued by `nookctl` over the operator socket.
 
-The operator listener is a separate administrative surface. It admits ten methods in the same `RpcMethod` union, exported as
-`OPERATOR_TRANSPORT_METHODS`: `OPERATOR_METHODS` holds eight (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`,
-`notes.create`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`) and `OPERATOR_DISCOVERY_METHODS` holds two (`notes.browse`, `notes.search-operator`).
-`notes.create` is shared with the daemon surface. The union therefore holds twenty methods, grouped by surface: eleven are non-operator, of which nine are reachable through MCP tools
-(`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.sync`) and two are issued by the CLI over
-that same daemon socket with no MCP tool (`notes.locked_note_proof`, `notes.path_diagnostic`); and nine are operator-only (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`,
-`notes.apply-undo`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`, `notes.browse`, `notes.search-operator`). That is eleven non-operator
-methods plus nine operator-only methods, with `notes.create` counted once because it is shared.
+The operator listener is a separate administrative surface, admitted only to peers in `nookbridge-operators` (`nookbridge-clients`, the group the MCP proxy runs in, is not admitted). Admission and the mutation capability are the same group, so operator access is all-or-nothing: an admitted peer may both read and mutate, and there is no read-only operator tier. The socket's own permission boundary is not what refuses a client peer today: `operator.sock` is created mode 0660 in group `nookbridge-clients`, and the daemon runs as `nookbridge` in that group, so any client-group process can connect and is then refused by the authorizer before dispatch, provided it has no operator-group membership.
+
+That last condition is not met in the current deployment, and this change does not fix it. The MCP server is launched from the MCP client's own configuration (`nook-mcp` against the daemon socket) and therefore runs as the same identity used for operator CLI work, which holds `nookbridge-operators`. A peer is admitted when *any* of its groups is the operator group, so the MCP-launched process remains admitted to the operator listener. Removing `nookbridge-clients` from the admitted list excludes clients-only peers; it does not separate the MCP path. Closing that needs a dedicated non-operator identity for the MCP server, which is deployment configuration outside this unit, and it is tracked as SR-9.
+
+The listener admits eleven methods in the same `RpcMethod` union, exported as
+`OPERATOR_TRANSPORT_METHODS`: `OPERATOR_METHODS` holds nine (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`,
+`notes.create`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`, `notes.path_diagnostic`) and `OPERATOR_DISCOVERY_METHODS` holds two (`notes.browse`, `notes.search-operator`).
+`notes.create` is shared with the daemon surface. The union therefore holds twenty methods, grouped by surface: ten are non-operator - nine reachable through MCP tools
+(`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.sync`) and one issued by the CLI over the daemon socket with no MCP tool
+(`notes.locked_note_proof`) - and ten are operator-only, meaning admitted by no daemon policy (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`,
+`notes.apply-undo`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`, `notes.path_diagnostic`, `notes.browse`, `notes.search-operator`). That is ten non-operator
+methods plus ten operator-only methods, twenty in total. `notes.path_diagnostic` has no MCP tool and is issued by the CLI over the operator socket, not the daemon socket.
 
 The RPC layer must not expose:
 
@@ -774,7 +778,7 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 
 The MCP proxy maps these tools to equivalent named RPC methods. There is no generic `call`, `execute`, `sql`, `read_file`, `get_secret`, or arbitrary core method.
 
-The MCP surface is exactly the 9 tools above. The `RpcMethod` union holds 20 literals, grouped by surface: 9 are reachable through MCP tools, 2 are issued by the CLI over the same daemon socket with no MCP tool (`notes.locked_note_proof`, `notes.path_diagnostic`), and 9 are operator-only.
+The MCP surface is exactly the 9 tools above. The `RpcMethod` union holds 20 literals, grouped by surface: 9 are reachable through MCP tools, 1 is issued by the CLI over the daemon socket with no MCP tool (`notes.locked_note_proof`), and 10 are operator-only (admitted by no daemon policy), including `notes.path_diagnostic`, which the CLI issues over the operator socket.
 
 ## 6.2 Permission model
 
@@ -2987,7 +2991,7 @@ Also in the findings document, as open questions: live behaviour behind findings
 ## 13.25 Remediation ordering for the phase-1 security review
 
 **Status date:** 2026-10-28 (America/New_York)
-**Mode:** documentation-only ordering. Every item below is **open**. This section records an order and a verification basis; it resolves nothing.
+**Mode:** documentation-only ordering. Every item below is **open** unless its status cell says it is implemented in this repository, which so far applies only to SR-3 and SR-4. This section records an order and a verification basis; it closes nothing by itself.
 
 ### Supersession
 
@@ -3016,23 +3020,26 @@ It supersedes nothing else. No existing plan step, ticket label, or section numb
 | SR-1 | 1 | HIGH | After resolving, authorize `notes.delete` against every notebook the resolved note is directly attached to; refuse if any denies. Add the RED test first: a note directly in allowed `A` and denied `B`, deleted via `A/T`. | none (introduces the shared notebook-set resolution) | verified in source (parent check) |
 | SR-2a | 2 | MEDIUM-HIGH | Have `noteMetadata` return all direct notebook ids and authorize `get`, `append`, `update` (and the operator view/preimage/apply paths) against every one; deny wins. Alternative: refuse notes in more than one notebook, as discovery does. | SR-1 | needs reproduction first |
 | SR-2b | 3 | MEDIUM | When `patch.notebookId` is present, resolve the destination path and require `create` (or `edit`) there. | SR-1; compounds SR-2a (the patch is one way to create a multi-notebook note) | needs reproduction first |
-| SR-3 | 5 | MEDIUM-LOW | Remove `nookbridge-clients` from `OPERATOR_ADMITTED_GROUPS` (`operator-authorizer.ts:42-45`). | none; gates SR-4 | verified in source (parent check) |
-| SR-4 | 4 | MEDIUM | Per Patrick's 2026-10-27 decision: make `notes.path_diagnostic` operator-only and drop it from the default `readPolicy` (`install-systemd.sh:254-259`). | SR-3 | verified in source (parent check) |
+| SR-3 | 5 | MEDIUM-LOW | Remove `nookbridge-clients` from `OPERATOR_ADMITTED_GROUPS` (`operator-authorizer.ts:42-45`). **Scope: clients-only peers only.** It does not stop an MCP-launched process, which runs as an identity holding `nookbridge-operators`; that residue is SR-9. | none; gates SR-4 | implemented in this change (PR pending); the all-or-nothing invariant is pinned by test |
+| SR-4 | 4 | MEDIUM | Per Patrick's 2026-10-27 decision: make `notes.path_diagnostic` operator-only and drop it from the default `readPolicy` (`install-systemd.sh:254-259`). | SR-3 | implemented in this change (PR pending) |
 | SR-5 | 6, 14 | LOW-MEDIUM, LOW | Use `SO_PEERGROUPS` in the helper (6); set `completed = true` when the first frame is taken and use `resolvePeerAsync` (14). Same file region, one change. Re-assess 6 after SR-3. | SR-3 | needs reproduction first |
 | SR-6 | 7, 12, 13 | LOW | 7: reject operator literals at parse time on the daemon socket and align the peek list. 12: pass `undefined`, not `""`. 13: answer `permission_denied` for both unknown and denied ids. | 13 touches the same handler lines as SR-2a/2b; do it after them | needs reproduction first |
 | SR-7 | 8 | LOW, KNOWN | Refuse a drain when the batch is empty but `hasUnsyncedChanges()` is true; treat `notes.sync` as `edit`. | **A decision from Patrick first**: it reverses the residual risk accepted in §13.22. Also the open question whether unmarked dirty items exist. | needs reproduction first |
 | SR-8 | 9, 10, 11, 15 | LOW | 9: require approval to echo the previewed `highestSequence` and document that operator-group membership equals upload authority. 10: HMAC with a daemon-held key. 11: require `notes.get` whenever `notes.search` is allowed and fix the description. 15: reject keys containing `"` or `\`. | 15 must not strand existing databases; check how existing keys were produced before enforcing | needs reproduction first |
+| SR-9 | 5 (residual), 9 | MEDIUM-HIGH | Give the MCP server its own non-operator identity so a process launched by the MCP client is not admitted to the operator listener. Today that process runs as the operator CLI's identity, so it is admitted and retains `approve-upload`; SR-3 removes only clients-only peers. | SR-3 landed; needs deployment work in the MCP client's launch configuration, outside this unit | verified in source and in the launch configuration |
 
-### Open design question on SR-4
+### SR-4 mechanism, as implemented
 
-"Operator-only" is not yet specified mechanically. Today `notes.path_diagnostic` is an RPC method that the daemon socket parser accepts and the handler dispatches under the service policy. Moving it behind the operator group means either rejecting it on the daemon socket and adding an operator method, or requiring operator group membership on the existing path. That choice is not made here. Dropping it from the installer's default `readPolicy` also changes only new installs, since the installer writes the file; whether existing deployments keep the entry is a deployment check, not something the source shows. The built-in profiles in `service-policy.ts` (`:144`, `:166`, `:189`) also list it, so the profile lists need the same decision.
+"Operator-only" is now specified mechanically rather than left open. The daemon socket parser still recognises the `notes.path_diagnostic` literal, so that a caller using it there receives a categorical `permission_denied` instead of a dropped connection, but the method is absent from every daemon allowlist (`readOnly`, `readWriteNoDelete`, `custom`) and from the installer's default `readPolicy`, so policy refuses it before the handler dispatches. The operator listener serves it through `OPERATOR_METHODS`, and `nookctl` reaches it with `OperatorSocketClient` over `operator.sock`.
+
+Residual limit, stated rather than hidden: the operator socket is created mode 0660 in group `nookbridge-clients`, and the daemon itself runs as `nookbridge` in that group, so any process in the client group can connect. Refusal happens at the authorizer, before dispatch - but only for peers without operator-group membership. That is not the MCP path today: the MCP server is launched from the MCP client's configuration and runs as the same identity used for operator CLI work, which holds `nookbridge-operators`. So an MCP-launched process remains admitted to the operator listener, and with it `approve-upload`, which compounds finding 9 (approval gated by group, not by a human). SR-3 and SR-4 do not cover this; it is recorded as SR-9.
 
 ### Contradictions between the plan, the review and the code
 
-- **§3.3 and §6.1 previously said `notes.path_diagnostic` was "reachable only from the operator CLI and never admitted by the daemon listener".** That claim was false and has since been corrected in both sections: the daemon parser and handler admit all eleven non-operator methods (`rpc-protocol.ts:1228`, `:1615`; `rpc-handler.ts:273`, `:902`). Finding 4 does not depend on that claim. It rests on the method being authorized with an empty context (`rpc-handler.ts:266-285`) so notebook-level denial never applies, and on the installer's default `readPolicy` shipping it (`scripts/install-systemd.sh:254-259`). Both of those remain true and are what SR-3 and SR-4 address.
+- **§3.3 and §6.1 previously said `notes.path_diagnostic` was "reachable only from the operator CLI and never admitted by the daemon listener".** That claim was false and has since been corrected in both sections. Finding 4 itself rested on two conditions - authorization with an empty context (`rpc-handler.ts:266-285`) so notebook-level denial never applied, and the installer's default `readPolicy` shipping the method (`scripts/install-systemd.sh:254-259`). SR-4 addresses both: the method is now refused by daemon policy and absent from the default policy, and is served only by the operator listener.
 - **§13.22 accepts the unmarked-content upload as residual risk.** Finding 8's fix would reverse that, so SR-7 is gated on a new decision rather than scheduled.
 - **§13.21 records scoped discovery authorization as closed by #198.** That stands for discovery, which the review calls correct. Findings 1, 2 and 3 show the per-note paths (`get`, `append`, `update`, `delete`) are not held to the same standard for multi-notebook notes.
-- **Comment drift is wider than finding 16 states.** The `service-policy.ts` comments describe a four-read allow-list and an absent or present `notes.delete`; the actual lists hold five reads (including `notes.path_diagnostic`), plus `notes.create`, `notes.append`, `notes.update` and `notes.sync` in the write profile, and `notes.delete` appears only in the custom allow-list.
+- **Comment drift is wider than finding 16 states.** The `service-policy.ts` comments describe a four-read allow-list and an absent or present `notes.delete`; the actual lists hold four reads, plus `notes.create`, `notes.append`, `notes.update`, `notes.sync` in the write profile, and `notes.delete` appears only in the custom allow-list.
 
 ### Evidence class
 

@@ -5,13 +5,15 @@
  * to the operator socket, so the tests that exercise it are testing the code the
  * daemon actually runs rather than a helper beside it.
  *
- * Three gates, in order:
+ * Two gates, in order:
  *
- *   1. Admission — the peer must be in one of the two admitted groups.
- *   2. Capability — a mutating method requires the operator group.  The two
- *      groups are a privilege boundary, not decoration: membership of the
- *      read-only group must not be enough to call `apply-edit`.
- *   3. Target — a locked note refuses mutation categorically, and a notebook
+ *   1. Admission — the peer must be in an admitted group.  Admission and the
+ *      mutation capability are the same group (`nookbridge-operators`), so
+ *      operator access is all-or-nothing: there is no read-only operator tier,
+ *      and an admitted peer may also call `apply-edit`.  Admitting a read-only
+ *      group later means reintroducing a capability split here, not merely
+ *      widening `OPERATOR_ADMITTED_GROUPS`.
+ *   2. Target — a locked note refuses mutation categorically, and a notebook
  *      whose policy forbids the operation refuses it.  A target-addressed
  *      mutation whose target does not resolve for the calling peer is refused.
  *
@@ -38,9 +40,17 @@ import type { OperatorMethod } from "./operator-methods.js";
 import type { RpcRequest } from "./rpc-protocol.js";
 import type { SettingsOperation } from "../settings/settings-types.js";
 
-/** Groups admitted to the operator socket at all. */
+/**
+ * Groups admitted to the operator socket at all.  `nookbridge-clients` is
+ * deliberately absent, so a peer holding only that group cannot reach the
+ * operator listener.
+ *
+ * This is not an MCP boundary.  The MCP server is launched by the MCP client
+ * and runs as the same identity used for operator CLI work, which holds
+ * `nookbridge-operators`, so an MCP-launched process is still admitted.  A
+ * dedicated non-operator identity for the MCP server is tracked as SR-9.
+ */
 export const OPERATOR_ADMITTED_GROUPS: ReadonlyArray<string> = Object.freeze([
-  "nookbridge-clients",
   "nookbridge-operators",
 ]);
 
@@ -181,12 +191,13 @@ function evaluateOperatorRequest(
   context: OperatorAuthorizationContext,
 ): OperatorPolicyDecision {
   const groups = context.operatorGroupMembership ?? [];
-  const isOperator = groups.includes(OPERATOR_MUTATION_GROUP);
   const isAdmitted = groups.some((group) => OPERATOR_ADMITTED_GROUPS.includes(group));
   if (!isAdmitted) return { allowed: false, reason: "permission_denied" };
 
+  // Admission is the capability check as well: both resolve to the same group,
+  // so a separate "mutating requires the operator group" test would be dead
+  // code here.  Reinstate one if a read-only group is ever admitted.
   const mutating = OPERATOR_MUTATING_METHODS.includes(candidate);
-  if (mutating && !isOperator) return { allowed: false, reason: "permission_denied" };
 
   if (mutating && context.noteLockState?.locked === true) {
     return { allowed: false, reason: "vault_locked" };

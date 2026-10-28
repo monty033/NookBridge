@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-import { NookdSocketClient } from "../mcp/socket-client.js";
+import { OperatorSocketClient } from "./operator-socket-client.js";
 import type { RpcNotesPathDiagnosticResult } from "../service/rpc-protocol.js";
 import { readSafeOperatorEnvironment } from "./production-runtime.js";
 
@@ -10,7 +10,7 @@ export type PathDiagnosticRuntime = Readonly<{
   readonly pathDiagnostic: (path: string) => Promise<RpcNotesPathDiagnosticResult>;
 }>;
 
-const SOCKET_PATH = "/run/nookbridge/nookbridge.sock";
+const SOCKET_PATH = "/run/nookbridge/operator.sock";
 const MAX_PATH_BYTES = 512;
 
 function unavailable(pathBytes: number): PathDiagnosticReport {
@@ -82,13 +82,13 @@ export async function createProductionPathDiagnosticRuntime(
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<Readonly<{ runtime: PathDiagnosticRuntime; cleanup: () => void }>> {
   readSafeOperatorEnvironment(environment);
-  const client = new NookdSocketClient({ socketPath: SOCKET_PATH });
+  const client = new OperatorSocketClient({ socketPath: SOCKET_PATH });
   return {
     runtime: Object.freeze({
       pathDiagnostic: async (path: string): Promise<RpcNotesPathDiagnosticResult> => {
-        const response = await client.pathDiagnostic({ path });
+        const response = await client.request("notes.path_diagnostic", { path });
         if (!response.ok) throw new Error("diagnostic response unavailable");
-        const result = response.envelope.result;
+        const result = response.result;
         if (result.kind !== "path_diagnostic") throw new Error("diagnostic response unavailable");
         return result;
       },

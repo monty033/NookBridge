@@ -44,11 +44,19 @@ describe("operator authorizer", () => {
     });
   });
 
-  it("admits a read for a client peer", async () => {
+  it("refuses a read for a client-group-only peer and admits it for an operator", async () => {
+    // nookbridge-clients is not an operator-admitted group, so a peer holding
+    // only that group is refused.  This is not an MCP boundary: the MCP server
+    // runs as the operator CLI's identity and is still admitted (SR-9).  The
+    // operator control with the very same request is admitted, so the refusal
+    // is attributable to group membership alone.
     const authorize = createOperatorAuthorizer(deps());
-    await expect(
-      authorize("notes.get-view", CLIENT, request("notes.get-view", { id: "h_one" })),
-    ).resolves.toMatchObject({
+    const read = request("notes.get-view", { id: "h_one" });
+    await expect(authorize("notes.get-view", CLIENT, read)).resolves.toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    await expect(authorize("notes.get-view", OPERATOR, read)).resolves.toMatchObject({
       allowed: true,
       method: "notes.get-view",
     });
@@ -258,7 +266,7 @@ describe("D2-1 — operator target reads fail closed", () => {
     "%s with no target is denied",
     async (m) => {
       const authorize = createOperatorAuthorizer(deps());
-      await expect(authorize(m, CLIENT, request(m))).resolves.toMatchObject(denied);
+      await expect(authorize(m, OPERATOR, request(m))).resolves.toMatchObject(denied);
     },
   );
 
@@ -269,7 +277,7 @@ describe("D2-1 — operator target reads fail closed", () => {
       const authorize = createOperatorAuthorizer(
         deps({ resolveHandle: () => undefined, readNoteNotebookPath }),
       );
-      await expect(authorize(m, CLIENT, request(m, { id: "h_forged" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_forged" }))).resolves.toMatchObject(
         denied,
       );
       expect(readNoteNotebookPath).toHaveBeenCalledTimes(0);
@@ -283,7 +291,7 @@ describe("D2-1 — operator target reads fail closed", () => {
       const authorize = createOperatorAuthorizer(
         deps({ readNoteNotebookPath: vi.fn(async () => undefined), evaluateNotebookPolicy }),
       );
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject(
         denied,
       );
       expect(evaluateNotebookPolicy).toHaveBeenCalledTimes(0);
@@ -294,7 +302,7 @@ describe("D2-1 — operator target reads fail closed", () => {
     "%s with no path source is denied",
     async (m) => {
       const authorize = createOperatorAuthorizer(deps({ readNoteNotebookPath: undefined }));
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject(
         denied,
       );
     },
@@ -304,7 +312,7 @@ describe("D2-1 — operator target reads fail closed", () => {
     "%s with no policy source is denied",
     async (m) => {
       const authorize = createOperatorAuthorizer(deps({ evaluateNotebookPolicy: undefined }));
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject(
         denied,
       );
     },
@@ -320,7 +328,7 @@ describe("D2-1 — operator target reads fail closed", () => {
           },
         }),
       );
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject(
         denied,
       );
     },
@@ -333,7 +341,7 @@ describe("D2-1 — operator target reads fail closed", () => {
       const authorize = createOperatorAuthorizer(
         deps({ readNoteNotebookPath: async () => "Private", evaluateNotebookPolicy }),
       );
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject(
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject(
         denied,
       );
       expect(evaluateNotebookPolicy).toHaveBeenCalledWith("read", "Private");
@@ -346,7 +354,7 @@ describe("D2-1 — operator target reads fail closed", () => {
       const authorize = createOperatorAuthorizer(
         deps({ readNoteNotebookPath: async () => "Public", evaluateNotebookPolicy: () => true }),
       );
-      await expect(authorize(m, CLIENT, request(m, { id: "h_one" }))).resolves.toMatchObject({
+      await expect(authorize(m, OPERATOR, request(m, { id: "h_one" }))).resolves.toMatchObject({
         allowed: true,
         method: m,
       });
@@ -356,10 +364,10 @@ describe("D2-1 — operator target reads fail closed", () => {
   it("leaves untargeted reads allowed", async () => {
     const authorize = createOperatorAuthorizer(deps());
     await expect(
-      authorize("notes.operation-list", CLIENT, request("notes.operation-list")),
+      authorize("notes.operation-list", OPERATOR, request("notes.operation-list")),
     ).resolves.toMatchObject({ allowed: true });
     await expect(
-      authorize("notes.browse", CLIENT, request("notes.browse", {})),
+      authorize("notes.browse", OPERATOR, request("notes.browse", {})),
     ).resolves.toMatchObject({ allowed: true });
   });
 });

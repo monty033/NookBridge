@@ -255,8 +255,7 @@ write_service_config() {
     '    "notes.search",' \
     '    "notes.status",' \
     '    "notes.list_notebooks",' \
-    '    "notes.get",' \
-    '    "notes.path_diagnostic"' \
+    '    "notes.get"' \
     '  ]' \
     '}' >"$temporary"
   chmod 0644 "$temporary"

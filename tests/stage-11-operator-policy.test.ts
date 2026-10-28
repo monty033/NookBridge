@@ -77,6 +77,7 @@ describe("operator policy — closed method vocabulary", () => {
       "notes.operation-status",
       "notes.operation-list",
       "notes.approve-upload",
+      "notes.path_diagnostic",
     ]);
   });
 
@@ -96,7 +97,6 @@ describe("operator policy — closed method vocabulary", () => {
     expect(isOperatorMethod("notes.append")).toBe(false);
     expect(isOperatorMethod("notes.delete")).toBe(false);
     expect(isOperatorMethod("notes.locked_note_proof")).toBe(false);
-    expect(isOperatorMethod("notes.path_diagnostic")).toBe(false);
     expect(isOperatorMethod("notes.sync")).toBe(false);
   });
 

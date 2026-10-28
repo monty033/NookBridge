@@ -84,7 +84,6 @@ export const SERVICE_CONFIG_READ_POLICY = Object.freeze([
   "notes.status",
   "notes.list_notebooks",
   "notes.get",
-  "notes.path_diagnostic",
 ] as const);
 
 /**

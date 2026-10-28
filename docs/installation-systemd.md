@@ -105,23 +105,32 @@ The installer creates three groups:
 | group | purpose |
 | --- | --- |
 | `nookbridge` | private state group; owns the state directory |
-| `nookbridge-clients` | the read boundary — browse, search, view, status |
-| `nookbridge-operators` | the **mutation** capability — apply-edit, apply-undo, create |
+| `nookbridge-clients` | the daemon-socket client group — access to the daemon socket, subject to the service readPolicy |
+| `nookbridge-operators` | the operator listener — every operator method, reads and mutations alike |
 
 `nookbridge-operators` is created but nobody is added to it. That is deliberate:
-membership is what allows a peer to change a note, so it should be granted as a
-decision rather than inherited. Add the identity that runs your operator CLI:
+membership is what allows a peer to reach the operator listener at all - reads
+included, not just mutations - so it should be granted as a decision rather than
+inherited. Add the identity that runs your operator CLI:
 
 ```bash
 sudo usermod -aG nookbridge-clients,nookbridge-operators "$OPERATOR_USER"
 ```
 
-A peer may be in both groups. `nookbridge-clients` alone is enough to read and
-list notes — including a locked one — but it is **not** enough to mutate: the
-daemon refuses a mutating method for a peer without the operator group. A locked
+A peer may be in both groups. The groups govern different surfaces.
+`nookbridge-clients` governs the daemon socket: the service readPolicy decides
+which of the ten admitted methods that peer may call there. It grants no access
+to the operator listener - a peer without `nookbridge-operators` is refused
+there, reads included. The operator group is all-or-nothing: an admitted peer
+may both read and mutate, and there is no read-only operator tier. A locked
 note refuses mutation outright (`vault_locked`), and an operation the note's
 notebook policy forbids is refused (`permission_denied`); per-notebook overrides
 live in the settings file.
+
+Granting an identity the operator group therefore also grants it operator
+reads, upload approval, and edits. If an MCP client launches `nook-mcp` as that
+same identity, the MCP path inherits all of it; give the MCP server its own
+non-operator identity when that separation matters.
 
 A mutation that addresses an existing note also needs handles that belong to
 the same peer:

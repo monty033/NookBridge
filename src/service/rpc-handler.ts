@@ -1338,6 +1338,28 @@ async function runLockedNoteProof(
   return buildResultSuccessEnvelope(id, result);
 }
 
+/**
+ * Operator-listener entry point for `notes.path_diagnostic`.  The daemon
+ * surface refuses the method by policy; the operator listener has already
+ * authorized the peer before it calls this, so no service policy is consulted
+ * here.  Request validation and result shaping are shared with the handler.
+ */
+export async function runOperatorPathDiagnostic(
+  request: RpcNotesPathDiagnosticRequest,
+  runtime: RpcHandlerRuntimeLike,
+): Promise<RpcAnyResponseEnvelope> {
+  const id = extractRequestId(request);
+  try {
+    const structural = validateRequestStructurally(request);
+    if (structural.kind !== "ok" || structural.request.method !== "notes.path_diagnostic") {
+      return buildErrorEnvelope(id, "invalid_request");
+    }
+    return await runPathDiagnostic(structural.request, runtime, id);
+  } catch {
+    return buildErrorEnvelope(id, "service_unavailable");
+  }
+}
+
 async function runPathDiagnostic(
   request: RpcNotesPathDiagnosticRequest,
   runtime: RpcHandlerRuntimeLike,

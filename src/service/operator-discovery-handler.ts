@@ -64,6 +64,11 @@ export interface OperatorDiscoveryRuntime {
     params: RpcOperatorApproveUploadParams,
     peer: OperatorPeer,
   ) => Promise<RpcNotesApproveUploadResponse>;
+  /** Read-only path diagnostic; returns a complete, already-shaped envelope. */
+  readonly pathDiagnostic?: (
+    request: RpcRequest,
+    peer: OperatorPeer,
+  ) => Promise<RpcAnyResponseEnvelope>;
   readonly create?: (
     params: Readonly<{
       title: string;
@@ -117,6 +122,10 @@ export function createOperatorDiscoveryHandler(
       if (request.method === "notes.approve-upload") {
         if (runtime.approveUpload === undefined) return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.approveUpload(request.params, peer));
+      }
+      if (request.method === "notes.path_diagnostic") {
+        if (runtime.pathDiagnostic === undefined) return failure(request.id, "service_unavailable");
+        return await runtime.pathDiagnostic(request, peer);
       }
       if (request.method === "notes.create") {
         if (runtime.create === undefined) return failure(request.id, "service_unavailable");

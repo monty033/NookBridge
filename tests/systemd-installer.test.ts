@@ -248,7 +248,6 @@ describe("generic systemd installer — corrected Linux artifact contract (RED)"
     expect(source).toContain('"notes.status"');
     expect(source).toContain('"notes.list_notebooks"');
     expect(source).toContain('"notes.get"');
-    expect(source).toContain('"notes.path_diagnostic"');
   });
   it("polls bounded daemon readiness before failing the health gate", () => {
     const source = readFileSync(installer, "utf8");
