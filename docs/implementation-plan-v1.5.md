@@ -298,15 +298,16 @@ For Stages 0–4 only, development may temporarily instantiate the application l
 
 ## 3.3 Local IPC contract
 
-The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations. The non-operator RPC surface is exactly eleven methods: `notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.locked_note_proof`, `notes.path_diagnostic`, and `notes.sync`. Nine of them are reachable over the daemon socket; `notes.locked_note_proof` and `notes.path_diagnostic` are reachable only from the operator CLI and are never admitted by the daemon listener or through MCP.
+The internal protocol should be deliberately less powerful than the application implementation. It may use JSON-RPC or a small framed JSON protocol, but must expose only named bridge operations. The non-operator RPC surface is exactly eleven methods: `notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.locked_note_proof`, `notes.path_diagnostic`, and `notes.sync`. The daemon socket parser and handler admit all eleven subject to the service policy; nine of them have MCP tools, while `notes.locked_note_proof` and `notes.path_diagnostic` have no MCP tool and are issued by `nookctl` over that same daemon socket.
 
-The operator listener is a separate administrative surface. It admits nine methods in the same `RpcMethod` union, exported as
-`OPERATOR_TRANSPORT_METHODS`: `OPERATOR_METHODS` holds seven (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`,
-`notes.create`, `notes.operation-status`, `notes.operation-list`) and `OPERATOR_DISCOVERY_METHODS` holds two (`notes.browse`, `notes.search-operator`).
-`notes.create` is shared with the daemon surface. The union therefore holds nineteen methods, grouped by surface: nine are reachable over the daemon socket
-(`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.sync`); two are CLI-only and are
-never admitted by the daemon listener (`notes.locked_note_proof`, `notes.path_diagnostic`); and eight are operator-only, as listed above. That is eleven non-operator
-methods plus eight operator-only methods, with `notes.create` counted once because it is shared.
+The operator listener is a separate administrative surface. It admits ten methods in the same `RpcMethod` union, exported as
+`OPERATOR_TRANSPORT_METHODS`: `OPERATOR_METHODS` holds eight (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`, `notes.apply-undo`,
+`notes.create`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`) and `OPERATOR_DISCOVERY_METHODS` holds two (`notes.browse`, `notes.search-operator`).
+`notes.create` is shared with the daemon surface. The union therefore holds twenty methods, grouped by surface: eleven are non-operator, of which nine are reachable through MCP tools
+(`notes.search`, `notes.status`, `notes.list_notebooks`, `notes.get`, `notes.create`, `notes.append`, `notes.update`, `notes.delete`, `notes.sync`) and two are issued by the CLI over
+that same daemon socket with no MCP tool (`notes.locked_note_proof`, `notes.path_diagnostic`); and nine are operator-only (`notes.get-view`, `notes.edit-preimage`, `notes.apply-edit`,
+`notes.apply-undo`, `notes.operation-status`, `notes.operation-list`, `notes.approve-upload`, `notes.browse`, `notes.search-operator`). That is eleven non-operator
+methods plus nine operator-only methods, with `notes.create` counted once because it is shared.
 
 The RPC layer must not expose:
 
@@ -773,7 +774,7 @@ Objective: demonstrate that the installed bridge does not introduce a materially
 
 The MCP proxy maps these tools to equivalent named RPC methods. There is no generic `call`, `execute`, `sql`, `read_file`, `get_secret`, or arbitrary core method.
 
-The MCP surface is exactly the 9 tools above. The `RpcMethod` union holds 19 literals, grouped by surface: 9 are reachable over the daemon socket, 2 are CLI-only and never admitted by the daemon listener (`notes.locked_note_proof`, `notes.path_diagnostic`), and 8 are operator-only.
+The MCP surface is exactly the 9 tools above. The `RpcMethod` union holds 20 literals, grouped by surface: 9 are reachable through MCP tools, 2 are issued by the CLI over the same daemon socket with no MCP tool (`notes.locked_note_proof`, `notes.path_diagnostic`), and 9 are operator-only.
 
 ## 6.2 Permission model
 
