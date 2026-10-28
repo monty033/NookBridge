@@ -101,12 +101,21 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
 
   it("§6.1 states the closed MCP tool count and the RPC surface split", () => {
     expect(section61).toContain("MCP surface is exactly the 9 tools");
-    expect(section61).toContain("`RpcMethod` union holds 19 literals");
-    expect(section61).toContain("9 are reachable over the daemon socket");
-    expect(section61).toContain("2 are CLI-only and never admitted by the daemon listener");
-    expect(section61).toContain("8 are operator-only");
+    expect(section61).toContain("`RpcMethod` union holds 20 literals");
+    expect(section61).toContain("9 are reachable through MCP tools");
+    expect(section61).toContain("2 are issued by the CLI over the same daemon socket");
+    expect(section61).toContain("9 are operator-only");
     expect(section61).toContain("`notes.locked_note_proof`");
     expect(section61).toContain("`notes.path_diagnostic`");
+    expect(section61).not.toContain("never admitted by the daemon listener");
+  });
+
+  it("§3.3 states the corrected RPC surface split and does not deny daemon admission", () => {
+    expect(section33).toContain("non-operator RPC surface is exactly eleven methods");
+    expect(section33).toContain("parser and handler admit all eleven");
+    expect(section33).toContain("holds twenty methods");
+    expect(section33).toContain("nine are operator-only");
+    expect(section33).not.toContain("never admitted by the daemon listener");
   });
 
   it("names every operator method the code exports, including the shared one", () => {
