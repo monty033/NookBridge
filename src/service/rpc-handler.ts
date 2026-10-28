@@ -290,8 +290,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
           const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
           if (!resolved.ok)
             return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
-          const authorization = authorizeServiceMethod(policy, "notes.get", resolved.context);
-          if (!authorization.allowed) {
+          if (!authorizeEveryContext(policy, "notes.get", resolved.contexts)) {
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
           return (await runNotesGet(
@@ -320,7 +319,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
         const actual = await resolveNoteSettingsContext(resolution.id, runtime);
         if (!actual.ok)
           return buildErrorEnvelope(id, actual.code) as unknown as RpcHandlerResponse<T>;
-        if (!authorizeServiceMethod(policy, "notes.get", actual.context).allowed)
+        if (!authorizeEveryContext(policy, "notes.get", actual.contexts))
           return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
         const pathRequest = objectCreate(null) as Record<string, unknown>;
         pathRequest.id = id;
@@ -367,6 +366,16 @@ export async function handleRpcRequest<T extends RpcRequest>(
           structural.request,
           runtime,
           id,
+          // The path authorization above covered only what the caller claimed.
+          // Re-authorize the note the resolver actually produced, over every
+          // notebook it is attached to, before anything is mutated.
+          async (noteId) => {
+            const actual = await resolveNoteSettingsContext(noteId, runtime);
+            if (!actual.ok) return actual.code === "service_unavailable" ? "unavailable" : "deny";
+            return authorizeEveryContext(policy, "notes.delete", actual.contexts)
+              ? "allow"
+              : "deny";
+          },
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -423,13 +432,34 @@ export async function handleRpcRequest<T extends RpcRequest>(
       const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
       if (!resolved.ok)
         return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
-      const authorization = authorizeServiceMethod(
-        policy,
-        structural.request.method,
-        resolved.context,
-      );
-      if (!authorization.allowed) {
+      if (!authorizeEveryContext(policy, structural.request.method, resolved.contexts)) {
         return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+      }
+      if (structural.request.method === "notes.update") {
+        // A move is also a write INTO the destination notebook, which the
+        // source note's context never covers.  Resolve the destination and
+        // apply the same deny-wins rule; an unresolvable destination fails
+        // closed rather than being skipped.
+        const destinationId = readOwnStringField(
+          structural.request.params.patch as unknown as Record<string, unknown>,
+          "notebookId",
+        );
+        if (destinationId !== undefined) {
+          const destinationPath = await resolveNotebookPathById(runtime, destinationId);
+          if (destinationPath === undefined) {
+            return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
+          }
+          const noteTitle = readOwnStringField(resolved.note, "title");
+          if (
+            noteTitle === undefined ||
+            !authorizeServiceMethod(policy, "notes.update", {
+              notebookPath: destinationPath,
+              noteTitle,
+            }).allowed
+          ) {
+            return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+          }
+        }
       }
       if (structural.request.method === "notes.append") {
         return (await runNotesAppend(
@@ -924,7 +954,7 @@ async function runAuthorizedRpcMethod(
 type SettingsContextResolution =
   | {
       readonly ok: true;
-      readonly context: ServicePolicySettingsContext;
+      readonly contexts: readonly ServicePolicySettingsContext[];
       readonly note: Record<string, unknown>;
     }
   | { readonly ok: false; readonly code: "not_found" | "service_unavailable" };
@@ -946,40 +976,51 @@ async function resolveNoteSettingsContext(
   const note = normaliseNoteMetadata(raw);
   if (note === undefined) return { ok: false, code: "service_unavailable" };
 
-  const notebookId = readOwnStringField(note, "notebookId");
+  const rawRecord = raw as Record<string, unknown>;
   const noteTitle = readOwnStringField(note, "title");
   if (noteTitle === undefined) return { ok: false, code: "not_found" };
-  if (notebookId === undefined) {
+
+  // The authoritative set of directly-attached notebooks.  `notebookId`
+  // stays supported for metadata that only ever carried one; a present but
+  // malformed set is a refusal, never a reason to fall back to it.
+  const enumerated = readOwnIdArrayField(rawRecord, "notebookIds");
+  if (enumerated.kind === "invalid") return { ok: false, code: "service_unavailable" };
+  const singleNotebookId = readOwnStringField(note, "notebookId");
+  const notebookIds =
+    enumerated.kind === "present"
+      ? enumerated.ids
+      : singleNotebookId === undefined
+        ? []
+        : [singleNotebookId];
+
+  if (notebookIds.length === 0) {
     // A note is treated as living in the reserved `<root>` context only
     // when the projection POSITIVELY confirmed it belongs to no
     // notebook.  A missing notebook id without that confirmation
     // (lookup unavailable, capped, or incomplete) stays `not_found`.
     // The flag is read from the raw record, never from the normalised
     // note, so it cannot leak into the client-visible response.
-    if (readOwnBooleanField(raw as Record<string, unknown>, "notebookAbsenceConfirmed") !== true) {
+    if (readOwnBooleanField(rawRecord, "notebookAbsenceConfirmed") !== true) {
       return { ok: false, code: "not_found" };
     }
-    return { ok: true, context: { noteTitle }, note };
+    return { ok: true, contexts: [{ noteTitle }], note };
   }
-  let notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
-  if (notebookPath === undefined) {
-    const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
-    if (refreshResolver !== undefined) {
-      try {
-        const refreshedPath = await reflectApply(refreshResolver, runtime, [notebookId]);
-        if (typeof refreshedPath === "string") notebookPath = refreshedPath;
-      } catch {
-        return { ok: false, code: "not_found" };
-      }
-    }
-  }
-  if (notebookPath === undefined) return { ok: false, code: "not_found" };
 
-  return {
-    ok: true,
-    context: { notebookPath, noteTitle },
-    note,
-  };
+  // Fail closed when the enumeration could not be trusted as the whole set:
+  // authorizing over a partial set silently skips a denied notebook.
+  if (readOwnBooleanField(rawRecord, "notebookMembershipComplete") === false) {
+    return { ok: false, code: "service_unavailable" };
+  }
+
+  const contexts: ServicePolicySettingsContext[] = [];
+  for (const notebookId of notebookIds) {
+    const notebookPath = await resolveNotebookPathById(runtime, notebookId);
+    if (notebookPath === undefined || hasControlCharacter(notebookPath)) {
+      return { ok: false, code: "not_found" };
+    }
+    contexts.push({ notebookPath, noteTitle });
+  }
+  return { ok: true, contexts, note };
 }
 
 type CreateSettingsContextResolution =
@@ -1009,6 +1050,42 @@ async function resolveCreateSettingsContext(
     return { ok: false, code: "not_found" };
   }
   return { ok: true, context: { notebookPath } };
+}
+
+/**
+ * Deny-wins across a note's whole notebook membership: a single denying
+ * notebook refuses the operation, so enumeration order can never decide the
+ * outcome.
+ */
+function authorizeEveryContext(
+  policy: ServicePolicy,
+  method: string,
+  contexts: readonly ServicePolicySettingsContext[],
+): boolean {
+  for (const context of contexts) {
+    if (!authorizeServiceMethod(policy, method, context).allowed) return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve a notebook id to its trusted title path, falling back to the
+ * daemon's refresh resolver when the startup index has gone stale.
+ */
+async function resolveNotebookPathById(
+  runtime: RpcHandlerRuntimeLike,
+  notebookId: string,
+): Promise<string | undefined> {
+  const cached = resolveTrustedNotebookPath(runtime, notebookId);
+  if (cached !== undefined) return hasControlCharacter(cached) ? undefined : cached;
+  const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
+  if (refreshResolver === undefined) return undefined;
+  try {
+    const refreshed = await reflectApply(refreshResolver, runtime, [notebookId]);
+    return typeof refreshed === "string" && !hasControlCharacter(refreshed) ? refreshed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveTrustedNotebookPath(
@@ -1041,6 +1118,39 @@ function resolveTrustedNotebookPath(
   } catch {
     return undefined;
   }
+}
+
+type IdArrayRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "invalid" }
+  | { readonly kind: "present"; readonly ids: readonly string[] };
+
+/**
+ * Read an owned array of notebook ids.
+ *
+ * Only `absent` may fall back to the scalar `notebookId`.  A field that is
+ * PRESENT but malformed is `invalid`, and the caller must fail closed: falling
+ * back there would authorize on a set the projection widened for a reason.
+ */
+function readOwnIdArrayField(record: Record<string, unknown>, key: string): IdArrayRead {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = objectGetOwnPropertyDescriptor(record, key);
+  } catch {
+    return { kind: "invalid" };
+  }
+  if (descriptor === undefined) return { kind: "absent" };
+  if (!("value" in descriptor)) return { kind: "invalid" };
+  const value = descriptor.value;
+  if (!arrayIsArray(value) || value.length === 0) return { kind: "invalid" };
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0) return { kind: "invalid" };
+    if (entry.length > STAGE5_RPC_LIMITS.maxIdentifierBytes) return { kind: "invalid" };
+    if (hasControlCharacter(entry)) return { kind: "invalid" };
+    if (!ids.includes(entry)) ids.push(entry);
+  }
+  return { kind: "present", ids };
 }
 
 /**
@@ -1226,6 +1336,7 @@ async function runNotesDelete(
   request: RpcNotesDeleteRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
+  authorizeResolved?: (noteId: string) => Promise<"allow" | "deny" | "unavailable">,
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "deleteNote");
   const resolvePath = readRuntimeMethod(runtime, "resolveNotePath");
@@ -1244,6 +1355,11 @@ async function runNotesDelete(
       return buildErrorEnvelope(id, "service_unavailable");
     }
     return buildErrorEnvelope(id, "service_unavailable");
+  }
+  if (authorizeResolved !== undefined) {
+    const verdict = await authorizeResolved(resolution.id);
+    if (verdict === "deny") return buildErrorEnvelope(id, "permission_denied");
+    if (verdict === "unavailable") return buildErrorEnvelope(id, "service_unavailable");
   }
   const commandRecord = objectCreate(null) as Record<string, unknown>;
   commandRecord.id = resolution.id;

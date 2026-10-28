@@ -88,6 +88,18 @@ export interface NotesnookReadOnlyNoteMetadata {
   readonly dateCreated?: number;
   readonly dateModified?: number;
   readonly notebookId?: string;
+  /**
+   * Every notebook this note is directly attached to.  Present only when the
+   * note is attached to more than one, in which case `notebookId` is just the
+   * first of them and authorization must consider all of it.
+   */
+  readonly notebookIds?: readonly string[];
+  /**
+   * Present as `false` only when membership could not be enumerated reliably
+   * (for example the notebook list hit its cap).  Absent means the set above
+   * can be trusted; `false` means authorization must fail closed.
+   */
+  readonly notebookMembershipComplete?: boolean;
   readonly pinned?: boolean;
   readonly favorite?: boolean;
   readonly localOnly?: boolean;

@@ -71,6 +71,10 @@ export interface OperatorAuthorizerDependencies {
   readonly readNoteLockState?: ((id: string) => Promise<"locked" | "unlocked">) | undefined;
   /** Resolve a note id to its notebook path. */
   readonly readNoteNotebookPath?: ((noteId: string) => Promise<string | undefined>) | undefined;
+  /** Every notebook path the note is attached to; see the context helper. */
+  readonly readNoteNotebookPaths?:
+    | ((noteId: string) => Promise<readonly string[] | undefined>)
+    | undefined;
   readonly resolveNotebookPath?:
     | ((notebookId: string) => string | undefined | Promise<string | undefined>)
     | undefined;
@@ -119,6 +123,7 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
       resolveHandle: deps.resolveHandle,
       resolveOperationNoteId: deps.resolveOperationNoteId,
       readNoteNotebookPath: deps.readNoteNotebookPath,
+      readNoteNotebookPaths: deps.readNoteNotebookPaths,
       resolveNotebookPath: deps.resolveNotebookPath,
       evaluateNotebookPolicy: deps.evaluateNotebookPolicy,
     });

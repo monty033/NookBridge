@@ -182,3 +182,48 @@ describe("operator request lock context", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("multi-notebook deny-wins", () => {
+  const base = {
+    method: "notes.apply-edit" as const,
+    request: mutating({ id: "h_one" }),
+    peer: PEER,
+    resolveHandle,
+  };
+
+  it("refuses when any attached notebook denies, even if the first allows", async () => {
+    const evaluate = vi.fn((_op: unknown, path: string) => path !== "Private/Secrets");
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        ...base,
+        readNoteNotebookPath: undefined,
+        readNoteNotebookPaths: async () => ["Work/Roadmap", "Private/Secrets"],
+        evaluateNotebookPolicy: evaluate,
+      }),
+    ).resolves.toEqual({ notebookPath: "Private/Secrets", allow: false });
+    expect(evaluate).toHaveBeenCalledWith("edit", "Work/Roadmap");
+    expect(evaluate).toHaveBeenCalledWith("edit", "Private/Secrets");
+  });
+
+  it("allows only when every attached notebook allows", async () => {
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        ...base,
+        readNoteNotebookPath: undefined,
+        readNoteNotebookPaths: async () => ["Work/Roadmap", "Work/Plans"],
+        evaluateNotebookPolicy: () => true,
+      }),
+    ).resolves.toEqual({ notebookPath: "Work/Roadmap", allow: true });
+  });
+
+  it("refuses when membership could not be established", async () => {
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        ...base,
+        readNoteNotebookPath: undefined,
+        readNoteNotebookPaths: async () => undefined,
+        evaluateNotebookPolicy: () => true,
+      }),
+    ).resolves.toEqual({ notebookPath: "", allow: false });
+  });
+});
