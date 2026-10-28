@@ -195,7 +195,6 @@ describe("generic systemd installer — health rollback and retention", () => {
       "notes.status",
       "notes.list_notebooks",
       "notes.get",
-      "notes.path_diagnostic",
     ]);
     expect(lstatSync(join(ctx.usrLocalBinDir, "nookbridge-provision")).isSymbolicLink()).toBe(
       false,

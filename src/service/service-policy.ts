@@ -136,13 +136,7 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
   // the allowlist shape would see a non-array.  This hand-rolled
   // builder keeps the array surface frozen and null-prototype
   // while still being a proper array.
-  const arr: RpcMethod[] = [
-    "notes.search",
-    "notes.status",
-    "notes.list_notebooks",
-    "notes.get",
-    "notes.path_diagnostic",
-  ];
+  const arr: RpcMethod[] = ["notes.search", "notes.status", "notes.list_notebooks", "notes.get"];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
 })();
@@ -150,9 +144,9 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 /**
  * The historical `readWriteNoDelete` allowlist: the four reads plus
  * the side-effecting `notes.create`, `notes.append`, `notes.update`,
- * exact-path `notes.delete`, and explicitly approval-gated
- * `notes.sync` methods.  The name is retained for profile/API
- * compatibility; delete remains settings-evaluator-gated.
+ * and explicitly approval-gated `notes.sync` methods.  `notes.delete`
+ * is NOT in this list.  The name is retained for profile/API
+ * compatibility.
  */
 const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
   const arr: RpcMethod[] = [
@@ -163,7 +157,6 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.create",
     "notes.append",
     "notes.update",
-    "notes.path_diagnostic",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -186,12 +179,19 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.append",
     "notes.update",
     "notes.delete",
-    "notes.path_diagnostic",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
   return objectFreeze(arr) as ReadonlyArray<RpcMethod>;
 })();
+
+/**
+ * Upper bound on a caller-supplied custom allowlist.  It is one larger than the
+ * allowable universe so that a pre-existing config that still lists the
+ * daemon-retired `notes.path_diagnostic` keeps its other methods: the retired
+ * entry is dropped like any unknown one instead of voiding the whole list.
+ */
+const CUSTOM_POLICY_MAX_INPUT_LENGTH = CUSTOM_POLICY_ALLOWABLE_METHODS.length + 1;
 
 /**
  * The closed universe of methods the policy engine recognises for
@@ -395,7 +395,7 @@ function readCustomAllowlist(value: unknown): RpcMethod[] | undefined {
       typeof lengthDescriptor.value !== "number" ||
       !Number.isSafeInteger(lengthDescriptor.value) ||
       lengthDescriptor.value < 0 ||
-      lengthDescriptor.value > CUSTOM_POLICY_ALLOWABLE_METHODS.length
+      lengthDescriptor.value > CUSTOM_POLICY_MAX_INPUT_LENGTH
     ) {
       return undefined;
     }

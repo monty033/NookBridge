@@ -103,33 +103,35 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
     expect(section61).toContain("MCP surface is exactly the 9 tools");
     expect(section61).toContain("`RpcMethod` union holds 20 literals");
     expect(section61).toContain("9 are reachable through MCP tools");
-    expect(section61).toContain("2 are issued by the CLI over the same daemon socket");
-    expect(section61).toContain("9 are operator-only");
+    expect(section61).toContain("1 is issued by the CLI over the daemon socket with no MCP tool");
+    expect(section61).toContain("10 are operator-only");
     expect(section61).toContain("`notes.locked_note_proof`");
     expect(section61).toContain("`notes.path_diagnostic`");
     expect(section61).not.toContain("never admitted by the daemon listener");
   });
 
-  it("§3.3 states the corrected RPC surface split and does not deny daemon admission", () => {
-    expect(section33).toContain("non-operator RPC surface is exactly eleven methods");
-    expect(section33).toContain("parser and handler admit all eleven");
+  it("§3.3 separates the eleven parsed names from the ten policy-admitted methods, and claims no method is never admitted", () => {
+    expect(section33).toContain("recognises eleven method names");
+    expect(section33).toContain("The service policy admits the first ten");
     expect(section33).toContain("holds twenty methods");
-    expect(section33).toContain("nine are operator-only");
+    expect(section33).toContain("ten are operator-only");
     expect(section33).not.toContain("never admitted by the daemon listener");
   });
 
   it("names every operator method the code exports, including the shared one", () => {
-    // The operator surface carries ten methods across OPERATOR_METHODS (eight,
+    // The operator surface carries eleven methods across OPERATOR_METHODS (nine,
     // including notes.create, which is shared with the daemon) and
-    // OPERATOR_DISCOVERY_METHODS (two). A doc listing only the nine
+    // OPERATOR_DISCOVERY_METHODS (two). A doc listing only the ten
     // operator-only ones is ambiguous about a closed vocabulary. Decision 5
     // documents the new approval method in §13.22, so include that section in
     // the closed catalogue surface without weakening the exact method loop.
-    expect(OPERATOR_TRANSPORT_METHODS).toHaveLength(10);
+    expect(OPERATOR_TRANSPORT_METHODS).toHaveLength(11);
     expect(OPERATOR_TRANSPORT_METHODS).toContain("notes.create");
     const operatorSurface = `${section33}\n${section1322}`;
     for (const method of OPERATOR_TRANSPORT_METHODS) {
-      expect(operatorSurface, `operator method not documented: ${method}`).toContain(`\`${method}\``);
+      expect(operatorSurface, `operator method not documented: ${method}`).toContain(
+        `\`${method}\``,
+      );
     }
   });
 

@@ -1,7 +1,9 @@
 /**
  * T04 — canonical operator RPC vocabulary.
  *
- * T00 freezes eight operator mutation/view methods. The browse/search methods
+ * T00 froze eight operator mutation/view methods; `notes.path_diagnostic` is a
+ * ninth, read-only one that is admitted by the operator listener and refused by
+ * every daemon policy. The browse/search methods
  * are a separate discovery transport vocabulary: they are not D2 methods and
  * are kept distinct so the frozen contract cannot silently widen.
  */
@@ -17,6 +19,7 @@ export const OPERATOR_METHODS = Object.freeze([
   "notes.operation-status",
   "notes.operation-list",
   "notes.approve-upload",
+  "notes.path_diagnostic",
 ] as const);
 
 export const OPERATOR_DISCOVERY_METHODS = Object.freeze([

@@ -91,7 +91,6 @@ describe("service policy — readOnly factory contract", () => {
       "notes.status",
       "notes.list_notebooks",
       "notes.get",
-      "notes.path_diagnostic",
     ]);
   });
 
@@ -269,7 +268,6 @@ const RWND = [
   "notes.create",
   "notes.append",
   "notes.update",
-  "notes.path_diagnostic",
   "notes.sync",
 ] as const;
 
