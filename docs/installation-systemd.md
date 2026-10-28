@@ -111,7 +111,8 @@ The installer creates three groups:
 `nookbridge-operators` is created but nobody is added to it. That is deliberate:
 membership is what allows a peer to reach the operator listener at all - reads
 included, not just mutations - so it should be granted as a decision rather than
-inherited. Add the identity that runs your operator CLI:
+inherited. Grant it to the identity that runs your operator CLI, and to nothing
+else:
 
 ```bash
 sudo usermod -aG nookbridge-clients,nookbridge-operators "$OPERATOR_USER"
@@ -127,10 +128,21 @@ note refuses mutation outright (`vault_locked`), and an operation the note's
 notebook policy forbids is refused (`permission_denied`); per-notebook overrides
 live in the settings file.
 
-Granting an identity the operator group therefore also grants it operator
-reads, upload approval, and edits. If an MCP client launches `nook-mcp` as that
-same identity, the MCP path inherits all of it; give the MCP server its own
-non-operator identity when that separation matters.
+**Keep the identity that launches `nook-mcp` out of `nookbridge-operators`.**
+That server is a child of the MCP client and inherits whatever identity the
+client runs as. If that identity also does operator CLI work, the MCP path gains
+operator reads, upload approval and edits as a side effect. The daemon cannot
+enforce the separation: it sees one peer identity and its group list, so this is
+a deployment requirement rather than a runtime guarantee.
+
+The `nix-config` homelab deployment implements the split. The agent account holds
+`nookbridge-clients` only; a dedicated `nookop` account holds
+`nookbridge-operators`; and operator CLI work runs through a root-only
+`nookbridge-as-operator` wrapper that drops into `nookop` with `setpriv`. Root is
+required, so a compromised agent cannot use the wrapper, and a build-time
+assertion refuses to evaluate the host configuration if the agent account
+regains the operator group. If you launch `nook-mcp` from an account that also
+does operator work, adopt the same split.
 
 A mutation that addresses an existing note also needs handles that belong to
 the same peer:
