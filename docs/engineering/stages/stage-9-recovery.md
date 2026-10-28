@@ -187,3 +187,36 @@ the successful sync.
 The clean VM recovery drill, production-shaped database-bundle recovery,
 post-recovery policy checks, and resync evidence remain open exactly as stated
 above.
+
+## G2 production-module recovery drill (nix-config, 2026-10-27)
+
+A production-module recovery drill was implemented and merged in the `nix-config`
+repository, a different repository from this one. The drill lives in nix-config,
+not in this repository: it is a NixOS VM check that imports the production
+NookBridge module and runs the packaged daemon. Nothing from it is added here.
+
+- nix-config PR #464, merge commit `24fd4524`, change commit `96b19fd`.
+- Test file: `tests/nookbridge-production-recovery.nix`.
+
+Parent-verified on that tree:
+
+- Positive: the check passes with 13 subtests (exit 0).
+- Negative control, readable corruption disabled: the check exits 1 at the
+  subtest "readable corruption is quarantined and fresh state starts", with the
+  product message "nookctl recover-local-state: production database bundle is
+  healthy".
+
+Independent read-only review returned APPROVE and signed one specific claim for
+this scope. Provenance of that review: session
+`ses_e84f34f22ffeqS6qfvi9dZ3xbs`, model `opencode-go/deepseek-v4.1-flash`,
+effort high, read-only, on the frozen diff. The claim, verbatim:
+
+> G2 recovery evidence for NookBridge Stage 9 on a single-boot, empty-state TCG NixOS VM: the production module and pinned package with the real `nookd.service`/systemd unit; a per-boot runtime-only sops age identity and database key, root-only `0400`, with no decryptable artifact in `/nix/store`; sops secret installation ordered before nookd and delivered through systemd `LoadCredential`; no test-side chown. The test proves page-one SQLCipher corruption is detected and categorically refused; a readable-corruption bundle is inspected as corrupt, quarantined byte-for-byte and inode-preserved at `0700`, reinitialized to fresh `nookbridge:nookbridge 0600` state, started and served empty; rollback restores the corrupt originals and leaves nookd stopped; post-recovery socket `0770`/`nookbridge-clients`, client/outsider boundary, credential unreadability, and settings-derived `Financial` delete denial are asserted. This is not evidence for WAL/SHM sidecar recovery, allowed-policy behavior, reboot/switch persistence, a fully daemon-created log member, or independent state-directory/parent-quarantine mode invariants.
+
+What remains unproven, exactly as the claim's limits sentence puts it: WAL/SHM
+sidecar recovery, allowed-policy behavior, reboot/switch persistence, a fully
+daemon-created log member, and independent state-directory/parent-quarantine
+mode invariants.
+
+G2 evidence of this scope does not establish the remaining Stage 9 gates. This
+record does not close them.
