@@ -2938,6 +2938,106 @@ reviewed source only. No VM, live account, or deployment was used.
 
 **Evidence class:** source and offline tests; no VM, live account, or deployment was used.
 
+## 13.24 Decision record SR-1 — phase-1 security review accepted as evidence to be verified
+
+**Status date:** 2026-10-28 (America/New_York)
+**Mode:** documentation-only decision record. This section changes no source, test, deployment, or live behavior.
+
+An independent, read-only security review of the source was completed at commit `126e8089`. It produced 16 findings. Until this section, the review existed nowhere in the repository.
+
+1. **What happened.** The review was read-only. The reviewer wrote no files and ran no builds, tests, or network calls. It also did not run the tests it cites as missing coverage.
+2. **How the findings are treated.** They are accepted as **evidence to be verified**, not as confirmed defects. None of them is fixed, closed, or remediated by this section; all 16 are open items.
+3. **What was checked.** The parent checked the reviewer's line references for the HIGH finding (1), finding 4 and finding 5 only. Every other line reference is unverified until reproduced.
+4. **Where the full text lives.** [`stage-9-security-review.md`](engineering/stages/stage-9-security-review.md) holds the review in full, including the "checked and found sound" record and the open questions. This section summarises; it does not copy.
+5. **Where the ordering lives.** §13.25 holds the remediation order, dependencies, and verification basis.
+
+### Summary by severity
+
+Line references are the reviewer's, at `126e8089`.
+
+| # | Severity | Defect | Evidence location |
+| --- | --- | --- | --- |
+| 1 | HIGH | `notes.delete` authorizes the caller's path, not the resolved note's notebooks | `src/service/rpc-handler.ts:355-371`, `:1225-1257`; `src/service/exact-note-path-resolver.ts:162-205` |
+| 2 | MEDIUM-HIGH | A note in several notebooks is judged by whichever notebook enumerates first | `src/core/notesnook-readonly-projection.ts:325-341`, `:743-753`; `src/service/rpc-handler.ts:932-983` |
+| 3 | MEDIUM | `notes.update` with `patch.notebookId` writes into a never-authorized destination | `src/service/rpc-handler.ts:423-433`; `src/core/notesnook-write-adapter.ts:759-788` |
+| 4 | MEDIUM | `notes.path_diagnostic` is an unscoped corpus oracle in the default readPolicy | `src/service/rpc-handler.ts:266-285`; `src/service/service-runtime.ts:454-584`; `scripts/install-systemd.sh:254-259` |
+| 5 | MEDIUM-LOW | `nookbridge-clients` is admitted to operator-socket reads that ignore the service readPolicy | `src/service/operator-authorizer.ts:42-45`; `src/service/operator-socket-server.ts:22`, `:272-291`; `scripts/install-systemd.sh:127`, `:135-136` |
+| 6 | LOW-MEDIUM | Operator groups are read from `/proc/<pid>/status` by PID, open to a PID-reuse race | `native/operator-peercred.c:212-254`; `src/service/operator-authorizer.ts:183-189` |
+| 7 | LOW | Daemon socket answers operator methods with an envelope but drops unknown methods; test sits at the wrong layer | `src/service/rpc-protocol.ts:1216-1244`; `src/service/nookd-server.ts:70-99`, `:580-605` |
+| 8 | LOW, KNOWN | The upload gate looks at markers as a whole, not per dirty item | `src/core/notesnook-live-remote-sync.ts:71-101`, `:216`; `src/service/service-policy.ts:268` |
+| 9 | LOW | Upload approval is gated by group membership, not by a human | `src/service/operator-upload-approval-runtime.ts:52-73` |
+| 10 | LOW | Opaque-block placeholders are unkeyed hashes over values the client already has | `src/core/note-document-native.ts:505-508` |
+| 11 | LOW | `notes.search` matches note bodies although it is described as title-only | `src/mcp/nook-mcp-server.ts:177-179`; core `index.mjs:7567-7585` |
+| 12 | LOW | Operator `notes.create` with no notebook is evaluated with `""`, so a `<root>` deny never matches | `src/service/operator-authorization-context.ts:173-179`; `src/settings/settings-evaluator.ts:441-447` |
+| 13 | LOW | Note-id existence is observable before authorization (`not_found` vs `permission_denied`) | `src/service/rpc-handler.ts:288-296`, `:423-433` |
+| 14 | LOW | Operator socket accepts pipelined requests and blocks the event loop per connection | `src/service/operator-socket-server.ts:135-152`, `:223-229` |
+| 15 | LOW | SQLCipher key characters `"` and `\` are stripped instead of rejected | `src/auth/live-login-runtime.ts:402-404`; `src/storage/sqlite-storage.ts:234-240` |
+| 16 | INFORMATIONAL | A comment says `notes.delete` is structurally impossible in a custom policy; the allow-list includes it | `src/service/service-policy.ts:684-697`, `:179-191`, `:292-295` |
+
+**Finding 8 is not new.** The residual risk is already recorded in [`stage-s7a-dirty-set.md`](engineering/stages/stage-s7a-dirty-set.md) (outcome NO) and in §13.22, where Patrick accepted that content with no marker can still upload. The review restates it and marks what remains: any dirty item not produced through the write composition uploads without approval when an MCP client triggers sync. Whether such items exist is an open question.
+
+### What the review checked and found sound
+
+Recorded in full in the findings document and not repeated here. In short: the fetch-only sync boundary, the approval state, locked-note handling in `notes.get`, discovery filtering, daemon-socket permission checks, operator handle and cursor scoping, error categorisation, the nine-tool MCP surface, placeholder forging resistance, and credential handling were each read and found sound, subject to the cross-references in findings 2 and 10.
+
+### What the review could not establish
+
+Also in the findings document, as open questions: live behaviour behind findings 1 and 2, whether `fetch` leaves dirty items without markers, whether the operator CLI tools write without markers, runtime ownership of `/run/nookbridge` and `operator.sock`, the feasibility of the PID-reuse race, operator-socket timing, sops/age handling (outside this repository), and whether the tests the review names pass.
+
+## 13.25 Remediation ordering for the phase-1 security review
+
+**Status date:** 2026-10-28 (America/New_York)
+**Mode:** documentation-only ordering. Every item below is **open**. This section records an order and a verification basis; it resolves nothing.
+
+### Supersession
+
+This ordering **supersedes**, for the sixteen items below only, the sequencing of the authorization, operator-safety and socket items in §13.14 "Revised implementation order" (steps 2 and 4). Reason: that order was set on 2026-09-14 before the review existed, and it has no place for a HIGH authorization bypass on `notes.delete`. Where an item here and that order conflict on timing, this section wins.
+
+It supersedes nothing else. No existing plan step, ticket label, or section number (D-, R-, S7a-, P-, §13.x) is renumbered, renamed, or removed, because other documents cite them. The new items use the label `SR-n`. Statements elsewhere in the plan that the review contradicts are left in place and listed under "Contradictions" below.
+
+### Binding inputs
+
+- **Finding 1 goes first.** Re-authorize `notes.delete` against every notebook the resolved note is directly attached to; deny wins.
+- **Finding 5 gates finding 4.** Patrick decided on 2026-10-27: remove `nookbridge-clients` from the operator groups, **and** make `notes.path_diagnostic` operator-only, **and** drop it from the default `readPolicy`. Making the method operator-only alone achieves nothing while the client group is an operator-admitted group, because the MCP proxy runs as a client-group member. Deployment fact, verified: `hermes` holds both groups; the `nookbridge` service user holds clients only; nothing under `src/mcp/` touches `operator.sock`.
+- **Findings 1, 2 and 3 are one hardening area** with one fix shape: resolve the full notebook set, deny wins. Finding 1 lands first and introduces the shared resolution; findings 2 and 3 reuse it.
+- **Finding 16 does not wait** behind code work.
+
+### Verification basis
+
+- **Verified in source** means the cited code was read and the defect is visible in it. Findings 1, 4 and 5 were checked that way by the parent. Finding 16 is a comment-versus-code mismatch visible on reading.
+- **Needs reproduction first** means a failing test or live probe must exist before the fix is written. For findings 3 and 12 the cited code was read and matches the description, but their line references were not parent-checked and no test has been run, so they stay in this class.
+- No item is verified by execution. "Verified in source" is not "confirmed by a test".
+
+### Order
+
+| Order | Finding | Severity | Smallest fix | Depends on | Basis |
+| --- | --- | --- | --- | --- | --- |
+| SR-0 | 16 | INFORMATIONAL | Correct the custom-policy comment (`service-policy.ts:684-697`) and the stale `createReadWriteNoDelete` comment (`:292-295`). The allow-lists at `:132-146`, `:157-170` and `:179-191` also contradict the comment counts; fix them in the same edit. No behavior change. | none; do it now | verified in source |
+| SR-1 | 1 | HIGH | After resolving, authorize `notes.delete` against every notebook the resolved note is directly attached to; refuse if any denies. Add the RED test first: a note directly in allowed `A` and denied `B`, deleted via `A/T`. | none (introduces the shared notebook-set resolution) | verified in source (parent check) |
+| SR-2a | 2 | MEDIUM-HIGH | Have `noteMetadata` return all direct notebook ids and authorize `get`, `append`, `update` (and the operator view/preimage/apply paths) against every one; deny wins. Alternative: refuse notes in more than one notebook, as discovery does. | SR-1 | needs reproduction first |
+| SR-2b | 3 | MEDIUM | When `patch.notebookId` is present, resolve the destination path and require `create` (or `edit`) there. | SR-1; compounds SR-2a (the patch is one way to create a multi-notebook note) | needs reproduction first |
+| SR-3 | 5 | MEDIUM-LOW | Remove `nookbridge-clients` from `OPERATOR_ADMITTED_GROUPS` (`operator-authorizer.ts:42-45`). | none; gates SR-4 | verified in source (parent check) |
+| SR-4 | 4 | MEDIUM | Per Patrick's 2026-10-27 decision: make `notes.path_diagnostic` operator-only and drop it from the default `readPolicy` (`install-systemd.sh:254-259`). | SR-3 | verified in source (parent check) |
+| SR-5 | 6, 14 | LOW-MEDIUM, LOW | Use `SO_PEERGROUPS` in the helper (6); set `completed = true` when the first frame is taken and use `resolvePeerAsync` (14). Same file region, one change. Re-assess 6 after SR-3. | SR-3 | needs reproduction first |
+| SR-6 | 7, 12, 13 | LOW | 7: reject operator literals at parse time on the daemon socket and align the peek list. 12: pass `undefined`, not `""`. 13: answer `permission_denied` for both unknown and denied ids. | 13 touches the same handler lines as SR-2a/2b; do it after them | needs reproduction first |
+| SR-7 | 8 | LOW, KNOWN | Refuse a drain when the batch is empty but `hasUnsyncedChanges()` is true; treat `notes.sync` as `edit`. | **A decision from Patrick first**: it reverses the residual risk accepted in §13.22. Also the open question whether unmarked dirty items exist. | needs reproduction first |
+| SR-8 | 9, 10, 11, 15 | LOW | 9: require approval to echo the previewed `highestSequence` and document that operator-group membership equals upload authority. 10: HMAC with a daemon-held key. 11: require `notes.get` whenever `notes.search` is allowed and fix the description. 15: reject keys containing `"` or `\`. | 15 must not strand existing databases; check how existing keys were produced before enforcing | needs reproduction first |
+
+### Open design question on SR-4
+
+"Operator-only" is not yet specified mechanically. Today `notes.path_diagnostic` is an RPC method that the daemon socket parser accepts and the handler dispatches under the service policy. Moving it behind the operator group means either rejecting it on the daemon socket and adding an operator method, or requiring operator group membership on the existing path. That choice is not made here. Dropping it from the installer's default `readPolicy` also changes only new installs, since the installer writes the file; whether existing deployments keep the entry is a deployment check, not something the source shows. The built-in profiles in `service-policy.ts` (`:144`, `:166`, `:189`) also list it, so the profile lists need the same decision.
+
+### Contradictions between the plan, the review and the code
+
+- **§3.3 and §6.1 previously said `notes.path_diagnostic` was "reachable only from the operator CLI and never admitted by the daemon listener".** That claim was false and has since been corrected in both sections: the daemon parser and handler admit all eleven non-operator methods (`rpc-protocol.ts:1228`, `:1615`; `rpc-handler.ts:273`, `:902`). Finding 4 does not depend on that claim. It rests on the method being authorized with an empty context (`rpc-handler.ts:266-285`) so notebook-level denial never applies, and on the installer's default `readPolicy` shipping it (`scripts/install-systemd.sh:254-259`). Both of those remain true and are what SR-3 and SR-4 address.
+- **§13.22 accepts the unmarked-content upload as residual risk.** Finding 8's fix would reverse that, so SR-7 is gated on a new decision rather than scheduled.
+- **§13.21 records scoped discovery authorization as closed by #198.** That stands for discovery, which the review calls correct. Findings 1, 2 and 3 show the per-note paths (`get`, `append`, `update`, `delete`) are not held to the same standard for multi-notebook notes.
+- **Comment drift is wider than finding 16 states.** The `service-policy.ts` comments describe a four-read allow-list and an absent or present `notes.delete`; the actual lists hold five reads (including `notes.path_diagnostic`), plus `notes.create`, `notes.append`, `notes.update` and `notes.sync` in the write profile, and `notes.delete` appears only in the custom allow-list.
+
+### Evidence class
+
+Documentation only. Nothing here was reproduced by running code, and no test, build, VM, live account, or deployment was used. The single source-reading pass behind this section is not a substitute for the RED tests each item calls for.
+
 # Appendix A. Research Sources
 
 Research cutoff: August 26, 2026. The implementation should re-check upstream source before coding because Notesnook and Hermes are both active projects.
