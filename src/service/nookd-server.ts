@@ -45,6 +45,7 @@ import {
   type StartOperatorSocketServerOptions,
   type OperatorSocketServerHandle,
 } from "./operator-socket-server.js";
+import { isOperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 import type { Logger } from "../logging/logger.js";
@@ -66,6 +67,15 @@ export type NookdPeerResolver = (
   socket: net.Socket,
   signal: AbortSignal,
 ) => Promise<OperatorPeer | undefined>;
+
+/** Operator literals the daemon socket neither serves nor answers. */
+function isOperatorOnlyMethod(method: string): boolean {
+  return (
+    isOperatorTransportMethod(method) &&
+    method !== "notes.create" &&
+    method !== "notes.path_diagnostic"
+  );
+}
 
 function peekRpcMethod(frame: Buffer): RpcMethod {
   try {
@@ -587,6 +597,13 @@ export async function startNookdServer(
               typeof request.method !== "string"
             ) {
               throw new Error("rpc protocol: parser returned an invalid request");
+            }
+            // parseRpcFrame is shared with the operator listener, so it admits the
+            // operator literals. The daemon serves notes.create and answers
+            // notes.path_diagnostic itself; every other operator literal must be
+            // indistinguishable here from an unknown method: no envelope, closed.
+            if (isOperatorOnlyMethod(request.method)) {
+              throw new Error("rpc protocol: operator method on the daemon socket");
             }
           } catch {
             // A malformed frame has no trusted request id. The protocol has no

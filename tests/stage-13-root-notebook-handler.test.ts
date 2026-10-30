@@ -66,14 +66,15 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     expect(JSON.stringify(response)).not.toContain("notebookAbsenceConfirmed");
   });
 
-  it("keeps not_found when absence is NOT confirmed", async () => {
+  it("answers permission_denied when absence is NOT confirmed", async () => {
     const reader = vi.fn(async () => ({ type: "html" as const, data: "<p>x</p>" }));
     const response = await handleRpcRequest(
       req({ id: "n1" }),
       runtime(rootNote(), reader),
       policyFor([]),
     );
-    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
+    // Id-form: a missing/unconfirmed note answers like a denied one.
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(reader).not.toHaveBeenCalled();
   });
 
@@ -83,7 +84,7 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
       runtime(rootNote({ notebookAbsenceConfirmed: value })),
       policyFor([]),
     );
-    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
   });
 
   it("applies a deny rule for <root> before reading content", async () => {
@@ -110,8 +111,8 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     const seen: unknown[] = [];
     const r = runtime(rootNote({ notebookId: "nb", notebookAbsenceConfirmed: true }));
     const response = await handleRpcRequest(req({ id: "n1" }), r, policyFor(seen));
-    // No trusted notebook index -> unresolvable notebook stays not_found.
-    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
+    // No trusted notebook index -> unresolvable notebook; id-form answers permission_denied.
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(seen).toEqual([]);
   });
 
