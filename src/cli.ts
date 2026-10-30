@@ -22,6 +22,13 @@
  *   1  doctor probe had any `fail`
  *   2  CLI invocation error (unknown subcommand, bad args)
  *   3  auth credential-collection failure (EOF, malformed, etc.)
+ *   4  `notes` or `tree` command refused categorically (`denied`, `locked`,
+ *      `missing`, `conflict`); the refusal is printed on stdout as well, so
+ *      a script that checks only the exit code must not read it as success
+ *
+ * Codes 0-3 keep their existing per-command meanings, which vary between
+ * command families.  This change adds code 4, and makes `tree` return 2 for
+ * `invalid-input` as `notes` already did; it does not otherwise redefine them.
  */
 
 import { Buffer } from "node:buffer";
@@ -173,6 +180,13 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
     }
   }
   return { subcommand: subcommand ?? "help", args };
+}
+
+/** A categorical refusal must not read as success to a script that checks only the exit code. */
+function refusalExitCode(kind: string): 0 | 4 {
+  return kind === "denied" || kind === "locked" || kind === "missing" || kind === "conflict"
+    ? 4
+    : 0;
 }
 
 export async function run(argv: string[]): Promise<number> {
@@ -336,7 +350,8 @@ async function runTree(args: Args): Promise<number> {
     },
   });
   process.stdout.write(formatTreeResult(result));
-  return result.kind === "error" ? result.exitCode : 0;
+  if (result.kind === "error") return result.exitCode;
+  return result.kind === "invalid-input" ? 2 : refusalExitCode(result.kind);
 }
 
 /**
@@ -498,7 +513,7 @@ async function runNotes(args: Args): Promise<number> {
       formatNotesResult(result, parsed.command.kind === "browse" ? "browse" : "legacy"),
     );
     if (result.kind === "error") return result.exitCode;
-    return result.kind === "invalid-input" ? 2 : 0;
+    return result.kind === "invalid-input" ? 2 : refusalExitCode(result.kind);
   } finally {
     if (cleanup !== undefined) {
       try {
