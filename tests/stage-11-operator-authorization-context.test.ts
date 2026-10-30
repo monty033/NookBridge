@@ -4,6 +4,8 @@ import {
   resolveOperatorRequestNotebookPolicy,
   settingsOperationForMethod,
 } from "../src/service/operator-authorization-context.js";
+import { buildNotebookIndex } from "../src/settings/notebook-index.js";
+import { createSettingsEvaluator } from "../src/settings/settings-evaluator.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 
@@ -167,6 +169,35 @@ describe("operator request lock context", () => {
     expect(evaluate).toHaveBeenCalledWith("create", "Private/Secrets");
   });
 
+  it("evaluates a notebook-less create as confirmed-root, so a <root> create-deny applies", async () => {
+    // The evaluator matches the reserved <root> marker only when the notebook
+    // path is undefined.  An empty string is a path that matches nothing, so a
+    // <root> create-deny silently failed to apply to a notebook-less create.
+    const evaluate = createSettingsEvaluator(
+      {
+        version: 1,
+        defaults: { read: true, edit: true, create: true, delete: true },
+        overrides: [{ notebooks: ["<root>"], create: false }],
+      },
+      buildNotebookIndex([]),
+    );
+    await expect(
+      resolveOperatorRequestNotebookPolicy({
+        method: "notes.create",
+        request: {
+          id: "r1",
+          method: "notes.create",
+          params: { title: "T", content: "C" },
+        },
+        peer: PEER,
+        resolveHandle,
+        readNoteNotebookPath: undefined,
+        evaluateNotebookPolicy: (operation, notebookPath) =>
+          evaluate(operation, notebookPath === undefined ? {} : { notebookPath }).allowed,
+      }),
+    ).resolves.toMatchObject({ allow: false });
+  });
+
   it("reads no notebook policy when the daemon supplies no source", async () => {
     // Guard: without a path reader and an evaluator there is nothing to decide,
     // and the context must stay untouched rather than defaulting to allow.
@@ -192,7 +223,7 @@ describe("multi-notebook deny-wins", () => {
   };
 
   it("refuses when any attached notebook denies, even if the first allows", async () => {
-    const evaluate = vi.fn((_op: unknown, path: string) => path !== "Private/Secrets");
+    const evaluate = vi.fn((_op: unknown, path: string | undefined) => path !== "Private/Secrets");
     await expect(
       resolveOperatorRequestNotebookPolicy({
         ...base,

@@ -174,7 +174,7 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
     | ((notebookId: string) => string | undefined | Promise<string | undefined>)
     | undefined;
   readonly evaluateNotebookPolicy:
-    | ((operation: SettingsOperation, notebookPath: string) => boolean)
+    | ((operation: SettingsOperation, notebookPath: string | undefined) => boolean)
     | undefined;
 }): Promise<OperatorNotebookPolicy | undefined> {
   if (input.request === undefined) return undefined;
@@ -184,7 +184,9 @@ export async function resolveOperatorRequestNotebookPolicy(input: {
     if (notebookId === undefined) {
       return {
         notebookPath: "",
-        allow: input.evaluateNotebookPolicy("create", ""),
+        // `undefined`, not "": the evaluator matches the reserved <root> marker
+        // only against an undefined path, so "" made a <root> create-deny a no-op.
+        allow: input.evaluateNotebookPolicy("create", undefined),
       };
     }
     if (input.resolveNotebookPath === undefined) return undefined;

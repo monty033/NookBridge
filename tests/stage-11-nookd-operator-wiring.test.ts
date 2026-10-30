@@ -212,6 +212,12 @@ const S1B_SETTINGS_TEXT = JSON.stringify({
   defaults: { read: true, edit: true, create: true, delete: false },
   overrides: [{ notebooks: [DENIED_NOTEBOOK_PATH], edit: false, create: false }],
 });
+/** Create is allowed everywhere except a note confirmed to be in no notebook. */
+const ROOT_CREATE_DENIED_SETTINGS_TEXT = JSON.stringify({
+  version: 1,
+  defaults: { read: true, edit: true, create: true, delete: false },
+  overrides: [{ notebooks: ["<root>"], create: false }],
+});
 const S2C_SETTINGS_TEXT = JSON.stringify({
   version: 1,
   defaults: { read: true, edit: true, create: false, delete: false },
@@ -426,6 +432,35 @@ describe("nookd operator wiring (S1b)", () => {
         wiring.operator,
         OPERATOR,
         "create-admitted-notebook",
+        OPEN_NOTEBOOK_ID,
+      );
+      expect(admitted).toMatchObject({ allowed: true, method: "notes.create" });
+    } finally {
+      await wiring.handle.shutdown();
+    }
+  });
+
+  it("denies a notebook-less notes.create when settings deny create at <root>", async () => {
+    const wiring = await startWiredNookd({ settingsText: ROOT_CREATE_DENIED_SETTINGS_TEXT });
+    try {
+      const rootCreate = {
+        id: "create-root",
+        method: "notes.create",
+        params: { title: "Probe", content: NOTE_CONTENT },
+      };
+      const decision = await wiring.operator.authorize(
+        "notes.create",
+        OPERATOR,
+        rootCreate as never,
+      );
+      expect(decision).toEqual({ allowed: false, reason: "permission_denied" });
+
+      // Control: the same settings still admit a create into a real notebook, so
+      // the refusal above came from the <root> rule alone.
+      const admitted = await authorizeCreate(
+        wiring.operator,
+        OPERATOR,
+        "create-open-notebook",
         OPEN_NOTEBOOK_ID,
       );
       expect(admitted).toMatchObject({ allowed: true, method: "notes.create" });
