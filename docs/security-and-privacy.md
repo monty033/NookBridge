@@ -90,6 +90,16 @@ markers through the displayed bound; later writes remain blocked. The listing,
 confirmation, result, and audit record contain no note identifiers, titles, or
 paths. MCP has no approval method.
 
+The terminal and the typed sequence are a safeguard in the CLI, not a check the
+daemon can make. The `notes.approve-upload` RPC is a plain call: it takes no
+proof that a person is present, and anyone who can read the preview can supply
+its `highestSequence`. Echoing the sequence therefore guards against approving
+more than was displayed (the daemon never approves above the number it is
+given), not against a non-interactive caller. Membership of
+`nookbridge-operators` is equivalent to upload authority. Keep that group to
+the dedicated operator identity, which is the deployment invariant described in
+the implementation plan under SR-9.
+
 The empty-parameter form is a read-only preview: it returns those counts and
 the highest sequence without changing markers or saving state.
 
