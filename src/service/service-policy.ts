@@ -291,8 +291,9 @@ export function createReadOnlyServicePolicy(evaluator?: ServicePolicyEvaluator):
 
 /**
  * Build the canonical `readWriteNoDelete` service policy.  The
- * allowlist is the four reads plus `notes.create`; `notes.delete`
- * is structurally absent and cannot be admitted by this factory.
+ * allowlist is the four reads plus `notes.create`, `notes.append`,
+ * `notes.update` and `notes.sync`; `notes.delete` is absent from it and
+ * this factory cannot admit it.
  *
  * The returned policy is frozen on a null prototype, with the
  * allowlist tuple frozen too, so a hostile caller cannot widen the
@@ -682,8 +683,8 @@ function inspectPolicyAllowlist(value: unknown): ReadonlyArray<RpcMethod> | unde
       // Proxy that fabricates `length` without real entries
       // cannot pass.  Every entry must be a literal in
       // CUSTOM_POLICY_ALLOWABLE_METHODS (i.e. one of the four
-      // reads, `notes.create`, `notes.append`, or `notes.update`);
-      // anything else denies.
+      // reads, `notes.create`, `notes.append`, `notes.update`,
+      // `notes.delete`, or `notes.sync`); anything else denies.
       for (let index = 0; index < allowed.length; index += 1) {
         const entry = allowed[index];
         if (typeof entry !== "string") return undefined;
@@ -691,10 +692,10 @@ function inspectPolicyAllowlist(value: unknown): ReadonlyArray<RpcMethod> | unde
       }
       // Return the candidate tuple only after every entry has
       // been validated against the closed universe of
-      // allowable custom methods.  `notes.delete` is
-      // structurally impossible: it is not in
-      // CUSTOM_POLICY_ALLOWABLE_METHODS, so a candidate that
-      // contains it is denied above.
+      // allowable custom methods.  `notes.delete` IS in that
+      // universe, so a custom policy can admit it; the exact-path
+      // delete is then still gated by the notebook policy and the
+      // delete re-authorization in the handler.
       return allowed as ReadonlyArray<RpcMethod>;
     }
     return undefined;

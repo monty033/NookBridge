@@ -691,7 +691,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               settingsEvaluator === undefined
                 ? undefined
                 : (operation, notebookPath) =>
-                    settingsEvaluator(operation, { notebookPath }).allowed,
+                    settingsEvaluator(operation, notebookPath === undefined ? {} : { notebookPath })
+                      .allowed,
           }),
           handle: (() => {
             const discoveryRuntime = createOperatorDiscoveryRuntime(

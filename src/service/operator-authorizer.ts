@@ -80,7 +80,7 @@ export interface OperatorAuthorizerDependencies {
     | undefined;
   /** The settings evaluator that decides per-notebook overrides. */
   readonly evaluateNotebookPolicy?:
-    | ((operation: SettingsOperation, notebookPath: string) => boolean)
+    | ((operation: SettingsOperation, notebookPath: string | undefined) => boolean)
     | undefined;
 }
 
