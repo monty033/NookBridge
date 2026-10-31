@@ -69,6 +69,7 @@ import {
   createOperationStoreFs,
   deriveOperationStoreKey,
 } from "./service/notes-operation-store-fs.js";
+import { configureOpaquePlaceholderKey } from "./core/note-document-native.js";
 import { createOperatorAuthorizer } from "./service/operator-authorizer.js";
 import {
   createOperatorUploadApprovalRuntime,
@@ -393,6 +394,15 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     });
   } catch {
     throw startupError("credentials", "nookd credential startup failed");
+  }
+
+  // Placeholder tokens are keyed from the database key; a store without one
+  // keeps the per-process random key.
+  try {
+    const material = keys.getDatabaseKey();
+    configureOpaquePlaceholderKey(typeof material === "string" ? material : undefined);
+  } catch {
+    configureOpaquePlaceholderKey(undefined);
   }
 
   let status: NookdStartupRuntime["status"];

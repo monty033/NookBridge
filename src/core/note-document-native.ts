@@ -4,7 +4,7 @@
  * T07 must supply the actual note/revision under its mutation lock.
  */
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { types } from "node:util";
 import { URL } from "node:url";
 import {
@@ -105,6 +105,33 @@ function record(value: unknown, keys: readonly string[]): Record<string, unknown
   if (Object.keys(value).some((k) => !keys.includes(k))) fail();
   return value as Record<string, unknown>;
 }
+/**
+ * Key for opaque placeholder tokens.  The token is keyed so a caller who sees
+ * the note id, revision and Markdown cannot confirm a guess about the withheld
+ * content offline (review finding 10).  The daemon configures it from the
+ * database key at startup; until then a per-process random key is used, so a
+ * token is never derivable from public inputs.
+ */
+let placeholderKey: Buffer = randomBytes(32);
+function derivePlaceholderKey(keyMaterial: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(keyMaterial, "utf8"),
+      Buffer.from("nookbridge/opaque-placeholder/salt/v1"),
+      Buffer.from("nookbridge/opaque-placeholder/key/v1"),
+      32,
+    ),
+  );
+}
+
+export function configureOpaquePlaceholderKey(keyMaterial: string | undefined): void {
+  placeholderKey =
+    keyMaterial === undefined || keyMaterial.length === 0
+      ? randomBytes(32)
+      : derivePlaceholderKey(keyMaterial);
+}
+
 function bindingKey(value: unknown): string {
   const r = record(snapshot(value), ["noteId", "revision"]);
   const noteId = r.noteId;
@@ -502,7 +529,7 @@ function decodeBlocks(
       // `payloads` is created per decode, so its size is this reference's
       // traversal index — deterministic for identical input and binding, and
       // distinct for two identical subtrees in one document.
-      const token = createHash("sha256")
+      const token = createHmac("sha256", placeholderKey)
         .update(JSON.stringify([binding, payloads.size, n.raw]))
         .digest("hex")
         .slice(0, 36);
