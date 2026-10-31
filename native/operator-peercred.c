@@ -6,6 +6,8 @@
  *
  *   <uid> <gid> <pid> <group_1> <group_2> ...
  *
+ * Groups come from SO_PEERGROUPS connect-time socket credentials, so they
+ * remain bound to the peer even after its process exits.
  * The group entries are POSIX group NAMES from the local /etc/group file,
  * falling back to the numeric id when it does not have a local name. The
  * authorization policy matches peers on group names, so the name resolution
@@ -35,6 +37,7 @@
 #define O_RDONLY 0
 #define SOL_SOCKET 1
 #define SO_PEERCRED 17
+#define SO_PEERGROUPS 59
 
 typedef unsigned long usize;
 typedef long ssize;
@@ -192,65 +195,28 @@ static int resolve_local_group_name(
   return 0;
 }
 
-static int append_group_token(
-    char *output,
-    usize capacity,
-    usize *length,
-    const char *token_begin,
-    const char *token_end,
-    char *group_file,
-    usize group_file_length) {
-  unsigned long id = 0;
-  char name[65];
-  if (!append_char(output, capacity, length, ' ')) return 0;
-  if (parse_uint(token_begin, token_end, &id) &&
-      resolve_local_group_name(id, group_file, group_file_length, name, sizeof(name)))
-    return append_bytes(output, capacity, length, name, string_length(name));
-  return append_bytes(output, capacity, length, token_begin, (usize)(token_end - token_begin));
-}
-
 static int append_peer_groups(
-    char *output, usize capacity, usize *length, int pid, char *group_file, usize group_file_length) {
-  char path[64] = "/proc/";
-  usize path_length = string_length(path);
-  if (!append_uint(path, sizeof(path), &path_length, (unsigned long)pid) ||
-      !append_bytes(path, sizeof(path), &path_length, "/status", 7))
+    char *output, usize capacity, usize *length, char *group_file, usize group_file_length) {
+  unsigned int groups[2048];
+  unsigned int groups_length = (unsigned int)sizeof(groups);
+  long result = syscall5(
+      SYS_getsockopt, 0, SOL_SOCKET, SO_PEERGROUPS, (long)groups, (long)&groups_length);
+  if (result < 0 || groups_length > sizeof(groups) ||
+      groups_length % sizeof(groups[0]) != 0)
     return 0;
-  path[path_length] = '\0';
-
-  char status[8192];
-  usize status_length = 0;
-  if (!read_file(path, status, sizeof(status), &status_length)) return 0;
-
-  usize line_start = 0;
-  while (line_start < status_length) {
-    usize line_end = line_start;
-    while (line_end < status_length && status[line_end] != '\n') line_end++;
-    if (line_end - line_start >= 7 && status[line_start] == 'G' && status[line_start + 1] == 'r' &&
-        status[line_start + 2] == 'o' && status[line_start + 3] == 'u' &&
-        status[line_start + 4] == 'p' && status[line_start + 5] == 's' &&
-        status[line_start + 6] == ':') {
-      usize cursor = line_start + 7;
-      while (cursor < line_end && (status[cursor] == ' ' || status[cursor] == '\t')) cursor++;
-      usize group_count = 0;
-      while (cursor < line_end) {
-        usize token_end = cursor;
-        while (token_end < line_end && status[token_end] != ' ' && status[token_end] != '\t') token_end++;
-        if (token_end > cursor) {
-          if (!append_group_token(
-                  output, capacity, length, status + cursor, status + token_end, group_file,
-                  group_file_length))
-            return 0;
-          group_count++;
-        }
-        cursor = token_end;
-        while (cursor < line_end && (status[cursor] == ' ' || status[cursor] == '\t')) cursor++;
-      }
-      return group_count > 0;
+  usize group_count = groups_length / sizeof(groups[0]);
+  if (group_count == 0 || group_count > 64) return 0;
+  for (usize index = 0; index < group_count; index++) {
+    char name[65];
+    if (!append_char(output, capacity, length, ' ')) return 0;
+    if (resolve_local_group_name(
+            groups[index], group_file, group_file_length, name, sizeof(name))) {
+      if (!append_bytes(output, capacity, length, name, string_length(name))) return 0;
+    } else if (!append_uint(output, capacity, length, groups[index])) {
+      return 0;
     }
-    line_start = line_end + 1;
   }
-  return 0;
+  return 1;
 }
 
 static int write_all(const char *value, usize length) {
@@ -280,7 +246,7 @@ void _start(void) {
   usize group_file_length = 0;
   if (!read_file("/etc/group", group_file, sizeof(group_file), &group_file_length)) exit_process(3);
 
-  char output[8192];
+  char output[4096];
   usize output_length = 0;
   if (!append_uint(output, sizeof(output), &output_length, (unsigned long)credentials.uid) ||
       !append_char(output, sizeof(output), &output_length, ' ') ||
@@ -288,7 +254,7 @@ void _start(void) {
       !append_char(output, sizeof(output), &output_length, ' ') ||
       !append_uint(output, sizeof(output), &output_length, (unsigned long)credentials.pid) ||
       !append_peer_groups(
-          output, sizeof(output), &output_length, credentials.pid, group_file, group_file_length) ||
+          output, sizeof(output), &output_length, group_file, group_file_length) ||
       !append_char(output, sizeof(output), &output_length, '\n') || !write_all(output, output_length))
     exit_process(4);
   exit_process(0);
