@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  configureOpaquePlaceholderKey,
   decodeNoteDocumentNative,
   serializeNoteDocumentNative,
   NOTESNOOK_JSON_WRITER_ENABLED,
@@ -664,5 +666,39 @@ describe("T13 list semantics", () => {
         `${cls} should decode as an ordinary list`,
       ).toBe(false);
     }
+  });
+});
+
+describe("opaque placeholder tokens are keyed (review finding 10)", () => {
+  const html = '<hr style="border-top:1px dashed red" />';
+  const legacy = (raw: string, index: number) =>
+    createHash("sha256")
+      .update(JSON.stringify([JSON.stringify([binding.noteId, binding.revision]), index, raw]))
+      .digest("hex")
+      .slice(0, 36);
+  const tokenOf = () => {
+    const block = decodeNoteDocumentNative(wrap(html), binding).document.blocks[0];
+    if (block?.type !== "opaque") throw new Error("expected an opaque block");
+    return block.sentinel.token;
+  };
+
+  it("cannot be confirmed offline from the note id, revision and raw content", () => {
+    configureOpaquePlaceholderKey("fixture-key-material-a");
+    expect(tokenOf()).not.toBe(legacy(html, 0));
+  });
+
+  it("is stable for one key and differs between keys", () => {
+    configureOpaquePlaceholderKey("fixture-key-material-a");
+    const first = tokenOf();
+    expect(tokenOf()).toBe(first);
+    configureOpaquePlaceholderKey("fixture-key-material-b");
+    expect(tokenOf()).not.toBe(first);
+  });
+
+  it("still mints a well-formed, non-legacy token when no key is configured", () => {
+    configureOpaquePlaceholderKey(undefined);
+    const token = tokenOf();
+    expect(token).toMatch(/^[a-f0-9]{36}$/);
+    expect(token).not.toBe(legacy(html, 0));
   });
 });

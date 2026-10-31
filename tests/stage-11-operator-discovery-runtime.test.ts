@@ -1,8 +1,13 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+  expectedPlaceholderToken,
+  useFixturePlaceholderKey,
+} from "./helpers/opaque-placeholder-token.js";
+
+beforeAll(() => useFixturePlaceholderKey());
 import {
   createOperatorDiscoveryRuntime,
   createOperatorHandleRegistry,
@@ -158,10 +163,7 @@ describe("daemon operator discovery runtime", () => {
       '<div data-type="embed" data-url="https://example.com/embed"><p>embedded payload</p></div>',
     ];
     const expectedToken = (revision: string, index: number): string =>
-      createHash("sha256")
-        .update(JSON.stringify([JSON.stringify(["raw-note", revision]), index, opaque[index]]))
-        .digest("hex")
-        .slice(0, 36);
+      expectedPlaceholderToken("raw-note", revision, index, opaque[index] as string);
     const runtime = runtimeFor({
       listNotes: async () => [{ id: "raw-note", title: "Body" }],
       noteMetadata: async () => ({ id: "raw-note", title: "Body", revision }),
@@ -182,21 +184,21 @@ describe("daemon operator discovery runtime", () => {
     expect(placeholders, "expected three get-view opaque sentinels").toHaveLength(3);
     if (placeholders === null || placeholders === undefined)
       throw new Error("missing get-view opaque sentinels");
-    expect(placeholders?.map((placeholder) =>
-      /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)\n/.exec(placeholder)?.[1],
-    )).toEqual(["img", "div", "div"]);
+    expect(
+      placeholders?.map(
+        (placeholder) => /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)\n/.exec(placeholder)?.[1],
+      ),
+    ).toEqual(["img", "div", "div"]);
     const divTokens = placeholders
       ?.filter((placeholder) => placeholder.startsWith(":::nookbridge opaque div\n"))
       .map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]);
     expect(divTokens).toHaveLength(2);
     expect(new Set(divTokens).size).toBe(2);
     expect(
-      placeholders?.map(
-        (placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1],
-      ),
+      placeholders?.map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]),
     ).toEqual([0, 1, 2].map((index) => expectedToken(REVISION, index)));
     expect(placeholders?.[0]).toBe(
-      ":::nookbridge opaque img\nref:1:native-html:18c406028970c0744a52089cf4fb7b38e266\n:::",
+      `:::nookbridge opaque img\nref:1:native-html:${expectedToken(REVISION, 0)}\n:::`,
     );
     expect(second?.markdown).not.toBe(first?.markdown);
     const secondPlaceholders = second?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
@@ -206,18 +208,13 @@ describe("daemon operator discovery runtime", () => {
       ),
     ).toEqual([0, 1, 2].map((index) => expectedToken(`rev_${"2".repeat(32)}`, index)));
     expect(second?.markdown).toContain(
-      ":::nookbridge opaque img\nref:1:native-html:d398d39ea6428ead70fc54475b5a361f4410\n:::",
+      `:::nookbridge opaque img\nref:1:native-html:${expectedToken(`rev_${"2".repeat(32)}`, 0)}\n:::`,
     );
     expect(first?.markdown).not.toContain("example.com");
     expect(first?.markdown).not.toContain("attachment-opaque");
     expect(first?.markdown).not.toContain("image-opaque");
     expect(first?.markdown).not.toContain("/private/notes/");
-    expect(Object.keys(first ?? {}).sort()).toEqual([
-      "contentBytes",
-      "id",
-      "markdown",
-      "revision",
-    ]);
+    expect(Object.keys(first ?? {}).sort()).toEqual(["contentBytes", "id", "markdown", "revision"]);
   });
 
   it("falls back to tolerant Markdown when the strict decoder rejects stored content", async () => {

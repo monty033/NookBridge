@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
@@ -12,6 +12,10 @@ import {
 } from "../src/service/notes-operator-write-runtime.js";
 import { createNotesUndoStore, type OperationStoreFs } from "../src/service/notes-undo-store.js";
 import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
+import {
+  expectedPlaceholderToken,
+  useFixturePlaceholderKey,
+} from "./helpers/opaque-placeholder-token.js";
 
 const HANDLE = "h_noteone";
 const NOTE_ID = "note-1";
@@ -103,7 +107,10 @@ async function fixture(options: { readonly native?: string } = {}) {
 
 async function twoNoteFixture() {
   const native = threeOpaqueBlocks().native;
-  const states = new Map<string, { revision: string; content: OperatorStoredContent; writes: number }>([
+  const states = new Map<
+    string,
+    { revision: string; content: OperatorStoredContent; writes: number }
+  >([
     [NOTE_A, { revision: REVISION_1, content: wrap(native), writes: 0 }],
     [NOTE_B, { revision: REVISION_1, content: wrap(native), writes: 0 }],
   ]);
@@ -143,6 +150,10 @@ const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, u
     ttlMs: 60_000,
     ...extra,
   });
+
+beforeAll(() => useFixturePlaceholderKey());
+const keyedToken = (index: number, raw: string): string =>
+  expectedPlaceholderToken(NOTE_ID, REVISION_1, index, raw);
 
 describe("daemon operator write runtime", () => {
   it("records a durable create operation before reporting success", async () => {
@@ -217,10 +228,7 @@ describe("daemon operator write runtime", () => {
   it("refuses an edit when only the tolerant read decoder can view the stored content", async () => {
     const f = await fixture({ native: '<p><a href="javascript:alert(1)">before</a></p>' });
     await expect(
-      runtime(f).applyEdit(
-        { id: HANDLE, expectedRevision: REVISION_1, markdown: "# after" },
-        PEER,
-      ),
+      runtime(f).applyEdit({ id: HANDLE, expectedRevision: REVISION_1, markdown: "# after" }, PEER),
     ).rejects.toMatchObject({ code: "service_unavailable" });
     expect(f.state.writes).toBe(0);
     expect(await f.store.list()).toEqual([]);
@@ -336,11 +344,7 @@ describe("daemon operator write runtime", () => {
       /^:::nookbridge opaque img\nref:1:native-html:([A-Za-z0-9_-]+)\n:::$/m,
     );
     if (match === null) throw new Error("missing image opaque sentinel");
-    const expected = createHash("sha256")
-      .update(JSON.stringify([JSON.stringify([NOTE_ID, REVISION_1]), 0, image]))
-      .digest("hex")
-      .slice(0, 36);
-    expect(match[1]).toBe(expected);
+    expect(match[1]).toBe(keyedToken(0, image));
     let thrown: unknown;
     try {
       decodeNoteDocumentNative(wrap(image), {
@@ -360,19 +364,13 @@ describe("daemon operator write runtime", () => {
     const { image } = threeOpaqueBlocks();
     const f = await fixture({ native: `<p>before</p>${image}` });
     const preimage = await runtime(f).editPreimage({ id: HANDLE }, PEER);
-    const legacy = createHash("sha256")
-      .update(`${0}\u0000${image}`)
-      .digest("hex")
-      .slice(0, 36);
+    const legacy = createHash("sha256").update(`${0}\u0000${image}`).digest("hex").slice(0, 36);
     const markdown = preimage.markdown
       .replace(/ref:1:native-html:[A-Za-z0-9_-]+/, `ref:1:native-html:${legacy}`)
       .replace("before", "after");
 
     await expect(
-      runtime(f).applyEdit(
-        { id: HANDLE, expectedRevision: preimage.revision, markdown },
-        PEER,
-      ),
+      runtime(f).applyEdit({ id: HANDLE, expectedRevision: preimage.revision, markdown }, PEER),
     ).rejects.toMatchObject({ code: "invalid_request", message: "invalid_request" });
     expect(f.state.writes).toBe(0);
     expect(await f.store.list()).toEqual([]);
@@ -420,10 +418,7 @@ describe("daemon operator write runtime", () => {
     const placeholders = preimage.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
     expect(placeholders, "expected nested opaque placeholders").toHaveLength(2);
     for (const [index, raw] of [image, embed].entries()) {
-      const token = createHash("sha256")
-        .update(JSON.stringify([JSON.stringify([NOTE_ID, REVISION_1]), index, raw]))
-        .digest("hex")
-        .slice(0, 36);
+      const token = keyedToken(index, raw);
       expect(preimage.markdown, `missing nested sentinel ${index}`).toContain(
         `ref:1:native-html:${token}`,
       );

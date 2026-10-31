@@ -8,8 +8,13 @@
 
 import { TextDecoder } from "node:util";
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  expectedPlaceholderToken,
+  useFixturePlaceholderKey,
+} from "./helpers/opaque-placeholder-token.js";
+
+beforeAll(() => useFixturePlaceholderKey());
 
 import {
   createNotesnookReadOnlyAdapter,
@@ -2137,10 +2142,7 @@ describe("notes.get bounded content read", () => {
     );
     if (!response.ok || response.result.kind !== "note") throw new Error("expected note response");
     expect(response.result.note.revision).toBe(metadata.revision);
-    const expected = createHash("sha256")
-      .update(JSON.stringify([JSON.stringify(["note-1", metadata.revision]), 0, rawImage]))
-      .digest("hex")
-      .slice(0, 36);
+    const expected = expectedPlaceholderToken("note-1", metadata.revision, 0, rawImage);
     expect(response.result.contentStatus).toBe("ok");
     expect(response.result.markdown).toBe(
       `---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque img\nref:1:native-html:${expected}\n:::\n`,
