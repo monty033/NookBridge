@@ -355,7 +355,16 @@ function finishCustomServicePolicy(
   // Hand-rolled null-prototype frozen array: a pure `Object.create(null)`
   // does not pass `Array.isArray`, so we build a real array and then
   // null the prototype before freezing.
-  const cleanArr: RpcMethod[] = [...clean];
+  // Core search also matches note bodies, so `notes.search` without
+  // `notes.get` would be a body-content oracle. Search is only admitted
+  // alongside the read that already exposes those bodies (review finding 11).
+  const cleanArr: RpcMethod[] = [];
+  const canRead = reflectApply(arrayIndexOf, clean, ["notes.get"]) !== -1;
+  for (let index = 0; index < clean.length; index += 1) {
+    const entry = clean[index] as RpcMethod;
+    if (entry === "notes.search" && !canRead) continue;
+    cleanArr[cleanArr.length] = entry;
+  }
   objectSetPrototypeOf(cleanArr, null);
   objectFreeze(cleanArr);
   const policy = objectCreate(null) as {
@@ -560,6 +569,12 @@ export function authorizeServiceMethod(
   if (allowlist === undefined) return denyServicePolicyDecision();
 
   if (typeof method !== "string") return denyServicePolicyDecision();
+
+  // The construction-time rule is repeated here so a hand-built policy that
+  // reaches this function directly cannot admit search without read.
+  if (method === "notes.search" && reflectApply(arrayIndexOf, allowlist, ["notes.get"]) === -1) {
+    return denyServicePolicyDecision();
+  }
 
   // O(n) walk over the active allowlist.  The allowlist is too
   // small to justify a Set, and a Set would leak the method names

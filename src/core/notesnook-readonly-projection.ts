@@ -850,8 +850,9 @@ export function flattenLiveDatabaseToReadOnly(
           "Notesnook read-only projection: search query must be a non-empty string",
         );
       }
-      // Search both note titles and notebook titles.  The seam is
-      // title-only; body matches are out of scope for this slice.
+      // Search both note titles and notebook titles.  Core's lookup also
+      // matches note bodies, so the service policy admits search only
+      // together with `notes.get`; later layers reduce hits to titles.
       const hits: Array<{
         readonly id: string;
         readonly title: string;

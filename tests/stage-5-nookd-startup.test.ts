@@ -36,7 +36,7 @@ const CONFIG: ServiceConfig = Object.freeze({
 
 const WRITE_CONFIG: ServiceConfig = Object.freeze({
   ...CONFIG,
-  readPolicy: Object.freeze(["notes.search", "notes.create", "notes.append"] as const),
+  readPolicy: Object.freeze(["notes.search", "notes.get", "notes.create", "notes.append"] as const),
 });
 
 const productionKeys: SecureKeyStore = Object.freeze({
@@ -183,6 +183,7 @@ describe("bounded nookd startup composition", () => {
     expect(serverOptions?.policy?.profile).toBe("custom");
     expect(serverOptions?.policy?.allowedMethods).toEqual([
       "notes.search",
+      "notes.get",
       "notes.create",
       "notes.append",
     ]);
