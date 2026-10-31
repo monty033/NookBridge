@@ -12,7 +12,11 @@ import { setTimeout } from "node:timers";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { STAGE5_RPC_LIMITS, type RpcResponseEnvelope } from "../src/service/rpc-protocol.js";
+import {
+  STAGE5_RPC_LIMITS,
+  parseRpcFrame,
+  type RpcResponseEnvelope,
+} from "../src/service/rpc-protocol.js";
 import {
   startNookdServer,
   type NookdServerHandle,
@@ -27,6 +31,8 @@ import {
   startOperatorSocketServer,
   UNIX_SOCKET_PATH_MAX_BYTES,
 } from "../src/service/operator-socket-server.js";
+
+import { OPERATOR_DISCOVERY_METHODS, OPERATOR_METHODS } from "../src/service/operator-methods.js";
 
 const handles: NookdServerHandle[] = [];
 const tempDirectories: string[] = [];
@@ -217,6 +223,56 @@ describe("nookd Unix socket server", () => {
       const socket = await connect(socketPath);
       socket.write(request);
       await waitForClose(socket);
+    }
+  });
+
+  it("drops the connection for every operator method literal, as for an unknown method", async () => {
+    // parseRpcFrame admits the operator literals because the operator listener
+    // shares it.  On the client-group daemon socket they must be
+    // indistinguishable from an unknown method: no envelope, connection closed.
+    // Each frame carries schema-valid params and is first proven to PARSE, so a
+    // close can only come from the daemon-socket guard, never from a bad shape.
+    const rev = "rev_0123456789abcdef0123456789abcdef";
+    const validParams: Record<string, Record<string, unknown>> = {
+      "notes.get-view": { id: "n1" },
+      "notes.edit-preimage": { id: "n1" },
+      "notes.apply-edit": { id: "n1", expectedRevision: rev, markdown: "x" },
+      "notes.apply-undo": { operationHandle: "op1" },
+      "notes.operation-status": { operationHandle: "op1" },
+      "notes.operation-list": {},
+      "notes.approve-upload": {},
+      "notes.browse": {},
+      "notes.search-operator": { query: "q" },
+    };
+    const operatorOnly = [...OPERATOR_METHODS, ...OPERATOR_DISCOVERY_METHODS].filter(
+      (m) => m !== "notes.create" && m !== "notes.path_diagnostic",
+    );
+    expect([...operatorOnly].sort()).toEqual(Object.keys(validParams).sort());
+
+    const { socketPath } = await fixture(async () => []);
+    for (const method of operatorOnly) {
+      const payload = Buffer.from(JSON.stringify({ id: "x", method, params: validParams[method] }));
+      const frame = Buffer.alloc(4 + payload.length);
+      frame.writeUInt32BE(payload.length, 0);
+      payload.copy(frame, 4);
+      expect(() => parseRpcFrame(frame), `${method} must parse`).not.toThrow();
+
+      const socket = await connect(socketPath);
+      let received = 0;
+      socket.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+      });
+      const closed = new Promise<boolean>((resolve) => {
+        socket.on("close", () => resolve(true));
+        setTimeout(() => resolve(false), 2000).unref();
+      });
+      // The server may close before the write completes (EPIPE); that is the
+      // behaviour under test.
+      socket.on("error", () => undefined);
+      socket.write(frame);
+      const didClose = await closed;
+      socket.destroy();
+      expect({ method, didClose, received }).toEqual({ method, didClose: true, received: 0 });
     }
   });
 

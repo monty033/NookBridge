@@ -289,7 +289,10 @@ export async function handleRpcRequest<T extends RpcRequest>(
         if ("id" in structural.request.params) {
           const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
           if (!resolved.ok)
-            return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
+            return buildErrorEnvelope(
+              id,
+              idFormRefusalCode(resolved.code),
+            ) as unknown as RpcHandlerResponse<T>;
           if (!authorizeEveryContext(policy, "notes.get", resolved.contexts)) {
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
@@ -431,7 +434,10 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
       const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
       if (!resolved.ok)
-        return buildErrorEnvelope(id, resolved.code) as unknown as RpcHandlerResponse<T>;
+        return buildErrorEnvelope(
+          id,
+          idFormRefusalCode(resolved.code),
+        ) as unknown as RpcHandlerResponse<T>;
       if (!authorizeEveryContext(policy, structural.request.method, resolved.contexts)) {
         return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
       }
@@ -958,6 +964,20 @@ type SettingsContextResolution =
       readonly note: Record<string, unknown>;
     }
   | { readonly ok: false; readonly code: "not_found" | "service_unavailable" };
+
+/**
+ * An id-form request reaches the policy only after the note is looked up, so
+ * `not_found` here would tell a caller whether an id exists before any
+ * authorization.  Both a missing note and a denied one answer
+ * `permission_denied`.  `service_unavailable` is left unchanged: it is an
+ * outage signal, though an existing note with malformed metadata can still
+ * produce it where a missing id cannot.
+ */
+function idFormRefusalCode(
+  code: "not_found" | "service_unavailable",
+): "permission_denied" | "service_unavailable" {
+  return code === "not_found" ? "permission_denied" : code;
+}
 
 async function resolveNoteSettingsContext(
   noteId: string,

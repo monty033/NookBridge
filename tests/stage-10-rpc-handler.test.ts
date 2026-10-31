@@ -541,8 +541,42 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       createReadWriteNoDeleteServicePolicy(evaluator),
     );
 
-    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(appendNote).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["notes.get", { id: "missing-note" }],
+    ["notes.append", { id: "missing-note", markdownFragment: "x", expectedRevision: REVISION }],
+    ["notes.update", { id: "missing-note", patch: { title: "T" }, expectedRevision: REVISION }],
+  ] as const)(
+    "%s on a missing note id answers permission_denied, never revealing existence",
+    async (method, params) => {
+      // With an evaluator attached the note must be looked up before it can be
+      // authorized. `not_found` there would let a caller tell a missing id from
+      // a denied one, so both answer permission_denied.
+      const { evaluator } = makeEvaluator(true);
+      const response = await handleRpcRequest(
+        request(method, params),
+        makeRuntime({ noteMetadata: async () => undefined }),
+        createReadWriteNoDeleteServicePolicy(evaluator),
+      );
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    },
+  );
+
+  it("answers a denied existing note and a missing note identically for get", async () => {
+    const denied = await handleRpcRequest(
+      request("notes.get", { id: "note-1" }),
+      makeRuntime(),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(false).evaluator),
+    );
+    const missing = await handleRpcRequest(
+      request("notes.get", { id: "note-1" }),
+      makeRuntime({ noteMetadata: async () => undefined }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+    expect(missing).toEqual(denied);
   });
 
   it("keeps the evaluator optional for existing handler construction", async () => {
