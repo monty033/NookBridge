@@ -175,7 +175,8 @@ const SEARCH_TOOL_ANNOTATIONS: ToolAnnotations = Object.freeze({
 });
 
 const SEARCH_TOOL_DESCRIPTION =
-  "Search note titles via the local nookd service. " +
+  "Search notes via the local nookd service. " +
+  "The query also matches note bodies, so search is only available where reading notes is allowed. " +
   "Returns title-only hits; note IDs, bodies, and notebook IDs are intentionally not exposed.";
 
 /** Static tool descriptor returned by the factory so tests can

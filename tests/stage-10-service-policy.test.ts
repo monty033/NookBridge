@@ -432,3 +432,77 @@ describe("service policy — no-context calls do not throw", () => {
     });
   });
 });
+
+describe("service policy: notes.search requires notes.get (review finding 11)", () => {
+  // Core search also matches note bodies, so a policy that may search but may
+  // not read would turn search into a body-content oracle.
+  it("drops notes.search from a custom allowlist that lacks notes.get", () => {
+    const policy = createCustomServicePolicy(["notes.search", "notes.status"]);
+    expect(Array.from(policy.allowedMethods)).toEqual(["notes.status"]);
+    expect(authorizeServiceMethod(policy, "notes.search")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+  });
+
+  it("keeps notes.search when notes.get is also allowed, in either order", () => {
+    for (const list of [
+      ["notes.search", "notes.get"],
+      ["notes.get", "notes.search"],
+    ] as const) {
+      const policy = createCustomServicePolicy(list);
+      expect(authorizeServiceMethod(policy, "notes.search")).toEqual({
+        allowed: true,
+        method: "notes.search",
+      });
+    }
+  });
+
+  it("applies the rule to a policy rebuilt from an untrusted candidate", () => {
+    const tuple = ["notes.search", "notes.create"];
+    Object.setPrototypeOf(tuple, null);
+    const candidate = Object.create(null) as Record<string, unknown>;
+    candidate.profile = "custom";
+    candidate.allowedMethods = Object.freeze(tuple);
+    const rebuilt = narrowServicePolicy(Object.freeze(candidate));
+    expect(rebuilt).toBeDefined();
+    expect(Array.from(rebuilt!.allowedMethods)).toEqual(["notes.create"]);
+  });
+
+  it("denies search on a hand-built custom policy that lacks notes.get", () => {
+    const tuple = ["notes.search", "notes.status"];
+    Object.setPrototypeOf(tuple, null);
+    const forged = Object.create(null) as Record<string, unknown>;
+    forged.profile = "custom";
+    forged.allowedMethods = Object.freeze(tuple);
+    const policy = Object.freeze(forged) as unknown as ServicePolicy;
+    expect(authorizeServiceMethod(policy, "notes.search")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(authorizeServiceMethod(policy, "notes.status")).toMatchObject({ allowed: true });
+  });
+
+  it("does not depend on a replaceable Array.prototype.filter", () => {
+    // Assert only after restoring: the runner itself calls Array.prototype
+    // helpers, so nothing but the policy build may run while it is replaced.
+    const original = Array.prototype.filter;
+    let methods: readonly string[] = [];
+    Array.prototype.filter = function filter(this: unknown[]) {
+      return this;
+    } as typeof Array.prototype.filter;
+    try {
+      methods = Array.from(
+        createCustomServicePolicy(["notes.search", "notes.status"]).allowedMethods,
+      );
+    } finally {
+      Array.prototype.filter = original;
+    }
+    expect(methods).toEqual(["notes.status"]);
+  });
+
+  it("leaves the built-in profiles unchanged", () => {
+    expect(createReadOnlyServicePolicy().allowedMethods).toContain("notes.search");
+    expect(createReadWriteNoDeleteServicePolicy().allowedMethods).toContain("notes.search");
+  });
+});
