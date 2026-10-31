@@ -4,6 +4,7 @@ import process from "node:process";
 import { chmodSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import net from "node:net";
+import { setTimeout } from "node:timers";
 import { fileURLToPath, URL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -366,6 +367,80 @@ describe("daemon-owned operator socket", () => {
       socket.write(requestFrame("notes.search", { query: "secret" }));
       await new Promise<void>((resolve) => socket.once("close", () => resolve()));
       expect(dispatched).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+  it("serves exactly one request per connection even when frames are pipelined", async () => {
+    // Review finding 14: `completed` was only set after the first dispatch
+    // finished, so a second frame already in the buffer, or arriving while the
+    // first was in flight, reached the handler too.
+    const path = socketPath();
+    let handled = 0;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async (request) => {
+        handled += 1;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { id: request.id, ok: true, result: { kind: "operation-list", handles: [] } };
+      },
+    });
+    try {
+      const socket = net.createConnection(path);
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      // Two complete frames in a single write, then a third after a delay.
+      socket.write(
+        Buffer.concat([requestFrame("notes.operation-list"), requestFrame("notes.operation-list")]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      socket.write(requestFrame("notes.operation-list"));
+      const frames: Buffer[] = [];
+      socket.on("data", (chunk: Buffer) => frames.push(chunk));
+      socket.on("error", () => undefined);
+      // Allow every dispatch the server would perform to finish.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      socket.destroy();
+      expect({ handled, responses: Buffer.concat(frames).length > 0 }).toEqual({
+        handled: 1,
+        responses: true,
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("aborts a pending peer lookup when the client disconnects", async () => {
+    // Peer resolution is asynchronous (finding 14), so a client that leaves
+    // before it finishes must not leave the helper running.
+    const path = socketPath();
+    let aborted = false;
+    let handled = false;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: (_socket, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            resolve(undefined);
+          });
+        }),
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async (request) => {
+        handled = true;
+        return { id: request.id, ok: true, result: { kind: "operation-list", handles: [] } };
+      },
+    });
+    try {
+      const socket = net.createConnection(path);
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      socket.write(requestFrame("notes.operation-list"));
+      socket.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect({ aborted, handled }).toEqual({ aborted: true, handled: false });
     } finally {
       await server.close();
     }

@@ -1,9 +1,9 @@
 /**
  * Stage 5 — bounded peer-credential parsing and asynchronous resolution.
  *
- * The synchronous operator path keeps its spawn-and-wait resolver; the service
- * daemon uses the asynchronous resolver so one slow helper cannot block its
- * event loop.  Neither path records or forwards helper output.
+ * Both the service daemon and the operator socket use the asynchronous
+ * resolver, so one slow helper cannot block the event loop.  Neither records
+ * or forwards helper output.
  */
 
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";

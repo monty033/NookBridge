@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { chmodSync } from "node:fs";
 import { lstat, unlink } from "node:fs/promises";
@@ -15,7 +14,7 @@ import {
 import { isOperatorTransportMethod, type OperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import type { OperatorPolicyDecision } from "./operator-policy.js";
-import { defaultPeerCredentialHelperPath, parsePeerHelperOutput } from "./peer-credentials.js";
+import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES = 65_536;
@@ -32,13 +31,10 @@ const SOCKET_ROOT = "/run/nookbridge";
  */
 export const UNIX_SOCKET_PATH_MAX_BYTES = 103;
 
-type PeerSocket = net.Socket & {
-  readonly _handle?: {
-    readonly fd?: number;
-  };
-};
-
-export type OperatorSocketPeerResolver = (socket: net.Socket) => OperatorPeer | undefined;
+export type OperatorSocketPeerResolver = (
+  socket: net.Socket,
+  signal: AbortSignal,
+) => OperatorPeer | undefined | Promise<OperatorPeer | undefined>;
 export type OperatorSocketAuthorization = (
   method: OperatorTransportMethod,
   peer: OperatorPeer,
@@ -80,17 +76,27 @@ export async function startOperatorSocketServer(
     throw new Error("operator socket configuration is invalid");
   if (await exists(socketPath)) throw new Error("operator socket path is occupied");
 
-  const resolvePeer =
-    options.resolvePeer ??
-    ((socket) => resolveNativePeer(socket, options.peerCredentialHelperPath));
+  const helperPath = options.peerCredentialHelperPath ?? defaultPeerCredentialHelperPath();
+  const resolvePeer: OperatorSocketPeerResolver =
+    options.resolvePeer ?? ((socket, signal) => resolvePeerAsync(socket, { helperPath, signal }));
   let owned = false;
   const server = net.createServer((socket) => {
-    const peer = resolvePeer(socket);
-    if (peer === undefined) {
-      socket.destroy();
-      return;
+    // Resolution is asynchronous so a slow helper never blocks the event loop,
+    // and it is aborted if the client leaves first.
+    const controller = new AbortController();
+    socket.once("close", () => controller.abort());
+    let lookup: Promise<OperatorPeer | undefined>;
+    try {
+      lookup = Promise.resolve(resolvePeer(socket, controller.signal));
+    } catch {
+      lookup = Promise.resolve(undefined);
     }
-    serveOneRequest(socket, peer, options.authorize, options.handle);
+    const peerLookup = lookup.catch(() => undefined);
+    // An unresolved peer is dropped as soon as that is known, as before.
+    void peerLookup.then((peer) => {
+      if (peer === undefined) socket.destroy();
+    });
+    serveOneRequest(socket, peerLookup, options.authorize, options.handle);
   });
 
   try {
@@ -118,22 +124,21 @@ export async function startOperatorSocketServer(
   return Object.freeze({ socketPath, close });
 }
 
-async function serveOneRequest(
+function serveOneRequest(
   socket: net.Socket,
-  peer: OperatorPeer,
+  peerLookup: Promise<OperatorPeer | undefined>,
   authorize: OperatorSocketAuthorization,
   handle: OperatorSocketHandler,
-): Promise<void> {
+): void {
   let pending = Buffer.alloc(0);
+  // Set when the first frame is taken, not when its dispatch ends: the
+  // connection serves exactly one request, however the client pipelines.
   let completed = false;
-  const finish = (): void => {
-    if (!completed) {
-      completed = true;
-      socket.end();
-    }
-  };
   socket.on("data", (chunk: Buffer) => {
-    if (completed || pending.length + chunk.length > MAX_FRAME_BYTES) {
+    // Anything after the first frame is ignored; the one request in flight is
+    // still answered.
+    if (completed) return;
+    if (pending.length + chunk.length > MAX_FRAME_BYTES) {
       socket.destroy();
       return;
     }
@@ -147,8 +152,14 @@ async function serveOneRequest(
     const frameLength = FRAME_PREFIX_BYTES + declared;
     if (pending.length < frameLength) return;
     const frame = pending.subarray(0, frameLength);
-    pending = pending.subarray(frameLength);
-    void dispatchFrame(socket, frame, peer, authorize, handle).finally(finish);
+    pending = Buffer.alloc(0);
+    completed = true;
+    void peerLookup
+      .then(async (peer) => {
+        if (peer === undefined) return;
+        await dispatchFrame(socket, frame, peer, authorize, handle);
+      })
+      .finally(() => socket.end());
   });
   socket.on("error", () => undefined);
 }
@@ -212,27 +223,6 @@ async function writeResponse(socket: net.Socket, response: RpcAnyResponseEnvelop
   await new Promise<void>((resolve) => {
     socket.write(frame, () => resolve());
   });
-}
-
-function resolveNativePeer(
-  socket: net.Socket,
-  helperPath = defaultPeerCredentialHelperPath(),
-): OperatorPeer | undefined {
-  const fd = (socket as PeerSocket)._handle?.fd;
-  if (!Number.isInteger(fd) || (fd as number) < 0 || !path.isAbsolute(helperPath)) return undefined;
-  try {
-    const result = spawnSync(helperPath, [], {
-      stdio: [fd as number, "pipe", "ignore"],
-      timeout: 1000,
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (result.status !== 0 || result.signal !== null || typeof result.stdout !== "string")
-      return undefined;
-    return parsePeerHelperOutput(result.stdout);
-  } catch {
-    return undefined;
-  }
 }
 
 function validateSocketPath(value: string, testRoot?: string): string {
