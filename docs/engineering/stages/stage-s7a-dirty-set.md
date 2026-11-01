@@ -50,3 +50,9 @@ The NO therefore rests on criterion 2 (two `@internal` collections) and on crite
 ## Consequence
 
 DR-S7a item 5 applies: upstream offers no single public, complete, per-item dirty-set listing, so the upload boundary is enforced wholesale rather than per item. S7a-4 must not build on a probe. The drift guard in `tests/stage-7-dirty-set.test.ts` fails if the installed core version changes, which forces this finding to be re-evaluated for DR-S7a items 4 and 5.
+
+SR-7 amendment (owner-authorized): an empty marker batch now requires
+`database.hasUnsyncedChanges()` to resolve to exactly `false` before `full` can
+start. Missing, malformed, or failing status refuses with `unapproved_pending`.
+Non-empty releasable batches retain the existing marker gate and its residual
+risk. `notes.sync` now requires settings `edit` authorization.

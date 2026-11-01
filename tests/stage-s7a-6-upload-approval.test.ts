@@ -70,7 +70,9 @@ function commit(operation: SyncOperation, id: string, origin?: SyncOrigin): Sync
 /** Coordinator wired to the real live executor over a spy `syncer.start`. */
 function harness(store: ReturnType<typeof jsonStore> = jsonStore()) {
   const start = vi.fn(async (_options: unknown) => true);
-  const executor = createLiveRemoteSyncExecutor({ syncer: { start } }, () => undefined);
+  const executor = createLiveRemoteSyncExecutor({ syncer: { start } }, () => undefined, {
+    hasUnsyncedChanges: async () => false,
+  });
   const build = () =>
     new SyncCoordinator({
       executor,
@@ -663,18 +665,19 @@ describe("S7a-6a upload approval", () => {
       expect(receivedPeers).toEqual([OPERATOR_PEER, OPERATOR_PEER]);
 
       const authorizer = createOperatorAuthorizer({ resolveHandle: () => undefined });
+      expect(await authorizer("notes.approve-upload", OPERATOR_PEER, request)).toEqual({
+        allowed: true,
+        method: "notes.approve-upload",
+      });
+      expect(await authorizer("notes.approve-upload", READER_PEER, request)).toEqual({
+        allowed: false,
+        reason: "permission_denied",
+      });
       expect(
-        await authorizer("notes.approve-upload", OPERATOR_PEER, request),
-      ).toEqual({ allowed: true, method: "notes.approve-upload" });
-      expect(
-        await authorizer("notes.approve-upload", READER_PEER, request),
-      ).toEqual({ allowed: false, reason: "permission_denied" });
-      expect(
-        await authorizer(
-          "notes.approve-upload",
-          READER_PEER,
-          { ...request, params: {} } as RpcRequest,
-        ),
+        await authorizer("notes.approve-upload", READER_PEER, {
+          ...request,
+          params: {},
+        } as RpcRequest),
       ).toEqual({ allowed: false, reason: "permission_denied" });
     });
   });
@@ -941,7 +944,9 @@ describe("S7a-6a upload approval", () => {
       );
       expect(plan).toContain("### Decision 5 — operator upload approval");
       expect(plan).not.toContain("### Pending decision");
-      expect(plan).toContain("The former\nstatement that operator-origin writes had **no approval path** is therefore\nresolved");
+      expect(plan).toContain(
+        "The former\nstatement that operator-origin writes had **no approval path** is therefore\nresolved",
+      );
     });
   });
 
@@ -954,5 +959,153 @@ describe("S7a-6a upload approval", () => {
       expect(isExactFetchRequest({ type: "fetch", force: true })).toBe(false);
       expect(isExactFetchRequest({ type: "fetch", send: true })).toBe(false);
     });
+  });
+});
+
+describe("SR-7 empty drain status gate", () => {
+  const refused = { status: "refused", reason: "unapproved_pending" };
+
+  it.each([
+    ["dirty", async () => true],
+    ["non-boolean", async () => "false"],
+    ["missing", undefined],
+    [
+      "throws",
+      () => {
+        throw new Error("status unavailable");
+      },
+    ],
+    [
+      "rejecting thenable",
+      () => ({
+        then: (_resolve: unknown, reject: (error: Error) => void) =>
+          reject(new Error("status unavailable")),
+      }),
+    ],
+  ])("refuses an empty batch when status is %s before calling start", async (_label, status) => {
+    let starts = 0;
+    const executor = createLiveRemoteSyncExecutor(
+      {
+        syncer: {
+          start: () => {
+            starts++;
+            return true;
+          },
+        },
+      },
+      () => undefined,
+      status === undefined ? {} : { hasUnsyncedChanges: status },
+    );
+    await expect(executor({ pending: [] })).resolves.toEqual(refused);
+    expect(starts).toBe(0);
+  });
+
+  it("allows a clean empty batch and calls the bound status method once", async () => {
+    let checks = 0;
+    let starts = 0;
+    const database = {
+      hasUnsyncedChanges(this: object) {
+        expect(this).toBe(database);
+        checks++;
+        return Promise.resolve(false);
+      },
+      syncer: {
+        start: () => {
+          starts++;
+          return true;
+        },
+      },
+    };
+    await expect(
+      createLiveRemoteSyncExecutor(database, () => undefined, {
+        hasUnsyncedChanges: database.hasUnsyncedChanges.bind(database),
+      })({ pending: [] }),
+    ).resolves.toEqual({ status: "confirmed" });
+    expect(checks).toBe(1);
+    expect(starts).toBe(1);
+  });
+
+  it("does not trust status getters, prototype fields, or Proxy traps", async () => {
+    let traps = 0;
+    const status = () => {
+      traps++;
+      return false;
+    };
+    const getter = Object.defineProperty({}, "hasUnsyncedChanges", { get: status });
+    const inherited = Object.create({ hasUnsyncedChanges: status }) as object;
+    const proxy = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor: () => {
+          traps++;
+          return { value: status, configurable: true };
+        },
+      },
+    );
+    const callableProxy = new Proxy(status, {
+      apply: () => {
+        traps++;
+        return false;
+      },
+    });
+    for (const options of [
+      getter,
+      inherited,
+      proxy,
+      { hasUnsyncedChanges: callableProxy },
+      { hasUnsyncedChanges: false },
+    ]) {
+      let starts = 0;
+      const database = {
+        syncer: {
+          start: () => {
+            starts++;
+            return true;
+          },
+        },
+      };
+      await expect(
+        createLiveRemoteSyncExecutor(database, () => undefined, options as never)({ pending: [] }),
+      ).resolves.toEqual(refused);
+      expect(starts).toBe(0);
+    }
+    expect(traps).toBe(0);
+  });
+
+  it("preserves approved non-empty batches and refuses unapproved operator markers without checking status", async () => {
+    let starts = 0;
+    let checks = 0;
+    const executor = createLiveRemoteSyncExecutor(
+      {
+        syncer: {
+          start: () => {
+            starts++;
+            return true;
+          },
+        },
+      },
+      () => undefined,
+      {
+        hasUnsyncedChanges: () => {
+          checks++;
+          throw new Error("must not check");
+        },
+      },
+    );
+    // Marker fields unrelated to the gate are intentionally omitted.
+    await expect(
+      executor({
+        pending: [
+          { origin: "mcp" },
+          { origin: "operator", approved: true },
+          { origin: "unknown", approved: true },
+        ],
+      } as never),
+    ).resolves.toEqual({ status: "confirmed" });
+    await expect(
+      executor({ pending: [{ origin: "operator", approved: false }] } as never),
+    ).resolves.toEqual(refused);
+    expect(starts).toBe(1);
+    expect(checks).toBe(0);
   });
 });

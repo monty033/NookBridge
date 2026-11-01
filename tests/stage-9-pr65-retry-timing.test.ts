@@ -94,6 +94,7 @@ describe("PR-65 P1-4 — closed retry timing", () => {
       const executor = createLiveRemoteSyncExecutor(
         fakeDatabase(Promise.reject(Object.assign(new Error("vault"), { code: "vault_locked" }))),
         liveEnsureOpen,
+        { hasUnsyncedChanges: async () => false },
       );
       const result = await executor({ pending: [] });
       expect(result).toEqual({ status: "failed" });
@@ -103,6 +104,7 @@ describe("PR-65 P1-4 — closed retry timing", () => {
       const executor = createLiveRemoteSyncExecutor(
         fakeDatabase(Promise.reject(Object.assign(new Error("net"), { code: "sync_failed" }))),
         liveEnsureOpen,
+        { hasUnsyncedChanges: async () => false },
       );
       const result = await executor({ pending: [] });
       expect(result).toEqual({ status: "retry" });
@@ -119,6 +121,7 @@ describe("PR-65 P1-4 — closed retry timing", () => {
           ),
         ),
         liveEnsureOpen,
+        { hasUnsyncedChanges: async () => false },
       );
       const result = await executor({ pending: [] });
       expect(result).toEqual({ status: "retry", retryAfterMs: 4_000 });
@@ -128,6 +131,7 @@ describe("PR-65 P1-4 — closed retry timing", () => {
       const executor = createLiveRemoteSyncExecutor(
         fakeDatabase(Promise.resolve(true)),
         liveEnsureOpen,
+        { hasUnsyncedChanges: async () => false },
       );
       const result = await executor({ pending: [] });
       expect(result).toEqual({ status: "confirmed" });
@@ -137,6 +141,7 @@ describe("PR-65 P1-4 — closed retry timing", () => {
       const executor = createLiveRemoteSyncExecutor(
         fakeDatabase(Promise.resolve(false)),
         liveEnsureOpen,
+        { hasUnsyncedChanges: async () => false },
       );
       const result = await executor({ pending: [] });
       expect(result).toEqual({ status: "failed" });

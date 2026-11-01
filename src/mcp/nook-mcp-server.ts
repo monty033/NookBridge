@@ -444,8 +444,8 @@ const DELETE_NOTE_TOOL_DEFINITION = Object.freeze({
 }) as unknown as Tool;
 
 const SYNC_TOOL_DESCRIPTION =
-  "Explicitly request the approval-gated outbound sync coordinator. " +
-  "If the result is `unapproved_pending`, do not retry: local changes are committed but operator- or unknown-origin changes await approval before upload; tell the user.";
+  "Explicitly request the edit-authorized, upload-gated outbound sync coordinator. " +
+  "If the result is `unapproved_pending`, do not retry: local changes remain committed and the upload was refused, either because the batch was empty while unsynced changes remained or its dirty status was unavailable, or because it carried operator- or unknown-origin changes without approval. Tell the user. A non-empty releasable batch — every marker MCP-origin or approved — still uploads every dirty item.";
 
 const SYNC_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_SYNC_TOOL_NAME,

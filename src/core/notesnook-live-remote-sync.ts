@@ -1,16 +1,19 @@
 /**
  * Stage 4 — narrow live remote-sync executor.
  *
- * The only live value this module captures from a Database is a bound
- * `syncer.start` method. Callers cannot provide upstream options or reach the
- * Database/syncer after construction. Every invocation supplies the pinned
- * literal `{ type: "full" }`; upstream truthy success is not accepted — only
- * the boolean `true` confirms the batch.
+ * This module captures a bound `syncer.start` method from a Database and an
+ * optional status closure supplied separately. Callers cannot provide upstream
+ * options or reach the Database/syncer after construction. Every invocation
+ * supplies the pinned literal `{ type: "full" }`; only the boolean `true`
+ * confirms the batch.
  *
  * Upload gate (DR-S7a item 5): the executor reads the marker batch the
  * coordinator hands it and refuses, without touching upstream, unless every
  * marker is `origin: "mcp"` or carries operator approval (`approved: true`).
+ * Empty batches additionally require a strictly false database dirty status.
  */
+
+import { types } from "node:util";
 
 import { NotesnookWriteContractError } from "./notesnook-write-contract.js";
 import { withMutex } from "./notesnook-database-mutex.js";
@@ -36,6 +39,7 @@ function isRecord(value: unknown): value is object {
 
 function readOwnData(record: object, key: string): unknown {
   try {
+    if (types.isProxy(record)) return undefined;
     const descriptor = Reflect.getOwnPropertyDescriptor(record, key);
     if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
       return undefined;
@@ -60,7 +64,8 @@ const MAX_GATED_MARKERS = 64;
 /**
  * True only when `request.pending` is a bounded array of markers that are each
  * `origin: "mcp"`, or `"operator"`/`"unknown"` with `approved === true`. An
- * empty batch passes. Everything else is false, so the gate fails closed: a
+ * empty batch passes only when the database reports no unsynced changes.
+ * Everything else is false, so the gate fails closed: a
  * missing or malformed request, a non-array `pending`, a batch over the cap, a
  * non-record marker, an unapproved operator or unknown marker (including any
  * `approved` that is not the boolean `true`), an absent origin, and a value
@@ -68,7 +73,10 @@ const MAX_GATED_MARKERS = 64;
  * properties only, so a getter, a prototype-supplied field or a hostile Proxy
  * trap is never trusted or invoked.
  */
-function pendingIsReleasable(request: unknown): boolean {
+async function pendingIsReleasable(
+  request: unknown,
+  hasUnsyncedChanges: (() => unknown) | undefined,
+): Promise<boolean> {
   try {
     if (!isRecord(request)) return false;
     const pending = readOwnData(request, "pending");
@@ -81,6 +89,9 @@ function pendingIsReleasable(request: unknown): boolean {
       length > MAX_GATED_MARKERS
     ) {
       return false;
+    }
+    if (length === 0) {
+      return hasUnsyncedChanges !== undefined && (await hasUnsyncedChanges()) === false;
     }
     for (let index = 0; index < length; index++) {
       const marker = readOwnData(pending, String(index));
@@ -174,6 +185,7 @@ function normalizeCoordinatorResult(value: unknown): SyncCoordinatorResult {
 export function createLiveRemoteSyncExecutor(
   database: object,
   ensureOpen: LiveRemoteSyncEnsureOpen,
+  options?: { readonly hasUnsyncedChanges?: () => unknown },
 ): SyncExecutor {
   if (typeof database !== "object" || database === null || typeof ensureOpen !== "function") {
     failInvalidInput();
@@ -202,12 +214,16 @@ export function createLiveRemoteSyncExecutor(
     failInvalidInput();
   }
 
+  const status = options === undefined ? undefined : readOwnData(options, "hasUnsyncedChanges");
+  const hasUnsyncedChanges =
+    typeof status === "function" && !types.isProxy(status) ? (status as () => unknown) : undefined;
+
   return async (request): Promise<SyncExecutorResult> => {
     try {
       ensureOpen();
-      // Upload gate (DR-S7a item 5). Decided from the markers alone, and
+      // Upload gate (DR-S7a item 5 / SR-7). Check markers and empty-batch status,
       // before `boundStart` so a refusal can never reach upstream.
-      if (!pendingIsReleasable(request)) {
+      if (!(await pendingIsReleasable(request, hasUnsyncedChanges))) {
         return Object.freeze({
           status: "refused" as const,
           reason: "unapproved_pending" as const,
