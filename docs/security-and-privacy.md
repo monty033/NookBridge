@@ -112,3 +112,10 @@ The proof is authorized before its path is resolved: the caller needs read, edit
 For detailed threat model, review evidence, and fail-closed requirements, see
 the [implementation plan](implementation-plan-v1.5.md#9-security-and-privacy-model)
 and [security reviews](security-reviews.md).
+
+The SQLite storage wrapper, bundle-recovery probes and the live-login database
+setup share one rule: a SQLCipher string key containing a double quote or a
+backslash is refused before any handle is opened or any pragma is issued, never
+stripped. Rejection uses a fixed categorical error without the key, a path, or a
+cause; inspection and recovery probes map it to `unreadable`. Empty and
+whitespace-only keys retain their existing behavior.

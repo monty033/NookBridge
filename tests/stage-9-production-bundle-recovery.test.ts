@@ -3359,33 +3359,39 @@ describe("M — reinitialize integrity probe", () => {
     }
   });
 
-  // Guard G6 (mutant M35): the probe's key escaping must match the opener.
-  it("probe key escaping agrees with the production opener", async () => {
+  // Guard G6 (mutant M35): the probe and the opener must judge the same key
+  // the same way. Since F15 both refuse a key that cannot be represented in
+  // the `key=` pragma, so this agrees on refusal instead of on a silently
+  // rewritten passphrase.
+  it("probe and production opener both refuse an unescapable key", async () => {
     const root = mkRoot("nookbridge-bundle-keyescape-");
     const key = "stage9-key\\with-backslash";
-    const { stateDir, credentialsDir } = buildBundleFixture(root, { key });
+    // A bundle cannot be built with such a key any more, so build it with a
+    // supported one and swap the credential the probe reads.
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    writeFileSync(join(credentialsDir, "nookbridge-db-key"), key, { mode: 0o600 });
 
-    // Production-opener observation: can SqliteStorage open the member?
+    // Production-opener observation: the key never reaches a pragma.
     const primary = join(stateDir, BUNDLE_MEMBERS[0]);
-    let productionOpens = false;
+    let openerError: unknown;
     try {
       const storage = new SqliteStorage({ dbPath: primary, key, withExtensions: false });
-      try {
-        storage.all("SELECT count(*) AS n FROM sqlite_master");
-        productionOpens = true;
-      } finally {
-        storage.close();
-      }
-    } catch {
-      productionOpens = false;
+      storage.close();
+    } catch (error) {
+      openerError = error;
     }
+    expect((openerError as Error | undefined)?.message).toBe(
+      "SQLCipher key contains unsupported characters",
+    );
 
     const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
     expect(result.kind).toBe("bundle-inspection");
     if (result.kind !== "bundle-inspection") return;
-    // The probe must agree with the production opener's verdict; identity
-    // escaping (M35) would make the probe disagree.
-    expect(result.result.kind).toBe(productionOpens ? "healthy" : "corrupt");
+    // The probe must reach the verdict the opener reaches: it neither opens
+    // nor rewrites the key. An unreadable member folds into a corrupt bundle.
+    // The opener assertion above is the discriminating half of this guard —
+    // stripping used to let the constructor succeed.
+    expect(result.result.kind).toBe("corrupt");
   });
 });
 
