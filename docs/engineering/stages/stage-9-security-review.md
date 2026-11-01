@@ -120,12 +120,12 @@ The review text follows, unedited except for the headings of this document.
 ### 8. LOW, KNOWN: the upload gate works on sync markers as a whole, not per changed item
 - **Who can do it:** an MCP client with `notes.sync`.
 - **Evidence:**
-  - An empty marker batch passes (`src/core/notesnook-live-remote-sync.ts:71-101`). The executor then runs `syncer.start({type:"full"})` (`:216`), which uploads everything dirty.
+  - Before SR-7, an empty marker batch passed (`src/core/notesnook-live-remote-sync.ts:71-101`). The executor then runs `syncer.start({type:"full"})` (`:216`), which uploads everything dirty.
   - Already documented in `docs/engineering/stages/stage-s7a-dirty-set.md`.
-  - `notes.sync` is treated as a settings `read` (`src/service/service-policy.ts:268`).
-- **What is still wrong:** any dirty item not produced through the write composition gets uploaded with no approval when an MCP client triggers sync. I did not establish whether such items exist (see "Cannot establish" below).
+  - `notes.sync` was treated as a settings `read` (now `edit`, SR-7) (`src/service/service-policy.ts:268`).
+- **What is still wrong:** a *non-empty releasable* batch still calls `full`, so any dirty item not produced through the write composition is uploaded with no per-item approval when an MCP client triggers sync. The SR-7 empty-batch check does not change that. I did not establish whether such items exist (see "Cannot establish" below).
 - **Not forgeable:** the approval state itself cannot be forged from MCP. Write-ahead intents keep blocking even when marker persistence fails (`src/core/notesnook-write-composition.ts:1520-1566`).
-- **Fix:** refuse a drain when the batch is empty but `hasUnsyncedChanges()` is true, and treat `notes.sync` as `edit`.
+- **Fix implemented (SR-7, owner-authorized):** an empty batch requires `hasUnsyncedChanges()` to resolve to exactly `false`; failures or malformed status refuse before upstream starts. `notes.sync` maps to settings `edit`. Non-empty marker behavior is unchanged.
 
 ### 9. LOW: approval is gated by group membership, not by a human
 - **Who can do it:** any non-interactive process in the operator group.

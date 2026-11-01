@@ -112,7 +112,9 @@ describe("Stage 4 live remote executor", () => {
         return Promise.resolve(true);
       },
     };
-    const executor = createLiveRemoteSyncExecutor({ syncer }, () => undefined);
+    const executor = createLiveRemoteSyncExecutor({ syncer }, () => undefined, {
+      hasUnsyncedChanges: async () => false,
+    });
 
     await expect(executor({ pending: [] })).resolves.toEqual({ status: "confirmed" });
     expect(calls).toEqual([{ thisValue: syncer, options: { type: "full" } }]);
@@ -124,6 +126,7 @@ describe("Stage 4 live remote executor", () => {
         syncer: { start: () => Promise.resolve(false) },
       },
       () => undefined,
+      { hasUnsyncedChanges: async () => false },
     );
     await expect(falseExecutor({ pending: [] })).resolves.toEqual({ status: "failed" });
 
@@ -136,6 +139,7 @@ describe("Stage 4 live remote executor", () => {
         },
       },
       () => undefined,
+      { hasUnsyncedChanges: async () => false },
     );
     await expect(throwExecutor({ pending: [] })).resolves.toEqual({ status: "retry" });
   });
@@ -167,6 +171,7 @@ describe("Stage 4 live remote executor", () => {
       () => {
         if (!open) throw new Error("closed");
       },
+      { hasUnsyncedChanges: async () => false },
     );
     open = false;
     await expect(executor({ pending: [] })).resolves.toEqual({ status: "retry" });
@@ -466,7 +471,9 @@ describe("Stage 4 shared coordinator and write sync command", () => {
       },
     };
     const coordinator = new SyncCoordinator({
-      executor: createLiveRemoteSyncExecutor({ syncer }, () => undefined),
+      executor: createLiveRemoteSyncExecutor({ syncer }, () => undefined, {
+        hasUnsyncedChanges: async () => false,
+      }),
     });
     // S7a-4: only an mcp-origin batch may reach the live executor.
     coordinator.recordLocalCommit({ ...commit(), origin: "mcp" });
@@ -478,6 +485,10 @@ describe("Stage 4 shared coordinator and write sync command", () => {
     );
     const first = capability.requestSync();
     const second = capability.requestSync();
+    // The upload gate now awaits the dirty-status check before it can reach
+    // `start`, so coalescing is observed one microtask later.
+    await Promise.resolve();
+    await Promise.resolve();
     expect(calls).toBe(1);
 
     gate.resolve(true);
@@ -632,6 +643,7 @@ describe("S7a-4 — live executor upload gate", () => {
         },
       },
       () => undefined,
+      { hasUnsyncedChanges: async () => false },
     );
     const run = (request: unknown) =>
       (executor as unknown as (request: unknown) => Promise<unknown>)(request);

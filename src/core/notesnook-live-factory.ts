@@ -336,7 +336,11 @@ export async function createNotesnookLiveCoreFactory(
       normalized.injectedModule === undefined || hasLiveWriteSurface(db)
         ? (() => {
             const coordinator = new SyncCoordinator({
-              executor: createLiveRemoteSyncExecutor(db as unknown as object, ensureOpen),
+              executor: createLiveRemoteSyncExecutor(db as unknown as object, ensureOpen, {
+                ...(readOnly?.hasUnsyncedChanges === undefined
+                  ? {}
+                  : { hasUnsyncedChanges: readOnly.hasUnsyncedChanges }),
+              }),
               ...(normalized.syncStateStore === undefined
                 ? {}
                 : { stateStore: normalized.syncStateStore }),

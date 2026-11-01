@@ -56,6 +56,8 @@ import {
   type ServicePolicy,
   type ServicePolicyDecision,
 } from "../src/service/service-policy.js";
+import { createSettingsEvaluator } from "../src/settings/settings-evaluator.js";
+import { buildNotebookIndex } from "../src/settings/notebook-index.js";
 import type { SettingsOperation } from "../src/settings/settings-types.js";
 import type { SettingsDecision } from "../src/settings/settings-evaluator.js";
 
@@ -157,8 +159,8 @@ describe("service policy — methodToSettingsOperation returns the closed map", 
     expect(methodToSettingsOperation("notes.update")).toBe("edit");
   });
 
-  it("maps notes.sync to read", () => {
-    expect(methodToSettingsOperation("notes.sync")).toBe("read");
+  it("maps notes.sync to edit", () => {
+    expect(methodToSettingsOperation("notes.sync")).toBe("edit");
   });
 
   it("maps notes.delete to delete", () => {
@@ -243,11 +245,11 @@ describe("service policy — evaluator with an allowed decision", () => {
     ]);
   });
 
-  it("maps notes.sync to read when forwarding to the evaluator", () => {
+  it("maps notes.sync to edit when forwarding to the evaluator", () => {
     const { calls, evaluator } = makeStubEvaluator({ allowed: true });
     const policy = makePolicyWithEvaluator(evaluator);
     authorizeServiceMethod(policy, "notes.sync");
-    expect(calls).toEqual([{ op: "read", ctx: {} }]);
+    expect(calls).toEqual([{ op: "edit", ctx: {} }]);
   });
 
   it("forwards an empty ctx when settingsContext is undefined", () => {
@@ -505,4 +507,27 @@ describe("service policy: notes.search requires notes.get (review finding 11)", 
     expect(createReadOnlyServicePolicy().allowedMethods).toContain("notes.search");
     expect(createReadWriteNoDeleteServicePolicy().allowedMethods).toContain("notes.search");
   });
+});
+
+describe("SR-7 sync settings authorization without a notebook path", () => {
+  it.each([false, true])(
+    "uses defaults.edit=%s despite the host method allowlist and named notebook grants",
+    (edit) => {
+      const evaluator = createSettingsEvaluator(
+        {
+          version: 1,
+          defaults: { read: true, edit, create: false, delete: false },
+          overrides: [{ notebooks: ["Personal"], edit: true }],
+        },
+        buildNotebookIndex([]),
+      );
+      const policy = createCustomServicePolicy([...RWND, "notes.delete"], evaluator);
+      expect(evaluator("edit", {})).toEqual({ allowed: edit });
+      expect(authorizeServiceMethod(policy, "notes.sync")).toEqual(
+        edit
+          ? { allowed: true, method: "notes.sync" }
+          : { allowed: false, reason: "permission_denied" },
+      );
+    },
+  );
 });

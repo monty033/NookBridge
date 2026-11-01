@@ -185,7 +185,10 @@ interface Harness {
   readonly syncStart: ReturnType<typeof vi.fn>;
 }
 
-async function withProductionRuntime(body: (harness: Harness) => Promise<void>): Promise<void> {
+async function withProductionRuntime(
+  body: (harness: Harness) => Promise<void>,
+  dirty = false,
+): Promise<void> {
   const stateDir = mkdtempSync(join(tmpdir(), "nookbridge-sync-gate-"));
   const credentialsDir = mkdtempSync(join(tmpdir(), "nookbridge-sync-gate-creds-"));
   writeFileSync(join(credentialsDir, "nookbridge-db-key"), "sync-gate-wiring-key", {
@@ -193,6 +196,15 @@ async function withProductionRuntime(body: (harness: Harness) => Promise<void>):
   });
   const syncStart = vi.fn(async () => true);
   const database = createFakeDatabase(syncStart);
+  // Pinned core defines this method on Database.prototype. The factory must
+  // supply its captured read-only projection to the executor's own-data gate.
+  delete database.hasUnsyncedChanges;
+  Object.setPrototypeOf(database, {
+    hasUnsyncedChanges(this: object) {
+      expect(this).toBe(database);
+      return Promise.resolve(dirty);
+    },
+  });
   const ctor = vi.fn(function FakeDatabaseCtor() {
     return database;
   });
@@ -393,5 +405,16 @@ describe("S7a-4b — runNotesSync maps only the exact errorCode", () => {
     );
     expect(response.ok).toBe(false);
     if (response.ok === false) expect(response.error.code).toBe("unapproved_pending");
+  });
+});
+
+describe("SR-7 production empty drain uses the read-only status projection", () => {
+  it.each([false, true])("checks prototype database status dirty=%s", async (dirty) => {
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      await expect(runtime.requestSync!()).resolves.toMatchObject(
+        dirty ? { status: "failed", errorCode: "unapproved_pending" } : { status: "synced" },
+      );
+      expect(syncStart).toHaveBeenCalledTimes(dirty ? 0 : 1);
+    }, dirty);
   });
 });

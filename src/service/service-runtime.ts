@@ -185,7 +185,7 @@ export interface ServiceRuntime {
   readonly operatorUpdateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
   /** Optional bounded local single-note delete capability. */
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
-  /** Optional approval-gated outbound synchronization capability. */
+  /** Optional edit-authorized, upload-gated outbound synchronization capability. */
   readonly requestSync?: () => Promise<
     Readonly<{ status: "idle" | "synced" | "failed"; pendingSync: boolean; attempts: number }>
   >;

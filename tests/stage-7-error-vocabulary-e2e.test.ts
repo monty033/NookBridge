@@ -977,10 +977,10 @@ describe("S7a-4b — unapproved_pending vocabulary", () => {
     expect(sync?.description).toContain("unapproved_pending");
     expect(sync?.description).toContain("do not retry");
     expect(sync?.description).toContain(
-      "Explicitly request the approval-gated outbound sync coordinator.",
+      "Explicitly request the edit-authorized, upload-gated outbound sync coordinator.",
     );
     expect(sync?.description).toContain(
-      "If the result is `unapproved_pending`, do not retry: local changes are committed but operator- or unknown-origin changes await approval before upload; tell the user.",
+      "If the result is `unapproved_pending`, do not retry: local changes remain committed and the upload was refused, either because the batch was empty while unsynced changes remained or its dirty status was unavailable, or because it carried operator- or unknown-origin changes without approval. Tell the user. A non-empty releasable batch — every marker MCP-origin or approved — still uploads every dirty item.",
     );
     for (const tool of tools) {
       if (tool.name !== NOOK_MCP_SYNC_TOOL_NAME) {

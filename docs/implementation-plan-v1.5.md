@@ -399,7 +399,7 @@ Provisioning is an administrative action, not an agent action. `nookctl provisio
 | Persistent auth/protocol failure | Stop automatic retry after a bounded policy and surface operator-visible health failure. |
 | Conflict detected | Return a conflict result with note identity/revision metadata. Do not auto-resolve. |
 
-DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged. Such syncs are refused with `unapproved_pending` while operator- or unknown-origin changes are pending.
+DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged. Such syncs are refused with `unapproved_pending` while unapproved operator- or unknown-origin changes are pending, or when an empty marker batch lacks a strictly false database unsynced status (SR-7).
 
 A future admin-only `forceSync` may bypass ordinary scheduling for repair/diagnostics, but it must not be exposed through the Hermes MCP/RPC interface.
 
@@ -2911,9 +2911,10 @@ DR-S7a item 4 is not implemented: S7a-2 found no read-only dirty-set API
   (`operator > unknown > mcp`), and operator creates are marked before they
   mutate.
 - **DR-S7a item 5 as built.** A `full` sync is refused when any pending marker
-  is `operator` or `unknown`, including markers written before S7a-3, `nookctl
-  write` markers, and create placeholders, or when the batch is malformed. A
-  malformed batch produces `unapproved_pending`. An empty queue permits `full`.
+  is `operator` or `unknown` without `approved === true`, including markers
+  written before S7a-3, `nookctl write` markers, and create placeholders, or
+  when the batch is malformed. A
+  malformed batch produces `unapproved_pending`. An empty queue permits `full` only when `hasUnsyncedChanges()` resolves to exactly `false`; missing, malformed, or failing status refuses before upstream starts (SR-7).
 - **Client-visible code.** The refusal crosses the service boundary as
   `unapproved_pending` (#238); the fixed message is
   "Unapproved pending changes". Do not retry: local changes are committed and
@@ -2921,8 +2922,9 @@ DR-S7a item 4 is not implemented: S7a-2 found no read-only dirty-set API
 - **Error-code distinction.** `local_sync_marker_failed` means a marker failure
   after a committed write. `sync_failed` on a create means the write-ahead
   marker failed before any write, so nothing was committed and a retry is safe.
-- **Residual risk accepted by Patrick.** Content with no marker can still
-  upload — for example, file attachments queued by upstream `full` through
+- **Residual risk narrowed by SR-7 (owner-authorized).** An empty marker batch
+  with database-reported dirty content now refuses. With a non-empty releasable
+  marker batch, content with no marker can still upload — for example, file attachments queued by upstream `full` through
   `attachments.pending`. DR-S7a item 4 would have caught it.
 - **Extended consequence.** Unknown-origin markers block sync as well as
   operator-origin ones.
@@ -2980,7 +2982,7 @@ Line references are the reviewer's, at `126e8089`.
 | 15 | LOW | SQLCipher key characters `"` and `\` are stripped instead of rejected | `src/auth/live-login-runtime.ts:402-404`; `src/storage/sqlite-storage.ts:234-240` |
 | 16 | INFORMATIONAL | A comment says `notes.delete` is structurally impossible in a custom policy; the allow-list includes it | `src/service/service-policy.ts:684-697`, `:179-191`, `:292-295` |
 
-**Finding 8 is not new.** The residual risk is already recorded in [`stage-s7a-dirty-set.md`](engineering/stages/stage-s7a-dirty-set.md) (outcome NO) and in §13.22, where Patrick accepted that content with no marker can still upload. The review restates it and marks what remains: any dirty item not produced through the write composition uploads without approval when an MCP client triggers sync. Whether such items exist is an open question.
+**Finding 8 is not new.** The residual risk is already recorded in [`stage-s7a-dirty-set.md`](engineering/stages/stage-s7a-dirty-set.md) (outcome NO) and in §13.22, where Patrick accepted that content with no marker can still upload. The review restates it and marks what remains: any dirty item not produced through the write composition uploads without approval when an MCP client triggers sync. Whether such items exist is an open question. SR-7 now refuses empty dirty drains and maps sync to settings `edit`; non-empty releasable batches retain that residual risk.
 
 ### What the review checked and found sound
 
@@ -3026,7 +3028,7 @@ It supersedes nothing else. No existing plan step, ticket label, or section numb
 | SR-4 | 4 | MEDIUM | Per Patrick's 2026-10-27 decision: make `notes.path_diagnostic` operator-only and drop it from the default `readPolicy` (`install-systemd.sh:254-259`). | SR-3 | implemented in this change (PR pending) |
 | SR-5 | 6, 14 | LOW-MEDIUM, LOW | Use `SO_PEERGROUPS` in the helper (6); set `completed = true` when the first frame is taken and use `resolvePeerAsync` (14). Same file region, one change. Re-assess 6 after SR-3. | SR-3 | 14 implemented in PR #268 (one request per connection, asynchronous peer lookup). 6 implemented here: the helper reads `SO_PEERGROUPS` from the accepted socket instead of `/proc/<pid>/status`, so the group list is the one captured when the peer connected. `tests/native-peer-credentials.test.ts` is the reproduction: it builds the helper with the production flags and shows the same uid, gid, pid and groups after the peer is killed and reaped. |
 | SR-6 | 7, 12, 13 | LOW | 7: reject operator literals at parse time on the daemon socket and align the peek list. 12: pass `undefined`, not `""`. 13: answer `permission_denied` for both unknown and denied ids. | 13 touches the same handler lines as SR-2a/2b; do it after them | needs reproduction first |
-| SR-7 | 8 | LOW, KNOWN | Refuse a drain when the batch is empty but `hasUnsyncedChanges()` is true; treat `notes.sync` as `edit`. | **A decision from Patrick first**: it reverses the residual risk accepted in §13.22. Also the open question whether unmarked dirty items exist. | needs reproduction first |
+| SR-7 | 8 | LOW, KNOWN | Refuse a drain when the batch is empty but `hasUnsyncedChanges()` is true; treat `notes.sync` as `edit`. | Patrick authorized both halves: empty drains require a strictly false database status, and `notes.sync` maps to settings `edit`. Named notebook grants do not match its undefined path; absent a matching root/wildcard override, `defaults.edit` decides. | implemented; regression tests added; status capability supplied explicitly through executor options |
 | SR-8 | 9, 10, 11, 15 | LOW | 9: require approval to echo the previewed `highestSequence` and document that operator-group membership equals upload authority. 10: HMAC with a daemon-held key. 11: require `notes.get` whenever `notes.search` is allowed and fix the description. 15: reject keys containing `"` or `\`. | 15 must not strand existing databases; check how existing keys were produced before enforcing | needs reproduction first |
 | SR-9 | 5 (residual), 9 | MEDIUM-HIGH | Give the MCP server its own non-operator identity so a process launched by the MCP client is not admitted to the operator listener. When this row was written that process ran as the operator CLI's identity, so it was admitted and retained `approve-upload`; SR-3 removes only clients-only peers. | Implemented in the homelab deployment (nix-config #468): the agent account holds `nookbridge-clients` only, operator work runs as a dedicated `nookop` account behind a root-only wrapper, and a build assertion refuses to re-add the group. Deployment-enforced; the daemon cannot enforce it | verified in the merged host configuration and the pinned daemon source |
 
@@ -3041,7 +3043,7 @@ SR-9's fix is a deployment invariant, not a code change. The homelab host now gi
 ### Contradictions between the plan, the review and the code
 
 - **§3.3 and §6.1 previously said `notes.path_diagnostic` was "reachable only from the operator CLI and never admitted by the daemon listener".** That claim was false and has since been corrected in both sections. Finding 4 itself rested on two conditions - authorization with an empty context (`rpc-handler.ts:266-285`) so notebook-level denial never applied, and the installer's default `readPolicy` shipping the method (`scripts/install-systemd.sh:254-259`). SR-4 addresses both: the method is now refused by daemon policy and absent from the default policy, and is served only by the operator listener.
-- **§13.22 accepts the unmarked-content upload as residual risk.** Finding 8's fix would reverse that, so SR-7 is gated on a new decision rather than scheduled.
+- **§13.22 residual risk narrowed by SR-7.** Patrick authorized both halves. Empty dirty drains now refuse and sync requires settings `edit`; non-empty releasable batches retain the existing marker-only behavior.
 - **§13.21 records scoped discovery authorization as closed by #198.** That stands for discovery, which the review calls correct. Findings 1, 2 and 3 show the per-note paths (`get`, `append`, `update`, `delete`) are not held to the same standard for multi-notebook notes.
 - **Comment drift is wider than finding 16 states.** The `service-policy.ts` comments describe a four-read allow-list and an absent or present `notes.delete`; the actual lists hold four reads, plus `notes.create`, `notes.append`, `notes.update`, `notes.sync` in the write profile, and `notes.delete` appears only in the custom allow-list.
 

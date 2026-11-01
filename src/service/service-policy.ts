@@ -144,7 +144,7 @@ const READ_ONLY_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 /**
  * The historical `readWriteNoDelete` allowlist: the four reads plus
  * the side-effecting `notes.create`, `notes.append`, `notes.update`,
- * and explicitly approval-gated `notes.sync` methods.  `notes.delete`
+ * and edit-authorized, upload-gated `notes.sync` methods.  `notes.delete`
  * is NOT in this list.  The name is retained for profile/API
  * compatibility.
  */
@@ -166,7 +166,7 @@ const READ_WRITE_NO_DELETE_ALLOWED_METHODS: ReadonlyArray<RpcMethod> = (() => {
 /**
  * The closed universe of methods any `custom` policy may ever
  * admit. Bounded note creation, append, update, exact-path delete,
- * and the explicitly approval-gated `notes.sync` method are admitted
+ * and the edit-authorized, upload-gated `notes.sync` method are admitted
  * only when present in the validated configuration allowlist.
  */
 const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
@@ -197,7 +197,7 @@ const CUSTOM_POLICY_MAX_INPUT_LENGTH = CUSTOM_POLICY_ALLOWABLE_METHODS.length + 
  * The closed universe of methods the policy engine recognises for
  * the purposes of structural validation.  The four read methods,
  * `notes.create`, `notes.append`, `notes.update`, `notes.delete`, and
- * explicitly approval-gated `notes.sync` are valid. Anything else
+ * edit-authorized, upload-gated `notes.sync` are valid. Anything else
  * (including any future write method outside the published amendment)
  * is unknown to the policy engine
  * and would always be denied — but it is also never carried in a
@@ -265,12 +265,12 @@ export function methodToSettingsOperation(methodName: string): SettingsOperation
     case "notes.list_notebooks":
     case "notes.get":
     case "notes.path_diagnostic":
-    case "notes.sync":
       return "read";
     case "notes.create":
       return "create";
     case "notes.append":
     case "notes.update":
+    case "notes.sync":
       return "edit";
     case "notes.delete":
       return "delete";
