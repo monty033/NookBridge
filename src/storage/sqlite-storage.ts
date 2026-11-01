@@ -21,6 +21,7 @@ import { createRequire } from "node:module";
 import Database, { type Database as DatabaseType } from "better-sqlite3-multiple-ciphers";
 
 import type { Logger } from "../logging/logger.js";
+import { validateSqlcipherKey } from "./sqlcipher-key.js";
 
 const require = createRequire(import.meta.url);
 const betterTrigram = require("sqlite-better-trigram") as {
@@ -58,6 +59,8 @@ export class SqliteStorage {
   private readonly closed = { value: false };
 
   constructor(opts: SqliteStorageOptions) {
+    const key = validateSqlcipherKey(opts.key);
+
     // The default export IS the Database constructor
     // (`module.exports = require('./database')`); `DatabaseType` is the
     // matching class type so callers get strong typing on `db`.
@@ -88,7 +91,7 @@ export class SqliteStorage {
     // than `key` when the key looks like hex.  Stage 1 keeps the
     // simple `key=` form because all upstream tests use it.
     this.db.pragma(`cipher='sqlcipher'`);
-    this.db.pragma(`key="${escapeKey(opts.key)}"`);
+    this.db.pragma(`key="${key}"`);
     this.hardenPermissions();
 
     if (opts.withExtensions !== false) {
@@ -207,9 +210,10 @@ export function inspectEncryptedSqlite(options: {
 
   let db: DatabaseType | undefined;
   try {
+    const key = validateSqlcipherKey(options.key);
     db = new Database(options.dbPath, { readonly: true, fileMustExist: true });
     db.pragma("cipher='sqlcipher'");
-    db.pragma(`key="${escapeKey(options.key)}"`);
+    db.pragma(`key="${key}"`);
     const rows = db.pragma("integrity_check(100)") as unknown;
     if (!Array.isArray(rows) || rows.length === 0) return { status: "corrupt" };
     const healthy = rows.every(
@@ -229,14 +233,6 @@ export function inspectEncryptedSqlite(options: {
       // The inspection result is already categorical; never leak close errors.
     }
   }
-}
-
-/** Escape a SQLCipher `key=` pragma so a key containing `"` or `\` is safe. */
-function escapeKey(key: string): string {
-  // Stage -1 used a plain string key, but production reads keys from
-  // a file and we must not allow an operator-supplied key to inject
-  // a pragma terminator.
-  return key.replace(/["\\]/g, "");
 }
 
 function enforcePrivateFile(path: string): void {

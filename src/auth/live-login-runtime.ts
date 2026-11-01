@@ -31,6 +31,7 @@ import { createDevelopmentFileKeyStore } from "../keystore/file-keystore.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import { createPersistentStorage } from "../storage/persistent-storage.js";
+import { validateSqlcipherKey } from "../storage/sqlcipher-key.js";
 import type {
   NotesnookDatabaseSetupOptions,
   NotesnookIFileStorage,
@@ -277,6 +278,9 @@ function buildSetupOptions(
   storage: ReturnType<typeof createPersistentStorage>,
   _logger: Logger | undefined,
 ): NotesnookDatabaseSetupOptions {
+  // Refuse an unrepresentable key before any login database is created, so a
+  // refusal cannot leave a file keyed by something other than what was read.
+  const validatedKey = validateSqlcipherKey(key);
   return {
     sqliteOptions: {
       // `_init` is upstream's bootstrap callback (`@notesnook/core@8.1.3`
@@ -295,7 +299,7 @@ function buildSetupOptions(
         try {
           hardenLiveSqlitePath(dbPath);
           database.pragma("cipher='sqlcipher'");
-          database.pragma(`key="${escapeSqliteKey(key)}"`);
+          database.pragma(`key="${validatedKey}"`);
           hardenLiveSqlitePath(dbPath);
           sqliteDatabases.add(database);
           return new SqliteDialect({ database });
@@ -397,10 +401,6 @@ function hardenLiveSqlitePath(path: string): void {
       throw runtimeError("live-login SQLite permissions could not be hardened");
     }
   }
-}
-
-function escapeSqliteKey(key: string): string {
-  return key.replace(/["\\]/g, "");
 }
 
 function runtimeError(message: string): Error {

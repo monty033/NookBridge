@@ -67,6 +67,7 @@ import {
   NOOKBRIDGE_DB_KEY_LABEL,
   createSystemdCredentialKeyStore,
 } from "../keystore/systemd-credential-keystore.js";
+import { validateSqlcipherKey } from "../storage/sqlcipher-key.js";
 import { SqliteStorage, inspectEncryptedSqlite } from "../storage/sqlite-storage.js";
 import {
   QUARANTINE_DIR_MODE,
@@ -452,10 +453,11 @@ function removePrivateCopy(tempDir: string): boolean {
  */
 function classifyMemberForReinit(copyPath: string, key: string): MemberReinitStatus {
   try {
+    const validatedKey = validateSqlcipherKey(key);
     const db = new Database(copyPath, { readonly: true, fileMustExist: true });
     try {
       db.pragma("cipher='sqlcipher'");
-      db.pragma(`key="${escapeReinitKey(key)}"`);
+      db.pragma(`key="${validatedKey}"`);
       const rows = db.pragma("integrity_check(100)") as unknown;
       if (!Array.isArray(rows) || rows.length === 0) return "readable-corrupt";
       const healthy = rows.every(
@@ -477,14 +479,6 @@ function classifyMemberForReinit(copyPath: string, key: string): MemberReinitSta
     if ((error as { code?: unknown }).code === "SQLITE_CORRUPT") return "readable-corrupt";
     return "unreadable";
   }
-}
-
-/**
- * Copied verbatim from `escapeKey` in src/storage/sqlite-storage.ts: strips
- * `"` and `\` so a key cannot terminate the `key=` pragma.
- */
-function escapeReinitKey(key: string): string {
-  return key.replace(/["\\]/g, "");
 }
 
 /**
