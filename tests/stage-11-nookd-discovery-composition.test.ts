@@ -9,6 +9,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import type { ServicePolicy } from "../src/service/service-policy.js";
 import { startNookd, type NookdStartupFactories, type NookdStartupRuntime } from "../src/nookd.js";
 import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/service-config.js";
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
@@ -27,7 +29,7 @@ const CONFIG: ServiceConfig = Object.freeze({
   backend: "systemd-credential",
   credentialName: "nookbridge-db-key",
   settingsBackend: "nix",
-  readPolicy: Object.freeze(["notes.search", "notes.list_notebooks"] as const),
+  readPolicy: Object.freeze(["notes.search", "notes.list_notebooks", "notes.get"] as const),
 });
 const SETTINGS_TEXT = JSON.stringify({
   version: 1,
@@ -153,6 +155,12 @@ async function composeServerRuntime(overrides: Overrides = {}) {
     throw new Error("discovery must not use the per-id resolver");
   });
   const runtime: NookdStartupRuntime = Object.freeze({
+    noteMetadata: async (id: string) => ({
+      id,
+      title: titles[id] as string,
+      notebookId: membership[id]?.[0] as string,
+      notebookIds: membership[id] ?? [],
+    }),
     search: rawSearch,
     listNotebooks: rawListNotebooks,
     cleanup: vi.fn(async () => undefined),
@@ -161,6 +169,7 @@ async function composeServerRuntime(overrides: Overrides = {}) {
     ...(overrides.omitReadOnly === true ? {} : { readOnly: readOnly as never }),
   });
   let serverRuntime: NookdServerRuntime | undefined;
+  let policy: ServicePolicy | undefined;
   const factories: NookdStartupFactories = {
     loadConfig: vi.fn((_: string): LoadServiceConfigResult => ({ ok: true, config: CONFIG })),
     createKeyStore: vi.fn(() => productionKeys),
@@ -168,6 +177,7 @@ async function composeServerRuntime(overrides: Overrides = {}) {
     readSettingsFile: vi.fn(() => SETTINGS_TEXT),
     startServer: vi.fn(async (options: StartNookdServerOptions): Promise<NookdServerHandle> => {
       serverRuntime = options.runtime;
+      policy = options.policy;
       return {
         socketPath: CONFIG.socketPath,
         shutdown: vi.fn(async () => undefined),
@@ -176,13 +186,15 @@ async function composeServerRuntime(overrides: Overrides = {}) {
     }),
   };
   const handle = await startNookd({ configPath: CONFIG_PATH, factories });
-  if (serverRuntime === undefined) throw new Error("server runtime was not captured");
+  if (serverRuntime === undefined || policy === undefined)
+    throw new Error("server runtime was not captured");
   // Count only per-request fetches, not the startup index build.
   const startupFetches = listNotebooksForSettings.mock.calls.length;
   listNotebooksForSettings.mockClear();
   return {
     handle,
     serverRuntime,
+    policy,
     state,
     listNotebooksForSettings,
     startupFetches,
@@ -500,6 +512,80 @@ describe("startNookd hands the server a discovery-filtered runtime (S2 MEDIUM)",
     try {
       await expect(wired.serverRuntime.search("q")).rejects.toThrow();
       expect(wired.rawSearch).not.toHaveBeenCalled();
+    } finally {
+      await wired.handle.shutdown();
+    }
+  });
+});
+
+describe("daemon authorization uses fresh notebook paths", () => {
+  it("applies both directions of a rename without restarting", async () => {
+    const wired = await composeServerRuntime();
+    const get = (id: string) =>
+      handleRpcRequest(
+        { id: "get", method: "notes.get", params: { id } },
+        wired.serverRuntime,
+        wired.policy,
+      );
+    try {
+      expect((await get("n-open")).ok).toBe(true);
+      expect(await get("n-secret")).toMatchObject({
+        ok: false,
+        error: { code: "permission_denied" },
+      });
+      wired.state.hierarchy = [
+        { id: "nb-open", title: "Restricted" },
+        { id: "nb-restricted", title: "Open" },
+      ];
+      wired.listNotebooksForSettings.mockClear();
+      expect(await get("n-open")).toMatchObject({
+        ok: false,
+        error: { code: "permission_denied" },
+      });
+      expect(wired.listNotebooksForSettings).toHaveBeenCalledTimes(1);
+      expect((await get("n-secret")).ok).toBe(true);
+      expect(wired.listNotebooksForSettings).toHaveBeenCalledTimes(2);
+      expect(wired.resolveNotebookPath).not.toHaveBeenCalled();
+    } finally {
+      await wired.handle.shutdown();
+    }
+  });
+
+  it("refuses an otherwise allowed note when the snapshot fails to list or build", async () => {
+    const wired = await composeServerRuntime();
+    try {
+      for (const hierarchy of [new Error("unavailable"), [{ id: "bad", title: "" }]]) {
+        wired.state.hierarchy = hierarchy;
+        expect(
+          await handleRpcRequest(
+            { id: "get", method: "notes.get", params: { id: "n-open" } },
+            wired.serverRuntime,
+            wired.policy,
+          ),
+        ).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+      }
+      expect(wired.listNotebooksForSettings).toHaveBeenCalledTimes(2);
+    } finally {
+      await wired.handle.shutdown();
+    }
+  });
+
+  it("lists once for several memberships and refuses a failed snapshot", async () => {
+    const wired = await composeServerRuntime({
+      membership: { "n-open": ["nb-open", "nb-restricted"] },
+    });
+    const get = () =>
+      handleRpcRequest(
+        { id: "get", method: "notes.get", params: { id: "n-open" } },
+        wired.serverRuntime,
+        wired.policy,
+      );
+    try {
+      expect(await get()).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(wired.listNotebooksForSettings).toHaveBeenCalledTimes(1);
+      wired.state.hierarchy = new Error("unavailable");
+      expect(await get()).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+      expect(wired.listNotebooksForSettings).toHaveBeenCalledTimes(2);
     } finally {
       await wired.handle.shutdown();
     }
