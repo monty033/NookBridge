@@ -166,7 +166,10 @@ export interface ServiceRuntime {
   /** Resolve one exact hierarchical note path to an opaque id and revision. */
   readonly resolveNotePath?: (path: ExactNotePathInput) => Promise<ExactNotePathResolution>;
   /** Execute the closed daemon-owned locked-note acceptance proof. */
-  readonly lockedNoteProof?: (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult>;
+  readonly lockedNoteProof?: (
+    path: ExactNotePathInput,
+    authorizedResolution?: ExactNotePathResolution,
+  ) => Promise<RpcLockedNoteProofResult>;
   /** Execute the closed, read-only exact-path resolver diagnostic. */
   readonly pathDiagnostic?: (path: ExactNotePathInput) => Promise<RpcNotesPathDiagnosticResult>;
   /** Optional bounded local note creation capability. */
@@ -872,8 +875,11 @@ function mismatchedProofRevision(revision: string): NotesnookRevisionToken | und
  */
 export function createLockedNoteProof(
   deps: LockedNoteProofDeps,
-): (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult> {
-  return async (path) => {
+): (
+  path: ExactNotePathInput,
+  authorizedResolution?: ExactNotePathResolution,
+) => Promise<RpcLockedNoteProofResult> {
+  return async (path, authorizedResolution) => {
     let pathBytes: number;
     try {
       pathBytes = exactNotePathBytes(path);
@@ -890,7 +896,7 @@ export function createLockedNoteProof(
     let resolution: ExactNotePathResolution;
     try {
       parseExactNotePath(path);
-      resolution = await deps.resolveNotePath(path);
+      resolution = authorizedResolution ?? (await deps.resolveNotePath(path));
     } catch (error) {
       if (error instanceof ExactNotePathError && error.code === "not_found") {
         return Object.freeze({
