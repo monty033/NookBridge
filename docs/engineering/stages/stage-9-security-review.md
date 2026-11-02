@@ -169,9 +169,10 @@ The review text follows, unedited except for the headings of this document.
 - **Fix:** reject keys containing those characters.
 
 ### 16. INFORMATIONAL: a comment contradicts the code
-- `src/service/service-policy.ts:684-697` says `notes.delete` is "structurally impossible" in a custom policy. The allow-list at `:179-191` includes it.
-- The `createReadWriteNoDelete` doc comment (`:292-295`) is also stale.
+- `src/service/service-policy.ts:684-697` said `notes.delete` is "structurally impossible" in a custom policy. The allow-list at `:179-191` includes it.
+- The `createReadWriteNoDelete` doc comment (`:292-295`) also contradicted its allowlist.
 - This matters because reviewers may trust the comment.
+- **Resolved:** both comments now match the code. The custom-policy comment states that `notes.delete` is in the allowable universe and that a delete is still gated by the resolved-notebook policy and the handler's re-authorization; the no-delete factory's comment matches its allowlist. No behavioural change was needed.
 
 ---
 
