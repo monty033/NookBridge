@@ -768,3 +768,57 @@ describe("D4-3 — proof authorizes before resolving", () => {
     },
   );
 });
+
+describe("request notebook snapshots", () => {
+  it("takes no listing for a create that names no notebook", async () => {
+    const { evaluator } = makeEvaluator(true);
+    const createNote = vi.fn(async () => createResult());
+    // The hierarchy is unlistable; a notebook-less create must not care.
+    const listNotebooksForSettings = vi.fn(async () => {
+      throw new Error("hierarchy unavailable");
+    });
+    const response = await handleRpcRequest(
+      request("notes.create", { title: "New", content: "Body" }),
+      makeRuntime({ createNote, listNotebooksForSettings }),
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(createNote).toHaveBeenCalledOnce();
+    expect(listNotebooksForSettings).not.toHaveBeenCalled();
+  });
+
+  it("shares one listing across memberships and an update destination", async () => {
+    const listNotebooksForSettings = vi.fn(async () => [
+      { id: "a", title: "Allowed" },
+      { id: "b", title: "Also Allowed" },
+      { id: "c", title: "Denied" },
+    ]);
+    const updateNote = vi.fn(async () => updateResult());
+    const { evaluator, calls } = makeEvaluator((_op, ctx) => ctx.notebookPath !== "Denied");
+    const runtime = makeRuntime({
+      listNotebooksForSettings,
+      // A stale destination must never override the request snapshot.
+      notebookIndex: buildNotebookIndex([{ id: "c", title: "Allowed" }]),
+      noteMetadata: async (id) => ({
+        id,
+        title: "Roadmap",
+        notebookIds: ["a", "b"],
+      }),
+      updateNote,
+    });
+    const result = await handleRpcRequest(
+      request("notes.update", {
+        id: "note-1",
+        expectedRevision: REVISION,
+        patch: { notebookId: "c" },
+      }),
+      runtime,
+      createReadWriteNoDeleteServicePolicy(evaluator),
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(listNotebooksForSettings).toHaveBeenCalledTimes(1);
+    expect(calls.map(({ ctx }) => ctx.notebookPath)).toEqual(["Allowed", "Also Allowed", "Denied"]);
+    expect(updateNote).not.toHaveBeenCalled();
+  });
+});

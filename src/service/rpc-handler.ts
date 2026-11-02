@@ -75,7 +75,11 @@ import type {
   DeleteNoteResult,
   UpdateNoteResult,
 } from "../core/notesnook-write-adapter.js";
-import type { NotebookIndex } from "../settings/notebook-index.js";
+import {
+  buildNotebookIndex,
+  type NotebookRecord,
+  type NotebookIndex,
+} from "../settings/notebook-index.js";
 import {
   ExactNotePathError,
   parseExactNotePath,
@@ -167,8 +171,10 @@ export interface RpcHandlerRuntimeLike {
       }>
     | undefined
   >;
-  /** Optional trusted Stage 10 index for resolving notebook ids to titlePaths. */
+  /** Legacy injected runtimes only; the daemon never supplies a startup index. */
   readonly notebookIndex?: NotebookIndex;
+  /** Full fresh hierarchy, captured once per settings-authorized request. */
+  readonly listNotebooksForSettings?: () => Promise<readonly NotebookRecord[]>;
   /**
    * Optional bounded content-read capability, reusing the same
    * read-only projection the operator `notes.get-view` route already
@@ -285,9 +291,19 @@ export async function handleRpcRequest<T extends RpcRequest>(
         )) as unknown as RpcHandlerResponse<T>;
       }
 
+      // Notebook paths for this request, taken on first need: a decision that
+      // needs no path (a notebook-less create, a locked-note proof) must not
+      // depend on the hierarchy being listable. A snapshot that cannot be
+      // listed or built is an availability failure, not a malformed request.
+      const notebookPaths = createNotebookPathSource(runtime);
+
       if (structural.request.method === "notes.get") {
         if ("id" in structural.request.params) {
-          const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
+          const resolved = await resolveNoteSettingsContext(
+            structural.request.params.id,
+            runtime,
+            notebookPaths,
+          );
           if (!resolved.ok)
             return buildErrorEnvelope(
               id,
@@ -319,7 +335,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
         // resolver may accept a candidate on search metadata alone. Re-derive
         // the resolved note's ACTUAL notebook context (the same trusted lookup
         // the id form uses) and authorize that too before any content read.
-        const actual = await resolveNoteSettingsContext(resolution.id, runtime);
+        const actual = await resolveNoteSettingsContext(resolution.id, runtime, notebookPaths);
         if (!actual.ok)
           return buildErrorEnvelope(id, actual.code) as unknown as RpcHandlerResponse<T>;
         if (!authorizeEveryContext(policy, "notes.get", actual.contexts))
@@ -340,6 +356,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
         const context = await resolveCreateSettingsContext(
           structural.request.params.notebookId,
           runtime,
+          notebookPaths,
         );
         if (!context.ok)
           return buildErrorEnvelope(id, context.code) as unknown as RpcHandlerResponse<T>;
@@ -373,7 +390,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
           // Re-authorize the note the resolver actually produced, over every
           // notebook it is attached to, before anything is mutated.
           async (noteId) => {
-            const actual = await resolveNoteSettingsContext(noteId, runtime);
+            const actual = await resolveNoteSettingsContext(noteId, runtime, notebookPaths);
             if (!actual.ok) return actual.code === "service_unavailable" ? "unavailable" : "deny";
             return authorizeEveryContext(policy, "notes.delete", actual.contexts)
               ? "allow"
@@ -432,7 +449,11 @@ export async function handleRpcRequest<T extends RpcRequest>(
       ) {
         return buildErrorEnvelope(id, "invalid_request") as unknown as RpcHandlerResponse<T>;
       }
-      const resolved = await resolveNoteSettingsContext(structural.request.params.id, runtime);
+      const resolved = await resolveNoteSettingsContext(
+        structural.request.params.id,
+        runtime,
+        notebookPaths,
+      );
       if (!resolved.ok)
         return buildErrorEnvelope(
           id,
@@ -451,7 +472,14 @@ export async function handleRpcRequest<T extends RpcRequest>(
           "notebookId",
         );
         if (destinationId !== undefined) {
-          const destinationPath = await resolveNotebookPathById(runtime, destinationId);
+          const snapshot = await notebookPaths();
+          if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT) {
+            return buildErrorEnvelope(
+              id,
+              "service_unavailable",
+            ) as unknown as RpcHandlerResponse<T>;
+          }
+          const destinationPath = await resolveNotebookPathById(runtime, destinationId, snapshot);
           if (destinationPath === undefined) {
             return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
           }
@@ -982,6 +1010,7 @@ function idFormRefusalCode(
 async function resolveNoteSettingsContext(
   noteId: string,
   runtime: RpcHandlerRuntimeLike,
+  notebookPaths: NotebookPathSource,
 ): Promise<SettingsContextResolution> {
   const fn = readRuntimeMethod(runtime, "noteMetadata");
   if (fn === undefined) return { ok: false, code: "service_unavailable" };
@@ -1032,9 +1061,14 @@ async function resolveNoteSettingsContext(
     return { ok: false, code: "service_unavailable" };
   }
 
+  const snapshot = await notebookPaths();
+  if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT) {
+    return { ok: false, code: "service_unavailable" };
+  }
+
   const contexts: ServicePolicySettingsContext[] = [];
   for (const notebookId of notebookIds) {
-    const notebookPath = await resolveNotebookPathById(runtime, notebookId);
+    const notebookPath = await resolveNotebookPathById(runtime, notebookId, snapshot);
     if (notebookPath === undefined || hasControlCharacter(notebookPath)) {
       return { ok: false, code: "not_found" };
     }
@@ -1045,27 +1079,22 @@ async function resolveNoteSettingsContext(
 
 type CreateSettingsContextResolution =
   | { readonly ok: true; readonly context: ServicePolicySettingsContext }
-  | { readonly ok: false; readonly code: "not_found" };
+  | { readonly ok: false; readonly code: "not_found" | "service_unavailable" };
 
 async function resolveCreateSettingsContext(
   notebookId: string | undefined,
   runtime: RpcHandlerRuntimeLike,
+  notebookPaths: NotebookPathSource,
 ): Promise<CreateSettingsContextResolution> {
   // A notebook-less create has no note-specific context.  The evaluator
-  // receives its empty context so the configured default still applies.
+  // receives its empty context so the configured default still applies, and
+  // no notebook path is needed — so no hierarchy listing is taken.
   if (notebookId === undefined) return { ok: true, context: {} };
-  let notebookPath = resolveTrustedNotebookPath(runtime, notebookId);
-  if (notebookPath === undefined) {
-    const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
-    if (refreshResolver !== undefined) {
-      try {
-        const refreshedPath = await reflectApply(refreshResolver, runtime, [notebookId]);
-        if (typeof refreshedPath === "string") notebookPath = refreshedPath;
-      } catch {
-        return { ok: false, code: "not_found" };
-      }
-    }
+  const snapshot = await notebookPaths();
+  if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT) {
+    return { ok: false, code: "service_unavailable" };
   }
+  const notebookPath = await resolveNotebookPathById(runtime, notebookId, snapshot);
   if (notebookPath === undefined || hasControlCharacter(notebookPath)) {
     return { ok: false, code: "not_found" };
   }
@@ -1089,13 +1118,55 @@ function authorizeEveryContext(
 }
 
 /**
- * Resolve a notebook id to its trusted title path, falling back to the
- * daemon's refresh resolver when the startup index has gone stale.
+ * Availability sentinel for a notebook snapshot that could not be taken. It is
+ * deliberately distinct from `undefined`, which means "this runtime has no
+ * listing capability" and keeps the legacy cached-index path.
+ */
+const UNAVAILABLE_NOTEBOOK_SNAPSHOT = Symbol("unavailable-notebook-snapshot");
+
+/** Notebook paths for one request: taken on first need, then reused. */
+type NotebookPathSource = () => Promise<
+  NotebookIndex | undefined | typeof UNAVAILABLE_NOTEBOOK_SNAPSHOT
+>;
+
+function createNotebookPathSource(runtime: RpcHandlerRuntimeLike): NotebookPathSource {
+  let snapshot: ReturnType<NotebookPathSource> | undefined;
+  return () => (snapshot ??= takeNotebookSnapshot(runtime));
+}
+
+/**
+ * Take the one notebook snapshot a settings-authorized request is decided on.
+ * A listing or build failure is an availability failure: the caller refuses
+ * categorically rather than deciding on paths that may predate a rename.
+ */
+async function takeNotebookSnapshot(
+  runtime: RpcHandlerRuntimeLike,
+): Promise<NotebookIndex | undefined | typeof UNAVAILABLE_NOTEBOOK_SNAPSHOT> {
+  const listNotebooks = readRuntimeMethod(runtime, "listNotebooksForSettings");
+  if (listNotebooks === undefined) return undefined;
+  let records: unknown;
+  try {
+    records = await reflectApply(listNotebooks, runtime, []);
+  } catch {
+    return UNAVAILABLE_NOTEBOOK_SNAPSHOT;
+  }
+  try {
+    return buildNotebookIndex(records as readonly NotebookRecord[]);
+  } catch {
+    return UNAVAILABLE_NOTEBOOK_SNAPSHOT;
+  }
+}
+
+/**
+ * Resolve only from the request snapshot when supplied. Cached-index fallback
+ * is retained solely for legacy injected runtimes without a listing capability.
  */
 async function resolveNotebookPathById(
   runtime: RpcHandlerRuntimeLike,
   notebookId: string,
+  notebookSnapshot: NotebookIndex | undefined,
 ): Promise<string | undefined> {
+  if (notebookSnapshot !== undefined) return notebookSnapshot.resolvePath(notebookId);
   const cached = resolveTrustedNotebookPath(runtime, notebookId);
   if (cached !== undefined) return hasControlCharacter(cached) ? undefined : cached;
   const refreshResolver = readRuntimeMethod(runtime, "resolveNotebookPath");
@@ -1936,6 +2007,7 @@ function readRuntimeMethod(
     | "deleteNote"
     | "resolveNotePath"
     | "resolveNotebookPath"
+    | "listNotebooksForSettings"
     | "lockedNoteProof"
     | "pathDiagnostic"
     | "requestSync",

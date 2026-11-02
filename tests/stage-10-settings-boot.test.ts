@@ -139,7 +139,7 @@ describe("Stage 10 Task 8 — settings and notebook index at boot", () => {
     },
   );
 
-  it("loads settings once and injects one evaluator and the complete trusted index", async () => {
+  it("loads settings once, injects one evaluator, and hands the handler no startup index", async () => {
     const path = settingsFile(JSON.stringify(SETTINGS));
     const runtime = runtimeFixture();
     let serverOptions: StartNookdServerOptions | undefined;
@@ -153,14 +153,16 @@ describe("Stage 10 Task 8 — settings and notebook index at boot", () => {
 
     const policy = serverOptions?.policy;
     expect(policy?.evaluator).toEqual(expect.any(Function));
-    expect(serverOptions?.runtime.notebookIndex).toBeDefined();
-    expect(serverOptions?.runtime.notebookIndex?.resolvePath("family")).toBe("Family");
-    expect(serverOptions?.runtime.notebookIndex?.resolvePath("lina")).toBe("Family/Lina");
-    expect(serverOptions?.runtime.notebookIndex?.resolveId("family/lina")).toBe("lina");
-    expect(serverOptions?.runtime.notebookIndex?.size()).toBe(2);
-    expect(serverOptions?.runtime.notebookIndex).toEqual(
-      expect.objectContaining({ resolvePath: expect.any(Function) }),
-    );
+    expect(await serverOptions?.runtime.listNotebooksForSettings?.()).toEqual([
+      { id: "family", title: "Family" },
+      { id: "lina", title: "Lina", parentId: "family" },
+    ]);
+    // The startup index feeds the evaluator and boot validation only. Requests
+    // authorize against a per-request snapshot, so a notebook renamed after
+    // boot cannot leave a stale path in a decision.
+    expect(serverOptions?.runtime.notebookIndex).toBeUndefined();
+    expect(serverOptions?.runtime.listNotebooksForSettings).toEqual(expect.any(Function));
+    await expect(serverOptions?.runtime.listNotebooksForSettings?.()).resolves.toHaveLength(2);
     await handle.shutdown();
   });
 
