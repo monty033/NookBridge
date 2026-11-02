@@ -290,3 +290,31 @@ describe("service policy — readWriteNoDelete excludes delete (P-1)", () => {
     });
   });
 });
+
+describe("custom policy proof allowlist bound", () => {
+  it("keeps every valid method alongside a retired entry at the expanded bound", () => {
+    const valid = [...RWND, "notes.delete", "notes.locked_note_proof"];
+    const policy = createCustomServicePolicy([...valid, "notes.path_diagnostic"], () => ({
+      allowed: true,
+    }));
+    expect(Array.from(policy.allowedMethods)).toEqual(valid);
+    expect(authorizeServiceMethod(policy, "notes.path_diagnostic").allowed).toBe(false);
+    for (const method of valid) {
+      expect(authorizeServiceMethod(policy, method).allowed).toBe(true);
+    }
+  });
+});
+
+describe("locked-note proof evaluator requirement", () => {
+  it("keeps get/update/delete admission unchanged without an evaluator", () => {
+    const methods = ["notes.get", "notes.update", "notes.delete"];
+    const policy = createCustomServicePolicy(methods);
+    for (const method of methods) {
+      expect(authorizeServiceMethod(policy, method)).toEqual({ allowed: true, method });
+    }
+    expect(authorizeServiceMethod(policy, "notes.locked_note_proof")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+  });
+});

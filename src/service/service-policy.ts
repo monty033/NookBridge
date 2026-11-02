@@ -179,6 +179,7 @@ const CUSTOM_POLICY_ALLOWABLE_METHODS: ReadonlyArray<RpcMethod> = (() => {
     "notes.append",
     "notes.update",
     "notes.delete",
+    "notes.locked_note_proof",
     "notes.sync",
   ];
   objectSetPrototypeOf(arr, null);
@@ -569,6 +570,12 @@ export function authorizeServiceMethod(
   if (allowlist === undefined) return denyServicePolicyDecision();
 
   if (typeof method !== "string") return denyServicePolicyDecision();
+
+  // Proof must authorize the claimed path and every resolved notebook context.
+  // Both handler routes use this gate; without an evaluator neither can do so.
+  if (method === "notes.locked_note_proof" && policy.evaluator === undefined) {
+    return denyServicePolicyDecision();
+  }
 
   // The construction-time rule is repeated here so a hand-built policy that
   // reaches this function directly cannot admit search without read.

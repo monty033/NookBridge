@@ -204,6 +204,9 @@ describe("service policy — custom method allowlist", () => {
     expect(Array.from(malformedPolicy.allowedMethods)).toEqual([]);
     expect(authorizeServiceMethod(malformedPolicy, "notes.create").allowed).toBe(false);
 
+    // One entry longer than the allowlist universe: the bound is derived from
+    // that universe, so a fixed-length list here would silently stop being
+    // oversized whenever a method is added to it.
     const oversized = [
       "notes.search",
       "notes.status",
@@ -214,6 +217,7 @@ describe("service policy — custom method allowlist", () => {
       "notes.sync",
       "notes.update",
       "notes.delete",
+      "notes.locked_note_proof",
       "notes.path_diagnostic",
       "notes.search",
     ];

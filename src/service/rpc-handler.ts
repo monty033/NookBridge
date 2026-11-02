@@ -195,7 +195,10 @@ export interface RpcHandlerRuntimeLike {
   /** Optional daemon-side resolver for exact destructive note paths. */
   readonly resolveNotePath?: (path: ExactNotePathInput) => Promise<ExactNotePathResolution>;
   /** Daemon-owned closed locked-note acceptance proof. */
-  readonly lockedNoteProof?: (path: ExactNotePathInput) => Promise<RpcLockedNoteProofResult>;
+  readonly lockedNoteProof?: (
+    path: ExactNotePathInput,
+    authorizedResolution?: ExactNotePathResolution,
+  ) => Promise<RpcLockedNoteProofResult>;
   /** Daemon-owned closed read-only exact-path diagnostic. */
   readonly pathDiagnostic?: (path: ExactNotePathInput) => Promise<RpcNotesPathDiagnosticResult>;
   readonly requestSync?: () => Promise<
@@ -292,7 +295,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       // Notebook paths for this request, taken on first need: a decision that
-      // needs no path (a notebook-less create, a locked-note proof) must not
+      // needs no path (a notebook-less create) must not
       // depend on the hierarchy being listable. A snapshot that cannot be
       // listed or built is an availability failure, not a malformed request.
       const notebookPaths = createNotebookPathSource(runtime);
@@ -400,6 +403,9 @@ export async function handleRpcRequest<T extends RpcRequest>(
       }
 
       if (structural.request.method === "notes.locked_note_proof") {
+        if (!authorizeServiceMethod(policy, "notes.locked_note_proof").allowed) {
+          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        }
         const target = exactNotePathInput(structural.request.params);
         const resolver = runtime.resolveNotePath;
         if (resolver === undefined) {
@@ -423,18 +429,35 @@ export async function handleRpcRequest<T extends RpcRequest>(
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
         }
+        let resolution: ExactNotePathResolution;
         try {
-          await reflectApply(resolver, runtime, [target]);
+          resolution = await reflectApply(resolver, runtime, [target]);
         } catch (error) {
           if (error instanceof ExactNotePathError && error.code === "not_found") {
             return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
           }
           return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         }
+        const actual = await resolveNoteSettingsContext(resolution.id, runtime, notebookPaths);
+        if (!actual.ok)
+          return buildErrorEnvelope(
+            id,
+            idFormRefusalCode(actual.code),
+          ) as unknown as RpcHandlerResponse<T>;
+        for (const method of ["notes.get", "notes.update", "notes.delete"] as const) {
+          if (!authorizeEveryContext(policy, method, actual.contexts)) {
+            // The claimed path passed. Hide a denied cross-listed note as the
+            // resolver hides a missing note: refusal is indistinguishable by
+            // status and side effects, not elapsed time. The membership and
+            // policy checks do more work than a missing-note lookup.
+            return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
+          }
+        }
         return (await runLockedNoteProof(
           structural.request,
           runtime,
           id,
+          resolution,
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -1498,13 +1521,18 @@ async function runLockedNoteProof(
   request: RpcNotesLockedNoteProofRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
+  authorizedResolution?: ExactNotePathResolution,
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "lockedNoteProof");
   if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
   const target = exactNotePathInput(request.params);
   let raw: unknown;
   try {
-    raw = await reflectApply(fn, runtime, [target]);
+    raw = await reflectApply(
+      fn,
+      runtime,
+      authorizedResolution === undefined ? [target] : [target, authorizedResolution],
+    );
   } catch {
     return buildErrorEnvelope(id, "service_unavailable");
   }

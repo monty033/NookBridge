@@ -138,7 +138,7 @@ import type { RpcRequest } from "../src/service/rpc-protocol.js";
 
 const PROOF_PATH = "General/Canary";
 const REVISION = "rev_0123456789abcdef0123456789abcdef";
-const ALL = ["notes.get", "notes.update", "notes.delete"];
+const ALL = ["notes.get", "notes.update", "notes.delete", "notes.locked_note_proof"];
 const locked = () => {
   throw new NotesnookWriteContractError("vault_locked");
 };
@@ -169,7 +169,11 @@ function rpcRuntime(
     search: async () => [],
     status: async () => ({ lastSynced: 0, hasUnsyncedChanges: false }),
     listNotebooks: async () => [],
-    noteMetadata: async () => undefined,
+    noteMetadata: async () => ({
+      id: "note-1",
+      title: "Canary",
+      notebookAbsenceConfirmed: true,
+    }),
     resolveNotePath: vi.fn(async () => ({ id: "note-1", expectedRevision: REVISION })),
     updateNote: vi.fn(),
     deleteNote: vi.fn(),
@@ -259,10 +263,57 @@ describe("D4-2 — the proof never mutates an unlocked note", () => {
 });
 
 describe("D4-2 — rpc-handler branches", () => {
-  it("no evaluator: permission_denied, zero runtime calls (proof is never allowlistable)", async () => {
+  it("binds the proof to the authorized resolution when the path changes", async () => {
+    const authorized = { id: "note-A", expectedRevision: REVISION, pinned: true };
+    const replacement = {
+      id: "note-B",
+      expectedRevision: "rev_11111111111111111111111111111111",
+      pinned: false,
+    };
+    const resolveNotePath = vi
+      .fn()
+      .mockResolvedValueOnce(authorized)
+      .mockResolvedValue(replacement);
+    const d = deps("locked", { resolveNotePath });
+    const noteMetadata = vi.fn(async (id: string) => ({
+      id,
+      title: "Canary",
+      notebookAbsenceConfirmed: true,
+    }));
+    const rt = rpcRuntime(createLockedNoteProof(d), { resolveNotePath, noteMetadata });
+    const res = await handleRpcRequest(
+      proofRequest(),
+      rt,
+      createCustomServicePolicy(ALL, () => ({ allowed: true })),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      result: {
+        pathBytes: Buffer.byteLength(PROOF_PATH, "utf8"),
+        read: "vault_locked",
+        update: "vault_locked",
+        delete: "vault_locked",
+      },
+    });
+    expect(noteMetadata.mock.calls).toEqual([["note-A"]]);
+    expect(d.readNoteLockState.mock.calls).toEqual([["note-A"]]);
+    const probeRevision = "rev_0123456789abcdef0123456789abcde0";
+    expect(d.updateNote.mock.calls).toEqual([
+      [{ id: "note-A", expectedRevision: probeRevision, patch: { pinned: true } }],
+    ]);
+    expect(d.deleteNote.mock.calls).toEqual([[{ id: "note-A", expectedRevision: probeRevision }]]);
+    expect(resolveNotePath).toHaveBeenCalledTimes(1);
+    expect(resolveNotePath).toHaveBeenCalledWith(PROOF_PATH);
+  });
+
+  it("no evaluator and no explicit proof admission: permission_denied, zero runtime calls", async () => {
     const proof = vi.fn();
     const rt = rpcRuntime(proof);
-    const res = await handleRpcRequest(proofRequest(), rt, createCustomServicePolicy(ALL));
+    const res = await handleRpcRequest(
+      proofRequest(),
+      rt,
+      createCustomServicePolicy(ALL.slice(0, 3)),
+    );
     expect(res).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expectZeroRuntimeCalls(rt, proof);
     expect(
@@ -280,9 +331,10 @@ describe("D4-2 — rpc-handler branches", () => {
   it("evaluator present, notes.delete not allowlisted: permission_denied, zero runtime calls", async () => {
     const proof = vi.fn();
     const rt = rpcRuntime(proof);
-    const policy = createCustomServicePolicy(["notes.get", "notes.update"], () => ({
-      allowed: true,
-    }));
+    const policy = createCustomServicePolicy(
+      ["notes.get", "notes.update", "notes.locked_note_proof"],
+      () => ({ allowed: true }),
+    );
     const res = await handleRpcRequest(proofRequest(), rt, policy);
     expect(res).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expectZeroRuntimeCalls(rt, proof);

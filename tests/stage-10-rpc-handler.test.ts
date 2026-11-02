@@ -619,7 +619,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
 
 describe("D4-3 — proof authorizes before resolving", () => {
   const proofPolicy = (evaluator: ReturnType<typeof makeEvaluator>["evaluator"]) =>
-    createCustomServicePolicy([...RWND, "notes.delete"], evaluator);
+    createCustomServicePolicy([...RWND, "notes.delete", "notes.locked_note_proof"], evaluator);
   const proofRuntime = (resolve: () => Promise<unknown>) => {
     const resolveNotePath = vi.fn(resolve);
     const lockedNoteProof = vi.fn(async () => ({
@@ -629,7 +629,11 @@ describe("D4-3 — proof authorizes before resolving", () => {
       update: "ok",
       delete: "ok",
     }));
-    const runtime = makeRuntime({ resolveNotePath, lockedNoteProof } as never);
+    const runtime = makeRuntime({
+      resolveNotePath,
+      lockedNoteProof,
+      notebookIndex: makeIndex(),
+    } as never);
     return { runtime, resolveNotePath, lockedNoteProof };
   };
   const denyPrivate = (_op: SettingsOperation, ctx: ServicePolicySettingsContext) =>
@@ -686,7 +690,7 @@ describe("D4-3 — proof authorizes before resolving", () => {
     expect(lockedNoteProof).toHaveBeenCalledTimes(0);
   });
 
-  it("every authorization happens before the resolver is called", async () => {
+  it("claimed-path authorization precedes resolution and resolved authorization precedes proof", async () => {
     const evaluatorSpy = vi.fn(makeEvaluator(true).evaluator);
     const { runtime, resolveNotePath, lockedNoteProof } = proofRuntime(found);
     await handleRpcRequest(
@@ -695,8 +699,15 @@ describe("D4-3 — proof authorizes before resolving", () => {
       proofPolicy(evaluatorSpy),
     );
     expect(evaluatorSpy).toHaveBeenCalled();
-    expect(Math.max(...evaluatorSpy.mock.invocationCallOrder)).toBeLessThan(
+    expect(Math.max(...evaluatorSpy.mock.invocationCallOrder.slice(0, 3))).toBeLessThan(
       resolveNotePath.mock.invocationCallOrder[0] as number,
+    );
+    expect(evaluatorSpy).toHaveBeenCalledTimes(6);
+    expect(evaluatorSpy.mock.invocationCallOrder[3] as number).toBeGreaterThan(
+      resolveNotePath.mock.invocationCallOrder[0] as number,
+    );
+    expect(Math.max(...evaluatorSpy.mock.invocationCallOrder)).toBeLessThan(
+      lockedNoteProof.mock.invocationCallOrder[0] as number,
     );
     expect(lockedNoteProof).toHaveBeenCalledTimes(1);
   });
@@ -820,5 +831,156 @@ describe("request notebook snapshots", () => {
     expect(listNotebooksForSettings).toHaveBeenCalledTimes(1);
     expect(calls.map(({ ctx }) => ctx.notebookPath)).toEqual(["Allowed", "Also Allowed", "Denied"]);
     expect(updateNote).not.toHaveBeenCalled();
+  });
+});
+
+describe("locked-note proof authorization", () => {
+  const methods = ["notes.get", "notes.update", "notes.delete", "notes.locked_note_proof"];
+
+  function proofRuntime() {
+    const readLockState = vi.fn();
+    const updateNote = vi.fn(async () => updateResult());
+    const deleteNote = vi.fn();
+    const lockedNoteProof = vi.fn(async () => {
+      readLockState();
+      await updateNote();
+      deleteNote();
+      return {
+        kind: "locked_note_proof" as const,
+        pathBytes: 1,
+        read: "ok" as const,
+        update: "ok" as const,
+        delete: "ok" as const,
+      };
+    });
+    const resolveNotePath = vi.fn(async () => ({ id: "note-1", expectedRevision: REVISION }));
+    const runtime = makeRuntime({
+      resolveNotePath,
+      lockedNoteProof,
+      updateNote,
+      deleteNote,
+      notebookIndex: makeIndex(),
+    });
+    return { runtime, resolveNotePath, lockedNoteProof, readLockState, updateNote, deleteNote };
+  }
+
+  it.each([{ allowedMethods: ["notes.locked_note_proof"] }, { allowedMethods: methods }])(
+    "refuses proof without an evaluator on the generic route (%j)",
+    async ({ allowedMethods }) => {
+      const { runtime, resolveNotePath, lockedNoteProof, readLockState, updateNote, deleteNote } =
+        proofRuntime();
+      const response = await handleRpcRequest(
+        request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+        runtime,
+        createCustomServicePolicy(allowedMethods),
+      );
+      expect(lockedNoteProof).not.toHaveBeenCalled();
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(resolveNotePath).not.toHaveBeenCalled();
+      expect(readLockState).not.toHaveBeenCalled();
+      expect(updateNote).not.toHaveBeenCalled();
+      expect(deleteNote).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, makeEvaluator(true).evaluator])(
+    "requires explicit proof admission with get/update/delete only (evaluator: %s)",
+    async (evaluator) => {
+      const { runtime, resolveNotePath, lockedNoteProof, readLockState, updateNote, deleteNote } =
+        proofRuntime();
+      const response = await handleRpcRequest(
+        request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+        runtime,
+        createCustomServicePolicy(methods.slice(0, 3), evaluator),
+      );
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(resolveNotePath).not.toHaveBeenCalled();
+      expect(lockedNoteProof).not.toHaveBeenCalled();
+      expect(readLockState).not.toHaveBeenCalled();
+      expect(updateNote).not.toHaveBeenCalled();
+      expect(deleteNote).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains explicit proof admission and returns the report for an allowed note", async () => {
+    const { runtime, lockedNoteProof, readLockState, updateNote, deleteNote } = proofRuntime();
+    const policy = createCustomServicePolicy(methods, makeEvaluator(true).evaluator);
+    expect(policy.allowedMethods).toContain("notes.locked_note_proof");
+    const response = await handleRpcRequest(
+      request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+      runtime,
+      policy,
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      result: { kind: "locked_note_proof", read: "ok", update: "ok", delete: "ok" },
+    });
+    expect(lockedNoteProof).toHaveBeenCalledOnce();
+    expect(readLockState).toHaveBeenCalledOnce();
+    expect(updateNote).toHaveBeenCalledOnce();
+    expect(deleteNote).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "edit", "delete"] as const)(
+    "matches a missing note for a second notebook's %s refusal before any proof read or mutation",
+    async (deniedOperation) => {
+      const { runtime, lockedNoteProof, readLockState, updateNote, deleteNote } = proofRuntime();
+      const response = await handleRpcRequest(
+        request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+        {
+          ...runtime,
+          noteMetadata: async () => ({
+            id: "note-1",
+            title: "Roadmap",
+            notebookIds: ["child", "private"],
+          }),
+          notebookIndex: buildNotebookIndex([
+            { id: "root", title: "Personal" },
+            { id: "child", title: "Projects", parentId: "root" },
+            { id: "private", title: "Private" },
+          ]),
+        },
+        createCustomServicePolicy(
+          methods,
+          makeEvaluator((op, ctx) => ctx.notebookPath !== "Private" || op !== deniedOperation)
+            .evaluator,
+        ),
+      );
+      const missing = await handleRpcRequest(
+        request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+        {
+          ...runtime,
+          resolveNotePath: async () => {
+            throw new ExactNotePathError("not_found");
+          },
+        },
+        createCustomServicePolicy(methods, makeEvaluator(true).evaluator),
+      );
+      expect(missing).toMatchObject({ ok: false, error: { code: "not_found" } });
+      expect(response).toEqual(missing);
+      expect(readLockState).not.toHaveBeenCalled();
+      expect(lockedNoteProof).not.toHaveBeenCalled();
+      expect(updateNote).not.toHaveBeenCalled();
+      expect(deleteNote).not.toHaveBeenCalled();
+    },
+  );
+
+  it("fails closed when the resolved settings context is unavailable", async () => {
+    const { runtime, lockedNoteProof, readLockState, updateNote, deleteNote } = proofRuntime();
+    const response = await handleRpcRequest(
+      request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+      {
+        ...runtime,
+        noteMetadata: async () => {
+          throw new Error("unavailable");
+        },
+      },
+      createCustomServicePolicy(methods, makeEvaluator(true).evaluator),
+    );
+    expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    expect(lockedNoteProof).not.toHaveBeenCalled();
+    expect(readLockState).not.toHaveBeenCalled();
+    expect(updateNote).not.toHaveBeenCalled();
+    expect(deleteNote).not.toHaveBeenCalled();
   });
 });
