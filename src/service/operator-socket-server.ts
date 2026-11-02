@@ -4,6 +4,7 @@ import { lstat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { clearTimeout, setTimeout } from "node:timers";
 
 import {
   parseRpcFrame,
@@ -19,6 +20,9 @@ import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-creden
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES = 65_536;
 const DEFAULT_SOCKET_MODE = 0o660;
+const DEFAULT_MAX_CONNECTIONS = 64;
+const DEFAULT_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_CONNECTION_LIFETIME_MS = 60_000;
 const SOCKET_ROOT = "/run/nookbridge";
 
 /**
@@ -55,6 +59,9 @@ export type StartOperatorSocketServerOptions = Readonly<{
   authorize: OperatorSocketAuthorization;
   handle: OperatorSocketHandler;
   socketMode?: number;
+  maxConnections?: number;
+  idleTimeoutMs?: number;
+  maxConnectionLifetimeMs?: number;
 }>;
 
 export type OperatorSocketServerHandle = Readonly<{
@@ -72,6 +79,18 @@ export async function startOperatorSocketServer(
 ): Promise<OperatorSocketServerHandle> {
   const socketPath = validateSocketPath(options.socketPath, options.socketPathRoot);
   const socketMode = validateSocketMode(options.socketMode ?? DEFAULT_SOCKET_MODE);
+  const maxConnections = validateConnectionLimit(
+    options.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
+    1_024,
+  );
+  const idleTimeoutMs = validateConnectionLimit(
+    options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+    3_600_000,
+  );
+  const maxConnectionLifetimeMs = validateConnectionLimit(
+    options.maxConnectionLifetimeMs ?? DEFAULT_MAX_CONNECTION_LIFETIME_MS,
+    3_600_000,
+  );
   if (typeof options.authorize !== "function" || typeof options.handle !== "function")
     throw new Error("operator socket configuration is invalid");
   if (await exists(socketPath)) throw new Error("operator socket path is occupied");
@@ -80,7 +99,29 @@ export async function startOperatorSocketServer(
   const resolvePeer: OperatorSocketPeerResolver =
     options.resolvePeer ?? ((socket, signal) => resolvePeerAsync(socket, { helperPath, signal }));
   let owned = false;
+  const sockets = new Set<net.Socket>();
+  // A connection that has not produced a request yet. Only these may be
+  // dropped at shutdown; one whose handler is running is left to finish so a
+  // mutation is never cut off while its backing resources are being closed.
+  const idleSockets = new Set<net.Socket>();
+  // Requests that have been taken but whose handler has not settled. Shutdown
+  // waits for these: a socket destroyed by the lifetime cap must not let
+  // cleanup start while the handler is still running.
+  const inFlight = new Set<Promise<void>>();
   const server = net.createServer((socket) => {
+    if (sockets.size >= maxConnections) {
+      socket.destroy();
+      return;
+    }
+    sockets.add(socket);
+    idleSockets.add(socket);
+    socket.setTimeout(idleTimeoutMs, () => socket.destroy());
+    const lifetimeTimer = setTimeout(() => socket.destroy(), maxConnectionLifetimeMs);
+    socket.once("close", () => {
+      sockets.delete(socket);
+      idleSockets.delete(socket);
+      clearTimeout(lifetimeTimer);
+    });
     // Resolution is asynchronous so a slow helper never blocks the event loop,
     // and it is aborted if the client leaves first.
     const controller = new AbortController();
@@ -96,7 +137,17 @@ export async function startOperatorSocketServer(
     void peerLookup.then((peer) => {
       if (peer === undefined) socket.destroy();
     });
-    serveOneRequest(socket, peerLookup, options.authorize, options.handle);
+    serveOneRequest(
+      socket,
+      peerLookup,
+      options.authorize,
+      options.handle,
+      () => idleSockets.delete(socket),
+      (work) => {
+        inFlight.add(work);
+        void work.finally(() => inFlight.delete(work));
+      },
+    );
   });
 
   try {
@@ -112,13 +163,19 @@ export async function startOperatorSocketServer(
 
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
-    closePromise ??= new Promise<void>((resolve) => {
-      server.close(() => {
-        void unlink(socketPath)
-          .catch(() => undefined)
-          .finally(resolve);
-      });
-    });
+    closePromise ??= (async () => {
+      // A connection still waiting for a request would hold shutdown until
+      // its lifetime timer fired, so drop those. A connection with a request
+      // in flight is left alone: cutting it off would abandon a mutation
+      // midway through the cleanups that follow.
+      for (const socket of idleSockets) socket.destroy();
+      await new Promise<void>((closed) => server.close(() => closed()));
+      // The lifetime cap can destroy the socket under a handler that is
+      // still running, so socket closure alone does not prove the work is
+      // done. Wait for the handlers themselves before reporting closed.
+      await Promise.allSettled([...inFlight]);
+      await unlink(socketPath).catch(() => undefined);
+    })();
     return closePromise;
   };
   return Object.freeze({ socketPath, close });
@@ -129,6 +186,8 @@ function serveOneRequest(
   peerLookup: Promise<OperatorPeer | undefined>,
   authorize: OperatorSocketAuthorization,
   handle: OperatorSocketHandler,
+  onRequestTaken: () => void,
+  trackWork: (work: Promise<void>) => void,
 ): void {
   let pending = Buffer.alloc(0);
   // Set when the first frame is taken, not when its dispatch ends: the
@@ -154,12 +213,19 @@ function serveOneRequest(
     const frame = pending.subarray(0, frameLength);
     pending = Buffer.alloc(0);
     completed = true;
-    void peerLookup
-      .then(async (peer) => {
-        if (peer === undefined) return;
-        await dispatchFrame(socket, frame, peer, authorize, handle);
-      })
-      .finally(() => socket.end());
+    onRequestTaken();
+    // The idle window guards a connection that has not produced a request. Once
+    // a frame is taken, only the lifetime cap bounds the handler's run time, so
+    // a slow sync or upload is not mistaken for an idle peer.
+    socket.setTimeout(0);
+    trackWork(
+      peerLookup
+        .then(async (peer) => {
+          if (peer === undefined) return;
+          await dispatchFrame(socket, frame, peer, authorize, handle);
+        })
+        .finally(() => socket.end()),
+    );
   });
   socket.on("error", () => undefined);
 }
@@ -245,6 +311,12 @@ function validateSocketPath(value: string, testRoot?: string): string {
 
 function validateSocketMode(value: number): number {
   if (value !== 0o660 && value !== 0o770) throw new Error("operator socket mode is invalid");
+  return value;
+}
+
+function validateConnectionLimit(value: number, maximum: number): number {
+  if (!Number.isInteger(value) || value <= 0 || value > maximum)
+    throw new Error("operator socket connection limit is invalid");
   return value;
 }
 
