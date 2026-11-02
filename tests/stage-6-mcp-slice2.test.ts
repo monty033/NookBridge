@@ -114,14 +114,32 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
     expect(handle.tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(
       true,
     );
+    // Update and delete can both remove or replace what a note held, so a
+    // client that auto-approves on these hints is told the truth.
+    const destructive = handle.tools
+      .filter((tool) => tool.annotations?.destructiveHint === true)
+      .map((tool) => tool.name);
+    expect(destructive).toEqual([
+      "notesnook_update_note",
+      "notesnook_delete_note",
+      "notesnook_sync",
+    ]);
     expect(
       handle.tools
-        .filter((tool) => tool.name !== "notesnook_delete_note")
+        .filter((tool) => !destructive.includes(tool.name))
         .every((tool) => tool.annotations?.destructiveHint === false),
     ).toBe(true);
     expect(
-      handle.tools.find((tool) => tool.name === "notesnook_delete_note")?.annotations
-        ?.destructiveHint,
+      handle.tools.find((tool) => tool.name === "notesnook_update_note")?.annotations
+        ?.idempotentHint,
+    ).toBe(true);
+    expect(
+      handle.tools.find((tool) => tool.name === "notesnook_sync")?.annotations?.openWorldHint,
+    ).toBe(true);
+    expect(
+      handle.tools
+        .filter((tool) => tool.name !== "notesnook_sync")
+        .every((tool) => tool.annotations?.openWorldHint === false),
     ).toBe(true);
   });
 

@@ -501,13 +501,30 @@ describe("nook-mcp server surface", () => {
     ]);
     expect(tools.slice(0, 4).every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(tools.slice(4).every((tool) => tool.annotations?.readOnlyHint === false)).toBe(true);
+    // Update and delete both replace or remove what a note held.
+    const destructive = tools
+      .filter((tool) => tool.annotations?.destructiveHint === true)
+      .map((tool) => tool.name);
+    expect(destructive).toEqual([
+      "notesnook_update_note",
+      "notesnook_delete_note",
+      "notesnook_sync",
+    ]);
     expect(
       tools
-        .filter((tool) => tool.name !== "notesnook_delete_note")
+        .filter((tool) => !destructive.includes(tool.name))
         .every((tool) => tool.annotations?.destructiveHint === false),
     ).toBe(true);
     expect(
-      tools.find((tool) => tool.name === "notesnook_delete_note")?.annotations?.destructiveHint,
+      tools.find((tool) => tool.name === "notesnook_update_note")?.annotations?.idempotentHint,
+    ).toBe(true);
+    expect(tools.find((tool) => tool.name === "notesnook_sync")?.annotations?.openWorldHint).toBe(
+      true,
+    );
+    expect(
+      tools
+        .filter((tool) => tool.name !== "notesnook_sync")
+        .every((tool) => tool.annotations?.openWorldHint === false),
     ).toBe(true);
   });
 

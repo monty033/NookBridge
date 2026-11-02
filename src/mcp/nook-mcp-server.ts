@@ -399,7 +399,10 @@ const UPDATE_NOTE_TOOL_DEFINITION = Object.freeze({
   annotations: Object.freeze({
     title: "Update note",
     readOnlyHint: false,
-    destructiveHint: false,
+    // A patch can replace the body and drop tags omitted from a replacement
+    // array. Repeating it is still idempotent in effect: the stale revision
+    // fails the guard, so a replay changes nothing.
+    destructiveHint: true,
     idempotentHint: true,
     openWorldHint: false,
   }),
@@ -454,9 +457,12 @@ const SYNC_TOOL_DEFINITION = Object.freeze({
   annotations: Object.freeze({
     title: "Sync notes",
     readOnlyHint: false,
-    destructiveHint: false,
     idempotentHint: false,
-    openWorldHint: false,
+    // The drain uploads to the Notesnook service, so it leaves this host, and
+    // it sends queued deletions: a full sync propagates them upstream. It
+    // deletes nothing locally.
+    destructiveHint: true,
+    openWorldHint: true,
   }),
 }) as unknown as Tool;
 
