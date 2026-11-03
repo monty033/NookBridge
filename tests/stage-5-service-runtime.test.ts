@@ -28,6 +28,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDevelopmentFileKeyStore } from "../src/keystore/file-keystore.js";
 import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
+import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
+import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import type { RpcRequest } from "../src/service/rpc-protocol.js";
 import {
   createProductionServiceRuntime,
   createSearchBackedPathDiagnostic,
@@ -81,6 +84,7 @@ function createFakeRealCoreModule(
   options: Readonly<{
     notebookLookupFailure?: boolean;
     pathDiagnosticMembershipFailure?: boolean;
+    noteMetadataFailureId?: string;
     /**
      * Mirror a modern Notesnook record: the note carries NO deprecated
      * `notebooks` array, so notebook membership is only provable through
@@ -167,6 +171,7 @@ function createFakeRealCoreModule(
       },
       notes: {
         note: async (id: string) => {
+          if (id === options.noteMetadataFailureId) throw new Error("note metadata source failed");
           if (options.pathDiagnosticMembershipFailure && id === "task-note") {
             return relationOnly
               ? { id, title: "Task list for Bernie", dateEdited: 2 }
@@ -243,6 +248,67 @@ function newState(): TempState {
 // ===========================================================================
 
 describe("Stage 5 Task 3 — service-runtime constructor", () => {
+  it("wraps a production metadata read failure like an absent note through the RPC handler", async () => {
+    const state = newState();
+    const tempCredentialsDir = mkdtempSync(join(tmpdir(), "nookbridge-stage-5-service-wrap-"));
+    writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+      mode: 0o600,
+    });
+    const keys = createSystemdCredentialKeyStore({ credentialsDirectory: tempCredentialsDir });
+    let runtime: ServiceRuntime | undefined;
+    try {
+      runtime = await createProductionServiceRuntime({
+        stateDir: state.stateDir,
+        keys,
+        injectedModule: createFakeRealCoreModule({
+          noteMetadataFailureId: "lookup-fails",
+          hierarchy: { ids: [], records: {}, breadcrumbs: async () => [] },
+        }),
+      });
+      await expect(runtime.readOnly.noteMetadata("lookup-fails")).rejects.toThrow();
+      await expect(runtime.readOnly.noteMetadata("not-present")).resolves.toBeUndefined();
+      const policy = createReadWriteNoDeleteServicePolicy(() => ({ allowed: true }));
+      const directPolicy = createReadWriteNoDeleteServicePolicy();
+      const noteRequest = (noteId: string): RpcRequest =>
+        ({
+          id: "same-request-id",
+          method: "notes.get",
+          params: { id: noteId },
+        }) as RpcRequest;
+
+      const wrappedLookupFailure = await handleRpcRequest(
+        noteRequest("lookup-fails"),
+        runtime,
+        policy,
+      );
+      const absentNote = await handleRpcRequest(noteRequest("not-present"), runtime, policy);
+      const directWrappedLookupFailure = await handleRpcRequest(
+        noteRequest("lookup-fails"),
+        runtime,
+        directPolicy,
+      );
+      const directAbsentNote = await handleRpcRequest(
+        noteRequest("not-present"),
+        runtime,
+        directPolicy,
+      );
+
+      expect(wrappedLookupFailure).toEqual(absentNote);
+      expect(wrappedLookupFailure).toMatchObject({
+        ok: false,
+        error: { code: "permission_denied", message: "Permission denied" },
+      });
+      expect(directWrappedLookupFailure).toEqual(directAbsentNote);
+      expect(directWrappedLookupFailure).toMatchObject({
+        ok: false,
+        error: { code: "not_found", message: "Not found" },
+      });
+    } finally {
+      if (runtime !== undefined) await runtime.cleanup();
+      rmSync(tempCredentialsDir, { recursive: true, force: true });
+    }
+  });
+
   it("uses title search to preserve body-free content markers without membership capabilities", async () => {
     const diagnostic = createSearchBackedPathDiagnostic({
       search: async () => [{ id: "hidden-note-id", title: "Task list for Bernie", source: "note" }],

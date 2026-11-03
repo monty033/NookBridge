@@ -229,7 +229,10 @@ describe("notes.get exact path", () => {
       runtime({ readOnly: { readOperatorNoteContent: reader } }),
       createReadWriteNoDeleteServicePolicy(evaluate as never),
     );
-    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    // The refusal is shaped like a missing path, not like a denied one: the
+    // caller already named the path, so answering "denied" here would say a
+    // note exists under it where a path with no note answers "not found".
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(reader).not.toHaveBeenCalled();
   });
 
