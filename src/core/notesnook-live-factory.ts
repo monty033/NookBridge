@@ -367,7 +367,7 @@ export async function createNotesnookLiveCoreFactory(
       localWrite === undefined || sharedCoordinator === undefined
         ? undefined
         : createLiveRemoteSyncCapability(
-            () => sharedCoordinator!.requestSync(),
+            (upload) => sharedCoordinator!.requestSync(upload),
             ensureOpen,
             db as unknown as object,
           );

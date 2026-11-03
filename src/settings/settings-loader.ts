@@ -42,9 +42,11 @@
 import {
   SETTINGS_SCHEMA_VERSION,
   isSettingsDefaults,
+  isSettingsUploadPolicy,
   type SettingsDefaults,
   type SettingsFile,
   type SettingsOverride,
+  type SettingsUploadPolicy,
 } from "./settings-types.js";
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,24 @@ export class SettingsLoadError extends Error {
     Object.setPrototypeOf(this, SettingsLoadError.prototype);
   }
 }
+
+const readUploadPolicy = (candidate: object): SettingsUploadPolicy => {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(candidate, "upload");
+  } catch {
+    throw new SettingsLoadError();
+  }
+  if (descriptor === undefined) return "attributed";
+  if (
+    descriptor.enumerable !== true ||
+    !Object.prototype.hasOwnProperty.call(descriptor, "value") ||
+    !isSettingsUploadPolicy(descriptor.value)
+  ) {
+    throw new SettingsLoadError();
+  }
+  return descriptor.value;
+};
 
 // ---------------------------------------------------------------------------
 // Id-entry validator (mirrors settings-glob's `validatePattern`).
@@ -340,6 +360,8 @@ export const loadSettings = (input: unknown): SettingsFile => {
     throw new SettingsLoadError();
   }
 
+  const upload = readUploadPolicy(candidate);
+
   // Defaults check: must satisfy the closed `isSettingsDefaults`
   // predicate.  This catches missing fields, extra fields, wrong
   // value types, and Proxy / subclass shapes in one place.
@@ -368,6 +390,7 @@ export const loadSettings = (input: unknown): SettingsFile => {
   // through any path.
   const file: SettingsFile = deepFreeze({
     version: SETTINGS_SCHEMA_VERSION,
+    upload,
     defaults,
     overrides: validatedOverrides,
   });

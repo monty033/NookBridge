@@ -7,10 +7,11 @@
  * supplies the pinned literal `{ type: "full" }`; only the boolean `true`
  * confirms the batch.
  *
- * Upload gate (DR-S7a item 5): the executor reads the marker batch the
- * coordinator hands it and refuses, without touching upstream, unless every
- * marker is `origin: "mcp"` or carries operator approval (`approved: true`).
- * Empty batches additionally require a strictly false database dirty status.
+ * Upload gate (DR-S7a item 5): under the default `attributed` policy, the
+ * executor refuses without touching upstream unless every marker is
+ * `origin: "mcp"` or carries operator approval (`approved: true`). The daemon's
+ * `allow` policy bypasses that marker-approval rule, but not bounded marker
+ * validation or the empty-batch dirty-status check.
  */
 
 import { types } from "node:util";
@@ -21,6 +22,7 @@ import type {
   SyncCoordinatorResult,
   SyncExecutor,
   SyncExecutorResult,
+  SyncUploadPolicy,
 } from "./notesnook-sync-coordinator.js";
 
 export type LiveRemoteSyncEnsureOpen = () => void;
@@ -62,16 +64,15 @@ function boundedAttempts(value: unknown): value is number {
 const MAX_GATED_MARKERS = 64;
 
 /**
- * True only when `request.pending` is a bounded array of markers that are each
- * `origin: "mcp"`, or `"operator"`/`"unknown"` with `approved === true`. An
- * empty batch passes only when the database reports no unsynced changes.
- * Everything else is false, so the gate fails closed: a
- * missing or malformed request, a non-array `pending`, a batch over the cap, a
- * non-record marker, an unapproved operator or unknown marker (including any
- * `approved` that is not the boolean `true`), an absent origin, and a value
- * outside the closed set even if marked approved. Reads are own data
- * properties only, so a getter, a prototype-supplied field or a hostile Proxy
- * trap is never trusted or invoked.
+ * True only when `request.pending` is a bounded array of structurally valid
+ * markers. By default each marker must be `origin: "mcp"`, or
+ * `"operator"`/`"unknown"` with `approved === true`; `upload: "allow"` bypasses
+ * that approval check. An empty batch passes only when the database reports no
+ * unsynced changes.
+ * The approval check stays in effect for missing or non-`allow` policy values;
+ * unknown origins fail even under `allow`. Reads are own data properties only,
+ * so a getter, a prototype-supplied field or a hostile Proxy trap is never
+ * trusted or invoked.
  */
 async function pendingIsReleasable(
   request: unknown,
@@ -93,17 +94,14 @@ async function pendingIsReleasable(
     if (length === 0) {
       return hasUnsyncedChanges !== undefined && (await hasUnsyncedChanges()) === false;
     }
+    const allowUnattributed = readOwnData(request, "upload") === "allow";
     for (let index = 0; index < length; index++) {
       const marker = readOwnData(pending, String(index));
       if (!isRecord(marker)) return false;
       const origin = readOwnData(marker, "origin");
-      if (origin === "mcp") continue;
-      if (
-        (origin !== "operator" && origin !== "unknown") ||
-        readOwnData(marker, "approved") !== true
-      ) {
-        return false;
-      }
+      if (origin !== "mcp" && origin !== "operator" && origin !== "unknown") return false;
+      if (allowUnattributed || origin === "mcp") continue;
+      if (readOwnData(marker, "approved") !== true) return false;
     }
     return true;
   } catch {
@@ -320,7 +318,7 @@ function readOptionalRetryAfterMs(record: object): number | undefined {
 
 /** A separately named explicit remote-sync capability. */
 export interface NotesnookLiveRemoteSyncCapability {
-  readonly requestSync: () => Promise<SyncCoordinatorResult>;
+  readonly requestSync: (upload?: SyncUploadPolicy) => Promise<SyncCoordinatorResult>;
 }
 
 /**
@@ -336,7 +334,7 @@ export interface NotesnookLiveRemoteSyncCapability {
  * concurrent remote drains but does not serialise against mutations.
  */
 export function createLiveRemoteSyncCapability(
-  requestSync: () => Promise<SyncCoordinatorResult>,
+  requestSync: (upload?: SyncUploadPolicy) => Promise<SyncCoordinatorResult>,
   ensureOpen: LiveRemoteSyncEnsureOpen,
   database?: object,
 ): NotesnookLiveRemoteSyncCapability {
@@ -350,10 +348,10 @@ export function createLiveRemoteSyncCapability(
     failInvalidInput();
   }
   return Object.freeze({
-    requestSync: async () => {
+    requestSync: async (upload?: SyncUploadPolicy) => {
       try {
         ensureOpen();
-        const run = () => requestSync().then(normalizeCoordinatorResult);
+        const run = () => requestSync(upload).then(normalizeCoordinatorResult);
         const result =
           database === undefined ? await run() : await withMutex(database, "remote:sync", run);
         return result;

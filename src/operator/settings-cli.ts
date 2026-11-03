@@ -62,6 +62,7 @@ const SAFE_SUBPROCESS_ENV = new Set([
 ]);
 const DEFAULT_SETTINGS: SettingsFile = Object.freeze({
   version: 1,
+  upload: "attributed",
   defaults: Object.freeze({ read: true, edit: false, create: false, delete: false }),
   overrides: Object.freeze([]),
 });

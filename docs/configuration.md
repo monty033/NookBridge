@@ -33,4 +33,8 @@ Generic systemd installations use the supplied root-owned JSON file and mark
 the service configuration as CLI-managed. The root operator can inspect,
 validate, edit, or reset that file through `nookctl settings`; ordinary users
 must not be granted access to it. See `nookctl settings help` for the installed
-binary's exact behavior.
+binary's exact behavior. An optional root-level `"upload"` key accepts
+`"attributed"` (the default) or `"allow"`; `"allow"` lets sync release queued
+changes that are not attributable to the MCP writer, and because Notesnook syncs
+the vault as a whole, it may upload queued changes in notebooks outside the
+settings policy's scope.

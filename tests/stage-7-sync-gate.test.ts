@@ -4,8 +4,8 @@
  * `createProductionServiceRuntime` over a fake real-core database, a temp state
  * directory and a temp credentials directory (the S7a-5 pattern). One shared
  * coordinator holds the markers: an MCP write is tagged `mcp`, an operator
- * write `operator`. An explicit sync may reach the upstream `syncer.start` only
- * when every pending marker is `mcp` (DR-S7a item 5).
+ * write `operator`. An explicit sync reaches `syncer.start` only when its
+ * daemon upload policy allows the pending markers (DR-S7a item 5).
  *
  * Fully offline. No network, no live Notesnook state, no real daemon state.
  */
@@ -17,12 +17,17 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  bindServiceRuntimeSyncUploadPolicy,
   createProductionServiceRuntime,
   type ServiceRuntime,
 } from "../src/service/service-runtime.js";
+import { startNookd, type NookdStartupFactories } from "../src/nookd.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { RPC_ERROR_MESSAGES, type RpcRequest } from "../src/service/rpc-protocol.js";
+import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/service-config.js";
+import type { SecureKeyStore } from "../src/keystore/keystore.js";
+import type { StartNookdServerOptions } from "../src/service/nookd-server.js";
 import { createSystemdCredentialKeyStore } from "../src/keystore/systemd-credential-keystore.js";
 import {
   markRealCoreModule,
@@ -36,6 +41,7 @@ const EXISTING_DATE_EDITED = 1_700_000_000_000;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 // ---------------------------------------------------------------------------
@@ -183,6 +189,7 @@ function createFakeDatabase(syncStart: ReturnType<typeof vi.fn>): Record<string,
 interface Harness {
   readonly runtime: ServiceRuntime;
   readonly syncStart: ReturnType<typeof vi.fn>;
+  readonly credentialsDir: string;
 }
 
 async function withProductionRuntime(
@@ -215,7 +222,7 @@ async function withProductionRuntime(
   let runtime: ServiceRuntime | undefined;
   try {
     runtime = await createProductionServiceRuntime({ stateDir, keys, injectedModule });
-    await body({ runtime, syncStart });
+    await body({ runtime, syncStart, credentialsDir });
   } finally {
     if (runtime) await runtime.cleanup();
     rmSync(stateDir, { recursive: true, force: true });
@@ -280,7 +287,36 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
     });
   });
 
-  it("9c. an MCP write does not launder an operator marker on the same note", async () => {
+  it("9c. a caller-supplied requestSync argument cannot release an unattributed queue", async () => {
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      await operatorWrite(runtime);
+
+      const requestSyncWithExtraArgument = runtime.requestSync as unknown as (
+        policy: "allow",
+      ) => ReturnType<NonNullable<ServiceRuntime["requestSync"]>>;
+      await expect(requestSyncWithExtraArgument("allow")).resolves.toMatchObject({
+        status: "failed",
+        errorCode: "unapproved_pending",
+      });
+      expect(syncStart).not.toHaveBeenCalled();
+    });
+  });
+
+  it("9c2. the first policy binding wins and a second binding is refused", async () => {
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      await operatorWrite(runtime);
+
+      expect(bindServiceRuntimeSyncUploadPolicy(runtime, "allow")).toBe(true);
+      expect(bindServiceRuntimeSyncUploadPolicy(runtime, "attributed")).toBe(false);
+      await expect(runtime.requestSync!()).resolves.toMatchObject({
+        status: "synced",
+        pendingSync: false,
+      });
+      expect(syncStart).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("9d. an MCP write does not launder an operator marker on the same note", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
       await operatorWrite(runtime);
       await runtime.updateNote!({
@@ -299,7 +335,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
     });
   });
 
-  it("10. an MCP-only queue still syncs, with exactly { type: 'full' }", async () => {
+  it("10. an MCP-only queue syncs under the default policy with exactly { type: 'full' }", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
       await runtime.createNote!({ title: "From MCP", content: "body" });
 
@@ -311,7 +347,83 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
     });
   });
 
-  it("11. over RPC, notes.sync after an operator write is the unapproved_pending envelope", async () => {
+  it("11. the RPC handler uses the runtime's bound daemon policy", async () => {
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      await operatorWrite(runtime);
+      expect(bindServiceRuntimeSyncUploadPolicy(runtime, "allow")).toBe(true);
+
+      const response = await rpcSync(runtime);
+
+      expect(response.ok).toBe(true);
+      expect(syncStart).toHaveBeenCalledTimes(1);
+      expect(syncStart).toHaveBeenCalledWith({ type: "full" });
+    });
+  });
+
+  it("11b. nookd binds loaded settings before exposing requestSync to RPC", async () => {
+    await withProductionRuntime(async ({ runtime, syncStart, credentialsDir }) => {
+      await operatorWrite(runtime);
+      vi.stubEnv("CREDENTIALS_DIRECTORY", credentialsDir);
+
+      const config: ServiceConfig = Object.freeze({
+        stateDir: "/var/lib/nookbridge",
+        socketPath: "/run/nookbridge/nookbridge.sock",
+        socketGroup: "nookbridge-clients",
+        backend: "systemd-credential",
+        credentialName: "nookbridge-db-key",
+        settingsBackend: "nix",
+        readPolicy: Object.freeze(["notes.search", "notes.sync"] as const),
+      });
+      let databaseKeyReads = 0;
+      const keys: SecureKeyStore = Object.freeze({
+        backend: "systemd-credential",
+        productionSafe: true,
+        getDatabaseKey: () => {
+          databaseKeyReads += 1;
+          if (databaseKeyReads > 1) throw new Error("test key unavailable");
+          return "daemon-test-key";
+        },
+      });
+      const settingsText = JSON.stringify({
+        version: 1,
+        upload: "allow",
+        defaults: { read: true, edit: false, create: false, delete: false },
+        overrides: [],
+      });
+      let serverRuntime: StartNookdServerOptions["runtime"] | undefined;
+      const factories: NookdStartupFactories = {
+        loadConfig: vi.fn((): LoadServiceConfigResult => ({ ok: true, config })),
+        createKeyStore: vi.fn(() => keys),
+        createRuntime: vi.fn(async () => runtime),
+        readSettingsFile: vi.fn(() => settingsText),
+        startServer: vi.fn(async (options) => {
+          serverRuntime = options.runtime;
+          return Object.freeze({
+            socketPath: config.socketPath,
+            shutdown: async () => undefined,
+            close: async () => undefined,
+          });
+        }),
+      };
+
+      const handle = await startNookd({ configPath: "/etc/nookbridge/service.json", factories });
+      try {
+        expect(serverRuntime).not.toHaveProperty("syncUploadPolicy");
+        const response = await handleRpcRequest(
+          { id: "sync-1", method: "notes.sync", params: {} } as RpcRequest,
+          serverRuntime!,
+          createReadWriteNoDeleteServicePolicy(),
+        );
+        expect(response.ok).toBe(true);
+        expect(syncStart).toHaveBeenCalledTimes(1);
+        expect(syncStart).toHaveBeenCalledWith({ type: "full" });
+      } finally {
+        await handle.shutdown();
+      }
+    });
+  });
+
+  it("12. over RPC, notes.sync after an operator write is the unapproved_pending envelope", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
       await operatorWrite(runtime);
 
@@ -336,7 +448,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
     });
   });
 
-  it("12. MCP-only markers with a failing upstream start stay sync_failed", async () => {
+  it("13. MCP-only markers with a failing upstream start stay sync_failed", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
       syncStart.mockResolvedValue(false);
       await runtime.createNote!({ title: "From MCP", content: "body" });

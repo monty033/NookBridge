@@ -52,6 +52,14 @@ const reflectOwnKeys = Reflect.ownKeys;
  */
 export const SETTINGS_SCHEMA_VERSION = 1 as const;
 
+/** Vault-wide policy for releasing pending sync markers. */
+export type SettingsUploadPolicy = "attributed" | "allow";
+
+/** Narrow an arbitrary value to the closed upload-policy vocabulary. */
+export function isSettingsUploadPolicy(value: unknown): value is SettingsUploadPolicy {
+  return value === "attributed" || value === "allow";
+}
+
 // ---------------------------------------------------------------------------
 // Operation vocabulary.
 // ---------------------------------------------------------------------------
@@ -203,13 +211,15 @@ export type SettingsOverride = Readonly<{
 
 /**
  * The closed settings file shape.  `version` is the literal `1`
- * (matching `SETTINGS_SCHEMA_VERSION`); `defaults` is the closed
- * `SettingsDefaults` record; `overrides` is the read-only list of
- * `SettingsOverride` entries.  Every field is `Readonly` so the
- * loaded file is immutable once the loader hands it back.
+ * (matching `SETTINGS_SCHEMA_VERSION`); `upload` is the normalized vault-wide
+ * upload policy (the loader defaults an absent key to `"attributed"`);
+ * `defaults` is the closed `SettingsDefaults` record; `overrides` is the
+ * read-only list of `SettingsOverride` entries. Every field is `Readonly` so
+ * the loaded file is immutable once the loader hands it back.
  */
 export type SettingsFile = Readonly<{
   version: 1;
+  upload: SettingsUploadPolicy;
   defaults: SettingsDefaults;
   overrides: readonly SettingsOverride[];
 }>;

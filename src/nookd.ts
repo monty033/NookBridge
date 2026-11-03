@@ -32,6 +32,7 @@ import {
 } from "./keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "./keystore/keystore.js";
 import {
+  bindServiceRuntimeSyncUploadPolicy,
   createProductionServiceRuntime,
   type CreateProductionServiceRuntimeOptions,
   type ServiceRuntime,
@@ -484,6 +485,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           typeof capturedOperatorUploadApproval.approvePending !== "function" ||
           typeof capturedOperatorUploadApproval.blockingSummary !== "function"))
     ) {
+      throw new Error("invalid service runtime");
+    }
+    const syncPolicyBound = bindServiceRuntimeSyncUploadPolicy(runtime, settings.upload);
+    if (capturedRequestSync !== undefined && !syncPolicyBound) {
       throw new Error("invalid service runtime");
     }
     readOnly = capturedReadOnly;

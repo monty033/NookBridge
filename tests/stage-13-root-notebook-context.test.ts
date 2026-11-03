@@ -26,7 +26,7 @@ type Override = {
 const file = (
   overrides: readonly Override[],
   defaults = { read: false, edit: false, create: false, delete: false },
-): SettingsFile => ({ version: 1, defaults, overrides });
+): SettingsFile => ({ version: 1, upload: "attributed", defaults, overrides });
 
 const evaluator = (settings: SettingsFile) =>
   createSettingsEvaluator(settings, buildNotebookIndex([]));

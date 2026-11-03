@@ -51,6 +51,7 @@ import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookRealCoreModule } from "../core/notesnook-core-adapter.js";
+import type { SyncUploadPolicy } from "../core/notesnook-sync-coordinator.js";
 import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
@@ -199,6 +200,22 @@ export interface ServiceRuntime {
    * categorical `service_unavailable`-style error.
    */
   readonly cleanup: () => Promise<void>;
+}
+
+type ServiceRuntimeSyncPolicyBinder = (policy: SyncUploadPolicy) => boolean;
+
+const serviceRuntimeSyncPolicyBinders = new WeakMap<object, ServiceRuntimeSyncPolicyBinder>();
+
+/**
+ * Internal daemon seam. The runtime instance does not expose a policy setter;
+ * the first daemon binding wins, and later attempts are refused.
+ * This helper is deliberately omitted from the package's public index.
+ */
+export function bindServiceRuntimeSyncUploadPolicy(
+  runtime: object,
+  policy: SyncUploadPolicy,
+): boolean {
+  return serviceRuntimeSyncPolicyBinders.get(runtime)?.(policy) ?? false;
 }
 
 /**
@@ -693,6 +710,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         });
 
   const remoteSync = core.handle.remoteSync;
+  let syncUploadPolicy: SyncUploadPolicy = "attributed";
+  let syncUploadPolicyBound = false;
   const requestSync =
     remoteSync === undefined
       ? undefined
@@ -705,13 +724,13 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         > => {
           if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
           try {
-            return await remoteSync.requestSync();
+            return await remoteSync.requestSync(syncUploadPolicy);
           } catch {
             throw serviceRuntimeError("service runtime sync failed");
           }
         };
 
-  return Object.freeze({
+  const runtime = Object.freeze({
     readOnly,
     search,
     status,
@@ -731,6 +750,13 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,
   });
+  serviceRuntimeSyncPolicyBinders.set(runtime, (policy) => {
+    if (syncUploadPolicyBound) return false;
+    syncUploadPolicy = policy;
+    syncUploadPolicyBound = true;
+    return true;
+  });
+  return runtime;
 }
 
 function unavailableContentDiagnostic(): NotesnookReadOnlyContentDiagnostic {

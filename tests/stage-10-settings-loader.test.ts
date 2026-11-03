@@ -65,7 +65,8 @@ describe("settings loader — canonical schema", () => {
     };
 
     const loaded = loadSettings(input);
-    expect(loaded).toEqual(input);
+    expect(loaded).toEqual({ ...input, upload: "attributed" });
+    expect(loaded.upload).toBe("attributed");
     expect(Object.isFrozen(loaded)).toBe(true);
     expect(Object.isFrozen(loaded.defaults)).toBe(true);
     expect(Object.isFrozen(loaded.overrides)).toBe(true);
@@ -87,6 +88,52 @@ describe("settings loader — canonical schema", () => {
     const loaded = loadSettings(input);
     expect(loaded.overrides).toEqual([]);
     expect(Object.isFrozen(loaded.overrides)).toBe(true);
+  });
+
+  it('accepts and round-trips the root-level "allow" upload policy', () => {
+    const input = {
+      version: 1,
+      upload: "allow",
+      defaults: {
+        read: true,
+        edit: false,
+        create: false,
+        delete: false,
+      },
+      overrides: [],
+    };
+    const loaded = loadSettings(input);
+    expect(loaded).toEqual(input);
+    expect(loadSettings(JSON.parse(JSON.stringify(loaded)) as unknown)).toEqual(input);
+  });
+
+  it('accepts the explicit "attributed" upload policy', () => {
+    const loaded = loadSettings({
+      version: 1,
+      upload: "attributed",
+      defaults: { read: true, edit: false, create: false, delete: false },
+      overrides: [],
+    });
+    expect(loaded.upload).toBe("attributed");
+  });
+
+  it.each([
+    ["a different string", "deny"],
+    ["a number", 42],
+    ["null", null],
+    ["an array", []],
+    ["an object", {}],
+    ["false", false],
+    ["explicit undefined", undefined],
+  ])("rejects upload when it is %s", (_label, upload) => {
+    expect(() =>
+      loadSettings({
+        version: 1,
+        upload,
+        defaults: { read: true, edit: false, create: false, delete: false },
+        overrides: [],
+      }),
+    ).toThrow(new SettingsLoadError());
   });
 
   it("rejects a non-object input (primitive, null, array)", () => {

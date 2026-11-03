@@ -620,8 +620,8 @@ describe("Stage 4 shared coordinator and write sync command", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S7a-4 — upload gate (DR-S7a item 5): only an all-`mcp` batch may reach the
-// pinned `{ type: "full" }` upstream call.
+// S7a-4 — upload gate (DR-S7a item 5): the configured upload policy decides
+// which bounded marker batches may reach the pinned `{ type: "full" }` call.
 // ---------------------------------------------------------------------------
 
 describe("S7a-4 — live executor upload gate", () => {
@@ -647,7 +647,7 @@ describe("S7a-4 — live executor upload gate", () => {
     );
     const run = (request: unknown) =>
       (executor as unknown as (request: unknown) => Promise<unknown>)(request);
-    return { starts, run };
+    return { starts, run, executor };
   }
 
   const REFUSED = { status: "refused", reason: "unapproved_pending" };
@@ -664,6 +664,52 @@ describe("S7a-4 — live executor upload gate", () => {
       status: "confirmed",
     });
     expect(starts).toEqual([{ type: "full" }]);
+  });
+
+  it("2b. MCP-only queues sync with either upload policy", async () => {
+    for (const upload of ["attributed", "allow"] as const) {
+      const { starts, run } = gated();
+      await expect(run({ upload, pending: [marker(1, "mcp")] })).resolves.toEqual({
+        status: "confirmed",
+      });
+      expect(starts).toEqual([{ type: "full" }]);
+    }
+  });
+
+  it('2c. "allow" releases a structurally valid unattributed queue', async () => {
+    const { starts, run } = gated();
+    await expect(run({ upload: "allow", pending: [marker(1, "unknown")] })).resolves.toEqual({
+      status: "confirmed",
+    });
+    expect(starts).toEqual([{ type: "full" }]);
+  });
+
+  it.each([
+    ["attributed", { upload: "attributed" }],
+    ["absent", {}],
+  ] as const)("2d. %s keeps the unattributed queue refused", async (_label, policy) => {
+    const { starts, run } = gated();
+    await expect(run({ ...policy, pending: [marker(1, "operator")] })).resolves.toEqual(REFUSED);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("2e. coordinator refusal leaves the unattributed marker unapproved", async () => {
+    const { starts, executor } = gated();
+    const coordinator = new SyncCoordinator({ executor, minIntervalMs: 0 });
+    coordinator.recordLocalCommit(commit());
+
+    await expect(coordinator.requestSync("attributed")).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "unapproved_pending",
+    });
+    expect(coordinator.snapshot().pending[0]?.approved).toBeUndefined();
+
+    await expect(coordinator.requestSync()).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "unapproved_pending",
+    });
+    expect(coordinator.snapshot().pending[0]?.approved).toBeUndefined();
+    expect(starts).toHaveLength(0);
   });
 
   it("3. one operator marker among mcp markers refuses without calling start", async () => {

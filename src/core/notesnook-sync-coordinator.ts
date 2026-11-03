@@ -54,6 +54,9 @@ export type SyncLocalCommit = Readonly<{
  */
 export type SyncOrigin = "mcp" | "operator" | "unknown";
 
+/** Vault-wide policy supplied by the daemon for one explicit sync request. */
+export type SyncUploadPolicy = "attributed" | "allow";
+
 /** Durable queue marker. It contains no body, record, credential, or path. */
 export type SyncPendingMarker = Readonly<{
   readonly operation: SyncOperation;
@@ -101,6 +104,7 @@ export interface SyncMetadataStateStore {
 /** Request sent to the injected synchronization policy. */
 export type SyncExecutorRequest = Readonly<{
   readonly pending: readonly SyncPendingMarker[];
+  readonly upload?: SyncUploadPolicy;
 }>;
 
 /**
@@ -568,11 +572,11 @@ export class SyncCoordinator {
    * remainder first (R3), so repeated requests cannot drive upstream faster
    * than `minIntervalMs` and any server Retry-After.
    */
-  requestSync(): Promise<SyncCoordinatorResult> {
+  requestSync(upload?: SyncUploadPolicy): Promise<SyncCoordinatorResult> {
     const inFlight = this.#inFlight;
     if (inFlight !== undefined) return inFlight;
 
-    const flight = this.#drain();
+    const flight = this.#drain(upload);
     this.#inFlight = flight;
     void flight.then(
       () => this.#clearFlight(flight),
@@ -581,7 +585,7 @@ export class SyncCoordinator {
     return flight;
   }
 
-  async #drain(): Promise<SyncCoordinatorResult> {
+  async #drain(upload?: SyncUploadPolicy): Promise<SyncCoordinatorResult> {
     const startedAt = safeNow(this.#now);
     const batch = Object.freeze(this.#pending.map(copyMarker));
     const localCommitted = batch.length > 0;
@@ -591,7 +595,7 @@ export class SyncCoordinator {
         const slept = await this.#wait(gap);
         if (!slept) return failedResult(1, startedAt, localCommitted, this.#pending.length > 0);
       }
-      return await this.#runAttempts(startedAt, batch, localCommitted);
+      return await this.#runAttempts(startedAt, batch, localCommitted, upload);
     } finally {
       this.#extendHold(this.#minIntervalMs);
     }
@@ -601,12 +605,16 @@ export class SyncCoordinator {
     startedAt: number,
     batch: readonly SyncPendingMarker[],
     localCommitted: boolean,
+    upload?: SyncUploadPolicy,
   ): Promise<SyncCoordinatorResult> {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt++) {
       let response: SyncExecutorResult;
       try {
         const raw = Reflect.apply(this.#executor, undefined, [
-          Object.freeze({ pending: batch }),
+          Object.freeze({
+            pending: batch,
+            ...(upload === "allow" || upload === "attributed" ? { upload } : {}),
+          }),
         ]) as unknown;
         response = (await raw) as SyncExecutorResult;
       } catch {
