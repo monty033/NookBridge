@@ -331,6 +331,9 @@ export async function handleRpcRequest<T extends RpcRequest>(
         const authorization = authorizeServiceMethod(policy, "notes.get", context);
         if (!authorization.allowed)
           return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        const snapshot = await notebookPaths();
+        if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT)
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         const resolution = await resolveNotesGetPath(structural.request.params, runtime);
         if (!resolution.ok)
           return buildErrorEnvelope(id, resolution.code) as unknown as RpcHandlerResponse<T>;
@@ -341,8 +344,11 @@ export async function handleRpcRequest<T extends RpcRequest>(
         const actual = await resolveNoteSettingsContext(resolution.id, runtime, notebookPaths);
         if (!actual.ok)
           return buildErrorEnvelope(id, actual.code) as unknown as RpcHandlerResponse<T>;
-        if (!authorizeEveryContext(policy, "notes.get", actual.contexts))
-          return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
+        if (!authorizeEveryContext(policy, "notes.get", actual.contexts)) {
+          // The claimed path passed. Match a missing path's envelope; the
+          // resolved metadata and membership probes can still take longer.
+          return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
+        }
         const pathRequest = objectCreate(null) as Record<string, unknown>;
         pathRequest.id = id;
         pathRequest.method = "notes.get";
@@ -385,6 +391,9 @@ export async function handleRpcRequest<T extends RpcRequest>(
         if (!authorization.allowed) {
           return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
         }
+        const snapshot = await notebookPaths();
+        if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT)
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         return (await runNotesDelete(
           structural.request,
           runtime,
@@ -394,10 +403,13 @@ export async function handleRpcRequest<T extends RpcRequest>(
           // notebook it is attached to, before anything is mutated.
           async (noteId) => {
             const actual = await resolveNoteSettingsContext(noteId, runtime, notebookPaths);
-            if (!actual.ok) return actual.code === "service_unavailable" ? "unavailable" : "deny";
+            if (!actual.ok)
+              return actual.code === "service_unavailable" ? "unavailable" : "not_found";
+            // Refusal matches a missing path's envelope. Resolving the note and
+            // checking its metadata and membership can still take longer.
             return authorizeEveryContext(policy, "notes.delete", actual.contexts)
               ? "allow"
-              : "deny";
+              : "not_found";
           },
         )) as unknown as RpcHandlerResponse<T>;
       }
@@ -429,6 +441,9 @@ export async function handleRpcRequest<T extends RpcRequest>(
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
         }
+        const snapshot = await notebookPaths();
+        if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT)
+          return buildErrorEnvelope(id, "service_unavailable") as unknown as RpcHandlerResponse<T>;
         let resolution: ExactNotePathResolution;
         try {
           resolution = await reflectApply(resolver, runtime, [target]);
@@ -440,16 +455,12 @@ export async function handleRpcRequest<T extends RpcRequest>(
         }
         const actual = await resolveNoteSettingsContext(resolution.id, runtime, notebookPaths);
         if (!actual.ok)
-          return buildErrorEnvelope(
-            id,
-            idFormRefusalCode(actual.code),
-          ) as unknown as RpcHandlerResponse<T>;
+          return buildErrorEnvelope(id, actual.code) as unknown as RpcHandlerResponse<T>;
         for (const method of ["notes.get", "notes.update", "notes.delete"] as const) {
           if (!authorizeEveryContext(policy, method, actual.contexts)) {
-            // The claimed path passed. Hide a denied cross-listed note as the
-            // resolver hides a missing note: refusal is indistinguishable by
-            // status and side effects, not elapsed time. The membership and
-            // policy checks do more work than a missing-note lookup.
+            // The claimed path passed. Refusal matches a missing path by
+            // status and side effects, not elapsed time: membership and policy
+            // checks do more work than a missing-note lookup.
             return buildErrorEnvelope(id, "not_found") as unknown as RpcHandlerResponse<T>;
           }
         }
@@ -1018,11 +1029,11 @@ type SettingsContextResolution =
 
 /**
  * An id-form request reaches the policy only after the note is looked up, so
- * `not_found` here would tell a caller whether an id exists before any
- * authorization.  Both a missing note and a denied one answer
- * `permission_denied`.  `service_unavailable` is left unchanged: it is an
- * outage signal, though an existing note with malformed metadata can still
- * produce it where a missing id cannot.
+ * a note-specific `not_found` would tell a caller whether an id exists before
+ * authorization. Every note lookup refusal becomes `permission_denied`;
+ * only the daemon-wide notebook snapshot and a missing lookup capability stay
+ * `service_unavailable`. Refused requests have no side effects, while elapsed
+ * time can still differ because a found note needs membership probes.
  */
 function idFormRefusalCode(
   code: "not_found" | "service_unavailable",
@@ -1035,6 +1046,16 @@ async function resolveNoteSettingsContext(
   runtime: RpcHandlerRuntimeLike,
   notebookPaths: NotebookPathSource,
 ): Promise<SettingsContextResolution> {
+  // The notebook hierarchy is daemon-wide state, so it is resolved before the
+  // note is looked up.  An unavailable snapshot then answers the same way for
+  // every id-form request -- an existing note and an unknown one alike -- and
+  // keeps `service_unavailable` meaning "retry", instead of turning an outage
+  // into a refusal whose shape depends on whether the note exists.
+  const snapshot = await notebookPaths();
+  if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT) {
+    return { ok: false, code: "service_unavailable" };
+  }
+
   const fn = readRuntimeMethod(runtime, "noteMetadata");
   if (fn === undefined) return { ok: false, code: "service_unavailable" };
 
@@ -1042,11 +1063,18 @@ async function resolveNoteSettingsContext(
   try {
     raw = await reflectApply(fn, runtime, [noteId]);
   } catch {
-    return { ok: false, code: "service_unavailable" };
+    // The production runtime wraps every read-only metadata lookup failure
+    // generically (`service-runtime.ts`), so this handler cannot distinguish a
+    // per-note failure from a daemon-wide one. Refusing both like a missing
+    // note is the deliberate trade: a transient lookup failure becomes
+    // indistinguishable from an absent note on this route. An oracle that
+    // answers "this id exists" is the worse of the two.
+    return { ok: false, code: "not_found" };
   }
   if (raw === undefined) return { ok: false, code: "not_found" };
   const note = normaliseNoteMetadata(raw);
-  if (note === undefined) return { ok: false, code: "service_unavailable" };
+  // A malformed record is refused like a missing note.
+  if (note === undefined) return { ok: false, code: "not_found" };
 
   const rawRecord = raw as Record<string, unknown>;
   const noteTitle = readOwnStringField(note, "title");
@@ -1056,7 +1084,7 @@ async function resolveNoteSettingsContext(
   // stays supported for metadata that only ever carried one; a present but
   // malformed set is a refusal, never a reason to fall back to it.
   const enumerated = readOwnIdArrayField(rawRecord, "notebookIds");
-  if (enumerated.kind === "invalid") return { ok: false, code: "service_unavailable" };
+  if (enumerated.kind === "invalid") return { ok: false, code: "not_found" };
   const singleNotebookId = readOwnStringField(note, "notebookId");
   const notebookIds =
     enumerated.kind === "present"
@@ -1081,12 +1109,7 @@ async function resolveNoteSettingsContext(
   // Fail closed when the enumeration could not be trusted as the whole set:
   // authorizing over a partial set silently skips a denied notebook.
   if (readOwnBooleanField(rawRecord, "notebookMembershipComplete") === false) {
-    return { ok: false, code: "service_unavailable" };
-  }
-
-  const snapshot = await notebookPaths();
-  if (snapshot === UNAVAILABLE_NOTEBOOK_SNAPSHOT) {
-    return { ok: false, code: "service_unavailable" };
+    return { ok: false, code: "not_found" };
   }
 
   const contexts: ServicePolicySettingsContext[] = [];
@@ -1450,7 +1473,7 @@ async function runNotesDelete(
   request: RpcNotesDeleteRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
-  authorizeResolved?: (noteId: string) => Promise<"allow" | "deny" | "unavailable">,
+  authorizeResolved?: (noteId: string) => Promise<"allow" | "not_found" | "unavailable">,
 ): Promise<RpcAnyResponseEnvelope> {
   const fn = readRuntimeMethod(runtime, "deleteNote");
   const resolvePath = readRuntimeMethod(runtime, "resolveNotePath");
@@ -1472,7 +1495,7 @@ async function runNotesDelete(
   }
   if (authorizeResolved !== undefined) {
     const verdict = await authorizeResolved(resolution.id);
-    if (verdict === "deny") return buildErrorEnvelope(id, "permission_denied");
+    if (verdict === "not_found") return buildErrorEnvelope(id, "not_found");
     if (verdict === "unavailable") return buildErrorEnvelope(id, "service_unavailable");
   }
   const commandRecord = objectCreate(null) as Record<string, unknown>;
@@ -1839,6 +1862,11 @@ async function resolveNotesGetPath(
   runtime: RpcHandlerRuntimeLike,
 ): Promise<{ ok: true; id: string } | { ok: false; code: RpcErrorCode }> {
   const resolver = readRuntimeMethod(runtime, "resolveNotePath");
+  // The production runtime omits this capability when the shared title-index
+  // or strict-hierarchy prerequisite is unavailable. On the settings-evaluated
+  // route the notebook snapshot has already been taken before this point; on
+  // the direct-policy route it has not, so treat this as daemon-wide either
+  // way.
   if (resolver === undefined) return { ok: false, code: "service_unavailable" };
   let resolution: ExactNotePathResolution;
   try {
@@ -1850,6 +1878,26 @@ async function resolveNotesGetPath(
       if (error.code === "ambiguous" || error.code === "invalid_path")
         return { ok: false, code: "invalid_request" };
     }
+    // Residual, and deliberately not closed here: where a title with no
+    // candidate at all is `not_found`, several candidate-dependent failures
+    // answer `service_unavailable` instead. A candidate record that cannot be
+    // read, a membership probe that throws or returns something invalid, and a
+    // fallback notebook enumeration that fails all arrive here as
+    // `source_unavailable`. The notebook hierarchy the resolver fetches again
+    // after it has found candidates arrives by another route -- the preflight
+    // check above covers only the fetch made before the path is resolved, so a
+    // first fetch that succeeds and a second that fails propagates a generic
+    // error -- and lands on the same answer. Either way it tells the caller
+    // its title produced candidates; it does not tell it a note exists at the
+    // path asked for, and it selects and mutates nothing.
+    //
+    // Skipping an unverified candidate is not safe in general. Where several
+    // candidates compete, dropping the one that could not be verified lets a
+    // surviving candidate be treated as unique, so a path the resolver would
+    // call ambiguous can resolve to the wrong note and then be read or
+    // deleted. It would be safe only for the authoritative read the resolver
+    // performs once it has established exactly one candidate, which is a
+    // narrower change than this one; until then the difference stays.
     return { ok: false, code: "service_unavailable" };
   }
   if (typeof resolution?.id !== "string" || resolution.id.length === 0)
@@ -1882,11 +1930,15 @@ async function runNotesGet(
     try {
       raw = await reflectApply(fn, runtime, [noteId]);
     } catch {
-      return buildErrorEnvelope(id, "service_unavailable");
+      // The production runtime wraps note lookup failures generically, so a
+      // failed read is indistinguishable here from an absent note. Keep the
+      // refusal identical rather than exposing an existence oracle; the cost
+      // is that on this route a transient failure reads as a missing note.
+      return buildErrorEnvelope(id, "not_found");
     }
     if (raw === undefined) return buildErrorEnvelope(id, "not_found");
     note = normaliseNoteMetadata(raw);
-    if (note === undefined) return buildErrorEnvelope(id, "service_unavailable");
+    if (note === undefined) return buildErrorEnvelope(id, "not_found");
   }
   const { contentStatus, contentReason, markdown, markdownBytes } = await readBoundedNoteContent(
     runtime,

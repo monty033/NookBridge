@@ -95,7 +95,7 @@ describe("finding 1 — notes.delete must re-authorize the resolved note", () =>
       createCustomServicePolicy(["notes.search", "notes.get", "notes.delete"], evaluator),
     );
 
-    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(deleteNote).not.toHaveBeenCalled();
   });
 });
@@ -126,7 +126,7 @@ describe("finding 2 — deny-wins across every directly-attached notebook", () =
       createCustomServicePolicy(["notes.search", "notes.get", "notes.delete"], evaluator),
     );
 
-    expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(deleteNote).not.toHaveBeenCalled();
   });
 });
@@ -202,7 +202,7 @@ describe("membership that cannot be trusted fails closed", () => {
       createCustomServicePolicy(["notes.search", "notes.get", "notes.delete"], evaluator),
     );
 
-    expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(deleteNote).not.toHaveBeenCalled();
   });
 
@@ -229,7 +229,7 @@ describe("membership that cannot be trusted fails closed", () => {
       createCustomServicePolicy(["notes.search", "notes.get", "notes.delete"], evaluator),
     );
 
-    expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(deleteNote).not.toHaveBeenCalled();
   });
 });

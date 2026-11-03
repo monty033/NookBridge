@@ -328,6 +328,312 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(JSON.stringify(response)).not.toContain("note-1");
   });
 
+  describe("id-form refusal uniformity", () => {
+    const makeContentReader = () => vi.fn(async () => ({ type: "html" as const, data: "private" }));
+
+    it("answers a malformed notebookIds set exactly like a missing id", async () => {
+      const noteMetadata = vi.fn(async (id: string) =>
+        id === "missing-note"
+          ? undefined
+          : ({
+              id,
+              title: "Confidential Roadmap",
+              notebookId: "child",
+              notebookIds: "malformed",
+            } as never),
+      );
+      const readOperatorNoteContent = makeContentReader();
+      const runtime = makeRuntime({
+        noteMetadata,
+        readOnly: { readOperatorNoteContent },
+        notebookIndex: makeIndex(),
+      });
+      const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+      const existing = await handleRpcRequest(
+        request("notes.get", { id: "known-note" }),
+        runtime,
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { id: "missing-note" }),
+        runtime,
+        policy,
+      );
+
+      expect(existing).toEqual(missing);
+      expect(existing).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+
+    it("answers an unreadable note record exactly like a missing id", async () => {
+      const noteMetadata = vi.fn(async (id: string) =>
+        id === "missing-note" ? undefined : ({ id: "", title: 42 } as never),
+      );
+      const readOperatorNoteContent = makeContentReader();
+      const runtime = makeRuntime({
+        noteMetadata,
+        readOnly: { readOperatorNoteContent },
+        notebookIndex: makeIndex(),
+      });
+      const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+      const existing = await handleRpcRequest(
+        request("notes.get", { id: "known-note" }),
+        runtime,
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { id: "missing-note" }),
+        runtime,
+        policy,
+      );
+
+      expect(existing).toEqual(missing);
+      expect(existing).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+
+    it("answers incomplete notebook membership exactly like a missing id", async () => {
+      const noteMetadata = vi.fn(async (id: string) =>
+        id === "missing-note"
+          ? undefined
+          : ({
+              id,
+              title: "Confidential Roadmap",
+              notebookId: "child",
+              notebookMembershipComplete: false,
+            } as never),
+      );
+      const readOperatorNoteContent = makeContentReader();
+      const runtime = makeRuntime({
+        noteMetadata,
+        readOnly: { readOperatorNoteContent },
+        notebookIndex: makeIndex(),
+      });
+      const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+      const existing = await handleRpcRequest(
+        request("notes.get", { id: "known-note" }),
+        runtime,
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { id: "missing-note" }),
+        runtime,
+        policy,
+      );
+
+      expect(existing).toEqual(missing);
+      expect(existing).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+
+    it("refuses capped membership like a missing id without returning note data", async () => {
+      const cappedIds = Array.from({ length: 256 }, (_, index) => `notebook-${index}`);
+      const noteMetadata = vi.fn(async (id: string) =>
+        id === "missing-note"
+          ? undefined
+          : ({
+              id,
+              title: "Confidential Roadmap",
+              notebookId: cappedIds[0],
+              notebookIds: cappedIds,
+              notebookMembershipComplete: false,
+            } as never),
+      );
+      const readOperatorNoteContent = makeContentReader();
+      const runtime = makeRuntime({
+        noteMetadata,
+        readOnly: { readOperatorNoteContent },
+        listNotebooksForSettings: async () =>
+          cappedIds.map((id, index) => ({ id, title: `Vault/Notebook ${index}` })),
+        notebookIndex: makeIndex(),
+      });
+      const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+      const existing = await handleRpcRequest(
+        request("notes.get", { id: "known-note" }),
+        runtime,
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { id: "missing-note" }),
+        runtime,
+        policy,
+      );
+      const serialized = JSON.stringify(existing);
+
+      expect(existing).toEqual(missing);
+      expect(existing).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(serialized).not.toContain("known-note");
+      expect(serialized).not.toContain("Confidential Roadmap");
+      expect(serialized).not.toContain("Vault/Notebook");
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+
+    it("answers an unavailable notebook snapshot exactly like a missing id", async () => {
+      const noteMetadata = vi.fn(async (id: string) =>
+        id === "missing-note"
+          ? undefined
+          : ({ id, title: "Confidential Roadmap", notebookId: "child" } as never),
+      );
+      const readOperatorNoteContent = makeContentReader();
+      const runtime = makeRuntime({
+        noteMetadata,
+        readOnly: { readOperatorNoteContent },
+        listNotebooksForSettings: async () => {
+          throw new Error("hierarchy unavailable");
+        },
+        notebookIndex: makeIndex(),
+      });
+      const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+      const existing = await handleRpcRequest(
+        request("notes.get", { id: "known-note" }),
+        runtime,
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { id: "missing-note" }),
+        runtime,
+        policy,
+      );
+
+      expect(existing).toEqual(missing);
+      // An outage is daemon-wide, so it is reported as one -- identically for a
+      // note that exists and an id that does not.
+      expect(existing).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("path-form refusal and snapshot uniformity", () => {
+    const path = "Personal/Projects/Roadmap";
+    const methods = [...RWND, "notes.delete", "notes.locked_note_proof"] as const;
+    const denyPrivate = (_op: SettingsOperation, ctx: ServicePolicySettingsContext) =>
+      ctx.notebookPath !== "Private";
+
+    function actualPrivateNoteRuntime(overrides: Partial<RpcHandlerRuntimeLike> = {}) {
+      return makeRuntime({
+        resolveNotePath: async () => ({ id: "private-note", expectedRevision: REVISION }),
+        noteMetadata: async (id) => ({ id, title: "Roadmap", notebookId: "secret" }),
+        listNotebooksForSettings: async () => [
+          { id: "root", title: "Personal" },
+          { id: "child", title: "Projects", parentId: "root" },
+          { id: "secret", title: "Private" },
+        ],
+        ...overrides,
+      });
+    }
+
+    it("answers a denied path-form get like a missing path", async () => {
+      const readOperatorNoteContent = vi.fn(async () => ({
+        type: "html" as const,
+        data: "private",
+      }));
+      const policy = createCustomServicePolicy(methods, makeEvaluator(denyPrivate).evaluator);
+      const denied = await handleRpcRequest(
+        request("notes.get", { path }),
+        actualPrivateNoteRuntime({ readOnly: { readOperatorNoteContent } }),
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.get", { path }),
+        makeRuntime({
+          resolveNotePath: async () => {
+            throw new ExactNotePathError("not_found");
+          },
+        }),
+        policy,
+      );
+
+      expect(denied).toEqual(missing);
+      expect(denied).toMatchObject({
+        ok: false,
+        error: { code: "not_found", message: "Not found" },
+      });
+      expect(readOperatorNoteContent).not.toHaveBeenCalled();
+    });
+
+    it("answers a denied path-form delete like a missing path without deleting the note", async () => {
+      const deleteNote = vi.fn(async () => {
+        throw new Error("denied note must not be deleted");
+      });
+      const { calls, evaluator } = makeEvaluator(denyPrivate);
+      const policy = createCustomServicePolicy(methods, evaluator);
+      const missingDeleteNote = vi.fn(async () => {
+        throw new Error("missing path must not be deleted");
+      });
+      const denied = await handleRpcRequest(
+        request("notes.delete", { path }),
+        actualPrivateNoteRuntime({ deleteNote }),
+        policy,
+      );
+      const missing = await handleRpcRequest(
+        request("notes.delete", { path }),
+        makeRuntime({
+          deleteNote: missingDeleteNote,
+          resolveNotePath: async () => {
+            throw new ExactNotePathError("not_found");
+          },
+        }),
+        policy,
+      );
+
+      expect(deleteNote).not.toHaveBeenCalled();
+      expect(calls).toEqual([
+        { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
+        { op: "delete", ctx: { notebookPath: "Private", noteTitle: "Roadmap" } },
+        { op: "delete", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
+      ]);
+      expect(denied).toEqual(missing);
+      expect(denied).toMatchObject({
+        ok: false,
+        error: { code: "not_found", message: "Not found" },
+      });
+      expect(missingDeleteNote).not.toHaveBeenCalled();
+    });
+
+    it.each(["notes.get", "notes.delete", "notes.locked_note_proof"] as const)(
+      "returns the shared snapshot outage before resolving a %s path",
+      async (method) => {
+        const policy = createCustomServicePolicy(methods, makeEvaluator(true).evaluator);
+        const pathRequest = request(method, { path });
+        const deleteNote = vi.fn(async () => {
+          throw new Error("snapshot outage must not delete a note");
+        });
+        const foundResolver = vi.fn(async () => ({
+          id: "private-note",
+          expectedRevision: REVISION,
+        }));
+        const missingResolver = vi.fn(async () => {
+          throw new ExactNotePathError("not_found");
+        });
+        const runtimeWithResolvedPath = makeRuntime({
+          deleteNote,
+          resolveNotePath: foundResolver,
+          listNotebooksForSettings: async () => {
+            throw new Error("hierarchy unavailable");
+          },
+        });
+        const runtimeWithMissingPath = makeRuntime({
+          deleteNote,
+          resolveNotePath: missingResolver,
+          listNotebooksForSettings: async () => {
+            throw new Error("hierarchy unavailable");
+          },
+        });
+        const resolved = await handleRpcRequest(pathRequest, runtimeWithResolvedPath, policy);
+        const missing = await handleRpcRequest(pathRequest, runtimeWithMissingPath, policy);
+
+        expect(resolved).toEqual(missing);
+        expect(resolved).toMatchObject({
+          ok: false,
+          error: { code: "service_unavailable", message: "Service unavailable" },
+        });
+        expect(foundResolver).not.toHaveBeenCalled();
+        expect(missingResolver).not.toHaveBeenCalled();
+        expect(deleteNote).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   it("passes exact delete path context to settings authorization before resolving or mutating", async () => {
     const { calls, evaluator } = makeEvaluator((_op, ctx) =>
       ctx.notebookPath === "Personal/Projects" && ctx.noteTitle === "Roadmap" ? false : true,
@@ -965,7 +1271,7 @@ describe("locked-note proof authorization", () => {
     },
   );
 
-  it("fails closed when the resolved settings context is unavailable", async () => {
+  it("refuses a failed resolved metadata lookup like a missing path", async () => {
     const { runtime, lockedNoteProof, readLockState, updateNote, deleteNote } = proofRuntime();
     const response = await handleRpcRequest(
       request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
@@ -977,7 +1283,21 @@ describe("locked-note proof authorization", () => {
       },
       createCustomServicePolicy(methods, makeEvaluator(true).evaluator),
     );
-    expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    const missing = await handleRpcRequest(
+      request("notes.locked_note_proof", { path: "Personal/Projects/Roadmap" }),
+      {
+        ...runtime,
+        resolveNotePath: async () => {
+          throw new ExactNotePathError("not_found");
+        },
+      },
+      createCustomServicePolicy(methods, makeEvaluator(true).evaluator),
+    );
+    expect(response).toEqual(missing);
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+    });
     expect(lockedNoteProof).not.toHaveBeenCalled();
     expect(readLockState).not.toHaveBeenCalled();
     expect(updateNote).not.toHaveBeenCalled();

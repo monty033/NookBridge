@@ -2051,7 +2051,7 @@ describe("read-only revision RPC chain", () => {
     await expect(adapter.noteMetadata("display-only-note")).resolves.not.toHaveProperty("revision");
   });
 
-  it("rejects non-string revisions at the RPC boundary", async () => {
+  it("refuses malformed revision metadata like a missing note at the RPC boundary", async () => {
     const request: RpcNotesGetRequest = {
       id: "rpc-get-invalid-revision",
       method: "notes.get",
@@ -2059,12 +2059,30 @@ describe("read-only revision RPC chain", () => {
     };
     const runtime = {
       search: async () => [],
-      noteMetadata: async () => ({ id: "note-1", title: "A note", revision: null }) as never,
+      noteMetadata: async (id: string) =>
+        id === "note-1" ? ({ id, title: "A note", revision: null } as never) : undefined,
+    };
+    const missingRequest: RpcNotesGetRequest = {
+      ...request,
+      params: { id: "not-present" },
     };
 
-    await expect(
-      handleRpcRequest(request, runtime, createReadWriteNoDeleteServicePolicy()),
-    ).resolves.toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    const malformed = await handleRpcRequest(
+      request,
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+    const missing = await handleRpcRequest(
+      missingRequest,
+      runtime,
+      createReadWriteNoDeleteServicePolicy(),
+    );
+
+    expect(malformed).toEqual(missing);
+    expect(malformed).toMatchObject({
+      ok: false,
+      error: { code: "not_found", message: "Not found" },
+    });
   });
 
   it("converts revision derivation failures into a categorical projection error", async () => {
