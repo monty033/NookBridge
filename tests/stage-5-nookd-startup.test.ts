@@ -112,7 +112,31 @@ describe("bounded nookd startup composition", () => {
     });
     expect(serverOptions?.socketPath).toBe(CONFIG.socketPath);
     expect(serverOptions?.runtime.search).toBeDefined();
+    expect(serverOptions?.runtime).not.toHaveProperty("syncUploadPolicy");
     expect(handle.socketPath).toBe(CONFIG.socketPath);
+  });
+
+  it('does not expose the loaded root-level "allow" policy on the RPC runtime', async () => {
+    vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
+    const settingsText = JSON.stringify({
+      version: 1,
+      upload: "allow",
+      defaults: { read: true, edit: false, create: false, delete: false },
+      overrides: [],
+    });
+    let serverRuntime: StartNookdServerOptions["runtime"] | undefined;
+    const factories = factoriesFixture({
+      readSettingsFile: vi.fn(() => settingsText),
+      startServer: vi.fn(async (options) => {
+        serverRuntime = options.runtime;
+        return fakeHandle();
+      }),
+    });
+
+    const handle = await startNookd({ configPath: CONFIG_PATH, factories });
+
+    expect(serverRuntime).not.toHaveProperty("syncUploadPolicy");
+    await handle.shutdown();
   });
 
   it("passes config.socketGroup and the production resolver through to startServer", async () => {

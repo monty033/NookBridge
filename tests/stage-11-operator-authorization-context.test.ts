@@ -176,6 +176,7 @@ describe("operator request lock context", () => {
     const evaluate = createSettingsEvaluator(
       {
         version: 1,
+        upload: "attributed",
         defaults: { read: true, edit: true, create: true, delete: true },
         overrides: [{ notebooks: ["<root>"], create: false }],
       },

@@ -34,6 +34,7 @@ const NOTE_TITLES: Record<string, string> = {
 
 const allowPublic: SettingsFile = {
   version: 1,
+  upload: "attributed",
   defaults: { read: false, edit: false, create: false, delete: false },
   overrides: [{ notebooks: ["Public"], read: true }],
 };
@@ -145,6 +146,7 @@ describe("discovery visibility — notes.search / operator search", () => {
   it("applies a note-title override that denies a specific note in an allowed notebook", async () => {
     const settings: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: { read: false, edit: false, create: false, delete: false },
       overrides: [
         { notebooks: ["Public"], read: true },
@@ -235,6 +237,7 @@ describe("discovery visibility — notes.search / operator search", () => {
   it("returns a root note through searchHits only with own confirmation and allowing root policy", async () => {
     const withRoot: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: { read: false, edit: false, create: false, delete: false },
       overrides: [{ notebooks: ["<root>"], read: true }],
     };
@@ -296,6 +299,7 @@ describe("discovery visibility — notes.list_notebooks / operator browse", () =
   it("keeps a confirmed root note only when root read is allowed", async () => {
     const withRoot: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: { read: false, edit: false, create: false, delete: false },
       overrides: [{ notebooks: ["<root>"], read: true }],
     };
@@ -333,6 +337,7 @@ describe("discovery visibility — read-only audit fixes", () => {
     // The denying notebook is listed first, flipping the arbitrary choice.
     const denyPublic: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: { read: false, edit: false, create: false, delete: false },
       overrides: [{ notebooks: ["Private"], read: true }],
     };
@@ -448,6 +453,7 @@ describe("discovery visibility — the live hierarchy snapshot is the only autho
     const many = Array.from({ length: 25 }, (_, i) => ({ id: `nb-${i}`, title: `Book${i}` }));
     const manyAllowed: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: { read: true, edit: false, create: false, delete: false },
       overrides: [],
     };
@@ -574,6 +580,7 @@ describe("discovery visibility — recursive membership by parentId (S2 LOW)", (
   };
   const policy = (overrides: SettingsFile["overrides"], read = false): SettingsFile => ({
     version: 1,
+    upload: "attributed",
     defaults: { read, edit: false, create: false, delete: false },
     overrides,
   });
@@ -912,6 +919,7 @@ describe("discovery visibility — recursive membership by parentId (S2 LOW)", (
 describe("discovery visibility — optional dependencies and root confirmation (S2 LOW)", () => {
   const rootPolicy: SettingsFile = {
     version: 1,
+    upload: "attributed",
     defaults: { read: false, edit: false, create: false, delete: false },
     overrides: [{ notebooks: ["<root>"], read: true }],
   };

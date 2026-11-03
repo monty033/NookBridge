@@ -247,7 +247,11 @@ describe("Nix-managed settings protection", () => {
     });
     await expect(runSettingsCommand({ argv: ["show"], env, runtime })).resolves.toEqual({
       kind: "success",
-      message: `${JSON.stringify(JSON.parse(settings), null, 2)}\n`,
+      message: `${JSON.stringify(
+        { version: 1, upload: "attributed", ...JSON.parse(settings) },
+        null,
+        2,
+      )}\n`,
     });
   });
 });

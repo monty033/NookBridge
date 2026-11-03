@@ -516,6 +516,7 @@ describe("SR-7 sync settings authorization without a notebook path", () => {
       const evaluator = createSettingsEvaluator(
         {
           version: 1,
+          upload: "attributed",
           defaults: { read: true, edit, create: false, delete: false },
           overrides: [{ notebooks: ["Personal"], edit: true }],
         },

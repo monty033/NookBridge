@@ -30,9 +30,9 @@
  *      notebook / note id lists and per-operation booleans.  The
  *      shape is `Readonly`, the id lists are `readonly string[]`,
  *      and every boolean is plain `boolean`.
- *   5. `SettingsFile` is the closed shape wrapping `version: 1`,
- *      `defaults: SettingsDefaults`, and
- *      `overrides: readonly SettingsOverride[]`.
+ *   5. `SettingsFile` is the closed shape wrapping `version: 1`, the
+ *      normalized vault-wide upload policy, `defaults: SettingsDefaults`,
+ *      and `overrides: readonly SettingsOverride[]`.
  *   6. `SETTINGS_OPERATION_KEYS` is the published
  *      `Object.freeze(["read", "edit", "create", "delete"] as const)`
  *      tuple, frozen at runtime and at the type level.
@@ -49,6 +49,7 @@ import {
   SETTINGS_SCHEMA_VERSION,
   isSettingsDefaults,
   isSettingsOperation,
+  isSettingsUploadPolicy,
   type SettingsDefaults,
   type SettingsFile,
   type SettingsOverride,
@@ -86,6 +87,16 @@ describe("settings types — operation vocabulary", () => {
 
   it("uses a null prototype on SETTINGS_OPERATION_KEYS so an inherited getter cannot smuggle data", () => {
     expect(Object.getPrototypeOf(SETTINGS_OPERATION_KEYS)).toBeNull();
+  });
+});
+
+describe("settings types — upload policy", () => {
+  it("accepts only the attributed and allow literals", () => {
+    expect(isSettingsUploadPolicy("attributed")).toBe(true);
+    expect(isSettingsUploadPolicy("allow")).toBe(true);
+    for (const value of ["deny", 42, null, [], {}]) {
+      expect(isSettingsUploadPolicy(value)).toBe(false);
+    }
   });
 });
 
@@ -286,6 +297,7 @@ describe("settings types — SettingsFile shape", () => {
   it("wires version=1, defaults, and an overrides tuple", () => {
     const file: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: {
         read: true,
         edit: false,
@@ -304,6 +316,7 @@ describe("settings types — SettingsFile shape", () => {
       ],
     };
     expect(file.version).toBe(1);
+    expect(file.upload).toBe("attributed");
     expect(file.defaults.read).toBe(true);
     expect(file.overrides.length).toBe(2);
     expect(file.overrides[0]?.notebooks).toEqual(["alpha"]);
@@ -313,6 +326,7 @@ describe("settings types — SettingsFile shape", () => {
   it("accepts an empty overrides tuple", () => {
     const file: SettingsFile = {
       version: 1,
+      upload: "attributed",
       defaults: {
         read: true,
         edit: true,
@@ -339,6 +353,7 @@ describe("settings types — module purity", () => {
     expect(typeof module.SETTINGS_SCHEMA_VERSION).toBe("number");
     expect(typeof module.isSettingsOperation).toBe("function");
     expect(typeof module.isSettingsDefaults).toBe("function");
+    expect(typeof module.isSettingsUploadPolicy).toBe("function");
     expect(typeof module.SETTINGS_OPERATION_KEYS).toBe("object");
   });
 });

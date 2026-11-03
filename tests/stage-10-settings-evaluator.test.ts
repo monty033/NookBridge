@@ -99,6 +99,7 @@ const buildFile = (
   },
 ): SettingsFile => ({
   version: 1,
+  upload: "attributed",
   defaults: {
     read: defaults.read ?? false,
     edit: defaults.edit ?? false,
