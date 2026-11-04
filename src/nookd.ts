@@ -48,6 +48,7 @@ import { resolveGroupId } from "./service/socket-group-resolver.js";
 import { createLogger } from "./logging/logger.js";
 import type { RpcMethod } from "./service/rpc-protocol.js";
 import { asRevisionToken } from "./core/notesnook-write-contract.js";
+import { NotesnookReadOnlyProjectionError } from "./core/notesnook-readonly-projection.js";
 import { createServicePolicyFromMethods, type ServicePolicy } from "./service/service-policy.js";
 import {
   buildNotebookIndex,
@@ -170,13 +171,21 @@ export function createOperatorWriteSource(
   return {
     create: operatorCreateNote,
     read: async (noteId: string) => {
-      const metadata = await readOnly.noteMetadata(noteId);
-      const reader = readOnly.readOperatorNoteContent;
-      if (metadata === undefined || reader === undefined) return undefined;
-      const revision = metadata.revision;
+      // One snapshot, so the revision an edit is preconditioned on is the
+      // revision of the content it was built from.  A refused body (locked, or
+      // unreadable) throws, as the separate content read did.
+      const readSnapshot = readOnly.readNoteSnapshot;
+      if (readSnapshot === undefined) return undefined;
+      const snapshot = await readSnapshot(noteId);
+      if (snapshot === undefined) return undefined;
+      const revision = snapshot.metadata.revision;
       if (typeof revision !== "string" || revision.length === 0) return undefined;
-      const content = await reader(noteId);
-      return { revision, content };
+      if ("contentRefusal" in snapshot) {
+        throw snapshot.contentRefusal === "locked"
+          ? new NotesnookReadOnlyProjectionError("vault_locked")
+          : new Error("content unavailable");
+      }
+      return { revision, content: snapshot.content };
     },
     update: async (command: {
       readonly noteId: string;
@@ -575,13 +584,13 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     ...(resolveNotePath === undefined ? {} : { resolveNotePath }),
     ...(pathDiagnostic === undefined ? {} : { pathDiagnostic }),
     ...(lockedNoteProof === undefined ? {} : { lockedNoteProof }),
-    // Bounded notes.get content read: expose ONLY the one content reader
-    // method, never the full read-only adapter surface.
-    ...(readOnly?.readOperatorNoteContent === undefined
+    // Bounded notes.get read: expose ONLY the one snapshot method, never the
+    // full read-only adapter surface or a separate content reader.
+    ...(readOnly?.readNoteSnapshot === undefined
       ? {}
       : {
           readOnly: freeze({
-            readOperatorNoteContent: readOnly.readOperatorNoteContent.bind(readOnly),
+            readNoteSnapshot: readOnly.readNoteSnapshot.bind(readOnly),
           }),
         }),
     listNotebooksForSettings,

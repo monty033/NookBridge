@@ -439,7 +439,10 @@ describe("S7a-5 — createOperatorWriteSource", () => {
         title: "t",
         revision: "rev-after",
       })),
-      readOperatorNoteContent: vi.fn(async () => content),
+      readNoteSnapshot: vi.fn(async () => ({
+        metadata: { id: EXISTING_NOTE_ID, title: "t", revision: "rev-after" },
+        content,
+      })),
     } as never;
   }
 

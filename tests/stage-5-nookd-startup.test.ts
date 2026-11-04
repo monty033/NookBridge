@@ -383,18 +383,20 @@ describe("bounded nookd startup composition", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("wires only the bounded content reader into the server runtime for notes.get", async () => {
+  it("wires only the bounded note snapshot reader into the server runtime for notes.get", async () => {
     vi.stubEnv("CREDENTIALS_DIRECTORY", CREDENTIALS_DIRECTORY);
     const cleanup = vi.fn(async () => undefined);
     const readOperatorNoteContent = vi.fn(async () => ({
       type: "html" as const,
       data: "<p>x</p>",
     }));
+    const readNoteSnapshot = vi.fn(async () => undefined);
     const startServer = vi.fn(async (_options: StartNookdServerOptions) => fakeHandle());
     const runtime = {
       ...runtimeFixture(cleanup),
       readOnly: {
         readOperatorNoteContent,
+        readNoteSnapshot,
         listNotes: vi.fn(),
         search: vi.fn(),
         noteMetadata: vi.fn(),
@@ -413,9 +415,12 @@ describe("bounded nookd startup composition", () => {
     >;
     const exposed = serverRuntime.readOnly as Record<string, unknown> | undefined;
     expect(exposed).toBeDefined();
-    expect(Object.keys(exposed!)).toEqual(["readOperatorNoteContent"]);
-    await (exposed!.readOperatorNoteContent as (id: string) => Promise<unknown>)("note-1");
-    expect(readOperatorNoteContent).toHaveBeenCalledWith("note-1");
+    // The separate content reader is deliberately not exposed: it would be a
+    // way to read a body outside the snapshot's lock.
+    expect(Object.keys(exposed!)).toEqual(["readNoteSnapshot"]);
+    await (exposed!.readNoteSnapshot as (id: string) => Promise<unknown>)("note-1");
+    expect(readNoteSnapshot).toHaveBeenCalledWith("note-1");
+    expect(readOperatorNoteContent).not.toHaveBeenCalled();
     await handle.shutdown();
   });
 

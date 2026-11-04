@@ -312,7 +312,12 @@ describe("daemon operator write runtime", () => {
       {
         search: async () => [],
         noteMetadata: async () => ({ id: NOTE_ID, title: "Title", revision: REVISION_1 }),
-        readOnly: { readOperatorNoteContent: async () => f.state.content },
+        readOnly: {
+          readNoteSnapshot: async () => ({
+            metadata: { id: NOTE_ID, title: "Title", revision: REVISION_1 },
+            content: f.state.content,
+          }),
+        },
       },
       createReadWriteNoDeleteServicePolicy(),
     );

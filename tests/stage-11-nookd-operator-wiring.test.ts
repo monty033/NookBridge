@@ -7,6 +7,7 @@ import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/servi
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
 import type { NookdServerHandle, StartNookdServerOptions } from "../src/service/nookd-server.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 
 const CONFIG_PATH = "/etc/nookbridge/service.json";
 const CREDENTIALS_DIRECTORY = "/run/credentials/nookbridge.service";
@@ -307,6 +308,9 @@ async function startWiredNookd(overrides: WiringOverrides = {}) {
       readNoteLockState,
       ...(overrides.omitMembershipLookup ? {} : { findNoteIdsByNotebook, hasNoteInNotebook }),
       readOperatorNoteContent,
+      // The view and the edit read go through the snapshot slot, built here
+      // from the same two stubs so a refused read still never reaches either.
+      readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent),
     }) as never,
   });
   const factories: NookdStartupFactories = {

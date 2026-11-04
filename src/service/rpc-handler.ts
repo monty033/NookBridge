@@ -173,18 +173,17 @@ export interface RpcHandlerRuntimeLike {
   >;
   /** Legacy injected runtimes only; the daemon never supplies a startup index. */
   readonly notebookIndex?: NotebookIndex;
-  /** Full fresh hierarchy, captured once per settings-authorized request. */
+  /** Fresh hierarchy used for authorization and authorized-note snapshot validation. */
   readonly listNotebooksForSettings?: () => Promise<readonly NotebookRecord[]>;
   /**
-   * Optional bounded content-read capability, reusing the same
-   * read-only projection the operator `notes.get-view` route already
-   * uses. Deliberately narrow: only the one method `notes.get` needs
-   * is exposed here, not the full `readOnly` adapter surface.
+   * Optional bounded note-read capability, reusing the same read-only
+   * projection the operator routes use. Deliberately narrow: only the one
+   * method `notes.get` needs is exposed here, not the full `readOnly`
+   * adapter surface. It returns a note's metadata and content as one
+   * consistent pair; there is no separate content reader to fall back to.
    */
   readonly readOnly?: Readonly<{
-    readonly readOperatorNoteContent?: (
-      id: string,
-    ) => Promise<Readonly<{ type: "html" | "tiptap"; data: string }>>;
+    readonly readNoteSnapshot?: (id: string) => Promise<unknown>;
   }>;
   /** Refresh resolver backed by the daemon's full notebook hierarchy projection. */
   readonly resolveNotebookPath?: (notebookId: string) => Promise<string | undefined>;
@@ -315,12 +314,12 @@ export async function handleRpcRequest<T extends RpcRequest>(
           if (!authorizeEveryContext(policy, "notes.get", resolved.contexts)) {
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
-          return (await runNotesGet(
-            structural.request,
-            runtime,
-            id,
-            resolved.note,
-          )) as unknown as RpcHandlerResponse<T>;
+          return (await runNotesGet(structural.request, runtime, id, {
+            note: resolved.note,
+            basis: resolved.basis,
+            // Same code the id form's own authorization failure answers with.
+            refusal: "permission_denied",
+          })) as unknown as RpcHandlerResponse<T>;
         }
         const target = exactNotePathInput(structural.request.params);
         const parsedPath = parseExactNotePath(target);
@@ -357,7 +356,8 @@ export async function handleRpcRequest<T extends RpcRequest>(
           objectFreeze(pathRequest) as unknown as RpcNotesGetRequest,
           runtime,
           id,
-          actual.note,
+          // The path form answers a denied resolved note as a missing path.
+          { note: actual.note, basis: actual.basis, refusal: "not_found" },
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -1024,6 +1024,7 @@ type SettingsContextResolution =
       readonly ok: true;
       readonly contexts: readonly ServicePolicySettingsContext[];
       readonly note: Record<string, unknown>;
+      readonly basis: AuthorisationBasis;
     }
   | { readonly ok: false; readonly code: "not_found" | "service_unavailable" };
 
@@ -1103,7 +1104,8 @@ async function resolveNoteSettingsContext(
     if (readOwnBooleanField(rawRecord, "notebookAbsenceConfirmed") !== true) {
       return { ok: false, code: "not_found" };
     }
-    return { ok: true, contexts: [{ noteTitle }], note };
+    const basis = authorisationBasis(rawRecord, noteTitle, []);
+    return { ok: true, contexts: [{ noteTitle }], note, basis };
   }
 
   // Fail closed when the enumeration could not be trusted as the whole set:
@@ -1113,15 +1115,150 @@ async function resolveNoteSettingsContext(
   }
 
   const contexts: ServicePolicySettingsContext[] = [];
+  const resolvedNotebookPaths: string[] = [];
   for (const notebookId of notebookIds) {
     const notebookPath = await resolveNotebookPathById(runtime, notebookId, snapshot);
     if (notebookPath === undefined || hasControlCharacter(notebookPath)) {
       return { ok: false, code: "not_found" };
     }
+    resolvedNotebookPaths.push(notebookPath);
     contexts.push({ notebookPath, noteTitle });
   }
-  return { ok: true, contexts, note };
+  const basis = authorisationBasis(rawRecord, noteTitle, resolvedNotebookPaths);
+  return { ok: true, contexts, note, basis };
 }
+
+/**
+ * The metadata values an authorization decision rests on, reduced to
+ * comparable scalars. `notes.get` authorizes on one read and then reads the
+ * note again as a snapshot; if any of these differ between the two, the
+ * decision no longer describes the note being returned.
+ */
+type AuthorisationBasis = Readonly<{
+  noteTitle: string;
+  /** Order-independent: authorization is deny-wins over the whole set. */
+  resolvedNotebookPaths: string;
+  notebookId: string | undefined;
+  /** Order-independent: authorization is deny-wins over the whole set. */
+  notebookIds: string | undefined;
+  notebookMembershipComplete: boolean | undefined;
+  notebookAbsenceConfirmed: boolean | undefined;
+  locked: boolean | undefined;
+}>;
+
+function normaliseOrderIndependentSet(values: readonly string[]): string {
+  // Notebook ids and resolved paths reject control characters, so newline is
+  // an unambiguous separator after sorting.
+  return [...values].sort().join("\n");
+}
+
+function authorisationBasis(
+  record: Record<string, unknown>,
+  noteTitle: string,
+  resolvedNotebookPaths: readonly string[],
+): AuthorisationBasis {
+  const enumerated = readOwnIdArrayField(record, "notebookIds");
+  return objectFreeze({
+    noteTitle,
+    resolvedNotebookPaths: normaliseOrderIndependentSet(resolvedNotebookPaths),
+    notebookId: readOwnStringField(record, "notebookId"),
+    notebookIds:
+      enumerated.kind === "absent"
+        ? undefined
+        : enumerated.kind === "invalid"
+          ? "\u0000invalid"
+          : normaliseOrderIndependentSet(enumerated.ids),
+    notebookMembershipComplete: readOwnBooleanField(record, "notebookMembershipComplete"),
+    notebookAbsenceConfirmed: readOwnBooleanField(record, "notebookAbsenceConfirmed"),
+    locked: readOwnBooleanField(record, "locked"),
+  });
+}
+
+function sameAuthorisationBasis(a: AuthorisationBasis, b: AuthorisationBasis): boolean {
+  return (
+    a.noteTitle === b.noteTitle &&
+    a.resolvedNotebookPaths === b.resolvedNotebookPaths &&
+    a.notebookId === b.notebookId &&
+    a.notebookIds === b.notebookIds &&
+    a.notebookMembershipComplete === b.notebookMembershipComplete &&
+    a.notebookAbsenceConfirmed === b.notebookAbsenceConfirmed &&
+    a.locked === b.locked
+  );
+}
+
+/**
+ * Rebuild the policy inputs from the locked note metadata and its locked
+ * hierarchy paths. A path missing from that snapshot cannot validate the
+ * earlier authorization.
+ */
+function snapshotAuthorisationBasis(
+  record: Record<string, unknown>,
+  note: Record<string, unknown>,
+  notebookPathSnapshot: unknown,
+): AuthorisationBasis | undefined {
+  const noteTitle = readOwnStringField(note, "title");
+  if (noteTitle === undefined) return undefined;
+
+  const enumerated = readOwnIdArrayField(record, "notebookIds");
+  if (enumerated.kind === "invalid") return undefined;
+  const singleNotebookId = readOwnStringField(note, "notebookId");
+  const notebookIds =
+    enumerated.kind === "present"
+      ? enumerated.ids
+      : singleNotebookId === undefined
+        ? []
+        : [singleNotebookId];
+
+  if (notebookIds.length === 0) {
+    if (readOwnBooleanField(record, "notebookAbsenceConfirmed") !== true) return undefined;
+    if (!arrayIsArray(notebookPathSnapshot) || notebookPathSnapshot.length !== 0) return undefined;
+    return authorisationBasis(record, noteTitle, []);
+  }
+  if (readOwnBooleanField(record, "notebookMembershipComplete") === false) return undefined;
+  const resolvedNotebookPaths = pathsFromLockedSnapshot(notebookPathSnapshot, notebookIds);
+  if (resolvedNotebookPaths === undefined) return undefined;
+  return authorisationBasis(record, noteTitle, resolvedNotebookPaths);
+}
+
+/** Validate a complete id-to-path mapping before comparing its order-free set. */
+function pathsFromLockedSnapshot(
+  value: unknown,
+  notebookIds: readonly string[],
+): readonly string[] | undefined {
+  if (!arrayIsArray(value) || value.length !== notebookIds.length) return undefined;
+  const pathsById = new Map<string, string>();
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || arrayIsArray(item)) return undefined;
+    const entry = item as Record<string, unknown>;
+    const notebookId = readOwnStringField(entry, "notebookId");
+    const path = readOwnStringField(entry, "path");
+    if (
+      notebookId === undefined ||
+      !notebookIds.includes(notebookId) ||
+      path === undefined ||
+      path.length === 0 ||
+      hasControlCharacter(path) ||
+      pathsById.has(notebookId)
+    ) {
+      return undefined;
+    }
+    pathsById.set(notebookId, path);
+  }
+  if (pathsById.size !== notebookIds.length) return undefined;
+  return notebookIds.map((notebookId) => pathsById.get(notebookId)!);
+}
+
+/**
+ * A note whose context was already authorized for `notes.get`, with the code
+ * to refuse with if the snapshot disagrees. That is the code this route's
+ * authorization failure already answers with, so a context change between
+ * the two reads is indistinguishable from the denial it would have been.
+ */
+type PreAuthorisedNote = Readonly<{
+  note: Record<string, unknown>;
+  basis: AuthorisationBasis;
+  refusal: "permission_denied" | "not_found";
+}>;
 
 type CreateSettingsContextResolution =
   | { readonly ok: true; readonly context: ServicePolicySettingsContext }
@@ -1909,7 +2046,7 @@ async function runNotesGet(
   request: RpcNotesGetRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
-  resolvedNote?: Record<string, unknown>,
+  authorised?: PreAuthorisedNote,
 ): Promise<RpcAnyResponseEnvelope> {
   // Path-form requests reach here directly when no settings evaluator is
   // configured (the evaluator branch rewrites them to an id first). Resolve
@@ -1922,30 +2059,76 @@ async function runNotesGet(
     if (!resolved.ok) return buildErrorEnvelope(id, resolved.code);
     noteId = resolved.id;
   }
-  let note = resolvedNote;
-  if (note === undefined) {
-    const fn = readRuntimeMethod(runtime, "noteMetadata");
-    if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
-    let raw: unknown;
-    try {
-      raw = await reflectApply(fn, runtime, [noteId]);
-    } catch {
-      // The production runtime wraps note lookup failures generically, so a
-      // failed read is indistinguishable here from an absent note. Keep the
-      // refusal identical rather than exposing an existence oracle; the cost
-      // is that on this route a transient failure reads as a missing note.
-      return buildErrorEnvelope(id, "not_found");
+  let note: Record<string, unknown>;
+  let read: BoundedNoteRead;
+  const snapshotFn = readNoteSnapshotMethod(runtime);
+  if (snapshotFn === undefined) {
+    // No snapshot slot: the metadata still comes from the lookup, but the body
+    // is never fetched by a second, unlocked call.
+    let resolvedNote = authorised?.note;
+    if (resolvedNote === undefined) {
+      const fn = readRuntimeMethod(runtime, "noteMetadata");
+      if (fn === undefined) return buildErrorEnvelope(id, "service_unavailable");
+      let raw: unknown;
+      try {
+        raw = await reflectApply(fn, runtime, [noteId]);
+      } catch {
+        // The production runtime wraps note lookup failures generically, so a
+        // failed read is indistinguishable here from an absent note. Keep the
+        // refusal identical rather than exposing an existence oracle; the cost
+        // is that on this route a transient failure reads as a missing note.
+        return buildErrorEnvelope(id, "not_found");
+      }
+      if (raw === undefined) return buildErrorEnvelope(id, "not_found");
+      resolvedNote = normaliseNoteMetadata(raw);
+      if (resolvedNote === undefined) return buildErrorEnvelope(id, "not_found");
     }
-    if (raw === undefined) return buildErrorEnvelope(id, "not_found");
-    note = normaliseNoteMetadata(raw);
-    if (note === undefined) return buildErrorEnvelope(id, "not_found");
+    note = resolvedNote;
+    read =
+      readOwnBooleanField(note, "locked") === true
+        ? { contentStatus: "locked" }
+        : { contentStatus: "unavailable", contentReason: "reader_unavailable" };
+  } else {
+    // One call returns the note and its body together, taken under the shared
+    // database lock, so the revision reported is the revision of the body.
+    // Everything below is derived from it; nothing re-reads the note.
+    const refusal = authorised?.refusal ?? "not_found";
+    let snapshot: unknown;
+    try {
+      snapshot = await reflectApply(snapshotFn, runtime.readOnly, [noteId]);
+    } catch {
+      // See the lookup above: a failed read is refused like a missing note.
+      return buildErrorEnvelope(id, refusal);
+    }
+    if (snapshot === null || typeof snapshot !== "object") {
+      return buildErrorEnvelope(id, refusal);
+    }
+    const record = snapshot as Record<string, unknown>;
+    const metadata = readOwnDataField(record, "metadata");
+    const snapshotNote = normaliseNoteMetadata(metadata);
+    if (snapshotNote === undefined) return buildErrorEnvelope(id, refusal);
+    // The authorization above rested on an earlier read. If what it depended
+    // on has moved, it no longer covers this note: refuse as a denial would.
+    if (authorised !== undefined) {
+      const snapshotBasis = snapshotAuthorisationBasis(
+        metadata as Record<string, unknown>,
+        snapshotNote,
+        readOwnDataField(record, "notebookPathSnapshot"),
+      );
+      if (snapshotBasis === undefined || !sameAuthorisationBasis(authorised.basis, snapshotBasis)) {
+        return buildErrorEnvelope(id, refusal);
+      }
+    }
+    note = snapshotNote;
+    read = readBoundedNoteContent(
+      readOwnDataField(record, "contentRefusal"),
+      readOwnDataField(record, "content"),
+      noteId,
+      note,
+      id,
+    );
   }
-  const { contentStatus, contentReason, markdown, markdownBytes } = await readBoundedNoteContent(
-    runtime,
-    noteId,
-    note,
-    id,
-  );
+  const { contentStatus, contentReason, markdown, markdownBytes } = read;
   const descriptors: PropertyDescriptorMap = {
     kind: { value: "note", enumerable: true, configurable: false, writable: false },
     note: { value: note, enumerable: true, configurable: false, writable: false },
@@ -1982,47 +2165,40 @@ async function runNotesGet(
   return buildResultSuccessEnvelope(id, result);
 }
 
-/**
- * Bounded content read for `notes.get`, reusing the same read-only
- * projection the operator `notes.get-view` route uses.
- *
- * Fails closed in every direction:
- *   - no content reader wired                -> "unavailable"
- *   - note metadata already says `locked`    -> "locked" (never calls
- *     the reader; the already-proven metadata flag is the source of
- *     truth, not exception introspection on the read call)
- *   - decoded Markdown exceeds the bound      -> "oversize" (content
- *     withheld, byte count never returned either)
- *   - reader/decoder throws for any reason    -> "unavailable"
- */
-async function readBoundedNoteContent(
-  runtime: RpcHandlerRuntimeLike,
-  noteId: string,
-  note: Record<string, unknown>,
-  requestId: string,
-): Promise<{
+type BoundedNoteRead = {
   readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
   readonly contentReason?: "reader_unavailable" | "read_failed";
   readonly markdown?: string;
   readonly markdownBytes?: number;
-}> {
-  if (readOwnBooleanField(note, "locked") === true) {
+};
+
+/**
+ * Bounded Markdown projection of the content half of a note snapshot, for
+ * `notes.get`. Nothing here reads the database: the snapshot already holds the
+ * body that belongs to the revision in `note`.
+ *
+ * Fails closed in every direction:
+ *   - note metadata already says `locked`    -> "locked"
+ *   - snapshot refused the body as `locked`  -> "locked"
+ *   - snapshot could not read the body       -> "unavailable"
+ *   - decoded Markdown exceeds the bound      -> "oversize" (content
+ *     withheld, byte count never returned either)
+ *   - decoder throws for any reason           -> "unavailable"
+ */
+function readBoundedNoteContent(
+  contentRefusal: unknown,
+  envelope: unknown,
+  noteId: string,
+  note: Record<string, unknown>,
+  requestId: string,
+): BoundedNoteRead {
+  if (readOwnBooleanField(note, "locked") === true || contentRefusal === "locked") {
     return { contentStatus: "locked" };
   }
-  let reader: ((id: string) => Promise<unknown>) | undefined;
-  try {
-    const readOnly = runtime.readOnly;
-    reader =
-      readOnly !== undefined && typeof readOnly.readOperatorNoteContent === "function"
-        ? readOnly.readOperatorNoteContent
-        : undefined;
-  } catch {
-    reader = undefined;
+  if (contentRefusal !== undefined || envelope === undefined) {
+    return { contentStatus: "unavailable", contentReason: "read_failed" };
   }
-  if (reader === undefined)
-    return { contentStatus: "unavailable", contentReason: "reader_unavailable" };
   try {
-    const envelope = await reflectApply(reader, runtime.readOnly, [noteId]);
     const revisionField = note.revision;
     const revision = typeof revisionField === "string" ? revisionField : `rev_${"0".repeat(32)}`;
     let markdown: string;
@@ -2072,6 +2248,19 @@ async function readBoundedNoteContent(
     return { contentStatus: "ok", markdown, markdownBytes };
   } catch {
     return { contentStatus: "unavailable", contentReason: "read_failed" };
+  }
+}
+
+function readNoteSnapshotMethod(
+  runtime: RpcHandlerRuntimeLike,
+): ((id: string) => Promise<unknown>) | undefined {
+  try {
+    const readOnly = runtime.readOnly;
+    return readOnly !== undefined && typeof readOnly.readNoteSnapshot === "function"
+      ? readOnly.readNoteSnapshot
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 

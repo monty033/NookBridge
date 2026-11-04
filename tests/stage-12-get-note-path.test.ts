@@ -4,6 +4,7 @@ import { TextDecoder } from "node:util";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 import { buildNookMcpServer } from "../src/mcp/nook-mcp-server.js";
 import {
@@ -15,9 +16,18 @@ import {
 
 const request = (params: Record<string, unknown>) =>
   ({ id: "get-1", method: "notes.get", params }) as unknown as RpcRequest;
+const memoMetadata = async (id: string) => ({ id, title: "Memo", notebookId: "nb" });
+// The snapshot slot, built from a content reader the way the live factory does.
+const slot = (
+  reader: (id: string) => Promise<unknown>,
+  metadata: (id: string) => Promise<unknown> = memoMetadata,
+  notebookPathSnapshot?: (
+    metadata: unknown,
+  ) => Promise<readonly { notebookId: string; path: string }[] | undefined>,
+) => ({ readNoteSnapshot: snapshotFrom(metadata, reader, notebookPathSnapshot) });
 const runtime = (overrides: Partial<RpcHandlerRuntimeLike> = {}): RpcHandlerRuntimeLike => ({
   search: async () => [],
-  noteMetadata: async (id) => ({ id, title: "Memo", notebookId: "nb" }),
+  noteMetadata: memoMetadata,
   resolveNotePath: async () => ({
     id: "opaque",
     expectedRevision: "rev_0123456789abcdef0123456789abcdef",
@@ -25,9 +35,7 @@ const runtime = (overrides: Partial<RpcHandlerRuntimeLike> = {}): RpcHandlerRunt
   // Mirrors the trusted index shape resolveTrustedNotebookPath reads: the
   // resolved note's real notebook is "Private" regardless of the caller's path.
   notebookIndex: { resolvePath: () => "Private" } as never,
-  readOnly: {
-    readOperatorNoteContent: vi.fn(async () => ({ type: "html" as const, data: "<p>Hello</p>" })),
-  },
+  readOnly: slot(vi.fn(async () => ({ type: "html" as const, data: "<p>Hello</p>" }))),
   ...overrides,
 });
 
@@ -38,7 +46,10 @@ describe("notes.get exact path", () => {
       id: "opaque",
       expectedRevision: "rev_0123456789abcdef0123456789abcdef",
     }));
-    const r = runtime({ resolveNotePath, readOnly: { readOperatorNoteContent: reader } });
+    const r = runtime({
+      resolveNotePath,
+      readOnly: slot(reader, memoMetadata, async () => [{ notebookId: "nb", path: "Private" }]),
+    });
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
       r,
@@ -55,9 +66,15 @@ describe("notes.get exact path", () => {
   });
   it("does not read locked path-resolved notes", async () => {
     const reader = vi.fn(async () => ({ type: "html" as const, data: "<p>Hello</p>" }));
+    const lockedMetadata = async (id: string) => ({
+      id,
+      title: "Memo",
+      notebookId: "nb",
+      locked: true,
+    });
     const r = runtime({
-      noteMetadata: async (id) => ({ id, title: "Memo", notebookId: "nb", locked: true }),
-      readOnly: { readOperatorNoteContent: reader },
+      noteMetadata: lockedMetadata,
+      readOnly: slot(reader, lockedMetadata),
     });
     const response = await handleRpcRequest(request({ path: "Private/Memo" }), r);
     expect(response).toMatchObject({ ok: true, result: { contentStatus: "locked" } });
@@ -85,7 +102,7 @@ describe("notes.get exact path", () => {
   });
   it("reports reader_unavailable when the reader capability getter throws", async () => {
     const readOnly = {};
-    Object.defineProperty(readOnly, "readOperatorNoteContent", {
+    Object.defineProperty(readOnly, "readNoteSnapshot", {
       get() {
         throw new Error("CAPABILITY_SECRET/private");
       },
@@ -107,11 +124,9 @@ describe("notes.get exact path", () => {
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
       runtime({
-        readOnly: {
-          readOperatorNoteContent: async () => {
-            throw new Error("secret");
-          },
-        },
+        readOnly: slot(async () => {
+          throw new Error("secret");
+        }),
       }),
     );
     expect(
@@ -126,12 +141,10 @@ describe("notes.get exact path", () => {
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
       runtime({
-        readOnly: {
-          readOperatorNoteContent: async () => ({
-            type: "html",
-            data: `<p>${"x".repeat(STAGE5_RPC_LIMITS.maxResponseBytes + 1)}</p>`,
-          }),
-        },
+        readOnly: slot(async () => ({
+          type: "html",
+          data: `<p>${"x".repeat(STAGE5_RPC_LIMITS.maxResponseBytes + 1)}</p>`,
+        })),
       }),
     );
     expect(response).toMatchObject({ ok: true, result: { contentStatus: "oversize" } });
@@ -143,13 +156,7 @@ describe("notes.get exact path", () => {
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
       runtime({
-        readOnly: {
-          readOperatorNoteContent: async () =>
-            ({ type: "unknown", data: "SECRET" }) as unknown as Readonly<{
-              type: "html" | "tiptap";
-              data: string;
-            }>,
-        },
+        readOnly: slot(async () => ({ type: "unknown", data: "SECRET" })),
       }),
     );
     expect(response).toMatchObject({
@@ -176,9 +183,7 @@ describe("notes.get exact path", () => {
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
       runtime({
-        readOnly: {
-          readOperatorNoteContent: async () => ({ type: "html" as const, data: "" }),
-        },
+        readOnly: slot(async () => ({ type: "html" as const, data: "" })),
       }),
     );
     expect(response).toMatchObject({
@@ -209,11 +214,52 @@ describe("notes.get exact path", () => {
     }));
     const response = await handleRpcRequest(
       request({ path: "Private/Memo" }),
-      runtime({ readOnly: { readOperatorNoteContent: reader } }),
+      runtime({ readOnly: slot(reader) }),
       createReadWriteNoDeleteServicePolicy(evaluate as never),
     );
     expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(reader).not.toHaveBeenCalled();
+  });
+
+  it("refuses a path denied inside the snapshot even if it is allowed again afterward", async () => {
+    let listings = 0;
+    const hierarchySnapshots = [
+      [{ id: "nb", title: "Public" }],
+      [{ id: "nb", title: "Private" }],
+      [{ id: "nb", title: "Public" }],
+    ] as const;
+    const listNotebooksForSettings = vi.fn(async () => {
+      const result = hierarchySnapshots[listings];
+      listings += 1;
+      return result ?? hierarchySnapshots[2];
+    });
+    const noteMetadata = vi.fn(async (id: string) => ({ id, title: "Memo", notebookId: "nb" }));
+    const reader = vi.fn(async () => ({ type: "html" as const, data: "<p>Body</p>" }));
+    const notebookPathSnapshot = async (metadata: unknown) => {
+      const records = await listNotebooksForSettings();
+      const notebookId = (metadata as { notebookId?: unknown }).notebookId;
+      if (typeof notebookId !== "string") return undefined;
+      const notebook = records.find((record) => record.id === notebookId);
+      return notebook === undefined ? undefined : [{ notebookId, path: notebook.title }];
+    };
+    const response = await handleRpcRequest(
+      request({ path: "Public/Memo" }),
+      runtime({
+        noteMetadata,
+        readOnly: slot(reader, noteMetadata, notebookPathSnapshot),
+        listNotebooksForSettings,
+      }),
+      createReadWriteNoDeleteServicePolicy((_operation, context) => ({
+        allowed: context.notebookPath !== "Private",
+      })),
+    );
+
+    // The path form answers a denied resolved note like a missing path.
+    expect(response).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(JSON.stringify(response)).not.toContain("Body");
+    // First listing authorizes Public; the snapshot itself sees Private. The
+    // handler must compare that locked path without taking a third listing.
+    expect(listings).toBe(2);
   });
 
   it("denies when a permitted path resolves to a note actually in a denied notebook", async () => {
@@ -226,7 +272,7 @@ describe("notes.get exact path", () => {
     }));
     const response = await handleRpcRequest(
       request({ path: "Public/Memo" }),
-      runtime({ readOnly: { readOperatorNoteContent: reader } }),
+      runtime({ readOnly: slot(reader) }),
       createReadWriteNoDeleteServicePolicy(evaluate as never),
     );
     // The refusal is shaped like a missing path, not like a denied one: the
@@ -245,7 +291,7 @@ describe("notes.get exact path", () => {
       request({ path: "Memo" }),
       runtime({
         noteMetadata: async (id) => ({ id, title: "Memo" }),
-        readOnly: { readOperatorNoteContent: reader },
+        readOnly: slot(reader, async (id) => ({ id, title: "Memo" })),
       }),
       createReadWriteNoDeleteServicePolicy((() => ({ allowed: true })) as never),
     );

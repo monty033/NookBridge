@@ -30,6 +30,7 @@ import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
 import { serializeNoteDocumentMarkdown } from "../src/core/note-document-markdown.js";
 import { handleRpcRequest } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 
 const HEADER = "---\nnookbridge-format: 1\n---\n";
 const canonical = (body: string): string => `${HEADER}\n${body}\n`;
@@ -163,7 +164,12 @@ function createWorld(
     search: reader.search.bind(reader),
     noteMetadata: reader.noteMetadata.bind(reader),
     createNote: (command: Parameters<typeof adapter.createNote>[0]) => adapter.createNote(command),
-    readOnly: { readOperatorNoteContent: reader.readOperatorNoteContent.bind(reader) },
+    readOnly: {
+      readNoteSnapshot: snapshotFrom(
+        reader.noteMetadata.bind(reader),
+        reader.readOperatorNoteContent.bind(reader),
+      ),
+    },
   };
   const policy = createReadWriteNoDeleteServicePolicy();
   const mutationCount = (): number =>
