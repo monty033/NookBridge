@@ -493,28 +493,54 @@ export class NotesnookWriteAdapter {
       );
     }
 
+    // Order matters.  The pinned `@notesnook/core@8.1.3` Content
+    // collection does not bump the parent note's `dateEdited` when a
+    // content row is replaced through `Content.updateByNoteId`, so an
+    // append has to advance the note itself; without that a follow-up
+    // read returns the pre-append revision token and the concurrency
+    // gate cannot fire.
+    //
+    // The touch goes first because it is the step that changes nothing
+    // but a timestamp.  Writing content first means any later failure
+    // leaves the appended body committed under the previous revision,
+    // and undoing that would rewrite the content row — a second write
+    // that marks the row unsynced even though the body is back where it
+    // started.  Touching first means a reader never sees new content
+    // under an old token, and a failed content write can restore the
+    // timestamp exactly, leaving no trace.
+    //
+    // It lands strictly after the observed value rather than at
+    // `Date.now()`: a wall clock that has not advanced past the note's
+    // own `dateEdited` would otherwise leave the previous revision token
+    // valid, which is the same defect the update path carries a fix for.
     try {
-      await this.#safe("contentUpdateByNoteId", () =>
-        this.#database.contentUpdateByNoteId({ type: next.type, data: next.data }, plan.id),
+      await this.#safe("notesTouch", () =>
+        this.#database.notesTouch([plan.id], Math.max(Date.now(), observed.dateEdited + 1)),
       );
-    } catch {
-      throw adapterError("sync_failed", "Notesnook write adapter: append failed");
-    }
-
-    // The pinned `@notesnook/core@8.1.3` Content collection does not
-    // bump the parent note's `dateEdited` when a content row is replaced
-    // through `Content.updateByNoteId`.  Without this explicit touch,
-    // a follow-up `notesnook_get_note` reads the same `dateEdited` and
-    // returns the pre-append revision token, so the concurrency gate
-    // cannot fire on a follow-up append.  The touch is a narrow write
-    // (one field, one id) so it does not widen the patch surface.
-    try {
-      await this.#safe("notesTouch", () => this.#database.notesTouch([plan.id], Date.now()));
     } catch {
       throw adapterError(
         "sync_failed",
         "Notesnook write adapter: append failed to bump note dateEdited",
       );
+    }
+
+    try {
+      await this.#safe("contentUpdateByNoteId", () =>
+        this.#database.contentUpdateByNoteId({ type: next.type, data: next.data }, plan.id),
+      );
+    } catch {
+      // Nothing was written yet, so the inverse is the timestamp alone.
+      // Failing to restore it leaves a note whose revision moved with no
+      // content change behind it; that is recorded rather than reported
+      // as a clean failure.
+      try {
+        await this.#safe("notesTouch", () =>
+          this.#database.notesTouch([plan.id], observed.dateEdited),
+        );
+      } catch {
+        this.#recordRecovery("append", plan.id, "append-date");
+      }
+      throw adapterError("sync_failed", "Notesnook write adapter: append failed");
     }
 
     return Object.freeze({
