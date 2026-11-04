@@ -86,13 +86,168 @@ describe("T03 native HTML adapter", () => {
     expect(() => parseNoteDocumentMarkdown(header + "above\n---\nbelow\n")).toThrow();
   });
 
-  it("preserves noncanonical HR styles opaquely and still rejects styles on other elements", () => {
+  it("preserves noncanonical HR styles opaquely and rejects unsafe paragraph styles", () => {
     const hr = decodeNoteDocumentNative(wrap('<hr style="border-top:1px dashed red" />'), binding);
     expect(hr.document.blocks[0]?.type).toBe("opaque");
     expect(() =>
-      decodeNoteDocumentNative(wrap('<p style="color:red">text</p>'), binding),
+      decodeNoteDocumentNative(
+        wrap('<p style="background-image:var(--note-image)">text</p>'),
+        binding,
+      ),
     ).toThrow();
   });
+
+  it("preserves a safely styled span inside an unsupported heading while allowing a neighboring edit", () => {
+    const heading = '<h4><span style="color:red">Real note</span></h4>';
+    const decoded = decodeNoteDocumentNative(wrap(`${heading}<p>before</p>`), binding);
+    expect(decoded.document.blocks.map((block) => block.type)).toEqual(["opaque", "paragraph"]);
+
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+      preimage: decoded.document,
+    });
+    const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+    expect(stored.data).toContain(heading);
+    expect(stored.data).toContain("<p>changed</p>");
+  });
+
+  it.each([1, 2, 3, 4, 5, 6])(
+    "preserves a validated style on h%d through a neighboring edit",
+    (level) => {
+      const heading = `<h${level} style="text-align:center">Title</h${level}>`;
+      const decoded = decodeNoteDocumentNative(wrap(`${heading}<p>before</p>`), binding);
+      expect(decoded.document.blocks[0]?.type).toBe("opaque");
+
+      const markdown = serializeNoteDocumentMarkdown(decoded.document);
+      const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+        preimage: decoded.document,
+      });
+      const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+      expect(stored.data).toContain(heading);
+      expect(stored.data).toContain("<p>changed</p>");
+    },
+  );
+
+  it("refuses unsafe styles on a heading instead of preserving them opaquely", () => {
+    expect(() =>
+      decodeNoteDocumentNative(
+        wrap('<h2 style="background-image:var(--note-image)">Title</h2>'),
+        binding,
+      ),
+    ).toThrow(expect.objectContaining({ code: "unsupported_content" }));
+  });
+
+  it("preserves a safely styled decoded blockquote through a neighboring edit", () => {
+    const quote = '<blockquote style="text-align:center"><p>Quoted</p></blockquote>';
+    const decoded = decodeNoteDocumentNative(wrap(`${quote}<p>before</p>`), binding);
+    expect(decoded.document.blocks[0]?.type).toBe("opaque");
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+      preimage: decoded.document,
+    });
+    const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+    expect(stored.data).toContain(quote);
+    expect(stored.data).toContain("<p>changed</p>");
+  });
+
+  it.each(["ltr", "rtl", "auto", "RTL"])(
+    "accepts dir=%s and preserves it through a neighboring edit",
+    (direction) => {
+      const decorated = `<p dir="${direction}">مرحبا</p>`;
+      const decoded = decodeNoteDocumentNative(wrap(`${decorated}<p>before</p>`), binding);
+      expect(decoded.document.blocks[0]?.type).toBe("opaque");
+      const markdown = serializeNoteDocumentMarkdown(decoded.document);
+      const edited = parseNoteDocumentMarkdown(markdown.replace("before", "changed"), {
+        preimage: decoded.document,
+      });
+      const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+      expect(stored.data).toContain(decorated);
+      expect(stored.data).toContain("<p>changed</p>");
+    },
+  );
+
+  it("refuses a direction value outside the supported set", () => {
+    expect(() => decodeNoteDocumentNative(wrap('<p dir="sideways">text</p>'), binding)).toThrow(
+      expect.objectContaining({ code: "unsupported_content" }),
+    );
+  });
+
+  it("refuses a forbidden CSS property on a span inside an unsupported heading", () => {
+    expect(() =>
+      decodeNoteDocumentNative(
+        wrap('<h4><span style="background-image:none">Real note</span></h4>'),
+        binding,
+      ),
+    ).toThrow(expect.objectContaining({ code: "unsupported_content" }));
+  });
+
+  it("accepts ordinary declarative CSS functions in an opaque HR style", () => {
+    const style =
+      "color:rgb(1, 2, 3);background-color:rgba(0, 0, 0, .5);border-color:hsl(120, 100%, 50%);width:calc(50% - 1px);height:calc(100% - 1px);list-style-type:disc";
+    const decoded = decodeNoteDocumentNative(wrap(`<hr style="${style}" />`), binding);
+    expect(decoded.document.blocks[0]?.type).toBe("opaque");
+  });
+
+  it.each(["display:list-item;list-style-type:var(--note-marker)", "color:calc(var(--x) + 1px)"])(
+    "refuses custom property substitution in allowed CSS values: %s",
+    (declaration) => {
+      expect(() =>
+        decodeNoteDocumentNative(wrap(`<p style='${declaration}'>text</p>`), binding),
+      ).toThrow(expect.objectContaining({ code: "unsupported_content" }));
+    },
+  );
+
+  it.each([
+    'display:list-item;list-style-type:symbols(url("https://attacker.example/pixel.png"))',
+    'list-style-type:symbols("•")',
+    'color:\\75 rl("https://attacker.example/pixel.png")',
+    'color:u/**/rl("https://attacker.example/pixel.png")',
+  ])("refuses resource and execution CSS functions in allowed values: %s", (declaration) => {
+    expect(() => decodeNoteDocumentNative(wrap(`<hr style='${declaration}' />`), binding)).toThrow(
+      expect.objectContaining({ code: "unsupported_content" }),
+    );
+  });
+
+  it("parses a realistic Notesnook paragraph style", () => {
+    const decoded = decodeNoteDocumentNative(
+      wrap('<p style="text-align:left;color:rgb(12, 34, 56)">Kickoff</p>'),
+      binding,
+    );
+    expect(decoded.document.blocks[0]?.type).toBe("opaque");
+  });
+
+  it.each([
+    "background-image:var(--nb-note-image)",
+    'background:url("https://attacker.example/pixel.png")',
+    'border-image:url("https://attacker.example/border.png")',
+    'border-image-source:url("https://attacker.example/border.png")',
+    'list-style-image:url("https://attacker.example/bullet.png")',
+    'content:url("https://attacker.example/content.png")',
+    'cursor:url("https://attacker.example/cursor.png"),auto',
+    'filter:url("https://attacker.example/filter.svg#x")',
+    'mask:url("https://attacker.example/mask.png")',
+    'mask-image:url("https://attacker.example/mask.png")',
+    'mask-border-source:url("https://attacker.example/mask.png")',
+    '-webkit-mask:url("https://attacker.example/mask.png")',
+    '-webkit-mask-image:url("https://attacker.example/mask.png")',
+    'clip-path:url("https://attacker.example/clip.svg#x")',
+    'src:url("https://attacker.example/font.woff2")',
+    'background-image:image-set("https://attacker.example/pixel.png" 1x)',
+    'behavior:url("https://attacker.example/behavior.htc")',
+  ])("refuses resource-capable CSS property %s", (declaration) => {
+    expect(() => decodeNoteDocumentNative(wrap(`<hr style='${declaration}' />`), binding)).toThrow(
+      expect.objectContaining({ code: "unsupported_content" }),
+    );
+  });
+
+  it.each(["color:expression(alert(1))", "color:\\65 xpression(alert(1))"])(
+    "refuses executable CSS expressions in allowed properties: %s",
+    (declaration) => {
+      expect(() =>
+        decodeNoteDocumentNative(wrap(`<hr style='${declaration}' />`), binding),
+      ).toThrow(expect.objectContaining({ code: "unsupported_content" }));
+    },
+  );
 
   it("retains an adjacent task title and opaque block when reconstructing a rule document", () => {
     const style = "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
@@ -330,6 +485,16 @@ describe("T03 native HTML adapter", () => {
     "<p><b>x</p></b>",
     '<p a="x" a="y">x</p>',
     '<iframe src="https://example.com"></iframe>',
+    '<link rel="stylesheet" href="https://attacker.example/note.css" />',
+    '<span src="https://attacker.example/pixel"></span>',
+    '<img srcset="https://attacker.example/2x.png 2x" alt="x">',
+    '<span poster="https://attacker.example/poster.jpg">x</span>',
+    '<object data="https://attacker.example/object"></object>',
+    '<embed src="https://attacker.example/embed">',
+    '<form action="https://attacker.example/submit">go</form>',
+    '<div action="https://attacker.example/submit">go</div>',
+    '<a href="https://example.com" ping="https://attacker.example/ping">x</a>',
+    '<source src="https://attacker.example/media">',
   ])("categorically rejects hostile or malformed native HTML: %s", (html) => {
     try {
       decodeNoteDocumentNative(wrap(html), binding);
@@ -342,6 +507,16 @@ describe("T03 native HTML adapter", () => {
       expect(String(error)).not.toContain("secret-canary");
     }
   });
+
+  it.each(["plaintext", "xmp", "iframe", "noembed", "noframes", "textarea", "title"])(
+    "refuses raw-text-like <%s> before it can consume following markup",
+    (tag) => {
+      const html = tag === "title" ? "<title>Title closes </p><p>keep</p>" : `<${tag}/><p>keep</p>`;
+      expect(() => decodeNoteDocumentNative(wrap(html), binding)).toThrow(
+        expect.objectContaining({ code: "unsupported_content" }),
+      );
+    },
+  );
   it("preserves unsupported heading, table formatting, list start and inline attributes whole", () => {
     const html =
       '<h4>Four</h4><ol start="3"><li>third</li></ol><table><tr><th><b>marked</b></th></tr></table><p><strong title="keep">bold</strong></p><ul class="checklist"><li class="checklist--item"><p>parent</p><ul class="simple-checklist"><li class="simple-checklist--item"><p>child</p></li></ul></li></ul>';
@@ -494,6 +669,7 @@ describe("T13 document container tolerance", () => {
       ["data-id", `<div data-type="document" data-id="abc123">${body}</div>`],
       ["class", `<div class="note" data-type="document">${body}</div>`],
       ["class+data", `<div class="note" data-id="abc123" data-type="document">${body}</div>`],
+      ["style", `<div style="padding:0" data-type="document">${body}</div>`],
     ];
     for (const [name, data] of decorated) {
       const decoded = decodeNoteDocumentNative({ type: "tiptap", data }, binding);
@@ -502,10 +678,9 @@ describe("T13 document container tolerance", () => {
   });
 
   it("refuses a container carrying attributes the parser rejects outright", () => {
-    // Boundary, not a downgrade: the HTML parser refuses `style` and `id`
-    // anywhere in a stored document, so the read is refused categorically
-    // rather than silently returning a document with decoration dropped.
-    for (const decoration of ['style="padding:0"', 'id="root"']) {
+    // A safe style declaration is inert decoration and is accepted uniformly;
+    // identity attributes still have no representation on the container.
+    for (const decoration of ['id="root"']) {
       expect(() =>
         decodeNoteDocumentNative(
           { type: "tiptap", data: `<div ${decoration} data-type="document">${body}</div>` },
@@ -554,6 +729,32 @@ describe("T13 document container tolerance", () => {
     });
   });
 
+  it.each(['<p id="keep">old</p>', '<p style="text-align:left">old</p>'])(
+    "preserves decorated paragraph bytes through a neighboring edit and refuses its own text edit: %s",
+    (decorated) => {
+      const native = wrap(`${decorated}<p>other</p>`);
+      const decoded = decodeNoteDocumentNative(native, binding);
+      expect(decoded.document.blocks[0]?.type).toBe("opaque");
+
+      const markdown = serializeNoteDocumentMarkdown(decoded.document);
+      const edited = parseNoteDocumentMarkdown(markdown.replace("other", "updated"), {
+        preimage: decoded.document,
+      });
+      const stored = serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+
+      expect(stored.data).toContain(decorated);
+      expect(stored.data).toContain("<p>updated</p>");
+
+      const opaqueBlock = markdown.match(/:::nookbridge opaque p\n[^\n]+\n:::/)?.[0];
+      expect(opaqueBlock).toBeDefined();
+      expect(markdown).not.toContain("old");
+      const attemptedTextEdit = markdown.replace(opaqueBlock!, "changed");
+      expect(() =>
+        parseNoteDocumentMarkdown(attemptedTextEdit, { preimage: decoded.document }),
+      ).toThrow(expect.objectContaining({ code: "opaque_payload_forbidden" }));
+    },
+  );
+
   it("still enforces the attribute values it actually reads", () => {
     // Guard: tolerance covers attribute NAMES the decoder does not read, not
     // the values it interprets.  Two cases matter:
@@ -583,6 +784,15 @@ describe("T13 document container tolerance", () => {
       binding,
     );
     expect(decoded.document.blocks.every((b) => b.type === "opaque")).toBe(true);
+  });
+
+  it("categorically refuses an unknown self-closing non-void tag", () => {
+    expect(() => decodeNoteDocumentNative(wrap("<legacy-widget/><p>before</p>"), binding)).toThrow(
+      expect.objectContaining({
+        code: "unsupported_content",
+        message: "Native note content is not supported",
+      }),
+    );
   });
 });
 

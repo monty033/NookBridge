@@ -144,7 +144,7 @@ const delimiters: Record<string, string> = {
 function escapeText(s: string): string {
   return s
     .replace(/[\\*_~`[\]<>]/g, "\\$&")
-    .replace(/^(?=[#>:+!|]|- |\d+\. )/gm, "\\")
+    .replace(/^(?=[#>:+!|]|- |\d{1,9}\. )/gm, "\\")
     .replace(/^---$/gm, "\\-\\-\\-");
 }
 function fence(s: string): string {
@@ -221,7 +221,7 @@ function parseInlines(s: string): NoteInline[] {
       const c = s[pos]!;
       if (c === "\\") {
         pos++;
-        if (pos >= s.length || !/[\\*_~`[\]<>#:+!|.\->]/.test(s[pos]!)) fail();
+        if (pos >= s.length || !/[\\*_~`[\]<>#:+!|.\->0-9]/.test(s[pos]!)) fail();
         text += s[pos++]!;
         continue;
       }
@@ -501,12 +501,12 @@ class Parser {
       return { type: "task-list", items: this.tasks(depth, 0) };
     }
     if (line === "---") return { type: "horizontal-rule" };
-    if (/^(?:- |\d+\. )/.test(line)) {
+    if (/^(?:- |\d{1,9}\. )/.test(line)) {
       this.pos--;
-      const ordered = /^\d/.test(line);
+      const ordered = /^\d{1,9}\. /.test(line);
       const items: { inlines: NoteInline[] }[] = [];
       while (this.pos < this.lines.length) {
-        const m = (ordered ? /^\d+\. (.*)$/ : /^- (.*)$/).exec(this.lines[this.pos]!);
+        const m = (ordered ? /^\d{1,9}\. (.*)$/ : /^- (.*)$/).exec(this.lines[this.pos]!);
         if (!m) break;
         if (items.length >= MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST) fail("oversize_document");
         items.push({ inlines: parseInlines(m[1]!) });
@@ -534,7 +534,7 @@ class Parser {
       this.lines[this.pos] !== ":::"
     )
       lines.push(this.lines[this.pos++]!);
-    for (const l of lines) if (!l || /^\s|^(?:[#>:!|]|- |\d+\. |---$)/.test(l)) fail();
+    for (const l of lines) if (!l || /^\s|^(?:[#>:!|]|- |\d{1,9}\. |---$)/.test(l)) fail();
     return { type: "paragraph", inlines: parseInlines(lines.join("\n")) };
   }
   private tasks(depth: number, indent: number): NoteTaskItem[] {

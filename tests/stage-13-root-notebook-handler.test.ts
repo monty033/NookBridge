@@ -52,7 +52,7 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     expect(reader).toHaveBeenCalledWith("n1");
   });
 
-  it("returns Markdown when strict native decoding rejects decorated Notesnook HTML", async () => {
+  it("returns readable Markdown when unsupported native content is preserved opaquely", async () => {
     const reader = vi.fn(async () => ({
       type: "html" as const,
       data: '<h4><span style="color:red">Real note</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>',
@@ -64,7 +64,7 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     );
     expect(response).toMatchObject({
       ok: true,
-      result: { contentStatus: "ok", markdown: "#### Real note\n\n- [x] Done" },
+      result: { kind: "note", contentStatus: "ok", markdown: "#### Real note\n\n- [x] Done" },
     });
   });
 

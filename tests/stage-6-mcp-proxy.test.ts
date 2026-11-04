@@ -477,6 +477,48 @@ describe("D4-1 — client rejects a non-closed locked-note proof envelope", () =
 // Tool surface — exactly four read-only tools, no others.
 // -----------------------------------------------------------------------
 
+describe("nook-mcp update schema", () => {
+  it("forwards headings and nested checklist Markdown byte-identically", async () => {
+    const markdown = [
+      "---",
+      "nookbridge-format: 1",
+      "---",
+      "",
+      "# Kickoff",
+      "",
+      ":::nookbridge list task-list",
+      "- [x] Outline",
+      "  - [ ] Gather notes",
+      ":::",
+      "",
+    ].join("\n");
+    let received: unknown;
+    const socketPath = await startFakeDaemon((request) => {
+      const patch = (request.params as unknown as { patch: { content: string } }).patch;
+      received = patch.content;
+      return framedResponse({
+        id: request.id,
+        ok: true,
+        result: {
+          kind: "update",
+          id: "0123456789abcdef0123456789abcdef",
+          appliedFields: ["content"],
+        },
+      });
+    });
+    const server = buildNookMcpServer({ client: new NookdSocketClient({ socketPath }) });
+
+    const result = await server.callTool("notesnook_update_note", {
+      id: "0123456789abcdef0123456789abcdef",
+      expectedRevision: `rev_${"0".repeat(32)}`,
+      patch: { content: markdown },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(received).toBe(markdown);
+  });
+});
+
 describe("nook-mcp server surface", () => {
   it("advertises the four Slice 2 reads plus the three bounded writes", async () => {
     const client = new NookdSocketClient({

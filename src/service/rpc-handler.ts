@@ -89,6 +89,7 @@ import {
 import { decodeNoteDocumentNative } from "../core/note-document-native.js";
 import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
+import type { NoteBlock } from "../core/note-document.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
@@ -2209,17 +2210,14 @@ function readBoundedNoteContent(
       // merely the version header, so `notes.get` can return
       // `contentStatus: "ok"` with `markdown: ""` / `markdownBytes: 0`.
       markdown =
-        decoded.document.blocks.length === 0 ? "" : serializeNoteDocumentMarkdown(decoded.document);
+        decoded.document.blocks.length === 0
+          ? ""
+          : containsOpaqueHeadings(decoded.document.blocks)
+            ? readOnlyMarkdownFallback(envelope)
+            : serializeNoteDocumentMarkdown(decoded.document);
     } catch {
-      // Read-only approximation is deliberately a fallback; edit/write decoding stays strict.
-      if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
-      const candidate = envelope as { type?: unknown; data?: unknown };
-      if (
-        (candidate.type !== "tiptap" && candidate.type !== "html") ||
-        typeof candidate.data !== "string"
-      )
-        throw new Error("unavailable");
-      markdown = noteHtmlReadonlyMarkdown(candidate.data);
+      // Read-only approximation covers unsupported native headings too; edit/write decoding stays strict.
+      markdown = readOnlyMarkdownFallback(envelope);
     }
     const markdownBytes = bufferByteLength(markdown, "utf8");
     if (markdownBytes > MAX_NOTES_GET_MARKDOWN_BYTES) {
@@ -2262,6 +2260,28 @@ function readNoteSnapshotMethod(
   } catch {
     return undefined;
   }
+}
+
+function containsOpaqueHeadings(blocks: readonly NoteBlock[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "opaque") return /^h[1-6]$/.test(block.nodeType);
+    if (block.type === "blockquote" || block.type === "callout")
+      return containsOpaqueHeadings(block.blocks);
+    if (block.type === "bullet-list" || block.type === "ordered-list")
+      return block.items.some((item) => containsOpaqueHeadings(item.blocks ?? []));
+    return false;
+  });
+}
+
+function readOnlyMarkdownFallback(envelope: unknown): string {
+  if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
+  const candidate = envelope as { type?: unknown; data?: unknown };
+  if (
+    (candidate.type !== "tiptap" && candidate.type !== "html") ||
+    typeof candidate.data !== "string"
+  )
+    throw new Error("unavailable");
+  return noteHtmlReadonlyMarkdown(candidate.data);
 }
 
 function readRuntimeMethod(

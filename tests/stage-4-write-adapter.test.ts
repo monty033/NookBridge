@@ -39,14 +39,16 @@ import {
   type NotesnookListKind,
 } from "../src/core/notesnook-write-codec.js";
 import { noteHtmlReadonlyMarkdown } from "../src/core/note-html-readonly-markdown.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
 import { serializeNoteDocumentMarkdown } from "../src/core/note-document-markdown.js";
 import type { NoteBlock } from "../src/core/note-document.js";
-import { handleRpcRequest } from "../src/service/rpc-handler.js";
+import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import { serializeRpcResponse } from "../src/service/rpc-protocol.js";
 import {
   isNotesnookWriteContractError,
+  STAGE4_WRITE_LIMITS,
   type AppendNoteCommand,
   type CreateNoteCommand,
   type NotesnookRevisionToken,
@@ -72,6 +74,136 @@ const OTHER_ID = "fedcba9876543210fedcba9876543210";
 const NOTEBOOK_ID = "cafebabecafebabecafebabecafebabe";
 const TAG_ID = "deadbeefdeadbeefdeadbeefdeadbeef";
 const SECOND_TAG_ID = "beadbeadbeadbeadbeadbeadbeadbead";
+
+describe("read-only HTML Markdown projection", () => {
+  it("leaves ordinary parentheses readable and keeps paragraph text from becoming a list", () => {
+    expect(noteHtmlReadonlyMarkdown("<p>Functions (x) and y</p>")).toBe("Functions (x) and y");
+    // A `- ` that follows a <br /> is still paragraph text, not a list item.
+    // Emitting it bare would make the Markdown re-parse as a paragraph plus a
+    // list, silently changing the document's shape on the next write, so the
+    // projection escapes it. Real list items are emitted as list syntax and
+    // carry no backslash.
+    expect(noteHtmlReadonlyMarkdown("<p>Notes:<br />- Settings (advanced)</p>")).toBe(
+      "Notes:\n\\- Settings (advanced)",
+    );
+  });
+
+  it("decodes common named entities", () => {
+    expect(
+      noteHtmlReadonlyMarkdown(
+        "<p>&rsquo;&lsquo;&rdquo;&ldquo;&ndash;&mdash;&hellip;&nbsp;&copy;&reg;&trade;</p>",
+      ),
+    ).toBe("’‘”“–—… ©®™");
+  });
+});
+
+describe("deterministic Markdown codec list fidelity", () => {
+  it("refuses ordered lists whose numbering it cannot preserve", () => {
+    expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("2. First\n3. Second")).toThrow();
+  });
+
+  it("round-trips a long numeric prose marker from read projection through write", () => {
+    const projected = noteHtmlReadonlyMarkdown("<p>1234567890. This is prose</p>");
+    const written = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(projected);
+    expect(projected).toBe("1234567890. This is prose");
+    expect(written.data).toBe('<div data-type="document"><p>1234567890. This is prose</p></div>');
+  });
+});
+
+describe("Stage 4 body byte limits", () => {
+  it("rejects oversized UTF-8 bodies before create, append, or update mutates", async () => {
+    const oversizedContent = "é".repeat(STAGE4_WRITE_LIMITS.maxContentBytes / 2 + 1);
+    const oversizedFragment = "é".repeat(STAGE4_WRITE_LIMITS.maxFragmentBytes / 2 + 1);
+
+    const createDatabase = createFakeDatabase();
+    const createAdapter = createNotesnookWriteAdapter({
+      source: createDatabase,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+    expect(
+      await codeOfAsync(() =>
+        createAdapter.createNote({ title: "Too large", content: oversizedContent }),
+      ),
+    ).toBe("unsupported_content");
+    expect(createDatabase.calls.add).toHaveLength(0);
+
+    const appendState = (() => {
+      const note: FakeNote = {
+        id: NOTE_ID,
+        title: "Bounded",
+        contentId: "content-1",
+        pinned: false,
+        favorite: false,
+        conflicted: false,
+        locked: false,
+        dateEdited: 1_700_000_000_000,
+      };
+      const content: FakeContent = {
+        id: "content-1",
+        noteId: NOTE_ID,
+        type: "html",
+        data: "<p>body</p>",
+      };
+      const database = createFakeDatabase({
+        notes: new Map([[NOTE_ID, note]]),
+        content: new Map([[content.id, content]]),
+      });
+      return {
+        database,
+        adapter: createNotesnookWriteAdapter({
+          source: database,
+          codec: DETERMINISTIC_MARKDOWN_CODEC,
+        }),
+      };
+    })();
+    expect(
+      await codeOfAsync(() =>
+        appendState.adapter.appendNote({
+          id: NOTE_ID,
+          markdownFragment: oversizedFragment,
+          expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(appendState.database.calls.contentUpdate).toHaveLength(0);
+    expect(appendState.database.calls.update).toHaveLength(0);
+
+    const updateNote: FakeNote = {
+      id: NOTE_ID,
+      title: "Bounded",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const updateContent: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "html",
+      data: "<p>body</p>",
+    };
+    const updateDatabase = createFakeDatabase({
+      notes: new Map([[NOTE_ID, updateNote]]),
+      content: new Map([[updateContent.id, updateContent]]),
+    });
+    const updateAdapter = createNotesnookWriteAdapter({
+      source: updateDatabase,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+    expect(
+      await codeOfAsync(() =>
+        updateAdapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+          patch: { content: oversizedContent },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(updateDatabase.calls.contentUpdate).toHaveLength(0);
+  });
+});
 
 interface FakeWriteDatabaseOptions {
   notes?: Map<string, FakeNote>;
@@ -602,6 +734,58 @@ describe("Stage 4 write adapter — createNote", () => {
     expect(database.calls.notebookAdd).toHaveLength(0);
   });
 
+  it("normalizes CRLF to LF before creating the stored document", async () => {
+    const database = createFakeDatabase();
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    await adapter.createNote({ title: "CRLF", content: "first line\r\nsecond line" });
+
+    const stored = database.calls.add[0]?.contentData;
+    expect(stored).toContain("<p>first line<br />second line</p>");
+    expect(stored).not.toContain("\r");
+  });
+
+  it.each([
+    ["- ", "<ul><li>Settings</li></ul>"],
+    ["* ", "<ul><li>Settings</li></ul>"],
+    ["+ ", "<ul><li>Settings</li></ul>"],
+    ["1. ", "<ol><li>Settings</li></ol>"],
+  ])("starts a %s list after a text line", async (marker, expectedList) => {
+    const database = createFakeDatabase();
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    await adapter.createNote({ title: "List interruption", content: `Notes:\n${marker}Settings` });
+
+    expect(database.calls.add[0]?.contentData).toContain(`<p>Notes:</p>${expectedList}`);
+  });
+
+  it.each(["\u0000", "\u001b", "\u007f"])(
+    "still rejects control characters before creating a note",
+    async (control) => {
+      const database = createFakeDatabase();
+      const adapter = createNotesnookWriteAdapter({
+        source: database,
+        codec: DETERMINISTIC_MARKDOWN_CODEC,
+      });
+
+      const code = await codeOfAsync(() =>
+        adapter.createNote({ title: "Control", content: `before${control}after` }),
+      );
+
+      // The codec is the only layer that knows a control byte is
+      // unrepresentable, so its refusal crosses as `unsupported_content`;
+      // both layers still refuse the request at the boundary.
+      expect(code).toBe("unsupported_content");
+      expect(database.calls.add).toHaveLength(0);
+    },
+  );
+
   it("preserves explicit listKind through the defensive command snapshot", async () => {
     const database = createFakeDatabase();
     const codec = htmlCodec();
@@ -816,6 +1000,70 @@ describe("Stage 4 write adapter — createNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — appendNote", () => {
+  it("normalizes CRLF and interrupts a paragraph with an appended list", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Journal",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: '<div data-type="document"><p>Beginning</p></div>',
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    await adapter.appendNote({
+      id: NOTE_ID,
+      markdownFragment: "Notes:\r\n- Settings (advanced)",
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+    });
+
+    const next = (await database.contentFindByNoteId(NOTE_ID))!;
+    expect(next.data).toContain("<p>Notes:</p><ul><li>Settings (advanced)</li></ul>");
+    expect(next.data).not.toContain("\r");
+    const readMarkdown = serializeNoteDocumentMarkdown(
+      decodeNoteDocumentNative(
+        { type: next.type, data: next.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document,
+    );
+    expect(readMarkdown).toContain("Notes:\n\n- Settings (advanced)");
+    expect(readMarkdown).not.toContain("\\(");
+    expect(readMarkdown).not.toContain("\\)");
+    expect(readMarkdown).not.toContain("\\-");
+  });
+
+  it.each(["\u0000", "\u001b", "\u007f"])(
+    "still rejects control characters before appending",
+    async (control) => {
+      const { adapter, database, codec } = setupAppendable();
+      const code = await codeOfAsync(() =>
+        adapter.appendNote({
+          id: NOTE_ID,
+          markdownFragment: `before${control}after`,
+          expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+        }),
+      );
+      expect(code).toBe("unsupported_content");
+      expect(database.calls.contentUpdate).toHaveLength(0);
+      expect(codec.appendCalls).toBe(0);
+    },
+  );
+
   it("snapshots a stateful append fragment before the codec call", async () => {
     const { adapter, database, codec } = (() => {
       const note: FakeNote = {
@@ -1286,6 +1534,72 @@ describe("Stage 4 write adapter — appendNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("Stage 4 write adapter — updateNote", () => {
+  it("writes back the daemon's styled-note projection without changing stored bytes", async () => {
+    const html = '<p style="text-align:left">Kickoff</p>';
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const beforeRevision = note.dateEdited;
+    const stored = await database.contentFindByNoteId(NOTE_ID);
+    const markdown = serializeNoteDocumentMarkdown(
+      decodeNoteDocumentNative(
+        { type: stored!.type, data: stored!.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document,
+    );
+
+    const result = await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: markdown },
+    });
+
+    expect(result.appliedFields).toEqual(["content"]);
+    expect(note.dateEdited).toBeGreaterThan(beforeRevision);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(html);
+  });
+
+  it("keeps style, id, unknown tags, and named entities across a real content edit", async () => {
+    const html =
+      '<div data-type="document"><p style="text-align:left" id="legacy-id">Kickoff</p><legacy-widget data-kind="memo">Preserved</legacy-widget><p>It&rsquo;s ready</p><p>Editable paragraph</p></div>';
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const stored = await database.contentFindByNoteId(NOTE_ID);
+    const markdown = serializeNoteDocumentMarkdown(
+      decodeNoteDocumentNative(
+        { type: stored!.type, data: stored!.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document,
+    );
+
+    const editedMarkdown = markdown.replace("Editable paragraph", "Edited paragraph");
+    expect(editedMarkdown).not.toBe(markdown);
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: editedMarkdown },
+    });
+
+    const updated = (await database.contentFindByNoteId(NOTE_ID))!.data;
+    expect(updated).toContain('<p style="text-align:left" id="legacy-id">Kickoff</p>');
+    expect(updated).toContain('<legacy-widget data-kind="memo">Preserved</legacy-widget>');
+    expect(updated).toContain("<p>Edited paragraph</p>");
+    expect(database.calls.contentUpdate).toHaveLength(1);
+  });
+
+  it.each(["\u0000", "\u001b", "\u007f"])(
+    "still rejects control characters before updating",
+    async (control) => {
+      const { adapter, database } = setupUpdatable();
+      const code = await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, 1_700_000_000_000),
+          patch: { content: `before${control}after` },
+        }),
+      );
+      expect(code).toBe("unsupported_content");
+      expect(database.calls.contentUpdate).toHaveLength(0);
+    },
+  );
+
   it.each([
     ["unknown version", "---\nnookbridge-format: 2\n---\nbody"],
     ["malformed version header", "---\nnookbridge-format: x\n---\nbody"],
@@ -1408,9 +1722,24 @@ nookbridge-format: 1
     expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(titledNative);
   });
 
-  it("accepts legacy updates over an ordinary titled ul without task-list semantics", async () => {
+  it("refuses legacy updates over an ordinary list with unmodelled title metadata", async () => {
     const html =
       '<div data-type="document"><ul data-title="ordinary metadata"><li><p>ordinary</p></li></ul></div>';
+    const { adapter, database, note } = setupUpdatable(undefined, html);
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: "legacy replacement" },
+      }),
+    );
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(html);
+  });
+
+  it("accepts legacy replacements over a title-free ordinary ul", async () => {
+    const html = '<div data-type="document"><ul><li><p>ordinary</p></li></ul></div>';
     const { adapter, database, note } = setupUpdatable(undefined, html);
     const result = await adapter.updateNote({
       id: NOTE_ID,
@@ -1767,9 +2096,8 @@ nookbridge-format: 1
     expect(legacy.database.calls.contentUpdate).toHaveLength(1);
   });
 
-  it("does not mistake title-looking text in unrelated attributes or encoded content for list metadata", async () => {
+  it("does not mistake title-looking encoded content for list metadata", async () => {
     for (const html of [
-      '<div data-type="document" data-note="&lt;ul data-title=&#39;fake&#39;&gt;"><p>x</p></div>',
       '<div data-type="document"><p>&lt;ul data-title=&quot;fake&quot;&gt;</p></div>',
       '<div data-type="document"><pre><code>&lt;ul data-title=&quot;fake&quot;&gt;</code></pre></div>',
       '<div data-type="document"><ul class="checklist" data-title=""><li class="checklist--item"><p>x</p></li></ul></div>',
@@ -2163,6 +2491,172 @@ nookbridge-format: 1
       expect(() => serializeRpcResponse(response)).not.toThrow();
     },
   );
+
+  it("round-trips headings and nested checklist Markdown through the RPC handler", async () => {
+    const { adapter, database, note } = setupUpdatable();
+    const content = [
+      "---",
+      "nookbridge-format: 1",
+      "---",
+      "",
+      "# Kickoff",
+      "",
+      ":::nookbridge list task-list",
+      "- [x] Outline",
+      "  - [ ] Gather notes",
+      ":::",
+      "",
+    ].join("\n");
+    const response = await handleRpcRequest(
+      {
+        id: "multiline-update-rpc",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content },
+        },
+      },
+      {
+        search: async () => [],
+        status: async () => ({ lastSynced: 0, hasUnsyncedChanges: false }),
+        listNotebooks: async () => [],
+        noteMetadata: async () => undefined,
+        updateNote: (command: UpdateNoteCommand) => adapter.updateNote(command),
+      },
+      createReadWriteNoDeleteServicePolicy(),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    const stored = await database.contentFindByNoteId(NOTE_ID);
+    const readBack = serializeNoteDocumentMarkdown(
+      decodeNoteDocumentNative(
+        { type: stored!.type, data: stored!.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document,
+    );
+    expect(readBack).toBe(content);
+  });
+
+  it.each([
+    {
+      name: "styled heading fallback",
+      native:
+        '<h4><span style="color:red">Real note</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>',
+    },
+    {
+      name: "opaque image block",
+      native:
+        '<div data-type="document"><p>Image note</p><img src="https://example.invalid/a.png"></div>',
+    },
+    {
+      name: "opaque table",
+      native:
+        '<div data-type="document"><table><tr><th title="keep">Name</th></tr><tr><td>Value</td></tr></table></div>',
+    },
+    {
+      name: "version-claim fallback",
+      native: "<hr /><p>nookbridge-format: 1</p><h4>Title</h4>",
+    },
+  ])("accepts the exact notes.get body on notes.update for $name", async ({ name, native }) => {
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const initialRevision = revisionToken(NOTE_ID, note.dateEdited);
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      listNotebooks: async () => [],
+      noteMetadata: async (id) =>
+        id === NOTE_ID
+          ? {
+              id,
+              title: note.title,
+              revision: revisionToken(NOTE_ID, note.dateEdited),
+              notebookAbsenceConfirmed: true,
+            }
+          : undefined,
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({
+            id,
+            title: note.title,
+            revision: revisionToken(NOTE_ID, note.dateEdited),
+          }),
+          async () => ({ type: original.type, data: original.data }),
+        ),
+      },
+      updateNote: (command) => adapter.updateNote(command),
+    };
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const getResponse = await handleRpcRequest(
+      { id: "opaque-get", method: "notes.get", params: { id: NOTE_ID } },
+      runtime,
+      policy,
+    );
+    expect(getResponse.ok).toBe(true);
+    if (!getResponse.ok || getResponse.result.kind !== "note") {
+      throw new Error("expected notes.get result");
+    }
+    expect(getResponse.result.contentStatus).toBe("ok");
+    const echoedBody = getResponse.result.markdown;
+    const readRevision = getResponse.result.note.revision;
+    expect(echoedBody).toBeDefined();
+    expect(readRevision).toBe(initialRevision);
+    if (name === "styled heading fallback") {
+      expect(echoedBody).toBe("#### Real note\n\n- [x] Done");
+    } else if (name === "version-claim fallback") {
+      expect(echoedBody).toBe("---\n\nnookbridge-format: 1\n\n#### Title");
+    } else if (name === "opaque image block") {
+      expect(echoedBody).toContain(":::nookbridge opaque img");
+    } else {
+      expect(echoedBody).toContain(":::nookbridge opaque table");
+    }
+
+    const updateResponse = await handleRpcRequest(
+      {
+        id: "opaque-update",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: readRevision!,
+          patch: { content: echoedBody! },
+        },
+      },
+      runtime,
+      policy,
+    );
+
+    expect(updateResponse.ok).toBe(true);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(original.data);
+    expect(revisionToken(NOTE_ID, note.dateEdited)).not.toBe(initialRevision);
+  });
+
+  it("still refuses a changed version-claiming fallback body", async () => {
+    const native = "<hr /><p>nookbridge-format: 1</p><h4>Title</h4>";
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const projected = noteHtmlReadonlyMarkdown(original.data);
+    const changedBody = `${projected}\nchanged`;
+    const initialRevision = note.dateEdited;
+
+    expect(projected).toBe("---\n\nnookbridge-format: 1\n\n#### Title");
+    expect(changedBody).not.toBe(projected);
+    expect(changedBody).toMatch(/^---[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*nookbridge-format\b/i);
+
+    const code = await codeOfAsync(() =>
+      adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, initialRevision),
+        patch: { content: changedBody },
+      }),
+    );
+
+    expect(code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(original.data);
+    expect(note.dateEdited).toBe(initialRevision);
+  });
 
   it("refreshes the note content when the patch replaces content", async () => {
     const { adapter, database, codec } = setupUpdatable();

@@ -30,7 +30,8 @@
  *
  *   `# `, `## `, `### `         → `<h1>` / `<h2>` / `<h3>`
  *   `- [ ] item` / `- [x] item` → Notesnook **simple checklist** HTML
- *   `- ` / `* ` lines           → `<ul><li>…</li></ul>`
+ *   `- ` / `* ` / `+ ` lines   → `<ul><li>…</li></ul>`
+ *   `1. ` lines                → `<ol><li>…</li></ol>`
  *   anything else               → `<p>…</p>`, with in-block newlines as `<br />`
  *
  * Markdown checkbox syntax is the input construct `task-list`.  The
@@ -136,13 +137,14 @@ function hasUnpairedSurrogate(value: string): boolean {
 function requireBoundedMarkdown(value: unknown, maxBytes: number): string {
   if (typeof value !== "string") refuse();
   if (Buffer.byteLength(value, "utf8") > maxBytes) refuse();
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
+  const normalized = value.replace(/\r\n/g, "\n");
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index);
     if (code === 0x09 || code === 0x0a) continue;
     if (code < 0x20 || code === 0x7f) refuse();
   }
-  if (hasUnpairedSurrogate(value)) refuse();
-  return value;
+  if (hasUnpairedSurrogate(normalized)) refuse();
+  return normalized;
 }
 
 function requireBoundedStoredData(value: unknown): string {
@@ -160,7 +162,7 @@ function requireStoredType(value: unknown): "tiptap" | "html" {
 // Markdown construct fidelity gate (Astra finding P1-7).
 //
 // The deterministic codec emits a deliberately tiny subset of Markdown:
-// `h1` / `h2` / `h3`, unordered lists, paragraphs, and a small inline
+// `h1` / `h2` / `h3`, unordered and ordered lists, paragraphs, and a small inline
 // mark set.  Constructs the codec does not round-trip safely MUST be
 // refused before the adapter mutates a note so a full replacement never
 // silently downgrades the content shape.
@@ -175,6 +177,7 @@ export type MarkdownConstruct =
   | "heading-2"
   | "heading-3"
   | "unordered-list"
+  | "ordered-list"
   | "task-list"
   | "paragraph"
   | "inline-bold"
@@ -204,6 +207,7 @@ export const SUPPORTED_MARKDOWN_CONSTRUCTS: ReadonlySet<MarkdownConstruct> = Obj
     "heading-2",
     "heading-3",
     "unordered-list",
+    "ordered-list",
     "task-list",
     "paragraph",
     "inline-bold",
@@ -420,6 +424,20 @@ function parseTableBlockRows(lines: readonly string[]): readonly (readonly strin
   return rows as readonly (readonly string[])[];
 }
 
+function isOrderedListBlock(lines: readonly string[]): boolean {
+  return lines.length > 0 && lines.every((line) => /^\d{1,9}\. +/.test(line));
+}
+
+function isCanonicalOrderedList(lines: readonly string[]): boolean {
+  return (
+    isOrderedListBlock(lines) &&
+    lines.every((line, index) => {
+      const marker = /^(\d{1,9})\. +/.exec(line);
+      return marker?.[1] === String(index + 1);
+    })
+  );
+}
+
 /**
  * Classify one already-split block (see {@link splitBlocks}) as exactly
  * the construct {@link renderBlock} will render it as.  Order matters
@@ -437,7 +455,8 @@ function classifyBlockConstruct(lines: readonly string[]): MarkdownConstruct {
     return level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3";
   }
   if (lines.every((line) => TASK_LIST_LINE.test(line))) return "task-list";
-  if (lines.every((line) => /^[-*] +/.test(line))) return "unordered-list";
+  if (lines.every((line) => /^[-*+] +/.test(line))) return "unordered-list";
+  if (isOrderedListBlock(lines)) return "ordered-list";
   return "paragraph";
 }
 
@@ -548,10 +567,12 @@ function escapeHtml(text: string): string {
  * surrounding prose merged in by accident — fails to parse as a
  * `|`-delimited row.
  */
-type LineShape = "task" | "quote" | "other";
+type LineShape = "task" | "unordered-list" | "ordered-list" | "quote" | "other";
 
 function lineShape(line: string): LineShape {
   if (isTaskListLine(line)) return "task";
+  if (/^[-*+] +/.test(line)) return "unordered-list";
+  if (/^\d{1,9}\. +/.test(line)) return "ordered-list";
   if (/^> ?/.test(line)) return "quote";
   return "other";
 }
@@ -574,7 +595,7 @@ function lineShape(line: string): LineShape {
  *     fence is itself isolated from any surrounding prose (flushed
  *     before opening and after closing) so two adjacent fences, or a
  *     fence immediately followed by text, never merge into one block.
- *   - Any other line's {@link lineShape} (task / quote / other) must
+ *   - Any other line's {@link lineShape} (task / unordered / ordered / quote / other) must
  *     match the current block's shape, or the block is flushed first.
  *     This keeps a blockquote from absorbing an adjacent plain-text line
  *     (or vice versa) when there is no blank line between them.  A
@@ -992,12 +1013,19 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
     return renderTaskListBlock(lines, listKind);
   }
 
-  const isList = lines.every((line) => /^[-*] +/.test(line));
-  if (isList) {
+  const isBulletList = lines.every((line) => /^[-*+] +/.test(line));
+  if (isBulletList) {
     const items = lines
-      .map((line) => `<li>${renderInline(line.replace(/^[-*] +/, ""))}</li>`)
+      .map((line) => `<li>${renderInline(line.replace(/^[-*+] +/, ""))}</li>`)
       .join("");
     return `<ul>${items}</ul>`;
+  }
+  if (isOrderedListBlock(lines)) {
+    if (!isCanonicalOrderedList(lines)) refuse();
+    const items = lines
+      .map((line) => `<li>${renderInline(line.replace(/^\d+\. +/, ""))}</li>`)
+      .join("");
+    return `<ol>${items}</ol>`;
   }
 
   return `<p>${lines.map((line) => renderInline(line)).join("<br />")}</p>`;
