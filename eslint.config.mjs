@@ -9,7 +9,14 @@ import prettierConfig from "eslint-config-prettier";
 /** @type {import("eslint").Linter.Config[]} */
 export default [
   {
-    ignores: ["dist/**", "coverage/**", "node_modules/**", "result/**", "flake.lock"],
+    ignores: [
+      "dist/**",
+      "coverage/**",
+      "node_modules/**",
+      "result/**",
+      "flake.lock",
+      ".worktrees/**",
+    ],
   },
   js.configs.recommended,
   {

@@ -32,3 +32,6 @@ result-*
 
 # Agent working notes (untracked planning scratch)
 .hermes/
+
+# Linked worktrees created under this checkout (see AGENTS.md workflow)
+.worktrees/
