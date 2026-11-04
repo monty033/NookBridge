@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -141,7 +142,10 @@ async function twoNoteFixture() {
   return { states, events, source, store };
 }
 
-const runtime = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {}) =>
+const runtime = (
+  f: Pick<Awaited<ReturnType<typeof fixture>>, "source" | "store">,
+  extra: Record<string, unknown> = {},
+) =>
   createOperatorWriteRuntime({
     source: f.source,
     store: f.store,
