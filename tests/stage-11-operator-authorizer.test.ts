@@ -62,6 +62,24 @@ describe("operator authorizer", () => {
     });
   });
 
+  it("admits search-operator only for operators, independent of notebook policy", async () => {
+    for (const policyDecision of [true, false]) {
+      const evaluateNotebookPolicy = vi.fn(() => policyDecision);
+      const authorize = createOperatorAuthorizer(deps({ evaluateNotebookPolicy }));
+      const search = request("notes.search-operator", { query: "term" });
+
+      await expect(authorize("notes.search-operator", OPERATOR, search)).resolves.toMatchObject({
+        allowed: true,
+        method: "notes.search-operator",
+      });
+      await expect(authorize("notes.search-operator", CLIENT, search)).resolves.toEqual({
+        allowed: false,
+        reason: "permission_denied",
+      });
+      expect(evaluateNotebookPolicy).not.toHaveBeenCalled();
+    }
+  });
+
   it("denies a mutation for a client peer", async () => {
     // Review finding: the two groups were decoration - the evaluator admitted
     // either for every method, so membership of the read-only group was enough

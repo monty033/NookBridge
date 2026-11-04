@@ -14,20 +14,39 @@ const cleanControls = (value: string, preserveNewline = false): string => {
   }
   return result;
 };
+const namedEntities: Readonly<Record<string, string>> = Object.freeze({
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+});
+const entityPattern =
+  /&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp|rsquo|lsquo|rdquo|ldquo|ndash|mdash|hellip|copy|reg|trade);/gi;
 const decode = (text: string): string =>
   cleanControls(
-    text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (m, e: string) => {
-      if (e[0] === "#") {
-        const n = e[1]?.toLowerCase() === "x" ? parseInt(e.slice(2), 16) : Number(e.slice(1));
+    text.replace(entityPattern, (match, entity: string) => {
+      if (entity[0] === "#") {
+        const n =
+          entity[1]?.toLowerCase() === "x"
+            ? parseInt(entity.slice(2), 16)
+            : Number(entity.slice(1));
         return Number.isInteger(n) && n >= 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff)
           ? String.fromCodePoint(n)
           : "";
       }
-      return (
-        ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " } as Record<string, string>)[
-          e.toLowerCase()
-        ] ?? m
-      );
+      return namedEntities[entity.toLowerCase()] ?? match;
     }),
     true,
   );
@@ -97,11 +116,20 @@ const rawText = (nodes: Array<Node | string>): string =>
   nodes
     .map((n) => (typeof n === "string" ? n : n.tag === "br" ? "\n" : rawText(n.children)))
     .join("");
-const escapeText = (value: string): string => value.replace(/[\\`*_[\]()<>!~|]/g, "\\$&");
+const escapeText = (value: string): string =>
+  value
+    .replace(/[\\`*_<>!~|]/g, "\\$&")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
 const escapeLineStart = (value: string): string =>
-  value.replace(/^([ \t]*)([#+\-=]|\d+[.)])/gm, (_m, ws: string, mark: string) =>
-    /^\d/.test(mark) ? `${ws}${mark.slice(0, -1)}\\${mark.slice(-1)}` : `${ws}\\${mark}`,
-  );
+  value
+    .replace(/^([ \t]*)(#{1,3})(?=[ \t])/gm, "$1\\$2")
+    .replace(/^([ \t]*)([-+*])(?=[ \t])/gm, "$1\\$2")
+    .replace(/^([ \t]*)(\d{1,9})([.)])(?=[ \t])/gm, "$1$2\\$3")
+    .replace(
+      /^([ \t]*)(-{3,})[ \t]*$/gm,
+      (_match, whitespace: string, rule: string) => `${whitespace}\\${rule}`,
+    );
 const oneLine = (value: string): string => value.replace(/\s*\n\s*/g, " ");
 const inline = (nodes: Array<Node | string>): string =>
   nodes
@@ -189,7 +217,7 @@ function blocks(nodes: Array<Node | string>, depth = 0): string[] {
     else if (
       ["a", "strong", "b", "em", "i", "s", "strike", "del", "code", "span", "mark", "u"].includes(t)
     )
-      out.push(inline([n]));
+      out.push(escapeLineStart(inline([n])));
     else if (t === "div" && /attachment|embed|file/i.test(n.attrs["data-type"] ?? "")) {
       const name = n.attrs["data-name"] ?? n.attrs["data-filename"];
       out.push(

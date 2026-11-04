@@ -9,12 +9,23 @@ describe("read-only Notesnook HTML Markdown projection", () => {
       ),
     ).toBe("#### **Hi**\n\n###### x");
   });
+  it("leaves hash tags and equals prose unescaped at line start", () => {
+    expect(noteHtmlReadonlyMarkdown("<p>#tag</p><p>= label</p>")).toBe("#tag\n\n= label");
+  });
   it("renders nested lists, ordered starts, and checklist states", () => {
     expect(
       noteHtmlReadonlyMarkdown(
         '<ol start="3"><li>A<ul><li>B</li></ul></li></ol><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li><li class="checklist--item"><p>Todo</p></li></ul>',
       ),
     ).toContain("3. A\n  - B\n\n- [x] Done\n- [ ] Todo");
+  });
+  it("escapes list markers inside generated list labels", () => {
+    expect(noteHtmlReadonlyMarkdown("<ul><li><p>- literal</p></li></ul>")).toBe("- \\- literal");
+  });
+  it("protects inline elements from emitting a new list at line start", () => {
+    expect(noteHtmlReadonlyMarkdown("<span>Notes:<br />- Settings</span>")).toBe(
+      "Notes:\n\\- Settings",
+    );
   });
   it("renders tables, code, quote, and safe links", () => {
     const html =
@@ -56,12 +67,12 @@ describe("read-only Notesnook HTML Markdown projection", () => {
     [
       "link text and href delimiters are escaped",
       '<a href="https://example.test/a)b]">x]y)</a>',
-      "[x\\]y\\)](https://example.test/a\\)b\\])",
+      "[x\\]y)](https://example.test/a\\)b\\])",
     ],
     [
       "link text cannot inject nested Markdown links",
       '<a href="https://example.test/">[x](https://evil.test)</a>',
-      "[\\[x\\]\\(https://evil.test\\)](https://example.test/)",
+      "[\\[x\\](https://evil.test)](https://example.test/)",
     ],
     [
       "href parentheses are escaped",

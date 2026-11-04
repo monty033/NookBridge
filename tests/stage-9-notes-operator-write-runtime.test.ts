@@ -212,6 +212,23 @@ describe("daemon operator write runtime", () => {
     expect(f.state.writes).toBe(0);
   });
 
+  it("returns and accepts a ten-digit numeric prose paragraph in edit preimage", async () => {
+    const prose = "1234567890. This is prose";
+    const f = await fixture({ native: `<p>${prose}</p>` });
+    const rt = runtime(f);
+    const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+
+    expect(preimage.markdown).toContain(prose);
+    const result = await rt.applyEdit(
+      { id: HANDLE, expectedRevision: preimage.revision, markdown: preimage.markdown },
+      PEER,
+    );
+
+    expect(result.kind).toBe("edit");
+    expect(f.state.content.data).toBe(`<div data-type="document"><p>${prose}</p></div>`);
+    expect(f.state.writes).toBe(0);
+  });
+
   it("keeps the preimage strict for content the tolerant read fallback can view", async () => {
     // D6-2 lock: the operator get-view may approximate content the strict
     // decoder refuses, but a preimage is an edit baseline.  It must still

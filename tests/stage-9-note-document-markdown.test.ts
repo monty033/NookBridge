@@ -37,6 +37,15 @@ describe("T02 deterministic Markdown interchange", () => {
     expect(LIMIT).toBe(4 * 1024 * 1024);
     expect(serialize(parse(header))).toBe(header);
   });
+  it.each(["1", "123456789"])("round-trips %s digit prose prefixes", (digits) => {
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: [{ type: "paragraph", inlines: [{ text: `${digits}. This is prose` }] }],
+    };
+    const markdown = serialize(document);
+    expect(markdown).toContain(`\\${digits}. This is prose`);
+    expect(parse(markdown)).toEqual(document);
+  });
   it.each([
     "# Title\n\n## 二\n\n### Three\n\nHello 😀 é.",
     "**bold** *italic* __underline__ ~~strike~~ `code` [link](https://example.test/a)",

@@ -156,27 +156,33 @@ const escape = (s: string): string =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-function entities(s: string): string {
-  // Require explicit entities; unknown named entities cannot silently change meaning.
-  return clean(
-    s.replace(/&([^;\s<&]*);?/g, (whole, name: string) => {
-      if (!whole.endsWith(";")) fail();
-      const named: Record<string, string> = {
-        amp: "&",
-        lt: "<",
-        gt: ">",
-        quot: '"',
-        apos: "'",
-        nbsp: "\u00a0",
-      };
-      if (Object.hasOwn(named, name)) return named[name]!;
-      if (!/^#(?:[0-9]+|x[0-9a-f]+)$/i.test(name)) fail();
+function entities(s: string): { value: string; unsupported: boolean } {
+  let unsupported = false;
+  const value = s.replace(/&([^;\s<&]*);?/g, (whole, name: string) => {
+    if (!whole.endsWith(";")) {
+      unsupported = true;
+      return whole;
+    }
+    const named: Record<string, string> = {
+      amp: "&",
+      lt: "<",
+      gt: ">",
+      quot: '"',
+      apos: "'",
+      nbsp: "\u00a0",
+    };
+    if (Object.hasOwn(named, name)) return named[name]!;
+    if (/^#(?:[0-9]+|x[0-9a-f]+)$/i.test(name)) {
       const n =
         name[1]?.toLowerCase() === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
-      if (!n || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) fail();
-      return String.fromCodePoint(n);
-    }),
-  );
+      if (n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff)) return String.fromCodePoint(n);
+    }
+    // Keep an entity the model cannot decode attached to its original block.
+    // Its source bytes are retained in the private opaque payload below.
+    unsupported = true;
+    return whole;
+  });
+  return { value: clean(value), unsupported };
 }
 interface Element {
   tag: string;
@@ -184,17 +190,177 @@ interface Element {
   children: HtmlNode[];
   raw: string;
   start: number;
+  unsupported: boolean;
 }
 type HtmlNode = Element | string;
-const voids = new Set(["br", "hr", "img"]);
+const voids = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
 const tags = new Set(
   "div p h1 h2 h3 h4 h5 h6 ul ol li strong b em i u s strike del code a br pre blockquote table thead tbody tfoot tr th td span img hr figure figcaption sup sub mark".split(
     " ",
   ),
 );
-function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
+const forbiddenTags = new Set([
+  "applet",
+  "audio",
+  "base",
+  "embed",
+  "form",
+  "frame",
+  "frameset",
+  "iframe",
+  "link",
+  "math",
+  "noembed",
+  "noframes",
+  "object",
+  "portal",
+  "plaintext",
+  "script",
+  "source",
+  "style",
+  "title",
+  "svg",
+  "textarea",
+  "track",
+  "video",
+  "xmp",
+]);
+const forbiddenExternalReferenceAttributes = new Set([
+  "action",
+  "formaction",
+  "ping",
+  "poster",
+  "srcset",
+]);
+const inertAttributeTags: Readonly<Record<string, ReadonlySet<string>>> = {
+  alt: new Set(["img"]),
+  colspan: new Set(["td", "th"]),
+  height: new Set(["hr", "img"]),
+  href: new Set(["a"]),
+  rel: new Set(["a"]),
+  reversed: new Set(["ol"]),
+  rowspan: new Set(["td", "th"]),
+  src: new Set(["img"]),
+  start: new Set(["ol"]),
+  target: new Set(["a"]),
+  width: new Set(["hr", "img"]),
+};
+function hasUnsafeCssFunction(value: string): boolean {
+  const decoded = value
+    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/gs, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(
+      /\\([\da-f]{1,6})\s?|\\(.)/gi,
+      (_match, hex: string | undefined, char: string | undefined) => {
+        if (!hex) return char ?? "";
+        const codePoint = parseInt(hex, 16);
+        return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : "";
+      },
+    );
+  return /(?:^|[^a-z0-9_-])(?:url|var|image-set|-webkit-image-set|image|symbols|cross-fade|element|paint|src|expression)\s*\(/i.test(
+    decoded,
+  );
+}
+const safeOpaqueStyleProperties = new Set([
+  "text-align",
+  "color",
+  "background-color",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "line-height",
+  "width",
+  "height",
+  "display",
+  "vertical-align",
+  "white-space",
+  "list-style-type",
+  "opacity",
+]);
+function isSafeOpaqueStyleProperty(property: string): boolean {
+  return (
+    safeOpaqueStyleProperties.has(property) ||
+    /^margin(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?$/.test(
+      property,
+    ) ||
+    /^padding(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?$/.test(
+      property,
+    ) ||
+    /^border(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?(?:-(?:width|color|style))?$/.test(
+      property,
+    ) ||
+    /^(?:min|max)-(?:width|height|inline-size|block-size)$/.test(property) ||
+    /^text-decoration(?:-(?:line|color|style|thickness))?$/.test(property)
+  );
+}
+function safeOpaqueStyle(style: string): boolean {
+  let declaration = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let depth = 0;
+  const allowed = (part: string): boolean => {
+    const trimmed = part.trim();
+    if (!trimmed) return true;
+    const colon = trimmed.indexOf(":");
+    if (colon <= 0) return false;
+    const property = trimmed.slice(0, colon).trim().toLowerCase();
+    const value = trimmed.slice(colon + 1);
+    return (
+      /^[a-z][a-z0-9-]*$/.test(property) &&
+      isSafeOpaqueStyleProperty(property) &&
+      !hasUnsafeCssFunction(value)
+    );
+  };
+
+  for (const character of style) {
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (quote) {
+      if (character === quote) quote = undefined;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (character === "(") {
+      depth++;
+    } else if (character === ")") {
+      if (depth === 0) return false;
+      depth--;
+    } else if (character === ";" && depth === 0) {
+      if (!allowed(declaration)) return false;
+      declaration = "";
+      continue;
+    }
+    declaration += character;
+  }
+  return !escaped && !quote && depth === 0 && allowed(declaration);
+}
+function parseHtml(html: string): HtmlNode[] {
   clean(html);
-  const root: Element = { tag: "root", attrs: {}, children: [], raw: "", start: 0 };
+  const root: Element = {
+    tag: "root",
+    attrs: {},
+    children: [],
+    raw: "",
+    start: 0,
+    unsupported: false,
+  };
   const stack = [root];
   let pos = 0;
   let count = 0;
@@ -204,17 +370,18 @@ function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
     if (html[pos] !== "<") {
       const end = html.indexOf("<", pos);
       const next = end < 0 ? html.length : end;
-      const text = entities(html.slice(pos, next));
+      const decoded = entities(html.slice(pos, next));
+      if (decoded.unsupported) parent.unsupported = true;
       if (
         ["ul", "ol", "table", "thead", "tbody", "tfoot", "tr"].includes(parent.tag) &&
-        text.trim()
+        decoded.value.trim()
       )
         fail();
-      parent.children.push(text);
+      parent.children.push(decoded.value);
       pos = next;
       continue;
     }
-    const closing = /^<\/([a-z][a-z0-9-]*)\s*>/i.exec(html.slice(pos));
+    const closing = /^<\/([a-z][a-z0-9:_-]*)\s*>/i.exec(html.slice(pos));
     if (closing) {
       if (stack.length === 1 || parent.tag !== closing[1]!.toLowerCase()) fail();
       pos += closing[0].length;
@@ -222,21 +389,23 @@ function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
       stack.pop();
       continue;
     }
-    const open = /^<([a-z][a-z0-9-]*)/i.exec(html.slice(pos));
+    const open = /^<([a-z][a-z0-9:_-]*)/i.exec(html.slice(pos));
     if (!open) fail();
     const tag = open[1]!.toLowerCase();
-    if (!tags.has(tag)) fail();
+    if (forbiddenTags.has(tag)) fail();
+    const knownTag = tags.has(tag);
     // Reject structures a browser would repair/reparent before rendering.
     const phrasing = new Set(
       "strong b em i u s strike del code a br span img sup sub mark".split(" "),
     );
     if (
+      knownTag &&
       (["p", "h1", "h2", "h3", "h4", "h5", "h6"].includes(parent.tag) ||
         phrasing.has(parent.tag)) &&
       !phrasing.has(tag)
     )
       fail();
-    if (tag === "a" && stack.some((n) => n.tag === "a")) fail();
+    if (knownTag && tag === "a" && stack.some((n) => n.tag === "a")) fail();
     const requiredChildren: Record<string, string[]> = {
       ul: ["li"],
       ol: ["li"],
@@ -246,7 +415,8 @@ function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
       tfoot: ["tr"],
       tr: ["th", "td"],
     };
-    if (requiredChildren[parent.tag] && !requiredChildren[parent.tag]!.includes(tag)) fail();
+    if (knownTag && requiredChildren[parent.tag] && !requiredChildren[parent.tag]!.includes(tag))
+      fail();
     const requiredParents: Record<string, string[]> = {
       li: ["ul", "ol"],
       thead: ["table"],
@@ -256,49 +426,63 @@ function parseHtml(html: string, allowHrStyle = false): HtmlNode[] {
       th: ["tr"],
       td: ["tr"],
     };
-    if (requiredParents[tag] && !requiredParents[tag]!.includes(parent.tag)) fail();
+    if (
+      knownTag &&
+      (parent.tag === "root" || tags.has(parent.tag)) &&
+      requiredParents[tag] &&
+      !requiredParents[tag]!.includes(parent.tag)
+    )
+      fail();
     const start = pos;
     pos += open[0].length;
     const attrs: Record<string, string> = Object.create(null) as Record<string, string>;
+    let unsupported = false;
     while (!/^\s*\/?>/.test(html.slice(pos))) {
-      const attr = /^\s+([a-z][a-z0-9-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(
+      const attr = /^\s+([a-z][a-z0-9:_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(
         html.slice(pos),
       );
       if (!attr) fail();
       const key = attr[1]!.toLowerCase();
-      const value = entities(attr[2] ?? attr[3] ?? attr[4]!);
+      const rawValue = attr[2] ?? attr[3] ?? attr[4] ?? "";
+      const decoded = entities(rawValue);
       if (Object.hasOwn(attrs, key)) fail();
-      // Closed inert attributes. Preserve unfamiliar data/aria attributes opaquely.
-      if (
-        !/^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) &&
-        !(allowHrStyle && tag === "hr" && key === "style") &&
-        ![
-          "class",
-          "title",
-          "href",
-          "src",
-          "alt",
-          "width",
-          "height",
-          "colspan",
-          "rowspan",
-          "start",
-          "reversed",
-          "target",
-          "rel",
-        ].includes(key)
-      )
-        fail();
-      if (key === "href" || key === "src") url(value);
-      attrs[key] = value;
+      if (key.startsWith("on") || forbiddenExternalReferenceAttributes.has(key)) fail();
+      // These inert decorations are retained opaquely when the model cannot
+      // represent them; style declarations pass a closed property allowlist.
+      const paragraphDecoration = tag === "p" && key === "id";
+      const allowed =
+        /^(data-[a-z0-9-]+|aria-[a-z0-9-]+)$/.test(key) ||
+        key === "class" ||
+        key === "title" ||
+        key === "style" ||
+        key === "dir" ||
+        inertAttributeTags[key]?.has(tag) === true ||
+        paragraphDecoration;
+      if (!allowed) fail();
+      if (key === "style" && (decoded.unsupported || !safeOpaqueStyle(decoded.value))) fail();
+      if (key === "dir" && !/^(ltr|rtl|auto)$/i.test(decoded.value)) fail();
+      if (decoded.unsupported) unsupported = true;
+      if (key === "href" || key === "src") {
+        if (decoded.unsupported) fail();
+        url(decoded.value);
+      }
+      attrs[key] = decoded.value;
       pos += attr[0].length;
     }
     const end = /^\s*(\/?)>/.exec(html.slice(pos))!;
     pos += end[0].length;
     if (end[1] && !voids.has(tag)) fail();
-    const node: Element = { tag, attrs, children: [], raw: html.slice(start, pos), start };
+    const raw = html.slice(start, pos);
+    const node: Element = {
+      tag,
+      attrs,
+      children: [],
+      raw,
+      start,
+      unsupported,
+    };
     parent.children.push(node);
-    if (!voids.has(tag)) stack.push(node);
+    if (!end[1] && !voids.has(tag)) stack.push(node);
   }
   if (stack.length !== 1) fail();
   return root.children;
@@ -318,7 +502,7 @@ export function hasNonemptyNativeTaskListTitle(html: string): boolean {
         visit(node.children)
       );
     });
-  return visit(parseHtml(html, true));
+  return visit(parseHtml(html));
 }
 // Internal signal: syntactically safe but not representable without data loss.
 class Preserve extends Error {}
@@ -326,19 +510,13 @@ function preserve(): never {
   throw new Preserve();
 }
 /**
- * Check the attributes this tag's decoding actually interprets.
- *
- * `meaningful` maps each attribute NAME the caller reads to the value it
- * accepts.  A name the caller does not read cannot change what is decoded, so
- * it is ignored rather than preserved: a real serializer decorates every
- * element it stores, and preserving a block because of decoration the decoder
- * never consults made every note written through this path unreadable and
- * uneditable.  A *meaningful* name whose value does not match still preserves
- * the element, and an unknown TAG is still preserved — tolerance is limited to
- * attribute names, never to content the decoder cannot express.
+ * Check the attribute values this tag's decoding actually interprets. The
+ * parser has already refused active or unsupported attribute names; accepted
+ * inert decoration that the model does not read is ignored.
  */
 function attrs(n: Element, meaningful: Record<string, string | RegExp> = {}): void {
   for (const [key, value] of Object.entries(n.attrs)) {
+    if ((n.tag === "p" && key === "id") || key === "style" || key === "dir") preserve();
     const rule = meaningful[key];
     if (rule === undefined) continue;
     if (typeof rule === "string" ? rule !== value : !rule.test(value)) preserve();
@@ -347,10 +525,8 @@ function attrs(n: Element, meaningful: Record<string, string | RegExp> = {}): vo
 /**
  * Reject ANY attribute on an element whose canonical form carries none.
  *
- * Used for inline marks and table cells.  Block elements tolerate decoration
- * (a real serializer decorates every element it stores), but the canonical
- * inline model has no attributes at all, so dropping one there would be a
- * silent downgrade rather than decoration.
+ * Used for inline marks and table cells. Dropping an attribute from either
+ * would be a silent downgrade, so the containing block stays opaque.
  */
 function attrsStrict(n: Element): void {
   if (Object.keys(n.attrs).length > 0) preserve();
@@ -439,7 +615,10 @@ function listKind(n: Element): NotesnookListKind | undefined {
   return undefined;
 }
 function taskItems(n: Element, kind: NotesnookListKind, allowTitle = false): NoteTaskItem[] {
-  attrs(n, { class: kind === "task-list" ? "checklist" : "simple-checklist" });
+  attrs(n, {
+    class: kind === "task-list" ? "checklist" : "simple-checklist",
+    ...(allowTitle ? { "data-title": /.*/ } : {}),
+  });
   if (!allowTitle && n.attrs["data-title"] !== undefined) preserve();
   return elements(n.children).map((li) => {
     if (li.tag !== "li") preserve();
@@ -518,6 +697,7 @@ function decodeBlocks(
 ): NoteBlock[] {
   return elements(nodes).map((n) => {
     try {
+      if (containsUnsupportedMarkup(n)) preserve();
       return decodeBlock(n, payloads, binding, topLevel);
     } catch (error) {
       if (!(error instanceof Preserve)) throw error;
@@ -541,6 +721,12 @@ function decodeBlocks(
       };
     }
   });
+}
+function containsUnsupportedMarkup(n: Element): boolean {
+  return (
+    n.unsupported ||
+    n.children.some((child) => typeof child !== "string" && containsUnsupportedMarkup(child))
+  );
 }
 function decodeBlock(
   n: Element,
@@ -581,19 +767,14 @@ function decodeBlock(
       };
     }
     // A class naming a checklist kind but not exactly one cannot be represented
-    // faithfully: the recorded item states would be dropped and the list would
-    // read back as ordinary bullets.  Preserve rather than guess.  `start` and
-    // `reversed` are likewise unrepresentable.  Any other class is decoration
-    // and stays tolerated, so a decorated list still round-trips.
-    // A checklist class must be an exact whitespace-separated token: a substring
-    // match would also preserve an ordinary list whose decorative class merely
-    // contains the word (`not-checklist`, `checklist-decoration`).
+    // faithfully: preserving its item states as ordinary bullets would lose
+    // meaning. Decorative classes that contain no checklist token are ignored.
     const classes = (n.attrs.class ?? "").split(/\s+/).filter(Boolean);
     if (classes.includes("checklist") || classes.includes("simple-checklist")) preserve();
-    // Presence is what matters, not the value: these are boolean or numeric
-    // attributes with no canonical representation, and a valueless `reversed`
-    // arrives as an empty string.
+    // Numbering data has no representation in the document model.
     if (n.attrs.start !== undefined || n.attrs.reversed !== undefined) preserve();
+    if (n.attrs["data-title"] !== undefined) preserve();
+    attrs(n);
     const items = elements(n.children).map((li) => {
       if (li.tag !== "li") preserve();
       attrs(li);
@@ -673,20 +854,17 @@ export function decodeNoteDocumentNative(
     const r = record(snapshot(envelope), ["type", "data"]);
     if ((r.type !== "html" && r.type !== "tiptap") || typeof r.data !== "string") fail();
     const original = bounded({ type: r.type, data: r.data });
-    const nodes = parseHtml(r.data, true);
+    const nodes = parseHtml(r.data);
     const roots = elements(nodes);
     if (!roots.length && r.data.trim()) fail();
     let content: HtmlNode[] = roots;
-    // The document container is structural, not content: it contributes no
-    // blocks of its own, so attributes on it cannot change what the document
-    // says.  Requiring it to carry exactly one attribute made every container
-    // that a real serializer decorates decode as one opaque block, which made
-    // written notes unreadable and uneditable.  Content-level strictness is
-    // unaffected -- a root element declaring any other type is still preserved.
+    // The document container is structural. Its accepted presentation and data
+    // attributes do not alter its content, so decode its children as the root.
     if (
       roots.length === 1 &&
       roots[0]!.tag === "div" &&
-      roots[0]!.attrs["data-type"] === "document"
+      roots[0]!.attrs["data-type"] === "document" &&
+      roots[0]!.attrs.dir === undefined
     )
       content = roots[0]!.children;
     const payloads = new Map<string, string>();

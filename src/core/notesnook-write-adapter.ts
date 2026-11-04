@@ -70,6 +70,7 @@ import {
 } from "./note-document-markdown.js";
 import type { NoteBlock } from "./note-document.js";
 import { classifyMarkdownVersionClaim } from "./note-document-version-claim.js";
+import { noteHtmlReadonlyMarkdown } from "./note-html-readonly-markdown.js";
 import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
 import {
   createNotesnookRecoveryMarker,
@@ -662,15 +663,31 @@ export class NotesnookWriteAdapter {
       } else {
         const newContent = patch.content as string;
         contentBytes = Buffer.byteLength(newContent, "utf8");
-        const canonicalHeader = newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER);
+        // `notes.get` may have to return an unversioned, read-only Markdown
+        // approximation when the native document cannot be represented by
+        // the versioned editor format. Establish an exact echo before
+        // interpreting any format claim, retaining the stored document
+        // byte-for-byte for that no-op update.
+        let isReadOnlyProjectionEcho = false;
+        try {
+          isReadOnlyProjectionEcho = newContent === noteHtmlReadonlyMarkdown(stored.data);
+        } catch {
+          // The fallback projection can reject oversized or malformed input.
+          // Continue through the existing strict content checks in that case.
+        }
         const claimsVersionedFormat =
-          canonicalHeader ||
-          /^---[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*nookbridge-format\b/i.test(newContent);
-        if (claimsVersionedFormat) {
+          !isReadOnlyProjectionEcho &&
+          (newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER) ||
+            /^---[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*nookbridge-format\b/i.test(newContent));
+        if (isReadOnlyProjectionEcho) {
+          preparedContent = { type: stored.type, data: stored.data };
+        } else if (claimsVersionedFormat) {
           // Versioned input is a distinct, fail-closed representation. Never
           // reinterpret a malformed/unknown version as legacy Markdown.
           try {
-            if (!canonicalHeader) throw new Error("unsupported format");
+            if (!newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)) {
+              throw new Error("unsupported format");
+            }
             const binding = {
               noteId: plan.id,
               revision: createRevisionToken({ id: observed.id, dateEdited: observed.dateEdited }),
