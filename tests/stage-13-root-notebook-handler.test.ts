@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 
 const req = (params: Record<string, unknown>) =>
   ({ id: "r-1", method: "notes.get", params }) as unknown as RpcRequest;
@@ -22,7 +23,14 @@ const runtime = (
     id: "opaque",
     expectedRevision: "rev_0123456789abcdef0123456789abcdef",
   }),
-  readOnly: { readOperatorNoteContent: reader },
+  readOnly: {
+    readNoteSnapshot: snapshotFrom(noteMetadata, reader, async (metadata) => {
+      const note = metadata as { notebookAbsenceConfirmed?: unknown; notebookId?: unknown };
+      return note.notebookAbsenceConfirmed === true && note.notebookId === undefined
+        ? []
+        : undefined;
+    }),
+  },
 });
 
 // Policy: allow only when the evaluator receives the root context

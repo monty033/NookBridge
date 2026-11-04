@@ -45,6 +45,7 @@ import {
   type RpcRequest,
 } from "../src/service/rpc-protocol.js";
 import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 
 function createFakeDatabase(): NotesnookReadOnlyDatabase & {
   syncCalls: Array<{ type: "fetch"; force?: boolean }>;
@@ -2107,7 +2108,12 @@ describe("notes.get bounded content read", () => {
     const runtime = {
       search: adapter.search.bind(adapter),
       noteMetadata: adapter.noteMetadata.bind(adapter),
-      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          adapter.noteMetadata.bind(adapter),
+          adapter.readOperatorNoteContent.bind(adapter),
+        ),
+      },
     };
     const request: RpcNotesGetRequest = {
       id: "rpc-get-content",
@@ -2148,7 +2154,12 @@ describe("notes.get bounded content read", () => {
     const runtime = {
       search: adapter.search.bind(adapter),
       noteMetadata: adapter.noteMetadata.bind(adapter),
-      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          adapter.noteMetadata.bind(adapter),
+          adapter.readOperatorNoteContent.bind(adapter),
+        ),
+      },
     };
     const metadata = await adapter.noteMetadata("note-1");
     if (metadata === undefined || metadata.revision === undefined)
@@ -2176,7 +2187,7 @@ describe("notes.get bounded content read", () => {
     const runtime = {
       search: adapter.search.bind(adapter),
       noteMetadata: adapter.noteMetadata.bind(adapter),
-      readOnly: { readOperatorNoteContent: readSpy },
+      readOnly: { readNoteSnapshot: snapshotFrom(adapter.noteMetadata.bind(adapter), readSpy) },
     };
     const request: RpcNotesGetRequest = {
       id: "rpc-get-locked",
@@ -2222,7 +2233,12 @@ describe("notes.get bounded content read", () => {
     const runtime = {
       search: adapter.search.bind(adapter),
       noteMetadata: adapter.noteMetadata.bind(adapter),
-      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          adapter.noteMetadata.bind(adapter),
+          adapter.readOperatorNoteContent.bind(adapter),
+        ),
+      },
     };
     const response = await handleRpcRequest(
       { id: "rpc-get-near-limit", method: "notes.get", params: { id: "note-1" } },
@@ -2261,7 +2277,12 @@ describe("notes.get bounded content read", () => {
     const withReader = {
       search: adapter.search.bind(adapter),
       noteMetadata: adapter.noteMetadata.bind(adapter),
-      readOnly: { readOperatorNoteContent: adapter.readOperatorNoteContent.bind(adapter) },
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          adapter.noteMetadata.bind(adapter),
+          adapter.readOperatorNoteContent.bind(adapter),
+        ),
+      },
     };
     const request: RpcNotesGetRequest = {
       id: "rpc-get-unsupported",

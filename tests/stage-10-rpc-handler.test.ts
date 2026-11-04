@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { buildNotebookIndex } from "../src/settings/notebook-index.js";
+import { buildNotebookIndex, type NotebookRecord } from "../src/settings/notebook-index.js";
 import type { SettingsOperation } from "../src/settings/settings-types.js";
 import {
   createCustomServicePolicy,
@@ -13,6 +13,7 @@ import {
 } from "../src/service/service-policy.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
 import type {
   AppendNoteResult,
@@ -131,6 +132,206 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
     expect(calls).toEqual([
       { op: "read", ctx: { notebookPath: "Personal/Projects", noteTitle: "Roadmap" } },
     ]);
+  });
+
+  describe("notes.get authorization basis snapshot", () => {
+    const policy = () => createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
+    const contentReader = () => vi.fn(async () => ({ type: "html" as const, data: "<p>Body</p>" }));
+    const notebookRecords = (title: string) => [
+      { id: "parent", title: "Personal" },
+      { id: "child", title, parentId: "parent" },
+    ];
+    const lockedPathSnapshot = async (
+      metadata: unknown,
+      listHierarchy: () => Promise<readonly NotebookRecord[]>,
+    ) => {
+      const record = metadata as {
+        notebookId?: unknown;
+        notebookIds?: unknown;
+        notebookAbsenceConfirmed?: unknown;
+      };
+      const ids = Array.isArray(record.notebookIds)
+        ? record.notebookIds.filter((value): value is string => typeof value === "string")
+        : typeof record.notebookId === "string"
+          ? [record.notebookId]
+          : [];
+      if (ids.length === 0) return record.notebookAbsenceConfirmed === true ? [] : undefined;
+      const index = buildNotebookIndex(await listHierarchy());
+      return ids.flatMap((notebookId) => {
+        const path = index.resolvePath(notebookId);
+        return path === undefined ? [] : [{ notebookId, path }];
+      });
+    };
+
+    it("refuses when the note title changes before the locked snapshot", async () => {
+      let reads = 0;
+      const noteMetadata = vi.fn(async (id: string) => {
+        reads += 1;
+        return { id, title: reads === 1 ? "Roadmap" : "Renamed", notebookId: "child" };
+      });
+      const reader = contentReader();
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, (metadata) =>
+              lockedPathSnapshot(metadata, async () => notebookRecords("Projects")),
+            ),
+          },
+          listNotebooksForSettings: async () => notebookRecords("Projects"),
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(reader).toHaveBeenCalledOnce();
+    });
+
+    it("refuses when a notebook path changes while its id stays the same", async () => {
+      const noteMetadata = vi.fn(async (id: string) => ({
+        id,
+        title: "Roadmap",
+        notebookId: "child",
+      }));
+      const reader = contentReader();
+      let listings = 0;
+      const listNotebooksForSettings = async () => {
+        listings += 1;
+        return notebookRecords(listings === 1 ? "Projects" : "Renamed Projects");
+      };
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, (metadata) =>
+              lockedPathSnapshot(metadata, listNotebooksForSettings),
+            ),
+          },
+          listNotebooksForSettings,
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(listings).toBe(2);
+    });
+
+    it("refuses when a notebook id cannot be resolved at snapshot time", async () => {
+      const noteMetadata = vi.fn(async (id: string) => ({
+        id,
+        title: "Roadmap",
+        notebookId: "child",
+      }));
+      const reader = contentReader();
+      let listings = 0;
+      const listNotebooksForSettings = async () => {
+        listings += 1;
+        return listings === 1 ? notebookRecords("Projects") : [{ id: "parent", title: "Personal" }];
+      };
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, (metadata) =>
+              lockedPathSnapshot(metadata, listNotebooksForSettings),
+            ),
+          },
+          listNotebooksForSettings,
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(listings).toBe(2);
+    });
+
+    it("allows an unchanged note title and notebook path", async () => {
+      const noteMetadata = vi.fn(async (id: string) => ({
+        id,
+        title: "Roadmap",
+        notebookId: "child",
+      }));
+      const reader = contentReader();
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, (metadata) =>
+              lockedPathSnapshot(metadata, async () => notebookRecords("Projects")),
+            ),
+          },
+          listNotebooksForSettings: async () => notebookRecords("Projects"),
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: true, result: { kind: "note", contentStatus: "ok" } });
+      expect(reader).toHaveBeenCalledOnce();
+    });
+
+    it("allows reordered notebook ids when their resolved paths are unchanged", async () => {
+      let reads = 0;
+      const noteMetadata = vi.fn(async (id: string) => {
+        reads += 1;
+        return {
+          id,
+          title: "Roadmap",
+          notebookIds: reads === 1 ? ["a", "b"] : ["b", "a"],
+        } as never;
+      });
+      const reader = contentReader();
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, (metadata) =>
+              lockedPathSnapshot(metadata, async () => [
+                { id: "a", title: "First" },
+                { id: "b", title: "Second" },
+              ]),
+            ),
+          },
+          listNotebooksForSettings: async () => [
+            { id: "a", title: "First" },
+            { id: "b", title: "Second" },
+          ],
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: true, result: { kind: "note", contentStatus: "ok" } });
+      expect(reader).toHaveBeenCalledOnce();
+    });
+
+    it("allows a positively confirmed note with no notebook path", async () => {
+      const noteMetadata = vi.fn(async (id: string) => ({
+        id,
+        title: "Root note",
+        notebookAbsenceConfirmed: true,
+      }));
+      const reader = contentReader();
+      const listNotebooksForSettings = vi.fn(async () => notebookRecords("Projects"));
+      const response = await handleRpcRequest(
+        request("notes.get", { id: "note-1" }),
+        makeRuntime({
+          noteMetadata,
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(noteMetadata, reader, async () => []),
+          },
+          listNotebooksForSettings,
+        }),
+        policy(),
+      );
+
+      expect(response).toMatchObject({ ok: true, result: { kind: "note", contentStatus: "ok" } });
+      // Authorization takes the hierarchy snapshot; no path re-resolution is needed for `<root>`.
+      expect(listNotebooksForSettings).toHaveBeenCalledOnce();
+    });
   });
 
   it("resolves notebookId through the trusted index before authorizing notes.create", async () => {
@@ -345,7 +546,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const readOperatorNoteContent = makeContentReader();
       const runtime = makeRuntime({
         noteMetadata,
-        readOnly: { readOperatorNoteContent },
+        readOnly: { readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent) },
         notebookIndex: makeIndex(),
       });
       const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
@@ -372,7 +573,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const readOperatorNoteContent = makeContentReader();
       const runtime = makeRuntime({
         noteMetadata,
-        readOnly: { readOperatorNoteContent },
+        readOnly: { readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent) },
         notebookIndex: makeIndex(),
       });
       const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
@@ -406,7 +607,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const readOperatorNoteContent = makeContentReader();
       const runtime = makeRuntime({
         noteMetadata,
-        readOnly: { readOperatorNoteContent },
+        readOnly: { readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent) },
         notebookIndex: makeIndex(),
       });
       const policy = createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator);
@@ -442,7 +643,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const readOperatorNoteContent = makeContentReader();
       const runtime = makeRuntime({
         noteMetadata,
-        readOnly: { readOperatorNoteContent },
+        readOnly: { readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent) },
         listNotebooksForSettings: async () =>
           cappedIds.map((id, index) => ({ id, title: `Vault/Notebook ${index}` })),
         notebookIndex: makeIndex(),
@@ -477,7 +678,7 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const readOperatorNoteContent = makeContentReader();
       const runtime = makeRuntime({
         noteMetadata,
-        readOnly: { readOperatorNoteContent },
+        readOnly: { readNoteSnapshot: snapshotFrom(noteMetadata, readOperatorNoteContent) },
         listNotebooksForSettings: async () => {
           throw new Error("hierarchy unavailable");
         },
@@ -530,7 +731,14 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       const policy = createCustomServicePolicy(methods, makeEvaluator(denyPrivate).evaluator);
       const denied = await handleRpcRequest(
         request("notes.get", { path }),
-        actualPrivateNoteRuntime({ readOnly: { readOperatorNoteContent } }),
+        actualPrivateNoteRuntime({
+          readOnly: {
+            readNoteSnapshot: snapshotFrom(
+              async (id) => ({ id, title: "Roadmap", notebookId: "secret" }),
+              readOperatorNoteContent,
+            ),
+          },
+        }),
         policy,
       );
       const missing = await handleRpcRequest(

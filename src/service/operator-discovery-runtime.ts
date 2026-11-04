@@ -140,11 +140,18 @@ export function createOperatorDiscoveryRuntime(
       requirePeer(peer);
       const noteId = registry.resolve(id, peer);
       if (noteId === undefined) throw new OperatorWriteError("not_found");
-      const reader = service.readOnly.readOperatorNoteContent;
-      if (reader === undefined) throw new Error("content unavailable");
-      const metadata = await service.readOnly.noteMetadata(noteId);
-      if (metadata === undefined) throw new Error("note unavailable");
-      const content = await reader(noteId);
+      // Metadata and body come from one snapshot, so `revision` is the
+      // revision of the body shown rather than of some neighbouring write.
+      const readSnapshot = service.readOnly.readNoteSnapshot;
+      if (readSnapshot === undefined) throw new Error("content unavailable");
+      const snapshot = await readSnapshot(noteId);
+      if (snapshot === undefined) throw new Error("note unavailable");
+      if ("contentRefusal" in snapshot) {
+        // A locked note keeps its own category; any other failure is generic.
+        if (snapshot.contentRefusal === "locked") throw new OperatorWriteError("vault_locked");
+        throw new Error("content unavailable");
+      }
+      const { metadata, content } = snapshot;
       const revision = metadata.revision ?? `rev_${"0".repeat(32)}`;
       let markdown: string;
       try {

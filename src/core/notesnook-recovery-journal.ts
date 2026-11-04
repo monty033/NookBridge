@@ -14,6 +14,7 @@ export const NOTESNOOK_RECOVERY_JOURNAL_KEY = "nookbridge:recovery-journal:v1" a
 export type NotesnookRecoveryStage =
   | "create-notebook-attach"
   | "create-tag-relation"
+  | "append-date"
   | "update-metadata"
   | "update-content"
   | "update-tags";
@@ -45,6 +46,7 @@ function isStage(value: unknown): value is NotesnookRecoveryStage {
   return (
     value === "create-notebook-attach" ||
     value === "create-tag-relation" ||
+    value === "append-date" ||
     value === "update-metadata" ||
     value === "update-content" ||
     value === "update-tags"

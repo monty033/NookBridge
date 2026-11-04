@@ -202,6 +202,36 @@ export type NotesnookReadOnlyContentDiagnostic = Readonly<{
   readonly literalMarkdown: NotesnookReadOnlyContentMarker;
 }>;
 
+/**
+ * One note's metadata and decoded-ready content, read as a unit.  The two
+ * halves are taken under the shared database lock, so a write that spans both
+ * (an append advances the note, then replaces its content) is never observed
+ * half-done: the revision in `metadata` always describes the body returned.
+ *
+ * Content is withheld, not guessed at, when it cannot be returned: `locked`
+ * when the note is locked, `read_failed` for any other reason.  Neither
+ * carries a cause.
+ */
+export type NotesnookReadOnlyNoteSnapshot =
+  | Readonly<{
+      metadata: NotesnookReadOnlyNoteMetadata;
+      content: NotesnookReadOnlyNoteContent;
+      /** Resolved from the same locked database view as metadata and content. */
+      notebookPathSnapshot?: readonly NotesnookReadOnlyNotebookPath[];
+    }>
+  | Readonly<{
+      metadata: NotesnookReadOnlyNoteMetadata;
+      contentRefusal: "locked" | "read_failed";
+      /** Resolved from the same locked database view as metadata and content. */
+      notebookPathSnapshot?: readonly NotesnookReadOnlyNotebookPath[];
+    }>;
+
+/** A notebook id and its canonical title path from one hierarchy snapshot. */
+export type NotesnookReadOnlyNotebookPath = Readonly<{
+  readonly notebookId: string;
+  readonly path: string;
+}>;
+
 export interface NotesnookReadOnlyDatabase {
   readonly lastSynced: () => Promise<number>;
   readonly hasUnsyncedChanges: () => Promise<boolean>;
@@ -240,6 +270,13 @@ export interface NotesnookReadOnlyDatabase {
   /** Body-free classifier for one note's stored content representation. */
   readonly noteContentDiagnostic?: (id: string) => Promise<NotesnookReadOnlyContentDiagnostic>;
   readonly readOperatorNoteContent?: (id: string) => Promise<NotesnookReadOnlyNoteContent>;
+  /**
+   * Metadata and content of one note as a consistent pair, or `undefined`
+   * when the note does not exist.  Takes the shared database lock, so it must
+   * never be called from code that already holds the lock.  Never starts a
+   * sync; it waits for one that is already running.
+   */
+  readonly readNoteSnapshot?: (id: string) => Promise<NotesnookReadOnlyNoteSnapshot | undefined>;
   readonly noteMetadata: (id: string) => Promise<NotesnookReadOnlyNoteMetadata | undefined>;
   readonly search: (query: string) => Promise<NotesnookReadOnlySearchHit[]>;
 }

@@ -18,6 +18,7 @@ import { NotesnookReadOnlyProjectionError } from "../src/core/notesnook-readonly
 import { serializeRpcResponse } from "../src/service/rpc-protocol.js";
 import type { OperatorPeer } from "../src/service/operator-server.js";
 import type { DiscoveryVisibility } from "../src/service/discovery-visibility.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 
 const PEER_A: OperatorPeer = Object.freeze({
   uid: 1001,
@@ -52,9 +53,23 @@ function visibilityDouble(
 
 type Service = Parameters<typeof createOperatorDiscoveryRuntime>[0];
 
+/**
+ * `view` reads the note through the snapshot slot, not through separate
+ * metadata and content readers.  Derive the slot from those two stubs the way
+ * the live factory does, so a fixture still describes a note by its parts.
+ */
+function withSnapshot(readOnly: Record<string, unknown>): Record<string, unknown> {
+  const metadata = readOnly.noteMetadata as ((id: string) => Promise<unknown>) | undefined;
+  const content = readOnly.readOperatorNoteContent as
+    | ((id: string) => Promise<unknown>)
+    | undefined;
+  if (metadata === undefined || content === undefined) return readOnly;
+  return { ...readOnly, readNoteSnapshot: snapshotFrom(metadata, content) };
+}
+
 /** Build a runtime whose allow-all filter delegates to the stubbed raw surface. */
-function runtimeFor(readOnly: Record<string, unknown>) {
-  const raw = readOnly as unknown as Service["readOnly"];
+function runtimeFor(readOnlyStub: Record<string, unknown>) {
+  const raw = withSnapshot(readOnlyStub) as unknown as Service["readOnly"];
   return createOperatorDiscoveryRuntime(
     { readOnly: raw } as Service,
     undefined,
@@ -277,7 +292,11 @@ describe("daemon operator discovery runtime", () => {
     const { runtime, handle } = await viewFixture(async () => {
       throw locked;
     });
-    await expect(runtime.view?.({ id: handle }, PEER_A)).rejects.toBe(locked);
+    // The snapshot reports the lock as a category rather than passing the
+    // thrown error through, so the refusal is matched by code, not identity.
+    await expect(runtime.view?.({ id: handle }, PEER_A)).rejects.toMatchObject({
+      code: "vault_locked",
+    });
     const response = await createOperatorDiscoveryHandler(runtime)(
       { id: "view-locked", method: "notes.get-view", params: { id: handle } },
       PEER_A,
@@ -399,14 +418,14 @@ describe("daemon operator discovery runtime", () => {
     const resolved: string[] = [];
     const runtime = createOperatorDiscoveryRuntime(
       {
-        readOnly: {
+        readOnly: withSnapshot({
           listNotes: async () => [],
           noteMetadata: async (id: string) => {
             resolved.push(id);
             return { id, title: "Created", revision: `rev_${"2".repeat(32)}` };
           },
           readOperatorNoteContent: async () => ({ type: "html", data: "<p>x</p>" }),
-        },
+        }),
         createNote: async () => ({ id: "raw-created-1", titleBytes: 5, contentBytes: 10 }),
       } as unknown as Parameters<typeof createOperatorDiscoveryRuntime>[0],
       undefined,
@@ -460,12 +479,12 @@ describe("daemon operator discovery runtime", () => {
       };
       const runtime = createOperatorDiscoveryRuntime(
         {
-          readOnly: {
+          readOnly: withSnapshot({
             listNotes: async () => ((calls.list += 1), []),
             search: async () => ((calls.search += 1), []),
             noteMetadata: async () => ((calls.meta += 1), undefined),
             readOperatorNoteContent: async () => ((calls.content += 1), { type: "html", data: "" }),
-          },
+          }),
           createNote: async () => (
             (calls.create += 1), { id: "x", titleBytes: 0, contentBytes: 0 }
           ),

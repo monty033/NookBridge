@@ -1180,6 +1180,105 @@ describe("Stage 4 write adapter — appendNote", () => {
     expect(Number.isInteger(touch.dateEdited)).toBe(true);
     expect(touch.dateEdited).toBeGreaterThan(1_700_000_000_000);
   });
+
+  // The touch is the first mutator of the append saga.  If it rejects, the
+  // content write never runs, so nothing is left behind and the caller is told
+  // plainly that nothing happened.
+  it("writes no content when the leading dateEdited bump rejects", async () => {
+    const { adapter, database } = setupAppendable();
+    database.notesTouch = async () => {
+      throw new Error("upstream: touch refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "late body",
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+  });
+
+  // The content write is the only step that applies the body, so its inverse is
+  // the timestamp: restore the observed value exactly and the note is where it
+  // started, with no content row touched twice and no sync flag disturbed.
+  it("restores the observed dateEdited when the content write rejects", async () => {
+    const { adapter, database } = setupAppendable();
+    database.contentUpdateByNoteId = async () => {
+      throw new Error("upstream: content update refused");
+    };
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapter.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "late body",
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(database.calls.touch).toHaveLength(2);
+    expect(database.calls.touch[0]?.dateEdited).toBeGreaterThan(1_700_000_000_000);
+    expect(database.calls.touch[1]?.dateEdited).toBe(1_700_000_000_000);
+  });
+
+  it("records an append-date recovery marker when the timestamp restore fails", async () => {
+    const { database } = setupAppendable();
+    database.contentUpdateByNoteId = async () => {
+      throw new Error("upstream: content update refused");
+    };
+    let touchCalls = 0;
+    database.notesTouch = async () => {
+      touchCalls += 1;
+      if (touchCalls > 1) throw new Error("upstream: touch refused");
+    };
+    const markers: unknown[] = [];
+    const adapterWithJournal = createNotesnookWriteAdapter({
+      source: database,
+      codec: htmlCodec(),
+      recoveryJournal: {
+        record: (marker: unknown) => markers.push(marker),
+        snapshot: () => [],
+      },
+    });
+    const expectedRevision = revisionToken(NOTE_ID, 1_700_000_000_000);
+
+    const code = await codeOfAsync(() =>
+      adapterWithJournal.appendNote({
+        id: NOTE_ID,
+        markdownFragment: "late body",
+        expectedRevision,
+      }),
+    );
+
+    expect(code).toBe("sync_failed");
+    expect(markers).toEqual([{ operation: "append", noteId: NOTE_ID, stage: "append-date" }]);
+  });
+
+  it("advances dateEdited past the observed value when the wall clock has not", async () => {
+    const { adapter, database } = setupAppendable();
+    const future = Date.now() + 60_000;
+    const originalNote = database.note;
+    database.note = (async (id: string) => {
+      const base = await originalNote(id);
+      return base === undefined ? base : { ...base, dateEdited: future };
+    }) as typeof database.note;
+    const expectedRevision = revisionToken(NOTE_ID, future);
+
+    await adapter.appendNote({
+      id: NOTE_ID,
+      markdownFragment: "clock behind body",
+      expectedRevision,
+    });
+
+    expect(database.calls.touch).toHaveLength(1);
+    expect(database.calls.touch[0]?.dateEdited).toBe(future + 1);
+  });
 });
 
 // ---------------------------------------------------------------------------

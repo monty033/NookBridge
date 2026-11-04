@@ -16,6 +16,7 @@ import {
   __resetMutexForTesting,
   peekMutex,
   withMutex,
+  withSharedMutex,
 } from "../src/core/notesnook-database-mutex.js";
 
 function makeDatabase(): object {
@@ -188,5 +189,233 @@ describe("notesnook-database-mutex", () => {
     await withMutex(db, "test:warm", async () => undefined);
     expect(__resetMutexForTesting(db)).toBe(true);
     expect(__resetMutexForTesting(db)).toBe(false);
+  });
+
+  describe("shared mode", () => {
+    interface Gate {
+      readonly promise: Promise<void>;
+      readonly open: () => void;
+    }
+    function gate(): Gate {
+      let open!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { promise, open };
+    }
+    /** Let every already-resolved continuation run. */
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    it("runs shared holders concurrently", async () => {
+      const db = makeDatabase();
+      const first = gate();
+      const second = gate();
+      const order: string[] = [];
+      const a = withSharedMutex(db, "test:a", async () => {
+        order.push("a:enter");
+        await first.promise;
+        order.push("a:exit");
+      });
+      const b = withSharedMutex(db, "test:b", async () => {
+        order.push("b:enter");
+        await second.promise;
+        order.push("b:exit");
+      });
+      await settle();
+      // Both are inside before either leaves.
+      expect(order).toEqual(["a:enter", "b:enter"]);
+      expect(peekMutex(db)).toEqual({ depth: 2, queued: 0 });
+      second.open();
+      first.open();
+      await Promise.all([a, b]);
+      expect(peekMutex(db)).toEqual({ depth: 0, queued: 0 });
+    });
+
+    it("makes a shared request wait for an exclusive holder", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const order: string[] = [];
+      const writer = withMutex(db, "test:w", async () => {
+        order.push("w:enter");
+        await hold.promise;
+        order.push("w:exit");
+      });
+      const reader = withSharedMutex(db, "test:r", async () => {
+        order.push("r:enter");
+      });
+      await settle();
+      expect(order).toEqual(["w:enter"]);
+      hold.open();
+      await Promise.all([writer, reader]);
+      expect(order).toEqual(["w:enter", "w:exit", "r:enter"]);
+    });
+
+    it("makes an exclusive request wait for every shared holder", async () => {
+      const db = makeDatabase();
+      const first = gate();
+      const second = gate();
+      const order: string[] = [];
+      const a = withSharedMutex(db, "test:a", async () => {
+        await first.promise;
+        order.push("a:exit");
+      });
+      const b = withSharedMutex(db, "test:b", async () => {
+        await second.promise;
+        order.push("b:exit");
+      });
+      const writer = withMutex(db, "test:w", async () => {
+        order.push("w:enter");
+      });
+      await settle();
+      first.open();
+      await settle();
+      // One reader is still inside, so the writer must still be waiting.
+      expect(order).toEqual(["a:exit"]);
+      second.open();
+      await Promise.all([a, b, writer]);
+      expect(order).toEqual(["a:exit", "b:exit", "w:enter"]);
+    });
+
+    it("prefers a queued writer over a shared request that arrives later", async () => {
+      const db = makeDatabase();
+      const early = gate();
+      const order: string[] = [];
+      const reader1 = withSharedMutex(db, "test:r1", async () => {
+        order.push("r1:enter");
+        await early.promise;
+        order.push("r1:exit");
+      });
+      const writer = withMutex(db, "test:w", async () => {
+        order.push("w:enter");
+        order.push("w:exit");
+      });
+      // Arrives while the writer is queued: a free-for-all would admit it
+      // alongside r1 and starve the writer.
+      const reader2 = withSharedMutex(db, "test:r2", async () => {
+        order.push("r2:enter");
+      });
+      await settle();
+      expect(order).toEqual(["r1:enter"]);
+      expect(peekMutex(db)).toEqual({ depth: 1, queued: 2 });
+      early.open();
+      await Promise.all([reader1, writer, reader2]);
+      expect(order).toEqual(["r1:enter", "r1:exit", "w:enter", "w:exit", "r2:enter"]);
+    });
+
+    it("admits every shared request queued behind a writer together once it leaves", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const inside = gate();
+      const order: string[] = [];
+      const writer = withMutex(db, "test:w", () => hold.promise);
+      const readers = [1, 2, 3].map((n) =>
+        withSharedMutex(db, `test:r${n}`, async () => {
+          order.push(`r${n}:enter`);
+          await inside.promise;
+        }),
+      );
+      await settle();
+      expect(order).toEqual([]);
+      hold.open();
+      await settle();
+      expect(order).toEqual(["r1:enter", "r2:enter", "r3:enter"]);
+      expect(peekMutex(db)).toEqual({ depth: 3, queued: 0 });
+      inside.open();
+      await Promise.all([writer, ...readers]);
+    });
+
+    it("does not let shared waiters make an exclusive request fail admission", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const writer = withMutex(db, "test:holder", () => hold.promise);
+      // Far beyond the exclusive cap of 64, within the shared cap.
+      const readers = Array.from({ length: 150 }, (_, i) =>
+        withSharedMutex(db, `test:r${i}`, async () => i),
+      );
+      const queuedWriter = withMutex(db, "test:next", async () => "written");
+      await settle();
+      expect(peekMutex(db).queued).toBe(151);
+      hold.open();
+      await expect(queuedWriter).resolves.toBe("written");
+      await expect(Promise.all(readers)).resolves.toHaveLength(150);
+      await writer;
+    });
+
+    it("rejects only shared requests once the shared cap is reached", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const writer = withMutex(db, "test:holder", () => hold.promise);
+      const outcomes: Array<Promise<"ok" | "rejected">> = [];
+      for (let i = 0; i < 200; i++) {
+        outcomes.push(
+          withSharedMutex(db, "test:r", async () => "ok" as const).catch((error: unknown) => {
+            expect(String(error)).toMatch(/queue depth exceeded/);
+            return "rejected" as const;
+          }),
+        );
+      }
+      // The exclusive queue is untouched by a full shared queue.
+      const queuedWriter = withMutex(db, "test:w", async () => "written");
+      hold.open();
+      const settled = await Promise.all(outcomes);
+      expect(settled.filter((value) => value === "ok")).toHaveLength(192);
+      expect(settled.filter((value) => value === "rejected")).toHaveLength(8);
+      await expect(queuedWriter).resolves.toBe("written");
+      await writer;
+      expect(peekMutex(db)).toEqual({ depth: 0, queued: 0 });
+    });
+
+    it("still rejects an exclusive request past its own cap while shared ones queue", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const holder = withSharedMutex(db, "test:holder", () => hold.promise);
+      const writers = Array.from({ length: 64 }, () =>
+        withMutex(db, "test:w", async () => "ok").catch(() => "rejected"),
+      );
+      await expect(withMutex(db, "test:over", async () => "ok")).rejects.toThrow(
+        /queue depth exceeded/,
+      );
+      // Shared requests queue behind those writers and are unaffected.
+      const reader = withSharedMutex(db, "test:r", async () => "read");
+      hold.open();
+      await holder;
+      await expect(reader).resolves.toBe("read");
+      await expect(Promise.all(writers)).resolves.toEqual(Array(64).fill("ok"));
+    });
+
+    it("releases the lock when a shared function throws", async () => {
+      const db = makeDatabase();
+      await expect(
+        withSharedMutex(db, "test:throw", async () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+      expect(peekMutex(db)).toEqual({ depth: 0, queued: 0 });
+      await expect(withMutex(db, "test:after", async () => "recovered")).resolves.toBe("recovered");
+    });
+
+    it("releases a waiting writer when the last shared holder throws", async () => {
+      const db = makeDatabase();
+      const hold = gate();
+      const reader = withSharedMutex(db, "test:r", async () => {
+        await hold.promise;
+        throw new Error("boom");
+      });
+      const writer = withMutex(db, "test:w", async () => "written");
+      hold.open();
+      await expect(reader).rejects.toThrow("boom");
+      await expect(writer).resolves.toBe("written");
+    });
+
+    it("applies the same argument validation as the exclusive gate", async () => {
+      const db = makeDatabase();
+      await expect(withSharedMutex(null, "test", async () => 1)).rejects.toThrow(/invalid_input/);
+      await expect(withSharedMutex(db, "", async () => 1)).rejects.toThrow(/invalid_input/);
+      await expect(
+        withSharedMutex(db, "ok", null as unknown as () => Promise<number>),
+      ).rejects.toThrow(/invalid_input/);
+    });
   });
 });

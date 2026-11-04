@@ -49,8 +49,16 @@ import {
   type NotesnookLiveDatabase,
   type NotesnookRealCoreModule,
 } from "./notesnook-core-adapter.js";
-import { flattenLiveDatabaseToReadOnly } from "./notesnook-readonly-projection.js";
-import type { NotesnookReadOnlyDatabase } from "./notesnook-readonly-adapter.js";
+import {
+  flattenLiveDatabaseToReadOnly,
+  isNotesnookReadOnlyProjectionError,
+} from "./notesnook-readonly-projection.js";
+import type {
+  NotesnookReadOnlyDatabase,
+  NotesnookReadOnlyNoteSnapshot,
+} from "./notesnook-readonly-adapter.js";
+import { withSharedMutex } from "./notesnook-database-mutex.js";
+import { buildNotebookIndex, type NotebookRecord } from "../settings/notebook-index.js";
 import {
   hasLiveWriteSurface,
   projectLiveDatabaseToWriteCapability,
@@ -322,7 +330,11 @@ export async function createNotesnookLiveCoreFactory(
     const token = wrapTokenManager(tokenManager, ensureOpen);
     const readOnly =
       normalized.injectedModule === undefined || hasReadOnlyProjectionSurface(db)
-        ? guardReadOnlyProjection(flattenLiveDatabaseToReadOnly(db), ensureOpen)
+        ? guardReadOnlyProjection(
+            flattenLiveDatabaseToReadOnly(db),
+            db as unknown as object,
+            ensureOpen,
+          )
         : undefined;
     // Stage 4: the write capability is built from a separate projection of
     // the same opened database.  It is optional so legacy injected auth-only
@@ -770,6 +782,7 @@ function hasReadOnlyProjectionSurface(database: NotesnookLiveDatabase): boolean 
 
 function guardReadOnlyProjection(
   readOnly: NotesnookReadOnlyDatabase,
+  database: object,
   ensureOpen: () => void,
 ): NotesnookReadOnlyDatabase {
   const listNotebooksWithParents = readOnly.listNotebooksWithParents;
@@ -780,6 +793,50 @@ function guardReadOnlyProjection(
   const readNoteLockState = readOnly.readNoteLockState;
   const noteContentDiagnostic = readOnly.noteContentDiagnostic;
   const readOperatorNoteContent = readOnly.readOperatorNoteContent;
+  // A note's metadata and content are two reads.  Taken separately they can
+  // straddle a write that spans both (an append advances the note, then
+  // replaces its content), so the pair is read under the shared database lock.
+  // The reads inside call the unguarded projection directly: the lock cannot
+  // be re-entered, and this function never starts a sync -- it only waits for
+  // one that already holds the lock.
+  const readNoteSnapshot =
+    readOperatorNoteContent === undefined
+      ? undefined
+      : async (id: string): Promise<NotesnookReadOnlyNoteSnapshot | undefined> => {
+          ensureOpen();
+          return withSharedMutex(database, "local:read", async () => {
+            const metadata = await readOnly.noteMetadata(id);
+            if (metadata === undefined) return undefined;
+            const notebookPathSnapshot = await resolveLockedNotebookPathSnapshot(
+              readOnly,
+              metadata,
+            );
+            if (metadata.locked === true) {
+              return {
+                metadata,
+                ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),
+                contentRefusal: "locked" as const,
+              };
+            }
+            try {
+              const content = await readOperatorNoteContent(id);
+              return {
+                metadata,
+                ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),
+                content,
+              };
+            } catch (error) {
+              // Categorised here, inside the lock, so no cause leaves it.
+              const locked =
+                isNotesnookReadOnlyProjectionError(error) && error.message === "vault_locked";
+              return {
+                metadata,
+                ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),
+                contentRefusal: locked ? ("locked" as const) : ("read_failed" as const),
+              };
+            }
+          });
+        };
   return Object.freeze({
     lastSynced: async () => {
       ensureOpen();
@@ -865,6 +922,7 @@ function guardReadOnlyProjection(
             return readOperatorNoteContent(id);
           },
         }),
+    ...(readNoteSnapshot === undefined ? {} : { readNoteSnapshot }),
     noteMetadata: async (id: string) => {
       ensureOpen();
       return readOnly.noteMetadata(id);
@@ -874,6 +932,38 @@ function guardReadOnlyProjection(
       return readOnly.search(query);
     },
   });
+}
+
+/**
+ * Resolve the note's notebook paths while its metadata and content snapshot
+ * still holds the shared database lock. An absent result means the membership
+ * or strict hierarchy could not be proven; the RPC authorization check then
+ * refuses the snapshot.
+ */
+async function resolveLockedNotebookPathSnapshot(
+  readOnly: NotesnookReadOnlyDatabase,
+  metadata: NotesnookReadOnlyNoteSnapshot["metadata"],
+): Promise<NotesnookReadOnlyNoteSnapshot["notebookPathSnapshot"] | undefined> {
+  const ids =
+    metadata.notebookIds ?? (metadata.notebookId === undefined ? [] : [metadata.notebookId]);
+  if (ids.length === 0) {
+    return metadata.notebookAbsenceConfirmed === true ? [] : undefined;
+  }
+  if (metadata.notebookMembershipComplete === false) return undefined;
+  const listHierarchy = readOnly.listNotebooksWithParentsStrict;
+  if (listHierarchy === undefined) return undefined;
+  try {
+    const records = await listHierarchy();
+    const index = buildNotebookIndex(records as readonly NotebookRecord[]);
+    const paths = ids.map((notebookId) => {
+      const path = index.resolvePath(notebookId);
+      return path === undefined ? undefined : { notebookId, path };
+    });
+    if (paths.some((entry) => entry === undefined)) return undefined;
+    return Object.freeze(paths.map((entry) => Object.freeze(entry!)));
+  } catch {
+    return undefined;
+  }
 }
 
 /**

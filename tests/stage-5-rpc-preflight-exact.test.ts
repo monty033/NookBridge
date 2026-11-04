@@ -2,6 +2,7 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, it, vi } from "vitest";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 import {
   fitsResponsePreflight,
   jsonStringUtf8Bytes,
@@ -38,7 +39,12 @@ const noteRuntime = (data: string, extra: Partial<RpcHandlerRuntimeLike> = {}) =
   ({
     search: async () => [],
     noteMetadata: async (id: string) => ({ id, title: "Memo", revision: REVISION }),
-    readOnly: { readOperatorNoteContent: vi.fn(async () => ({ type: "html" as const, data })) },
+    readOnly: {
+      readNoteSnapshot: snapshotFrom(
+        async (id: string) => ({ id, title: "Memo", revision: REVISION }),
+        vi.fn(async () => ({ type: "html" as const, data })),
+      ),
+    },
     ...extra,
   }) as RpcHandlerRuntimeLike;
 

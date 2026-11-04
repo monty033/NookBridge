@@ -48,6 +48,7 @@ import {
 } from "../src/mcp/nook-mcp-server.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
+import { snapshotFrom } from "./helpers/note-snapshot.js";
 import {
   serializeRpcResponse,
   type RpcRequest,
@@ -367,7 +368,10 @@ describe("nookd socket client — note revision projection", () => {
       search: async () => [],
       noteMetadata: async (id) => ({ id, title: "Title" }),
       readOnly: {
-        readOperatorNoteContent: async () => ({ type: "html" as const, data: "" }),
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({ id, title: "Title" }),
+          async () => ({ type: "html" as const, data: "" }),
+        ),
       },
     };
     const socketPath = await startFakeDaemon(async (request) => {
