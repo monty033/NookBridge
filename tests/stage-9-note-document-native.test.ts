@@ -453,11 +453,16 @@ describe("T03 native HTML adapter", () => {
       serializeNoteDocumentNative(edited, { context: decoded.context, binding }).data,
     ).toContain(opaque);
     expect(() => serializeNoteDocumentNative(edited)).toThrow();
-    for (const blocks of [
-      edited.blocks.slice(0, 1),
-      [...edited.blocks].reverse(),
-      [...edited.blocks, edited.blocks[1]!],
-    ]) {
+    // A1: regions are anchored by order, so a single region moved past an
+    // ordinary block in the same container has nothing to be reordered against.
+    // Reordering two or more regions is refused in the stage-9 echo tests.
+    expect(
+      serializeNoteDocumentNative(
+        { version: 1, blocks: [...edited.blocks].reverse() },
+        { context: decoded.context, binding },
+      ).data,
+    ).toContain(opaque);
+    for (const blocks of [edited.blocks.slice(0, 1), [...edited.blocks, edited.blocks[1]!]]) {
       expect(() =>
         serializeNoteDocumentNative({ version: 1, blocks }, { context: decoded.context, binding }),
       ).toThrow();

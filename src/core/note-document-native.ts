@@ -4,7 +4,7 @@
  * T07 must supply the actual note/revision under its mutation lock.
  */
 import { Buffer } from "node:buffer";
-import { createHmac, hkdfSync, randomBytes } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { types } from "node:util";
 import { URL } from "node:url";
 import {
@@ -189,6 +189,8 @@ interface Element {
   attrs: Record<string, string>;
   children: HtmlNode[];
   raw: string;
+  /** The opening tag's source bytes; `raw` grows to the whole element on close. */
+  open: string;
   start: number;
   unsupported: boolean;
 }
@@ -358,6 +360,7 @@ function parseHtml(html: string): HtmlNode[] {
     attrs: {},
     children: [],
     raw: "",
+    open: "",
     start: 0,
     unsupported: false,
   };
@@ -478,6 +481,7 @@ function parseHtml(html: string): HtmlNode[] {
       attrs,
       children: [],
       raw,
+      open: raw,
       start,
       unsupported,
     };
@@ -659,46 +663,196 @@ function fingerprint(value: unknown): string {
   }
   return JSON.stringify(normalized(value));
 }
+/**
+ * Private decode record of one block: its source bytes and structural identity.
+ * Held only in the decode context, never in the document or on the wire.
+ */
+interface BlockRecord {
+  readonly raw: string;
+  /**
+   * Opening-tag bytes. Emitted only for a container identified as this same
+   * instance: one that holds preserved regions and whose anchor chain names
+   * this record, or one whose whole block matched exactly and is echoed raw.
+   */
+  readonly open: string;
+  readonly type: NoteBlock["type"];
+  readonly variant: string | undefined;
+  /** True when this block is, or contains, a preserved region. */
+  readonly holdsRegion: boolean;
+  readonly canon: string;
+  readonly digest: string;
+  readonly children: readonly BlockRecord[];
+}
 interface PrivateContext {
   binding: string;
   original: NotesnookStoredContent;
+  /** The document container's original opening tag, when the note had one. */
+  container: string | undefined;
   baseline: string;
   refs: string[];
   payloads: Map<string, string>;
+  blocks: readonly BlockRecord[];
 }
 const contexts = new WeakMap<NativeNoteContext, PrivateContext>();
+const digestOf = (canon: string): string => createHash("sha256").update(canon).digest("hex");
+const variantOf = (b: NoteBlock): string | undefined =>
+  b.type === "callout" ? b.variant : undefined;
+const holdsRegion = (b: NoteBlock): boolean =>
+  b.type === "opaque" ||
+  ((b.type === "blockquote" || b.type === "callout") && b.blocks.some(holdsRegion));
+/** Containers that can hold blocks, keyed by type and variant. */
+function containerKey(b: NoteBlock): string | undefined {
+  return b.type === "blockquote" ||
+    b.type === "callout" ||
+    b.type === "bullet-list" ||
+    b.type === "ordered-list"
+    ? `${b.type}:${variantOf(b) ?? ""}`
+    : undefined;
+}
+/**
+ * Preserved regions are anchored by document order, not position: each token
+ * once, in order, inside the same chain of containers. Each link of the chain
+ * is the container's type, variant and its ordinal among the same-type,
+ * same-variant siblings before it, so a region cannot hop between two
+ * look-alike containers.
+ *
+ * First-release limitation (plan-owner ruling): the ordinal is positional, so
+ * inserting or deleting a same-type, same-variant container BEFORE an anchored
+ * container shifts that container's ordinal and refuses the edit. A container
+ * of a different type, or of the same type with a different variant, does not
+ * count toward the ordinal and stays accepted.
+ */
 function references(doc: NoteDocumentV1): string[] {
   const refs: string[] = [];
   const tokens = new Set<string>();
-  function walk(blocks: readonly NoteBlock[], path: string): void {
-    blocks.forEach((b, i) => {
-      const at = `${path}/${i}`;
+  function walk(blocks: readonly NoteBlock[], chain: string): void {
+    const seen = new Map<string, number>();
+    const link = (b: NoteBlock): string => {
+      const key = containerKey(b)!;
+      const ordinal = seen.get(key) ?? 0;
+      seen.set(key, ordinal + 1);
+      return `${chain}/${key}#${ordinal}`;
+    };
+    for (const b of blocks) {
       if (b.type === "opaque") {
         if (tokens.has(b.sentinel.token)) fail();
         tokens.add(b.sentinel.token);
         refs.push(
-          JSON.stringify([at, b.nodeType, b.sentinel.version, b.sentinel.source, b.sentinel.token]),
+          JSON.stringify([
+            chain,
+            b.nodeType,
+            b.sentinel.version,
+            b.sentinel.source,
+            b.sentinel.token,
+          ]),
         );
       }
-      if (b.type === "callout" || b.type === "blockquote")
-        walk(b.blocks, `${at}/${b.type}/${b.type === "callout" ? b.variant : ""}`);
-      if (b.type === "bullet-list" || b.type === "ordered-list")
-        b.items.forEach((item, j) => walk(item.blocks ?? [], `${at}/${b.type}/${j}`));
-    });
+      if (b.type === "callout" || b.type === "blockquote") walk(b.blocks, link(b));
+      if (b.type === "bullet-list" || b.type === "ordered-list") {
+        const next = link(b);
+        for (const item of b.items) walk(item.blocks ?? [], next);
+      }
+    }
   }
   walk(doc.blocks, "");
   return refs;
+}
+/** Beyond this many cells the quadratic table is skipped and the middle is rebuilt. */
+const MAX_ALIGN_CELLS = 4_000_000;
+interface Aligned {
+  readonly record: BlockRecord;
+  /** True when the edited block equals the original, so its bytes are echoed. */
+  readonly exact: boolean;
+}
+/**
+ * Match an edited block list against the original in order: a longest common
+ * subsequence over fingerprints, confirmed by structural equality, one original
+ * per edited block at most. An edited container holding preserved regions is
+ * additionally identified with its original by ordinal, so edits inside it keep
+ * its opening tag and unchanged children.
+ */
+function align(
+  blocks: readonly NoteBlock[],
+  records: readonly BlockRecord[],
+): (Aligned | undefined)[] {
+  const canon = blocks.map(fingerprint);
+  const digest = canon.map(digestOf);
+  const same = (i: number, j: number): boolean =>
+    digest[i] === records[j]!.digest && canon[i] === records[j]!.canon;
+  const n = blocks.length;
+  const m = records.length;
+  const pairs: [number, number][] = [];
+  let head = 0;
+  while (head < n && head < m && same(head, head)) pairs.push([head, head++]);
+  let tail = 0;
+  while (tail < n - head && tail < m - head && same(n - 1 - tail, m - 1 - tail)) tail++;
+  const rows = n - head - tail;
+  const cols = m - head - tail;
+  if (rows > 0 && cols > 0 && rows * cols <= MAX_ALIGN_CELLS) {
+    // lcs[i][j]: length of the longest common subsequence of the suffixes.
+    const width = cols + 1;
+    const lcs = new Uint32Array((rows + 1) * width);
+    for (let i = rows - 1; i >= 0; i--)
+      for (let j = cols - 1; j >= 0; j--)
+        lcs[i * width + j] = same(head + i, head + j)
+          ? lcs[(i + 1) * width + j + 1]! + 1
+          : Math.max(lcs[(i + 1) * width + j]!, lcs[i * width + j + 1]!);
+    // Walking forward and taking every equal pair keeps the earliest copy.
+    for (let i = 0, j = 0; i < rows && j < cols; ) {
+      if (same(head + i, head + j)) pairs.push([head + i++, head + j++]);
+      else if (lcs[(i + 1) * width + j]! >= lcs[i * width + j + 1]!) i++;
+      else j++;
+    }
+  }
+  for (let k = 0; k < tail; k++) pairs.push([n - tail + k, m - tail + k]);
+  const plan: (Aligned | undefined)[] = new Array<Aligned | undefined>(n).fill(undefined);
+  for (const [i, j] of pairs) plan[i] = { record: records[j]!, exact: true };
+  // Bytes are never borrowed by guessing. An edited container that is not an
+  // exact match takes its original opening tag only if it holds preserved
+  // regions and its ordinal among same-type, same-variant siblings names an
+  // original that holds regions too; `references` has already proven that the
+  // regions inside sit at the same anchor chain. Anything else, including a
+  // delete-and-insert in a gap, is rebuilt with the canonical tag, so editing a
+  // container without regions drops its tolerated attributes (accepted).
+  const used = new Set(pairs.map(([, j]) => records[j]!));
+  const ordinals = new Map<string, number>();
+  blocks.forEach((b, i) => {
+    if (b.type !== "blockquote" && b.type !== "callout") return;
+    const key = containerKey(b)!;
+    const ordinal = ordinals.get(key) ?? 0;
+    ordinals.set(key, ordinal + 1);
+    if (plan[i] || !holdsRegion(b)) return;
+    const record = records.filter((r) => `${r.type}:${r.variant ?? ""}` === key)[ordinal];
+    if (!record?.holdsRegion || used.has(record)) return;
+    used.add(record);
+    plan[i] = { record, exact: false };
+  });
+  return plan;
 }
 function decodeBlocks(
   nodes: HtmlNode[],
   payloads: Map<string, string>,
   binding: string,
   topLevel = false,
+  records: BlockRecord[] = [],
 ): NoteBlock[] {
   return elements(nodes).map((n) => {
+    const children: BlockRecord[] = [];
     try {
       if (containsUnsupportedMarkup(n)) preserve();
-      return decodeBlock(n, payloads, binding, topLevel);
+      const block = decodeBlock(n, payloads, binding, topLevel, children);
+      const canon = fingerprint(block);
+      records.push({
+        raw: n.raw,
+        open: n.open,
+        type: block.type,
+        variant: variantOf(block),
+        holdsRegion: holdsRegion(block),
+        canon,
+        digest: digestOf(canon),
+        children,
+      });
+      return block;
     } catch (error) {
       if (!(error instanceof Preserve)) throw error;
       // Deterministic, revision-bound, position-mixed token. The operator
@@ -714,11 +868,23 @@ function decodeBlocks(
         .digest("hex")
         .slice(0, 36);
       payloads.set(token, n.raw);
-      return {
+      const block: NoteBlock = {
         type: "opaque",
         nodeType: n.tag,
         sentinel: { version: 1, source: "native-html", token },
       };
+      const canon = fingerprint(block);
+      records.push({
+        raw: n.raw,
+        open: n.open,
+        type: "opaque",
+        variant: undefined,
+        holdsRegion: true,
+        canon,
+        digest: digestOf(canon),
+        children: [],
+      });
+      return block;
     }
   });
 }
@@ -732,7 +898,8 @@ function decodeBlock(
   n: Element,
   payloads: Map<string, string>,
   binding: string,
-  topLevel = false,
+  topLevel: boolean,
+  children: BlockRecord[],
 ): NoteBlock {
   if (n.tag === "hr") {
     const canonicalStyle =
@@ -797,7 +964,10 @@ function decodeBlock(
   }
   if (n.tag === "blockquote") {
     attrs(n);
-    return { type: "blockquote", blocks: decodeBlocks(n.children, payloads, binding) };
+    return {
+      type: "blockquote",
+      blocks: decodeBlocks(n.children, payloads, binding, false, children),
+    };
   }
   if (n.tag === "pre") {
     attrs(n);
@@ -840,7 +1010,7 @@ function decodeBlock(
     return {
       type: "callout",
       variant: variant as "info" | "warning" | "success" | "danger",
-      blocks: decodeBlocks(n.children, payloads, binding),
+      blocks: decodeBlocks(n.children, payloads, binding, false, children),
     };
   }
   return preserve();
@@ -858,28 +1028,35 @@ export function decodeNoteDocumentNative(
     const roots = elements(nodes);
     if (!roots.length && r.data.trim()) fail();
     let content: HtmlNode[] = roots;
+    let container: string | undefined;
     // The document container is structural. Its accepted presentation and data
     // attributes do not alter its content, so decode its children as the root.
+    // Its opening tag is kept so a rewrite can emit the same bytes.
     if (
       roots.length === 1 &&
       roots[0]!.tag === "div" &&
       roots[0]!.attrs["data-type"] === "document" &&
       roots[0]!.attrs.dir === undefined
-    )
+    ) {
       content = roots[0]!.children;
+      container = roots[0]!.open;
+    }
     const payloads = new Map<string, string>();
+    const blocks: BlockRecord[] = [];
     const document: NoteDocumentV1 = {
       version: 1,
-      blocks: decodeBlocks(content, payloads, key, true),
+      blocks: decodeBlocks(content, payloads, key, true, blocks),
     };
     validateNoteDocument(document);
     const context: NativeNoteContext = Object.freeze({ version: 1 });
     contexts.set(context, {
       binding: key,
       original,
+      container,
       baseline: fingerprint(document),
       refs: references(document),
       payloads,
+      blocks,
     });
     return Object.freeze({ document, context });
   });
@@ -918,10 +1095,16 @@ function renderBlocks(
   blocks: readonly NoteBlock[],
   kind: NotesnookListKind,
   payloads?: Map<string, string>,
+  records?: readonly BlockRecord[],
 ): string {
-  const render = (bs: readonly NoteBlock[]) => renderBlocks(bs, kind, payloads);
+  const render = (bs: readonly NoteBlock[], rs?: readonly BlockRecord[]) =>
+    renderBlocks(bs, kind, payloads, rs);
+  const plan = records && align(blocks, records);
   return blocks
-    .map((b) => {
+    .map((b, i) => {
+      const aligned = plan?.[i];
+      // An unchanged block keeps the bytes it was decoded from.
+      if (aligned?.exact) return aligned.record.raw;
       switch (b.type) {
         case "paragraph":
           return `<p>${renderInline(b.inlines)}</p>`;
@@ -939,7 +1122,7 @@ function renderBlocks(
           return `<ul class="${taskKind === "task-list" ? "checklist" : "simple-checklist"}"${title}>${b.items.map((item) => `<li class="${item.checked ? "checked " : ""}${taskKind === "task-list" ? "checklist" : "simple-checklist"}--item"><p>${renderInline(item.inlines)}</p>${item.children.length ? renderTasks(item.children, taskKind) : ""}</li>`).join("")}</ul>`;
         }
         case "blockquote":
-          return `<blockquote>${render(b.blocks)}</blockquote>`;
+          return `${aligned?.record.open ?? "<blockquote>"}${render(b.blocks, aligned?.record.children)}</blockquote>`;
         case "code-block":
           if (b.language !== undefined && !/^[A-Za-z0-9_+-]+$/.test(b.language)) fail();
           return `<pre><code${b.language ? ` class="language-${escape(b.language)}"` : ""}>${escape(b.text)}</code></pre>`;
@@ -947,7 +1130,7 @@ function renderBlocks(
           if (!b.columns.length) fail();
           return `<table><thead><tr>${b.columns.map((c) => `<th>${escape(c)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((row) => `<tr>${row.map((c) => `<td>${escape(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
         case "callout":
-          return `<div data-type="callout" data-variant="${b.variant}">${render(b.blocks)}</div>`;
+          return `${aligned?.record.open ?? `<div data-type="callout" data-variant="${b.variant}">`}${render(b.blocks, aligned?.record.children)}</div>`;
         case "horizontal-rule":
           return '<hr style="display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0" />';
         case "image":
@@ -1036,7 +1219,7 @@ export function serializeNoteDocumentNative(
     if (context && fingerprint(doc) === context.baseline) return context.original;
     return bounded({
       type: context?.original.type ?? "tiptap",
-      data: `<div data-type="document">${renderBlocks(doc.blocks, kind, context?.payloads)}</div>`,
+      data: `${context?.container ?? '<div data-type="document">'}${renderBlocks(doc.blocks, kind, context?.payloads, context?.blocks)}</div>`,
     });
   });
 }
