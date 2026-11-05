@@ -267,6 +267,16 @@ const HORIZONTAL_RULE_LINE = /^-{3,}$/;
 const CODE_FENCE_OPEN = /^```([A-Za-z0-9_+-]*)$/;
 
 /**
+ * The canonical list wrapper the versioned reader emits for an explicitly
+ * kinded task list: `:::nookbridge list simple-checklist` / `task-list`.
+ * A caller may hand the reader's body back with the version header stripped;
+ * recognising the wrapper here keeps that body structural instead of
+ * rendering the fence as escaped paragraph text and adding a second,
+ * default-kind wrapper inside it.
+ */
+const LIST_DIRECTIVE_OPEN = /^:::nookbridge list (simple-checklist|task-list)$/;
+
+/**
  * A Markdown table separator row cell: a bare dash run only (`-`, `--`,
  * `---`, ...).  Column-alignment colons (`:-`, `-:`, `:-:`) are
  * deliberately NOT accepted here: `NoteTableBlock` (the canonical AST
@@ -396,6 +406,30 @@ function isFencedCodeBlock(lines: readonly string[]): boolean {
   );
 }
 
+/**
+ * The explicit list kind of a canonical `:::nookbridge list KIND` block,
+ * or `null` when the block is not exactly one wrapper with at least one
+ * task item and a bare closing `:::`.  `renderBlock` and
+ * `classifyBlockConstruct` share this predicate so detection cannot admit
+ * a wrapper the renderer would flatten.
+ */
+function listDirectiveItems(lines: readonly string[]): readonly string[] {
+  return lines.slice(1, -1).filter((line) => line.trim().length !== 0);
+}
+
+function listDirectiveKind(lines: readonly string[]): NotesnookListKind | null {
+  if (lines.length < 2) return null;
+  const match = LIST_DIRECTIVE_OPEN.exec(lines[0] as string);
+  if (match === null) return null;
+  if (lines[lines.length - 1] !== ":::") return null;
+  // Blank lines inside the wrapper are layout, not list content.  Tolerating
+  // them keeps the list structural; requiring every physical line to be an
+  // item made a blank line before `:::` flatten the whole wrapper to prose.
+  const items = listDirectiveItems(lines);
+  if (items.length === 0 || !items.every((line) => TASK_LIST_LINE.test(line))) return null;
+  return match[1] as NotesnookListKind;
+}
+
 /** A block every line of which is a `> `-prefixed quote line. */
 function isBlockquoteBlock(lines: readonly string[]): boolean {
   return lines.length > 0 && lines.every((line) => /^> ?/.test(line));
@@ -447,6 +481,12 @@ function classifyBlockConstruct(lines: readonly string[]): MarkdownConstruct {
   const first = lines[0] ?? "";
   if (isHorizontalRuleBlock(lines)) return "horizontal-rule";
   if (isFencedCodeBlock(lines)) return "fenced-code-block";
+  if (listDirectiveKind(lines) !== null) return "task-list";
+  // A block that opened a list wrapper but is not exactly one wrapper plus
+  // task items (plain prose, a code fence, a nested container, ...) must not
+  // fall through to the paragraph renderer: that silently merged every line
+  // into escaped prose and dropped the list.  Refuse before any mutation.
+  if (LIST_DIRECTIVE_OPEN.test(first)) refuse();
   if (isBlockquoteBlock(lines)) return "blockquote";
   if (parseTableBlockRows(lines) !== null) return "markdown-table";
   const heading = /^(#{1,3}) +/.exec(first);
@@ -609,6 +649,7 @@ function splitBlocks(markdown: string): readonly string[] {
   const blocks: string[] = [];
   let current: string[] = [];
   let inFence = false;
+  let inListDirective = false;
   // Tracks whether `current` already forms a confirmed table (a valid
   // header + separator pair).  Computed incrementally — checked ONCE,
   // the instant `current` reaches exactly two lines — rather than
@@ -630,6 +671,22 @@ function splitBlocks(markdown: string): readonly string[] {
         inFence = false;
         flush();
       }
+      continue;
+    }
+    if (inListDirective) {
+      // The wrapper's interior is item lines only; keep them together until
+      // the bare closing `:::` so the list is never split into paragraphs.
+      current.push(line);
+      if (line === ":::") {
+        inListDirective = false;
+        flush();
+      }
+      continue;
+    }
+    if (LIST_DIRECTIVE_OPEN.test(line)) {
+      flush();
+      current.push(line);
+      inListDirective = true;
       continue;
     }
     if (CODE_FENCE_OPEN.test(line)) {
@@ -681,7 +738,7 @@ function splitBlocks(markdown: string): readonly string[] {
   // malformed fence has no safe native shape to downgrade to, so it is
   // refused before any mutation, the same "refuse rather than downgrade"
   // contract a ragged table already gets.
-  if (inFence) refuse();
+  if (inFence || inListDirective) refuse();
   flush();
   return blocks;
 }
@@ -986,6 +1043,12 @@ function renderBlock(block: string, listKind: NotesnookListKind): string {
   if (isFencedCodeBlock(lines)) {
     return renderCodeBlock(lines);
   }
+
+  const directiveKind = listDirectiveKind(lines);
+  if (directiveKind !== null) {
+    return renderTaskListBlock(listDirectiveItems(lines), directiveKind);
+  }
+  if (LIST_DIRECTIVE_OPEN.test(first)) refuse();
 
   if (isBlockquoteBlock(lines)) {
     return renderBlockquote(lines);

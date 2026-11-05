@@ -41,7 +41,10 @@ import {
 import { noteHtmlReadonlyMarkdown } from "../src/core/note-html-readonly-markdown.js";
 import { snapshotFrom } from "./helpers/note-snapshot.js";
 import { decodeNoteDocumentNative } from "../src/core/note-document-native.js";
-import { serializeNoteDocumentMarkdown } from "../src/core/note-document-markdown.js";
+import {
+  NOTE_DOCUMENT_MARKDOWN_HEADER,
+  serializeNoteDocumentMarkdown,
+} from "../src/core/note-document-markdown.js";
 import type { NoteBlock } from "../src/core/note-document.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
@@ -2336,6 +2339,433 @@ nookbridge-format: 1
     });
     return { adapter, database, codec, note };
   }
+
+  function setupListNote(kind: NotesnookListKind): {
+    adapter: NotesnookWriteAdapter;
+    database: ReturnType<typeof createFakeDatabase>;
+    note: FakeNote;
+    stored: FakeContent;
+  } {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "List round trip",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [ ] one\n- [ ] two\n\nStatus.", kind)
+        .data,
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+    return { adapter, database, note, stored };
+  }
+
+  function setupRawNote(nativeData: string): {
+    adapter: NotesnookWriteAdapter;
+    database: ReturnType<typeof createFakeDatabase>;
+    note: FakeNote;
+    stored: FakeContent;
+  } {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Raw note",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: nativeData,
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+    return { adapter, database, note, stored };
+  }
+
+  function readListMarkdown(stored: FakeContent, note: FakeNote): string {
+    return serializeNoteDocumentMarkdown(
+      decodeNoteDocumentNative(
+        { type: stored.type, data: stored.data },
+        { noteId: NOTE_ID, revision: revisionToken(NOTE_ID, note.dateEdited) },
+      ).document,
+    );
+  }
+
+  it("preserves the stored task-list kind when a content-only update omits listKind", async () => {
+    const { adapter, note, stored } = setupListNote("task-list");
+    expect(readListMarkdown(stored, note)).toContain(":::nookbridge list task-list");
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: "- [x] one\n- [ ] two\n\nStatus." },
+    });
+
+    const markdown = readListMarkdown(stored, note);
+    expect(markdown).toContain(":::nookbridge list task-list");
+    expect(markdown).not.toContain(":::nookbridge list simple-checklist");
+    expect(markdown).toContain("- [x] one");
+  });
+
+  it("keeps explicit wrapper kinds and resolves only directive-free blocks on a single-kind note", async () => {
+    // The body names a task-list block explicitly and leaves a second block
+    // directive-free.  The explicit block keeps its kind; the directive-free
+    // block takes the note's sole stored kind.
+    const { adapter, note, stored } = setupListNote("simple-checklist");
+    const content = `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n:::nookbridge list task-list\n- [ ] explicit task\n:::\n\n- [ ] implicit simple\n`;
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content },
+    });
+
+    const markdown = readListMarkdown(stored, note);
+    expect(markdown).toContain(":::nookbridge list task-list\n- [ ] explicit task");
+    expect(markdown).toContain(":::nookbridge list simple-checklist\n- [ ] implicit simple");
+  });
+
+  it.each([
+    ["task-list", "simple-checklist"],
+    ["simple-checklist", "task-list"],
+  ] as const)(
+    "re-encodes an exact headerless body when listKind is explicitly %s -> %s",
+    async (storedKind, requestedKind) => {
+      // The headerless echo shortcut must not swallow an explicit kind
+      // change.  The body is byte-for-byte the reader's body minus its
+      // version header, so an unguarded echo path would write the old kind
+      // back unchanged.
+      const { adapter, note, stored } = setupListNote(storedKind);
+      const body = readListMarkdown(stored, note).slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length);
+
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: body, listKind: requestedKind },
+      });
+
+      const markdown = readListMarkdown(stored, note);
+      expect(markdown).toContain(`:::nookbridge list ${requestedKind}`);
+      expect(markdown).not.toContain(`:::nookbridge list ${storedKind}`);
+    },
+  );
+
+  it.each(["simple-checklist", "task-list"] as const)(
+    "applies explicit listKind %s on both versioned and legacy bodies of a mixed-kind note",
+    async (requestedKind) => {
+      const native =
+        '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>interactive</p></li></ul><ul class="simple-checklist"><li class="simple-checklist--item"><p>simple</p></li></ul></div>';
+      const otherKind = requestedKind === "task-list" ? "simple-checklist" : "task-list";
+      const input = { listKind: requestedKind } as const;
+
+      // Versioned branch: the body names both kinds; the explicit selector
+      // must override every wrapper.
+      const versioned = setupRawNote(native);
+      const versionedBody = readListMarkdown(versioned.stored, versioned.note);
+      await versioned.adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, versioned.note.dateEdited),
+        patch: { content: versionedBody, ...input },
+      });
+      const versionedMarkdown = readListMarkdown(versioned.stored, versioned.note);
+      expect(versionedMarkdown).toContain(`:::nookbridge list ${requestedKind}`);
+      expect(versionedMarkdown).not.toContain(`:::nookbridge list ${otherKind}`);
+
+      // Legacy branch: same explicit intent on the same mixed-kind note must
+      // not be refused merely because the stored note is mixed.
+      const legacy = setupRawNote(native);
+      await legacy.adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, legacy.note.dateEdited),
+        patch: { content: "- [ ] legacy item", ...input },
+      });
+      const legacyMarkdown = readListMarkdown(legacy.stored, legacy.note);
+      expect(legacyMarkdown).toContain(`:::nookbridge list ${requestedKind}`);
+      expect(legacyMarkdown).not.toContain(`:::nookbridge list ${otherKind}`);
+    },
+  );
+
+  it.each([
+    ["task-list", "simple-checklist"],
+    ["simple-checklist", "task-list"],
+  ] as const)(
+    "re-encodes an exact projection echo when listKind is explicitly %s -> %s",
+    async (storedKind, requestedKind) => {
+      // The echo probe must not short-circuit an explicit kind change.  The
+      // patch body is byte-for-byte the read-only projection of the stored
+      // note, so without the explicit-kind guard this would write the old
+      // bytes back unchanged.
+      const { adapter, note, stored } = setupListNote(storedKind);
+      const body = noteHtmlReadonlyMarkdown(stored.data);
+      expect(body).toContain("- [ ] one");
+
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: body, listKind: requestedKind },
+      });
+
+      const markdown = readListMarkdown(stored, note);
+      expect(markdown).toContain(`:::nookbridge list ${requestedKind}`);
+      expect(markdown).not.toContain(`:::nookbridge list ${storedKind}`);
+    },
+  );
+
+  it("does not add a list wrapper to a note that is not a list", async () => {
+    const note: FakeNote = {
+      id: NOTE_ID,
+      title: "Prose",
+      contentId: "content-1",
+      pinned: false,
+      favorite: false,
+      conflicted: false,
+      locked: false,
+      dateEdited: 1_700_000_000_000,
+    };
+    const stored: FakeContent = {
+      id: "content-1",
+      noteId: NOTE_ID,
+      type: "tiptap",
+      data: DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("Status.").data,
+    };
+    const database = createFakeDatabase({
+      notes: new Map([[NOTE_ID, note]]),
+      content: new Map([[stored.id, stored]]),
+    });
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: "Updated status." },
+    });
+
+    const markdown = readListMarkdown(stored, note);
+    expect(markdown).toBe(`${NOTE_DOCUMENT_MARKDOWN_HEADER}\nUpdated status.\n`);
+    expect(markdown).not.toContain(":::nookbridge list");
+  });
+
+  it.each([
+    ["with the separator newline", 0],
+    ["without the separator newline", 1],
+  ] as const)(
+    "accepts the headerless fenced list body %s and keeps it byte-identical",
+    async (_label, offset) => {
+      const { adapter, note, stored } = setupListNote("task-list");
+      // Notesnook rewrites stored HTML on read, adding data-block-id to its
+      // lists and paragraphs.  The exact-echo path must preserve those bytes;
+      // re-encoding through the legacy codec would drop them.
+      stored.data = stored.data
+        .replace('<ul class="checklist">', '<ul class="checklist" data-block-id="ul-1">')
+        .replace("<p>one</p>", '<p data-block-id="p-1">one</p>')
+        .replace("<p>two</p>", '<p data-block-id="p-2">two</p>');
+      const originalData = stored.data;
+      const before = readListMarkdown(stored, note);
+      expect(before).toBe(
+        `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n:::nookbridge list task-list\n- [ ] one\n- [ ] two\n:::\n\nStatus.\n`,
+      );
+      const body = before.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length + offset);
+
+      await adapter.updateNote({
+        id: NOTE_ID,
+        expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+        patch: { content: body },
+      });
+
+      const after = readListMarkdown(stored, note);
+      expect(after).toBe(before);
+      expect(after.match(/:::nookbridge list /g)).toHaveLength(1);
+      expect(after).not.toContain("\\:::");
+      expect(after).not.toContain("simple-checklist");
+      expect(stored.data).toBe(originalData);
+    },
+  );
+
+  it("re-encodes an edited headerless table body to the reader's canonical form", async () => {
+    // A headerless table body is still the versioned document grammar.  An
+    // edit must be routed through the native table serializer; falling back
+    // to the legacy codec would turn the directive into escaped prose.
+    const native =
+      '<div data-type="document"><table><thead><tr><th>Owner</th></tr></thead><tbody><tr><td>Ada</td></tr></tbody></table></div>';
+    const { adapter, note, stored } = setupRawNote(native);
+    const before = readListMarkdown(stored, note);
+    expect(before).toBe(
+      `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n:::nookbridge table\n{"columns":["Owner"],"rows":[["Ada"]]}\n:::\n`,
+    );
+    const body = before.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length).replace('"Ada"', '"Grace"');
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: body },
+    });
+
+    const after = readListMarkdown(stored, note);
+    expect(after).toBe(`${NOTE_DOCUMENT_MARKDOWN_HEADER}${body}`);
+    expect(after).toContain('"Grace"');
+    expect(after).not.toContain("\\:::");
+  });
+
+  it("preserves each wrapper's kind when editing a mixed-kind note", async () => {
+    const native =
+      '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>interactive</p></li></ul><p>Between.</p><ul class="simple-checklist"><li class="simple-checklist--item"><p>simple</p></li></ul></div>';
+    const { adapter, note, stored } = setupRawNote(native);
+    const before = readListMarkdown(stored, note);
+    expect(before).toContain(":::nookbridge list task-list\n- [ ] interactive");
+    expect(before).toContain(":::nookbridge list simple-checklist\n- [ ] simple");
+    const edited = before
+      .replace("- [ ] interactive\n", "- [ ] interactive edited\n")
+      .replace("- [ ] simple\n", "- [ ] simple edited\n");
+    expect(edited).not.toBe(before);
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: edited },
+    });
+
+    const after = readListMarkdown(stored, note);
+    expect(after).toBe(edited);
+    expect(after.match(/:::nookbridge list task-list/g)).toHaveLength(1);
+    expect(after.match(/:::nookbridge list simple-checklist/g)).toHaveLength(1);
+  });
+
+  it("refuses a directive-free body on a mixed-kind note", async () => {
+    const native =
+      '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>interactive</p></li></ul><ul class="simple-checklist"><li class="simple-checklist--item"><p>simple</p></li></ul></div>';
+    const { adapter, database, note, stored } = setupRawNote(native);
+    const originalData = stored.data;
+
+    expect(
+      await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content: "- [ ] replacement" },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(stored.data).toBe(originalData);
+  });
+
+  it("refuses a noncanonical headerless table body instead of re-encoding it", async () => {
+    const native =
+      '<div data-type="document"><table><thead><tr><th>Owner</th></tr></thead><tbody><tr><td>Ada</td></tr></tbody></table></div>';
+    const { adapter, database, note, stored } = setupRawNote(native);
+    const originalData = stored.data;
+    const body = ':::nookbridge table\n{"columns": ["Owner"], "rows": [["Grace"]]}\n:::';
+
+    expect(
+      await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content: body },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(stored.data).toBe(originalData);
+  });
+
+  it("keeps a plain bullet-list headerless echo byte-identical", async () => {
+    // The native writer emits `<li><p>x</p></li>`; the legacy codec emits
+    // `<li>x</li>`.  An exact headerless echo must not silently switch the
+    // stored shape just because the body has no `:::` directive.
+    const native = '<div data-type="document"><ul><li><p>x</p></li></ul></div>';
+    const { adapter, note, stored } = setupRawNote(native);
+    const before = readListMarkdown(stored, note);
+    expect(before).toBe(`${NOTE_DOCUMENT_MARKDOWN_HEADER}\n- x\n`);
+    const body = before.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length);
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: body },
+    });
+
+    expect(readListMarkdown(stored, note)).toBe(before);
+    expect(stored.data).toBe(native);
+  });
+
+  it("keeps a non-list headerless echo with data-block-id attributes byte-identical", async () => {
+    const native =
+      '<div data-type="document" data-block-id="div-1"><p data-block-id="p-1">Status.</p></div>';
+    const { adapter, note, stored } = setupRawNote(native);
+    const before = readListMarkdown(stored, note);
+    expect(before).toBe(`${NOTE_DOCUMENT_MARKDOWN_HEADER}\nStatus.\n`);
+    const body = before.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length);
+
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: body },
+    });
+
+    expect(readListMarkdown(stored, note)).toBe(before);
+    expect(stored.data).toBe(native);
+  });
+
+  it("refuses a headerless versioned echo whose trailing newline was trimmed", async () => {
+    const { adapter, database, note, stored } = setupListNote("task-list");
+    const before = readListMarkdown(stored, note);
+    const body = before.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length).replace(/\n$/, "");
+    expect(body).toContain(":::nookbridge list task-list");
+    expect(body.endsWith("\n")).toBe(false);
+    const originalData = stored.data;
+
+    expect(
+      await codeOfAsync(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+          patch: { content: body },
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect(stored.data).toBe(originalData);
+  });
+
+  it("accepts the full returned body unchanged for a fenced list", async () => {
+    const { adapter, note, stored } = setupListNote("task-list");
+    const before = readListMarkdown(stored, note);
+    await adapter.updateNote({
+      id: NOTE_ID,
+      expectedRevision: revisionToken(NOTE_ID, note.dateEdited),
+      patch: { content: before },
+    });
+    expect(readListMarkdown(stored, note)).toBe(before);
+  });
 
   it("rejects an unknown replacement tag before changing note metadata", async () => {
     const { adapter, database } = setupUpdatable();
