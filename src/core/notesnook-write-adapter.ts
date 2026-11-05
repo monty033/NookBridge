@@ -57,7 +57,12 @@ import {
   type NotesnookUpdatePatchField,
   type UpdateNoteCommand,
 } from "./notesnook-write-contract.js";
-import { assertSupportedConstructs, type NotesnookListKind } from "./notesnook-write-codec.js";
+import {
+  DEFAULT_NOTESNOOK_LIST_KIND,
+  assertSupportedConstructs,
+  detectMarkdownConstructs,
+  type NotesnookListKind,
+} from "./notesnook-write-codec.js";
 import {
   decodeNoteDocumentNative,
   hasNonemptyNativeTaskListTitle,
@@ -652,6 +657,43 @@ export class NotesnookWriteAdapter {
           "Notesnook write adapter: stored content is not available",
         );
       }
+      const binding = {
+        noteId: plan.id,
+        revision: createRevisionToken({ id: observed.id, dateEdited: observed.dateEdited }),
+      };
+      // `plan.listKind` is set only when the caller named one explicitly.
+      // Otherwise the effective intent is the list kind already stored in
+      // the note: a content-only edit must not silently rewrite a
+      // `task-list` as `simple-checklist` (or the reverse).  A note with no
+      // readable list falls back to the published default; the codec only
+      // emits a wrapper when the NEW body actually contains list items.
+      let effectiveListKind = plan.listKind;
+      let currentListKinds: ReadonlySet<NotesnookListKind> = new Set();
+      let soleCurrentListKind: NotesnookListKind | undefined;
+      let currentVersionedMarkdown: string | undefined;
+      try {
+        const current = decodeNoteDocumentNative({ type: stored.type, data: stored.data }, binding);
+        currentListKinds = collectTaskListKinds(current.document.blocks);
+        soleCurrentListKind = currentListKinds.size === 1 ? [...currentListKinds][0] : undefined;
+        if (effectiveListKind === undefined) {
+          effectiveListKind = soleCurrentListKind;
+        }
+        // The exact body `notes.get` projects for a headerless echo.  Built
+        // once so the update can be proven byte-identical instead of being
+        // re-encoded through a writer with a different HTML shape.
+        currentVersionedMarkdown = serializeNoteDocumentMarkdown(current.document);
+      } catch {
+        // A malformed or non-native preimage has no readable kind or exact
+        // projection.  The strict legacy checks below still run before any
+        // mutation.
+      }
+      // Preserve the pre-existing codec contract for a note that has no
+      // list: the published default is the intent for any list the NEW
+      // body introduces.  A non-list body never gains a wrapper because
+      // the codec only wraps task-list lines.
+      if (effectiveListKind === undefined) {
+        effectiveListKind = DEFAULT_NOTESNOOK_LIST_KIND;
+      }
       if (plan.storedContent !== undefined) {
         // Native path.  The caller already decoded the stored document,
         // applied the editor's Markdown, and re-encoded it so untouched
@@ -667,40 +709,110 @@ export class NotesnookWriteAdapter {
         // approximation when the native document cannot be represented by
         // the versioned editor format. Establish an exact echo before
         // interpreting any format claim, retaining the stored document
-        // byte-for-byte for that no-op update.
+        // byte-for-byte for that no-op update.  An explicit listKind is a
+        // request to re-encode, so it must not take the byte-preserving echo
+        // path.
         let isReadOnlyProjectionEcho = false;
-        try {
-          isReadOnlyProjectionEcho = newContent === noteHtmlReadonlyMarkdown(stored.data);
-        } catch {
-          // The fallback projection can reject oversized or malformed input.
-          // Continue through the existing strict content checks in that case.
+        if (plan.listKind === undefined) {
+          try {
+            isReadOnlyProjectionEcho = newContent === noteHtmlReadonlyMarkdown(stored.data);
+          } catch {
+            // The fallback projection can reject oversized or malformed input.
+            // Continue through the existing strict content checks in that case.
+          }
+        }
+        const headerlessEcho =
+          !isReadOnlyProjectionEcho &&
+          plan.listKind === undefined &&
+          currentVersionedMarkdown !== undefined
+            ? headerlessVersionedEcho(newContent, currentVersionedMarkdown)
+            : null;
+        if (headerlessEcho === "trimmed") {
+          // The exact body is only truncated by its final newline.  Writing
+          // the legacy encoding would change the stored shape, and silently
+          // adding a newline would not return the body the caller sent.
+          //
+          // This stays `unsupported_content`: a dedicated code would have to
+          // be threaded through the closed RPC/MCP/CLI vocabulary for one
+          // narrow refusal, and `invalid_input` would conflate a canonical
+          // body rejection with command-shape validation.
+          throw adapterError(
+            "unsupported_content",
+            "Notesnook write adapter: versioned body is not byte-identical",
+          );
         }
         const claimsVersionedFormat =
           !isReadOnlyProjectionEcho &&
+          headerlessEcho === null &&
           (newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER) ||
             /^---[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*nookbridge-format\b/i.test(newContent));
-        if (isReadOnlyProjectionEcho) {
+        // The versioned reader's body may be handed back with the
+        // `---nookbridge-format` header stripped.  That body is still the
+        // canonical document grammar (its `:::nookbridge list KIND` wrapper
+        // is structural), so route it through the same strict parse instead
+        // of letting the legacy codec treat the fence as literal text.
+        const headerlessSources =
+          claimsVersionedFormat || headerlessEcho !== null
+            ? []
+            : headerlessVersionedCandidates(newContent);
+        const isHeaderlessVersioned =
+          !isReadOnlyProjectionEcho &&
+          headerlessEcho === null &&
+          !claimsVersionedFormat &&
+          (headerlessSources.length > 0 || HEADERLESS_DIRECTIVE.test(newContent));
+        if (isReadOnlyProjectionEcho || headerlessEcho === "exact") {
+          // The caller returned bytes the reader just produced; retain the
+          // stored document verbatim.  This also preserves data-block-id and
+          // list-item `<p>` wrappers the legacy codec would rewrite.
           preparedContent = { type: stored.type, data: stored.data };
-        } else if (claimsVersionedFormat) {
+        } else if (claimsVersionedFormat || isHeaderlessVersioned) {
           // Versioned input is a distinct, fail-closed representation. Never
           // reinterpret a malformed/unknown version as legacy Markdown.
           try {
-            if (!newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)) {
+            if (claimsVersionedFormat && !newContent.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)) {
               throw new Error("unsupported format");
             }
-            const binding = {
-              noteId: plan.id,
-              revision: createRevisionToken({ id: observed.id, dateEdited: observed.dateEdited }),
-            };
             const trusted = decodeNoteDocumentNative(
               { type: stored.type, data: stored.data },
               binding,
             );
-            const document = parseNoteDocumentMarkdown(newContent, { preimage: trusted.document });
-            const nativeStored = serializeNoteDocumentNative(document, {
+            let document: ReturnType<typeof parseNoteDocumentMarkdown> | undefined;
+            for (const source of claimsVersionedFormat ? [newContent] : headerlessSources) {
+              try {
+                document = parseNoteDocumentMarkdown(source, { preimage: trusted.document });
+                break;
+              } catch {
+                // Try the next headerless spelling; both are checked by the
+                // canonical emitter, so only an exact document body is used.
+              }
+            }
+            if (document === undefined) throw new Error("unsupported format");
+            // Explicit intent overrides every block.  Otherwise a wrapper
+            // that names its kind keeps that kind: a mixed-kind note must
+            // never be flattened to one kind by an ordinary save.  Only a
+            // directive-free block falls back to the note's stored kind, and
+            // only when the note has exactly one kind.  On a mixed note such
+            // a block is ambiguous, so refuse before mutating rather than
+            // guess.
+            let resolved = document;
+            if (plan.listKind !== undefined) {
+              resolved = {
+                ...document,
+                blocks: withForcedListKind(document.blocks, plan.listKind),
+              };
+            } else if (hasUnkindedTaskList(document.blocks)) {
+              if (currentListKinds.size > 1) throw new Error("ambiguous list kind");
+              if (soleCurrentListKind !== undefined) {
+                resolved = {
+                  ...document,
+                  blocks: withFallbackListKind(document.blocks, soleCurrentListKind),
+                };
+              }
+            }
+            const nativeStored = serializeNoteDocumentNative(resolved, {
               context: trusted.context,
               binding,
-              ...(plan.listKind === undefined ? {} : { listKind: plan.listKind }),
+              ...(effectiveListKind === undefined ? {} : { listKind: effectiveListKind }),
             });
             preparedContent = { type: stored.type, data: nativeStored.data };
           } catch {
@@ -732,13 +844,7 @@ export class NotesnookWriteAdapter {
             try {
               const decoded = decodeNoteDocumentNative(
                 { type: stored.type, data: stored.data },
-                {
-                  noteId: plan.id,
-                  revision: createRevisionToken({
-                    id: observed.id,
-                    dateEdited: observed.dateEdited,
-                  }),
-                },
+                binding,
               );
               hasPreserved = containsOpaqueBlock(decoded.document.blocks);
             } catch {
@@ -762,8 +868,33 @@ export class NotesnookWriteAdapter {
               "Notesnook write adapter: update content uses an unsupported construct",
             );
           }
+          if (plan.listKind === undefined && currentListKinds.size > 1) {
+            // A directive-free body can only carry one codec kind.  On a
+            // mixed-kind note that would silently rewrite one of the note's
+            // list blocks, so refuse unless the body introduces no list.
+            // An explicit `listKind` is an override, so it bypasses this
+            // ambiguity check on both the legacy and versioned branches.
+            let constructs: ReturnType<typeof detectMarkdownConstructs>;
+            try {
+              constructs = detectMarkdownConstructs(
+                newContent,
+                STAGE4_WRITE_LIMITS.maxContentBytes,
+              );
+            } catch {
+              throw adapterError(
+                "unsupported_content",
+                "Notesnook write adapter: update content uses an unsupported construct",
+              );
+            }
+            if (constructs.has("task-list")) {
+              throw adapterError(
+                "unsupported_content",
+                "Notesnook write adapter: list kind is ambiguous on this note",
+              );
+            }
+          }
           try {
-            const encoded = this.#encodeMarkdown(newContent, plan.listKind);
+            const encoded = this.#encodeMarkdown(newContent, effectiveListKind);
             preparedContent = { type: stored.type, data: encoded.data };
           } catch {
             throw adapterError(
@@ -1544,6 +1675,136 @@ const CREATE_PREFLIGHT_BINDING = Object.freeze({
   noteId: "0".repeat(32),
   revision: `rev_${"0".repeat(32)}`,
 });
+
+/** Every distinct explicit list kind in a decoded document. */
+function collectTaskListKinds(
+  blocks: readonly NoteBlock[],
+  into: Set<NotesnookListKind> = new Set(),
+): ReadonlySet<NotesnookListKind> {
+  for (const block of blocks) {
+    if (block.type === "task-list") {
+      if (block.kind !== undefined) into.add(block.kind);
+      continue;
+    }
+    if (block.type === "callout" || block.type === "blockquote") {
+      collectTaskListKinds(block.blocks, into);
+      continue;
+    }
+    if (block.type === "bullet-list" || block.type === "ordered-list") {
+      for (const item of block.items) collectTaskListKinds(item.blocks ?? [], into);
+    }
+  }
+  return into;
+}
+
+/** Whether any task list in a decoded body lacks an explicit wrapper kind. */
+function hasUnkindedTaskList(blocks: readonly NoteBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === "task-list") {
+      if (block.kind === undefined) return true;
+      continue;
+    }
+    if (block.type === "callout" || block.type === "blockquote") {
+      if (hasUnkindedTaskList(block.blocks)) return true;
+      continue;
+    }
+    if (block.type === "bullet-list" || block.type === "ordered-list") {
+      for (const item of block.items) {
+        if (hasUnkindedTaskList(item.blocks ?? [])) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Fill only directive-free task lists; explicit wrapper kinds are kept. */
+function withFallbackListKind(
+  blocks: readonly NoteBlock[],
+  kind: NotesnookListKind,
+): readonly NoteBlock[] {
+  return blocks.map((block): NoteBlock => {
+    if (block.type === "task-list") return block.kind === undefined ? { ...block, kind } : block;
+    if (block.type === "callout" || block.type === "blockquote") {
+      return { ...block, blocks: withFallbackListKind(block.blocks, kind) } as NoteBlock;
+    }
+    if (block.type === "bullet-list" || block.type === "ordered-list") {
+      return {
+        ...block,
+        items: block.items.map((item) =>
+          item.blocks === undefined
+            ? item
+            : { ...item, blocks: withFallbackListKind(item.blocks, kind) },
+        ),
+      } as NoteBlock;
+    }
+    return block;
+  });
+}
+
+/**
+ * Apply an explicit listKind to every task list in a decoded document.  Unlike
+ * {@link withResolvedListKind}, this overrides a kind already present, which
+ * is what an explicit `listKind` patch asks for.
+ */
+function withForcedListKind(
+  blocks: readonly NoteBlock[],
+  kind: NotesnookListKind,
+): readonly NoteBlock[] {
+  return blocks.map((block): NoteBlock => {
+    if (block.type === "task-list") return { ...block, kind };
+    if (block.type === "callout" || block.type === "blockquote") {
+      return { ...block, blocks: withForcedListKind(block.blocks, kind) } as NoteBlock;
+    }
+    if (block.type === "bullet-list" || block.type === "ordered-list") {
+      return {
+        ...block,
+        items: block.items.map((item) =>
+          item.blocks === undefined
+            ? item
+            : { ...item, blocks: withForcedListKind(item.blocks, kind) },
+        ),
+      } as NoteBlock;
+    }
+    return block;
+  });
+}
+
+/**
+ * Reconstruct the canonical versioned Markdown for a body whose leading
+ * `---nookbridge-format: 1---` header was stripped.  Only bodies that carry a
+ * canonical directive are considered, so ordinary legacy prose is never
+ * reinterpreted as a versioned document.  Both spellings `get` can produce
+ * when its header is removed are offered; the strict parser accepts only one
+ * that re-emits byte-for-byte.
+ */
+const HEADERLESS_DIRECTIVE = /(?:^|\n):::nookbridge (?:list|table|callout|opaque)(?=\s|$)/;
+
+function headerlessVersionedCandidates(content: string): readonly string[] {
+  if (!HEADERLESS_DIRECTIVE.test(content)) return [];
+  return [NOTE_DOCUMENT_MARKDOWN_HEADER + content, `${NOTE_DOCUMENT_MARKDOWN_HEADER}\n${content}`];
+}
+
+/**
+ * Classify a body against the exact versioned Markdown the current note
+ * projects.  `exact` is a true echo (both header-stripped spellings are
+ * accepted); `trimmed` means only the final newline is missing, which cannot
+ * be written back byte-identically and is therefore refused.  `null` is any
+ * other body.
+ */
+function headerlessVersionedEcho(
+  content: string,
+  versionedMarkdown: string,
+): "exact" | "trimmed" | null {
+  if (!versionedMarkdown.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)) return null;
+  const rest = versionedMarkdown.slice(NOTE_DOCUMENT_MARKDOWN_HEADER.length);
+  if (rest.length === 0) return null;
+  const withoutLeading = rest.startsWith("\n") ? rest.slice(1) : rest;
+  if (content === rest || content === withoutLeading) return "exact";
+  for (const candidate of [rest, withoutLeading]) {
+    if (candidate.endsWith("\n") && content === candidate.slice(0, -1)) return "trimmed";
+  }
+  return null;
+}
 
 function withResolvedListKind(
   blocks: readonly NoteBlock[],

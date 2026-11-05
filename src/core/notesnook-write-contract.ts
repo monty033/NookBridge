@@ -44,7 +44,6 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 import {
-  DEFAULT_NOTESNOOK_LIST_KIND,
   normaliseNotesnookListKind,
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
@@ -559,6 +558,23 @@ export interface UpdateNotePatch {
   readonly tags?: readonly string[];
   readonly pinned?: boolean;
   readonly favorite?: boolean;
+  /**
+   * Explicit list-kind override for a `content` patch.
+   *
+   * Precedence, in order:
+   *
+   *   1. An explicit `listKind` wins over everything: every task-list block
+   *      in the new body is written with this kind, on both the versioned
+   *      and legacy content paths.  The override is visible in the resulting
+   *      note, even when the caller's body carried a different wrapper kind
+   *      or the stored note already held a different or mixed kind.
+   *   2. With no explicit selector, a `:::nookbridge list KIND` wrapper keeps
+   *      that block's named kind.
+   *   3. A directive-free task-list block falls back to the note's stored
+   *      kind only when the note has exactly one distinct kind.  On a
+   *      mixed-kind note such a block is ambiguous and the update is refused
+   *      with `unsupported_content` before any mutator.
+   */
   readonly listKind?: NotesnookListKind;
 }
 
@@ -623,11 +639,11 @@ export interface UpdateNotePlan extends WriteOutcomeFlags {
   readonly patchFields: readonly NotesnookUpdatePatchField[];
   readonly expectedRevision: NotesnookRevisionToken;
   /**
-   * Resolved list-intent the codec uses for the `content` half of an
-   * update patch, when present.  Undefined when the patch did not
-   * include a content rewrite — the codec is only invoked for the
-   * `content` field, and the field does not carry a listKind outside
-   * of that context.
+   * The list-intent the caller named explicitly for the `content` half
+   * of an update patch.  Undefined when the patch did not include a
+   * content rewrite, or when it did but omitted the selector — in that
+   * case the adapter preserves the kind already stored on the note, a
+   * decision this pure plan cannot make because it has no note.
    */
   readonly listKind?: NotesnookListKind;
   /**
@@ -999,6 +1015,13 @@ export function planAppendNote(command: AppendNoteCommand): AppendNotePlan {
  * includes a `content` field — a `listKind`-only patch still passes
  * validation but the codec is never invoked, so the plan omits the
  * resolved kind rather than fabricating a content write.
+ *
+ * When the caller omits `listKind` the plan also omits it: the adapter
+ * resolves the effective kind from the note's current stored document
+ * so a content-only edit preserves the list kind the note already has.
+ * A plan cannot invent the default here without knowing the note, and
+ * substituting `simple-checklist` would silently convert every
+ * `task-list` note on its next content edit.
  */
 export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
   const record = requireRecord(command, "update command");
@@ -1071,9 +1094,7 @@ export function planUpdateNote(command: UpdateNoteCommand): UpdateNotePlan {
   ) {
     fail("unsupported_patch_field", "update patch mixes a native envelope with Markdown content");
   }
-  const listKind = patchHasMarkdownContent
-    ? (patchListKind ?? DEFAULT_NOTESNOOK_LIST_KIND)
-    : undefined;
+  const listKind = patchHasMarkdownContent ? patchListKind : undefined;
 
   return Object.freeze({
     operation: "update" as const,

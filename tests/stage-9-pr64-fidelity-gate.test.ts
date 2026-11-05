@@ -846,6 +846,48 @@ describe("notesnook-write-codec — fidelity gate (P1-7)", () => {
       expect(nextTask.data).toContain("<h1>title</h1>");
     });
 
+    it.each([
+      ["simple-checklist", "simple-checklist", "simple-checklist--item"],
+      ["task-list", "checklist", "checklist--item"],
+    ] as const)(
+      "encodes the fenced %s body the reader returns as one list block",
+      (listKind, ul, item) => {
+        // Regression: the body `notes.get` returns for a versioned note, with
+        // the `---nookbridge-format` header stripped, is still a canonical
+        // `:::nookbridge list KIND` block.  Treating the fence as literal text
+        // emitted an escaped paragraph plus a second, default-kind wrapper.
+        const body = `:::nookbridge list ${listKind}\n- [ ] one\n- [ ] two\n:::\n\nStatus.`;
+        const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(body);
+        expect(encoded.data).toBe(
+          wrap(
+            `<ul class="${ul}"><li class="${item}"><p>one</p></li><li class="${item}"><p>two</p></li></ul><p>Status.</p>`,
+          ),
+        );
+        expect(encoded.data).not.toContain(":::");
+      },
+    );
+
+    it("keeps a fenced list structural when a blank line precedes the closing fence", () => {
+      // A blank line inside the wrapper is layout, not content: the list must
+      // stay structural instead of falling through to escaped paragraph text.
+      const body = ":::nookbridge list task-list\n- [ ] one\n\n:::";
+      const encoded = DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(body);
+      expect(encoded.data).toBe(
+        wrap('<ul class="checklist"><li class="checklist--item"><p>one</p></li></ul>'),
+      );
+      expect(encoded.data).not.toContain(":::");
+      expect(encoded.data).not.toContain("\\");
+    });
+
+    it.each([
+      ["a fenced code block", ":::nookbridge list task-list\n- [ ] one\n```\n- [ ] two\n```\n:::"],
+      ["plain prose", ":::nookbridge list task-list\n- [ ] one\nplain tail\n:::"],
+    ])("refuses a wrapper whose interior contains %s instead of merging lines", (_label, body) => {
+      // Silently flattening the wrapper to one paragraph would drop the list
+      // item and the offending line into escaped prose. Fail closed instead.
+      expect(() => DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown(body)).toThrow();
+    });
+
     it("refuses an unknown listKind value", () => {
       expect(() =>
         DETERMINISTIC_MARKDOWN_CODEC.encodeMarkdown("- [ ] todo", "ordered-list" as never),
