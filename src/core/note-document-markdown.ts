@@ -141,9 +141,41 @@ const delimiters: Record<string, string> = {
   underline: "__",
   strike: "~~",
 };
+/**
+ * Ordinary prose must survive a read unchanged.  Two characters are escaped
+ * only where they are actually Markdown syntax:
+ *
+ *  - `\` is an escape only before ASCII punctuation; `C:\temp` is text.
+ *  - `_` cannot open or close emphasis inside a word (CommonMark flanking),
+ *    so `invalid_request` and `snake_case` are text.
+ *
+ * Everything else keeps the previous unconditional treatment.
+ */
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
+const WORD_CHARACTER = /[A-Za-z0-9]/;
+function escapeSyntax(value: string): string {
+  return value.replace(/[\\*_~`[\]<>]/g, (match: string, offset: number, whole: string) => {
+    if (match === "\\") {
+      const next = whole[offset + 1];
+      return next !== undefined && ASCII_PUNCTUATION.test(next) ? "\\\\" : "\\";
+    }
+    if (match === "_") {
+      const previous = whole[offset - 1];
+      const next = whole[offset + 1];
+      if (
+        previous !== undefined &&
+        next !== undefined &&
+        WORD_CHARACTER.test(previous) &&
+        WORD_CHARACTER.test(next)
+      ) {
+        return "_";
+      }
+    }
+    return `\\${match}`;
+  });
+}
 function escapeText(s: string): string {
-  return s
-    .replace(/[\\*_~`[\]<>]/g, "\\$&")
+  return escapeSyntax(s)
     .replace(/^(?=[#>:+!|]|- |\d{1,9}\. )/gm, "\\")
     .replace(/^---$/gm, "\\-\\-\\-");
 }
@@ -220,8 +252,17 @@ function parseInlines(s: string): NoteInline[] {
       }
       const c = s[pos]!;
       if (c === "\\") {
+        // A backslash is an escape only before a character this format
+        // escapes (ASCII punctuation plus the digit used for list-prefix
+        // escapes); anywhere else it is ordinary text, so `C:\temp` is
+        // prose.  The serializer emits those unescaped for that reason.
+        const next = s[pos + 1];
+        if (next === undefined || !/[\\*_~`[\]<>#:+!|.\->0-9]/.test(next)) {
+          text += c;
+          pos += 1;
+          continue;
+        }
         pos++;
-        if (pos >= s.length || !/[\\*_~`[\]<>#:+!|.\->0-9]/.test(s[pos]!)) fail();
         text += s[pos++]!;
         continue;
       }
@@ -255,6 +296,20 @@ function parseInlines(s: string): NoteInline[] {
               typeof m !== "string" && m.href === "pending" ? { type: "link", href: url } : m,
             ),
           };
+        continue;
+      }
+      // An underscore inside a word cannot open emphasis (CommonMark
+      // flanking), so `invalid_request` is prose, not a delimiter.  The
+      // serializer emits it unescaped for exactly that reason.
+      if (
+        c === "_" &&
+        pos > 0 &&
+        /[A-Za-z0-9]/.test(s[pos - 1]!) &&
+        pos + 1 < s.length &&
+        /[A-Za-z0-9]/.test(s[pos + 1]!)
+      ) {
+        text += c;
+        pos += 1;
         continue;
       }
       const match = Object.entries(delimiters).find(([, d]) => s.startsWith(d, pos));

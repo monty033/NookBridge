@@ -93,7 +93,7 @@ describe("read-only Notesnook HTML Markdown projection", () => {
     ["heading marker in text is escaped", "<p># not heading</p>", "\\# not heading"],
     ["list marker in text is escaped", "<p>- not list</p>", "\\- not list"],
     ["ordered marker in text is escaped", "<p>1. not list</p>", "1\\. not list"],
-    ["emphasis characters in text are escaped", "<p>a*b_c~d|e</p>", "a\\*b\\_c\\~d\\|e"],
+    ["emphasis characters in text are escaped", "<p>a*b_c~d|e</p>", "a\\*b_c\\~d\\|e"],
     [
       "br inside link text does not split the link",
       '<a href="https://safe.test">a<br>b</a>',
@@ -115,7 +115,7 @@ describe("read-only Notesnook HTML Markdown projection", () => {
     [
       "attachment name markdown is escaped",
       '<div data-type="attachment" data-name="a`b*c_d!e.pdf">x</div>',
-      "[attachment: a\\`b\\*c\\_d\\!e.pdf]",
+      "[attachment: a\\`b\\*c_d\\!e.pdf]",
     ],
     [
       "blockquote text is escaped and quoted",

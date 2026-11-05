@@ -68,7 +68,7 @@
       "content": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 4096
+        "maxLength": 27000
       },
       "notebookId": {
         "type": "string",
@@ -95,7 +95,7 @@
       "markdownFragment": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 4096
+        "maxLength": 27000
       },
       "expectedRevision": {
         "type": "string",
@@ -137,7 +137,7 @@
           "content": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096
+            "maxLength": 27000
           },
           "notebookId": {
             "type": "string",

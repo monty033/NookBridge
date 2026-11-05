@@ -410,10 +410,10 @@ describe("versioned create refuses before any mutator", () => {
   });
 
   it("refuses versioned content whose native output the public reader would not return", async () => {
-    // ~12k characters of ordinary paragraphs: valid canonical Markdown, but
-    // the public reader degrades it to `oversize`, so create must not persist
+    // Ordinary paragraphs whose canonical form exceeds the content cap, so
+    // the public reader degrades them to `oversize`; create must not persist
     // a note the exact-parity contract cannot read back.
-    const paragraphs = Array.from({ length: 3 }, () => "a".repeat(4_000)).join("\n\n");
+    const paragraphs = Array.from({ length: 7 }, () => "a".repeat(4_000)).join("\n\n");
     const world = createWorld();
     const response = await world.publicCreate({
       title: "too big for the reader",

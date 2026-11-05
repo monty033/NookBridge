@@ -245,7 +245,7 @@ describe("limits lock", () => {
     expect({ ...STAGE5_RPC_LIMITS }).toEqual({
       maxFrameBytes: 65_536,
       maxQueryBytes: 512,
-      maxContentBytes: 4096,
+      maxContentBytes: 27000,
       maxResponseBytes: 65_536,
       maxSearchHits: 64,
       maxTitleBytes: 256,

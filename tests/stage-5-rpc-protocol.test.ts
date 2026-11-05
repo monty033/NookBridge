@@ -2125,8 +2125,8 @@ describe("parseRpcFrame — content cap (maxContentBytes)", () => {
   const update = (content: string) =>
     frame("notes.update", { id: NOTE_ID, expectedRevision: REV, patch: { content } });
 
-  it("publishes a content cap of 4096 that is separate from the query cap", () => {
-    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(4096);
+  it("publishes a content cap of 27000 that is separate from the query cap", () => {
+    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(27_000);
     expect(STAGE5_RPC_LIMITS.maxQueryBytes).toBe(512);
   });
 
@@ -2185,9 +2185,31 @@ describe("parseRpcFrame — content cap (maxContentBytes)", () => {
     expect(() => parseRpcFrame(wrapFrame(encode(json)))).toThrow(/rpc protocol/);
   });
 
-  it("a worst-case escaped 4096-byte body still fits in one request frame", () => {
-    const body = "\n".repeat(STAGE5_RPC_LIMITS.maxContentBytes);
-    expect(create(body).length).toBeLessThanOrEqual(STAGE5_RPC_LIMITS.maxFrameBytes);
+  // A cap is only safe if every shape that carries it still fits the frame.
+  // LF, quote and backslash are the worst case for text: JSON escaping
+  // doubles them, and 27,000 x 2 plus the largest envelope must stay under
+  // 65,536 bytes.
+  for (const [label, build] of cases) {
+    it(`${label}: a worst-case escaped body at the cap still fits in one frame`, () => {
+      const body = '\n"\\'.repeat(Math.floor(STAGE5_RPC_LIMITS.maxContentBytes / 3));
+      const framed = build(body);
+      expect(framed.length).toBeLessThanOrEqual(STAGE5_RPC_LIMITS.maxFrameBytes);
+      expect(() => parseRpcFrame(framed)).not.toThrow();
+    });
+  }
+
+  it("an update carrying the cap plus every optional field fits one frame", () => {
+    const full = frame("notes.update", {
+      id: NOTE_ID,
+      expectedRevision: REV,
+      patch: {
+        content: "\n".repeat(STAGE5_RPC_LIMITS.maxContentBytes),
+        title: "T".repeat(STAGE5_RPC_LIMITS.maxTitleBytes),
+        notebookId: NOTE_ID.repeat(8),
+        tags: Array.from({ length: 16 }, () => "t".repeat(STAGE5_RPC_LIMITS.maxIdentifierBytes)),
+      },
+    });
+    expect(full.length).toBeLessThanOrEqual(STAGE5_RPC_LIMITS.maxFrameBytes);
   });
 });
 

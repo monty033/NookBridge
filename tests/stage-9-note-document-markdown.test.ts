@@ -46,6 +46,39 @@ describe("T02 deterministic Markdown interchange", () => {
     expect(markdown).toContain(`\\${digits}. This is prose`);
     expect(parse(markdown)).toEqual(document);
   });
+  // Ordinary prose must survive a read unchanged: an underscore inside a
+  // word cannot open or close emphasis, and a backslash is only an escape
+  // before ASCII punctuation.
+  it.each([
+    "the code was invalid_request",
+    "snake_case_name and SCREAMING_CASE",
+    "a path like C:\\temp and D:\\data\\file.txt",
+    "100% of users_said.so",
+  ])("leaves ordinary prose untouched: %s", (text) => {
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: [{ type: "paragraph", inlines: [{ text }] }],
+    };
+    const markdown = serialize(document);
+    expect(markdown).toContain(text);
+    expect(parse(markdown)).toEqual(document);
+  });
+  it("still escapes underscore emphasis and a backslash before punctuation", () => {
+    const document: NoteDocumentV1 = {
+      version: 1,
+      blocks: [
+        {
+          type: "paragraph",
+          inlines: [{ text: "_emphasis_ and a literal \\* star" }],
+        },
+      ],
+    };
+    const markdown = serialize(document);
+    expect(markdown).toContain("\\_emphasis\\_");
+    expect(markdown).toContain("\\\\\\*");
+    expect(parse(markdown)).toEqual(document);
+  });
+
   it.each([
     "# Title\n\n## 二\n\n### Three\n\nHello 😀 é.",
     "**bold** *italic* __underline__ ~~strike~~ `code` [link](https://example.test/a)",
