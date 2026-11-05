@@ -3,16 +3,28 @@
  *
  * The development recovery path in `recover-local-state.ts` knows a single
  * `nookbridge.db`.  Production does not use that layout: the daemon opens a
- * *bundle* of three encrypted SQLite databases (see
- * `auth/live-login-runtime.ts` and implementation-plan §3.5/§13.12 P1-9):
+ * *bundle* of encrypted SQLite databases (see
+ * `auth/live-login-runtime.ts` and implementation-plan §3.5/§13.12 P1-9).
+ *
+ * The bundle has two REQUIRED members:
  *
  *   - `nookbridge-storage.db` — PersistentStorage KV/meta state;
- *   - `notesnook.db`          — upstream Notesnook core database;
+ *   - `notesnook.db`          — upstream Notesnook core database.
+ *
+ * and one OPTIONAL member:
+ *
  *   - `notesnook-logs.db`     — upstream Notesnook log database.
  *
+ * A headless runtime that never initialises Notesnook core logging does not
+ * create the optional member, so its absence is the normal production shape.
+ * The required members must both be present for a complete bundle; the
+ * optional member only needs to be preserved when it exists.
+ *
  * Each member may also carry `-wal` and `-shm` SQLite sidecars (the runtime
- * sets `journalMode: "WAL"`).  This module treats the three members and any
- * present sidecars as ONE quarantine unit and refuses a partial bundle.
+ * sets `journalMode: "WAL"`).  This module treats the required members, the
+ * optional member when present, and any present sidecars as ONE quarantine
+ * unit.  It refuses a bundle missing a required member, and fails closed on a
+ * lone optional member or sidecar that could pair stale logs with fresh state.
  *
  * Security contract:
  *
@@ -82,11 +94,27 @@ import {
 // Bundle shape.
 // ---------------------------------------------------------------------------
 
-/** The three production members, in deterministic order. */
-export const PRODUCTION_BUNDLE_MEMBERS: readonly string[] = [
+/** The production members that must be present for a complete bundle. */
+export const REQUIRED_BUNDLE_MEMBERS: readonly string[] = [
   "nookbridge-storage.db",
   "notesnook.db",
-  "notesnook-logs.db",
+] as const;
+
+/**
+ * Production members that are preserved only when present.  The headless
+ * runtime does not initialise Notesnook core logging, so this file is normally
+ * absent and its absence must not make the bundle incomplete.
+ */
+export const OPTIONAL_BUNDLE_MEMBERS: readonly string[] = ["notesnook-logs.db"] as const;
+
+/**
+ * The full production bundle union, in deterministic order.  Move, manifest,
+ * and plan iteration use this so an optional member and its sidecars are
+ * covered whenever they exist.
+ */
+export const PRODUCTION_BUNDLE_MEMBERS: readonly string[] = [
+  ...REQUIRED_BUNDLE_MEMBERS,
+  ...OPTIONAL_BUNDLE_MEMBERS,
 ] as const;
 
 /** SQLite sidecar suffixes preserved alongside each member. */
@@ -105,6 +133,8 @@ const ROLLBACK_INCOMPLETE =
   "nookctl recover-local-state bundle rollback: preserved state is incomplete" as const;
 const ROLLBACK_OCCUPIED =
   "nookctl recover-local-state bundle rollback: destination is occupied" as const;
+const ROLLBACK_UNLISTED =
+  "nookctl recover-local-state bundle rollback: state root contains an unlisted bundle artefact" as const;
 const ROLLBACK_RESTORE_FAILED =
   "nookctl recover-local-state bundle rollback: failed to restore preserved state" as const;
 const ROLLBACK_PARTIAL =
@@ -211,23 +241,39 @@ function pathEntryExists(path: string): boolean {
 type MemberPresence = "complete" | "partial" | "missing" | "unsafe";
 
 function memberPresence(stateDir: string): MemberPresence {
-  let present = 0;
+  let requiredPresent = 0;
+  let optionalPresent = 0;
   for (const member of PRODUCTION_BUNDLE_MEMBERS) {
     const candidate = join(stateDir, member);
     if (!pathEntryExists(candidate)) continue;
     try {
       const stat = lstatSync(candidate);
       if (!stat.isFile() || stat.isSymbolicLink()) return "unsafe";
-      present += 1;
     } catch {
       return "unsafe";
     }
+    if (REQUIRED_BUNDLE_MEMBERS.includes(member)) requiredPresent += 1;
+    else optionalPresent += 1;
   }
+  // A complete bundle is exactly: every required member present and safe.  The
+  // optional member is irrelevant here, whether present or absent.
+  if (requiredPresent === REQUIRED_BUNDLE_MEMBERS.length) return "complete";
+  // A single required member is still partial.  A lone optional member with no
+  // required member is also partial: it must never be paired with fresh state.
+  if (requiredPresent > 0 || optionalPresent > 0) return "partial";
   // A SQLite sidecar with no main database file is an orphan, not an empty
   // root: it would pair with fresh state, so it is a partial bundle.
-  if (present === 0) return hasAnyStateSidecar(stateDir) ? "partial" : "missing";
-  if (present === PRODUCTION_BUNDLE_MEMBERS.length) return "complete";
-  return "partial";
+  return hasAnyStateSidecar(stateDir) ? "partial" : "missing";
+}
+
+/**
+ * The optional members that are actually present in the state root.  Planning
+ * uses this to decide whether the optional main member moves with the bundle;
+ * an absent optional main is never required, while its present sidecars are
+ * still planned separately.
+ */
+function presentOptionalMembers(stateDir: string): string[] {
+  return OPTIONAL_BUNDLE_MEMBERS.filter((member) => pathEntryExists(join(stateDir, member)));
 }
 
 /**
@@ -316,11 +362,16 @@ function inspectWhileHeld(stateDir: string, key: string | undefined): BundleInsp
   // The key is required before any copy is made.
   if (typeof key !== "string" || key.length === 0) return { kind: "indeterminate" };
 
-  const probe = probeBundleCopyUnderLock(stateDir, key);
+  // Only the required members gate health.  The optional member is disposable
+  // logging state: it is still moved with the bundle when present, but its
+  // probe status (for example a zero-byte file left by a killed writer) must
+  // never make a recoverable bundle look unhealthy.
+  const probeMembers = REQUIRED_BUNDLE_MEMBERS;
+  const probe = probeBundleCopyUnderLock(stateDir, key, probeMembers);
   if (probe.kind === "missing") return { kind: "missing" };
   if (probe.kind === "corrupt") return { kind: "corrupt" };
   if (probe.kind === "indeterminate") return { kind: "indeterminate" };
-  for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+  for (const member of probeMembers) {
     if (probe.statuses[member] !== "healthy") return { kind: "corrupt" };
   }
   return { kind: "healthy" };
@@ -720,7 +771,7 @@ export function reinitializeProductionBundle(
     if (scan.kind === "resume") {
       const listed = new Set(scan.manifest.items.map((item) => item.name));
       if (
-        hasUnlistedStateSidecar(stateDir, listed) ||
+        hasUnlistedStateArtefact(stateDir, listed) ||
         hasUnlistedEntryArtefact(join(quarantineDir, scan.id), listed)
       ) {
         return error(2, "refusing inconsistent quarantine state");
@@ -732,6 +783,10 @@ export function reinitializeProductionBundle(
     // crash moved is reconciled rather than read, so neither is probed here.
     // Any other pending member that became unreadable since the first run is
     // refused before anything else moves.
+    //
+    // Only required members are probed.  The optional log database is moved
+    // with the bundle when present, but a corrupt optional file must not make
+    // the required state unrecoverable.
     const probeMembers =
       scan.kind === "resume"
         ? scan.manifest.items
@@ -739,9 +794,9 @@ export function reinitializeProductionBundle(
             .map((item) => item.name)
             .filter(
               (name) =>
-                PRODUCTION_BUNDLE_MEMBERS.includes(name) && pathEntryExists(join(stateDir, name)),
+                REQUIRED_BUNDLE_MEMBERS.includes(name) && pathEntryExists(join(stateDir, name)),
             )
-        : [...PRODUCTION_BUNDLE_MEMBERS];
+        : [...REQUIRED_BUNDLE_MEMBERS];
     if (probeMembers.length > 0) {
       let probe: BundleCopyProbe;
       try {
@@ -868,7 +923,7 @@ function quarantineAndReinitialize(
   // Initialize fresh encrypted members so the service can start and resync.
   if (hasUnsafeBundleEntry(stateDir)) return error(2, "refusing unsafe production database bundle");
   try {
-    for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
       const fresh = new SqliteStorage({
         dbPath: join(stateDir, member),
         key,
@@ -891,15 +946,17 @@ function quarantineAndReinitialize(
 // ---------------------------------------------------------------------------
 // Rollback (bundle path).
 //
-// Restores the three members — and every sidecar the manifest lists — from a
-// named quarantine entry back to the state root.  Rollback does NOT read the
-// database key: it is a pure filesystem move and works without a credentials
-// directory.  Each move is a no-clobber link-then-unlink.  If a forward move
-// fails, completed moves are undone; if an undo also fails the result is
-// reported as a partial restore (exit 3, manual recovery).  The moves are not
-// journaled, so this is a best-effort undo, not a crash-safe transaction.  On
-// success the entry is consumed with the same cleanup convention the
-// reinitialize path uses (`discardEmptyEntry`).
+// Restores the required members — and the optional member or any sidecar the
+// manifest lists — from a named quarantine entry back to the state root.
+// Rollback does NOT read the database key: it is a pure filesystem move and
+// works without a credentials directory.  Each move is a no-clobber
+// link-then-unlink.  An entry that never contained the optional member is
+// still complete for rollback.  If a forward move fails, completed moves are
+// undone; if an undo also fails the result is reported as a partial restore
+// (exit 3, manual recovery).  The moves are not journaled, so this is a
+// best-effort undo, not a crash-safe transaction.  On success the entry is
+// consumed with the same cleanup convention the reinitialize path uses
+// (`discardEmptyEntry`).
 // ---------------------------------------------------------------------------
 
 export function rollbackProductionBundle(options: RollbackBundleOptions): BundleRollbackResult {
@@ -986,13 +1043,15 @@ function restoreBundleEntry(
   }
 
   const plan = restorePlan(manifest);
+  if (plan === undefined) return rollbackError(2, ROLLBACK_INCOMPLETE);
 
-  // Every file in the entry, and every sidecar left in the state root, must be
-  // named by the manifest.  An unlisted entry file would be stranded by a
-  // successful restore; an unlisted sidecar would pair with a restored database.
+  // Every file in the entry, and every bundle artefact left in the state root,
+  // must be named by the manifest.  An unlisted entry file would be stranded by
+  // a successful restore; an unlisted main or sidecar would pair with restored
+  // state.
   const listed = new Set(manifest.items.map((item) => item.name));
   if (hasUnlistedEntryArtefact(entry, listed)) return rollbackError(2, ROLLBACK_INCOMPLETE);
-  if (hasUnlistedStateSidecar(stateDir, listed)) return rollbackError(2, ROLLBACK_OCCUPIED);
+  if (hasUnlistedStateArtefact(stateDir, listed)) return rollbackError(2, ROLLBACK_UNLISTED);
 
   // Refuse before any mutation if a destination is already occupied.  The
   // existing file is never displaced.
@@ -1022,9 +1081,17 @@ function restoreBundleEntry(
   return { kind: "rolled-back", quarantineId };
 }
 
-/** The three members followed by every extra artefact the manifest lists. */
-function restorePlan(manifest: BundleManifest): string[] {
-  const plan = [...PRODUCTION_BUNDLE_MEMBERS];
+/**
+ * The required members followed by every extra artefact the manifest lists.
+ *
+ * Both required members MUST be listed.  The reader enforces the same coverage,
+ * and this explicit invariant is a second fail-closed guard: a rollback that
+ * would leave a required member stranded is never planned.
+ */
+function restorePlan(manifest: BundleManifest): string[] | undefined {
+  const listed = new Set(manifest.items.map((item) => item.name));
+  if (!REQUIRED_BUNDLE_MEMBERS.every((name) => listed.has(name))) return undefined;
+  const plan: string[] = [...REQUIRED_BUNDLE_MEMBERS];
   for (const item of manifest.items) {
     if (!plan.includes(item.name)) plan.push(item.name);
   }
@@ -1075,11 +1142,13 @@ function readRollbackManifest(entry: string, expectedId: string): BundleManifest
     if (state !== "pending" && state !== "moved") return undefined;
     if (seen.has(name)) return undefined;
     seen.add(name);
-    if (PRODUCTION_BUNDLE_MEMBERS.includes(name)) membersCovered.add(name);
+    if (REQUIRED_BUNDLE_MEMBERS.includes(name)) membersCovered.add(name);
     items.push({ name, state });
   }
   if (items.length === 0) return undefined;
-  if (membersCovered.size !== PRODUCTION_BUNDLE_MEMBERS.length) return undefined;
+  // The optional member may legitimately be absent from a production state, so
+  // rollback coverage requires only the required members.
+  if (membersCovered.size !== REQUIRED_BUNDLE_MEMBERS.length) return undefined;
 
   return { version: BUNDLE_MANIFEST_VERSION, id: expectedId, status, items };
 }
@@ -1092,11 +1161,23 @@ function rollbackError(exitCode: 2 | 3, message: string): BundleRollbackResult {
 // Planning.
 // ---------------------------------------------------------------------------
 
-/** The members plus any present sidecars, in deterministic order. */
+/**
+ * The members plus any present sidecars, in deterministic order.  Required
+ * members are always planned; the optional member is planned only when it
+ * exists, so a live production shape never produces a manifest entry for a
+ * file the runtime did not create.
+ */
 function planBundleItems(stateDir: string): string[] {
+  const optionalPresent = new Set(presentOptionalMembers(stateDir));
   const names: string[] = [];
   for (const member of PRODUCTION_BUNDLE_MEMBERS) {
-    names.push(member);
+    // Required members are always planned; the optional main member only when
+    // it exists.  Sidecars are planned whenever they exist, including an
+    // orphan optional sidecar, so a stale log index is quarantined rather than
+    // left beside fresh state.
+    if (REQUIRED_BUNDLE_MEMBERS.includes(member) || optionalPresent.has(member)) {
+      names.push(member);
+    }
     for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
       if (pathEntryExists(join(stateDir, `${member}${suffix}`))) names.push(`${member}${suffix}`);
     }
@@ -1324,11 +1405,13 @@ function readIncompleteManifest(entry: string, expectedId: string): BundleManife
     if (state !== "pending" && state !== "moved") return undefined;
     if (seen.has(name)) return undefined;
     seen.add(name);
-    if (PRODUCTION_BUNDLE_MEMBERS.includes(name)) membersCovered.add(name);
+    if (REQUIRED_BUNDLE_MEMBERS.includes(name)) membersCovered.add(name);
     items.push({ name, state });
   }
   if (items.length === 0) return undefined;
-  if (membersCovered.size !== PRODUCTION_BUNDLE_MEMBERS.length) return undefined;
+  // A checkpoint created from the live production shape lists only the
+  // required members; the optional member is not part of resume coverage.
+  if (membersCovered.size !== REQUIRED_BUNDLE_MEMBERS.length) return undefined;
 
   return {
     version: BUNDLE_MANIFEST_VERSION,
@@ -1414,12 +1497,13 @@ function isRegularFile(path: string): boolean {
 }
 
 /**
- * True when a SQLite sidecar of any bundle member is in the state root but not
+ * True when a bundle main member or SQLite sidecar is in the state root but not
  * named by the manifest.  Such a file would pair with fresh or restored state.
- * A sidecar that cannot be inspected counts as present (fail closed).
+ * An entry that cannot be inspected counts as present (fail closed).
  */
-function hasUnlistedStateSidecar(stateDir: string, listed: ReadonlySet<string>): boolean {
+function hasUnlistedStateArtefact(stateDir: string, listed: ReadonlySet<string>): boolean {
   for (const member of PRODUCTION_BUNDLE_MEMBERS) {
+    if (!listed.has(member) && pathEntryExists(join(stateDir, member))) return true;
     for (const suffix of BUNDLE_SIDECAR_SUFFIXES) {
       const name = `${member}${suffix}`;
       if (!listed.has(name) && pathEntryExists(join(stateDir, name))) return true;

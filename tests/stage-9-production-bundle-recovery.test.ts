@@ -261,6 +261,8 @@ vi.mock("../src/storage/sqlite-storage.js", async (importOriginal) => {
 });
 
 const BUNDLE_MEMBERS = ["nookbridge-storage.db", "notesnook.db", "notesnook-logs.db"] as const;
+const REQUIRED_BUNDLE_MEMBERS = ["nookbridge-storage.db", "notesnook.db"] as const;
+const OPTIONAL_BUNDLE_MEMBER = "notesnook-logs.db" as const;
 const SIDECAR_SUFFIXES = ["-wal", "-shm"] as const;
 const APPROVE = "--approve-reinitialize";
 const ACK = "--accept-unsynced-loss";
@@ -466,8 +468,8 @@ describe("bundle inspect — read-only categorical probe", () => {
     }
   });
 
-  it("reports a partial bundle categorically and mutates nothing", async () => {
-    const root = mkRoot("nookbridge-bundle-inspect-partial-");
+  it("reports the live production shape (no optional logs) healthy and mutates nothing", async () => {
+    const root = mkRoot("nookbridge-bundle-inspect-live-shape-");
     const { stateDir, credentialsDir } = buildBundleFixture(root);
     rmSync(join(stateDir, "notesnook-logs.db"));
     const before = snapshotTree(stateDir);
@@ -476,7 +478,8 @@ describe("bundle inspect — read-only categorical probe", () => {
 
     expect(result.kind).toBe("bundle-inspection");
     if (result.kind !== "bundle-inspection") return;
-    expect(result.result.kind).toBe("partial");
+    expect(result.result.kind).toBe("healthy");
+    expect(existsSync(join(stateDir, "notesnook-logs.db"))).toBe(false);
     expect(snapshotTree(stateDir)).toEqual(before);
   });
 
@@ -492,6 +495,357 @@ describe("bundle inspect — read-only categorical probe", () => {
     if (result.kind !== "bundle-inspection") return;
     expect(result.result.kind).toBe("locked");
     expect(snapshotTree(stateDir)).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Required/optional membership contract.
+//
+// The live daemon state contains only `nookbridge-storage.db` and
+// `notesnook.db`; it never initialises Notesnook core logging, so
+// `notesnook-logs.db` is optional.  Recovery must work on that exact shape
+// while still preserving the optional member (and sidecars) when it exists.
+// ---------------------------------------------------------------------------
+
+describe("bundle required/optional membership", () => {
+  function buildLiveShapeFixture(root: string): BundleFixture {
+    const fixture = buildBundleFixture(root);
+    rmSync(join(fixture.stateDir, OPTIONAL_BUNDLE_MEMBER));
+    return fixture;
+  }
+
+  it("1 — live shape (storage + notesnook only) inspects healthy", async () => {
+    const root = mkRoot("nookbridge-bundle-required-live-");
+    const { stateDir, credentialsDir } = buildLiveShapeFixture(root);
+    const before = snapshotTree(stateDir);
+
+    const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("bundle-inspection");
+    if (result.kind !== "bundle-inspection") return;
+    expect(result.result.kind).toBe("healthy");
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+    expect(snapshotTree(stateDir)).toEqual(before);
+  });
+
+  it("2 — all three members inspect healthy", async () => {
+    const root = mkRoot("nookbridge-bundle-required-all-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+
+    const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("bundle-inspection");
+    if (result.kind !== "bundle-inspection") return;
+    expect(result.result.kind).toBe("healthy");
+  });
+
+  it("3 — both required members missing (lone optional member) is partial, not missing", async () => {
+    const root = mkRoot("nookbridge-bundle-required-both-missing-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    for (const member of REQUIRED_BUNDLE_MEMBERS) rmSync(join(stateDir, member));
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(true);
+    const before = snapshotTree(stateDir);
+
+    const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("bundle-inspection");
+    if (result.kind !== "bundle-inspection") return;
+    expect(result.result.kind).toBe("partial");
+    expect(snapshotTree(stateDir)).toEqual(before);
+  });
+
+  it("4 — one required member missing is partial", async () => {
+    const root = mkRoot("nookbridge-bundle-required-storage-missing-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    rmSync(join(stateDir, "nookbridge-storage.db"));
+    const before = snapshotTree(stateDir);
+
+    const result = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+
+    expect(result.kind).toBe("bundle-inspection");
+    if (result.kind !== "bundle-inspection") return;
+    expect(result.result.kind).toBe("partial");
+    expect(snapshotTree(stateDir)).toEqual(before);
+  });
+
+  it("5 — a lone optional sidecar is partial and never pairs with fresh state", async () => {
+    const root = mkRoot("nookbridge-bundle-required-optional-sidecar-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    for (const member of BUNDLE_MEMBERS) rmSync(join(stateDir, member));
+    writeFileSync(join(stateDir, `${OPTIONAL_BUNDLE_MEMBER}-wal`), Buffer.from("orphan-log-wal"));
+    const before = snapshotTree(stateDir);
+
+    const inspected = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+    expect(inspected.kind).toBe("bundle-inspection");
+    if (inspected.kind !== "bundle-inspection") return;
+    expect(inspected.result.kind).toBe("partial");
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("error");
+    if (reinit.kind !== "error") return;
+    expect(reinit.exitCode).toBe(2);
+    expect(reinit.message).toBe("refusing partial production database bundle");
+    expect(snapshotTree(stateDir)).toEqual(before);
+  });
+
+  it("6 — an optional member that exists is quarantined and restored by rollback", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-present-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    const before = snapshotTreeWithInodes(stateDir);
+    const optionalBefore = {
+      bytes: readFileSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER)).toString("hex"),
+      ino: lstatSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER)).ino,
+    };
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+    const entry = join(quarantineRoot(stateDir), reinit.quarantineId);
+
+    // The optional member and its bytes moved into the quarantine entry.
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+    expect(readFileSync(join(entry, OPTIONAL_BUNDLE_MEMBER)).toString("hex")).toBe(
+      optionalBefore.bytes,
+    );
+
+    clearFreshMembers(stateDir);
+    const rolled = await runBundle(
+      ["bundle", "rollback", ROLLBACK, reinit.quarantineId],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(rolled.kind).toBe("rolled-back");
+    // Every original artefact, including the optional member, came back with
+    // identical bytes and inode.
+    const after = snapshotTreeWithInodes(stateDir);
+    for (const [relative, snapshot] of Object.entries(before)) {
+      expect(after[relative], relative).toBeDefined();
+      expect(after[relative]!.bytes, `${relative} bytes`).toBe(snapshot.bytes);
+      expect(after[relative]!.ino, `${relative} inode`).toBe(snapshot.ino);
+    }
+    expect(lstatSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER)).ino).toBe(optionalBefore.ino);
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  it("7 — without the optional member, reinitialize then rollback round-trips cleanly", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-absent-");
+    const { stateDir, credentialsDir } = buildLiveShapeFixture(root);
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+    const entry = join(quarantineRoot(stateDir), reinit.quarantineId);
+
+    // The manifest covers only the required members; it does not invent an
+    // entry for the optional file the runtime never created.
+    const manifest = JSON.parse(readFileSync(join(entry, MANIFEST_NAME), "utf8")) as {
+      status?: unknown;
+      items?: Array<{ name?: unknown }>;
+    };
+    expect(manifest.status).toBe("complete");
+    expect(manifest.items?.map((item) => item.name)).toEqual([...REQUIRED_BUNDLE_MEMBERS]);
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+
+    clearFreshMembers(stateDir);
+    const rolled = await runBundle(
+      ["bundle", "rollback", ROLLBACK, reinit.quarantineId],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(rolled.kind).toBe("rolled-back");
+    if (rolled.kind !== "rolled-back") return;
+    expect(rolled.quarantineId).toBe(reinit.quarantineId);
+
+    const after = snapshotTreeWithInodes(stateDir);
+    for (const [relative, snapshot] of Object.entries(before)) {
+      expect(after[relative], relative).toBeDefined();
+      expect(after[relative]!.bytes, `${relative} bytes`).toBe(snapshot.bytes);
+      expect(after[relative]!.ino, `${relative} inode`).toBe(snapshot.ino);
+    }
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+    expect(existsSync(entry)).toBe(false);
+
+    const inspected = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+    expect(inspected.kind).toBe("bundle-inspection");
+    if (inspected.kind !== "bundle-inspection") return;
+    expect(inspected.result.kind).toBe("healthy");
+  });
+
+  it("7b — a resumed partial move without the optional member still completes", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-absent-resume-");
+    const { stateDir, credentialsDir, memberBytes } = buildLiveShapeFixture(root);
+    const id = "ab5e17c0-0123456789ab";
+    const entry = plantIncompleteEntry(
+      stateDir,
+      id,
+      {
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+        ],
+      },
+      "nookbridge-storage.db",
+    );
+
+    // The crash left one required member in the entry and one in the root; the
+    // optional member was never part of this state.
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("reinitialized");
+    if (result.kind !== "reinitialized") return;
+    expect(result.quarantineId).toBe(id);
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
+      expect(existsSync(join(stateDir, member))).toBe(true);
+    }
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+    expect(existsSync(join(entry, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+
+    const manifest = JSON.parse(readFileSync(join(entry, MANIFEST_NAME), "utf8")) as {
+      status?: unknown;
+    };
+    expect(manifest.status).toBe("complete");
+  });
+
+  it("8 — a corrupt optional member does not block inspect or reinitialize, and is quarantined", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-corrupt-");
+    const { stateDir, credentialsDir } = buildBundleFixture(root);
+    // A zero-byte log database is the shape a writer killed mid-create leaves.
+    writeFileSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER), Buffer.alloc(0));
+    expect(lstatSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER)).size).toBe(0);
+
+    const inspected = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+    expect(inspected.kind).toBe("bundle-inspection");
+    if (inspected.kind !== "bundle-inspection") return;
+    expect(inspected.result.kind).toBe("healthy");
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+    const entry = join(quarantineRoot(stateDir), reinit.quarantineId);
+
+    // The damaged optional file was moved, not left beside fresh state.
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+    expect(lstatSync(join(entry, OPTIONAL_BUNDLE_MEMBER)).size).toBe(0);
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      expect(existsSync(join(stateDir, member))).toBe(true);
+    }
+  });
+
+  it("9 — resume refuses an unlisted stray optional main member", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-stray-resume-");
+    const { stateDir, credentialsDir } = buildLiveShapeFixture(root);
+    const id = "b1a5e17c-0123456789ab";
+    plantIncompleteEntry(
+      stateDir,
+      id,
+      {
+        version: 1,
+        id,
+        status: "incomplete",
+        items: [
+          { name: "nookbridge-storage.db", state: "moved" },
+          { name: "notesnook.db", state: "pending" },
+        ],
+      },
+      "nookbridge-storage.db",
+    );
+    // The checkpoint never names the optional member; a stray one must not be
+    // paired with the fresh required state the resume would create.
+    writeFileSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER), Buffer.from("stray-logs"));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe("refusing inconsistent quarantine state");
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
+  });
+
+  it("10 — required members plus an orphan optional sidecar inspect healthy and quarantine the sidecar", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-sidecar-present-");
+    const { stateDir, credentialsDir } = buildLiveShapeFixture(root);
+    const strayName = `${OPTIONAL_BUNDLE_MEMBER}-wal`;
+    writeFileSync(join(stateDir, strayName), Buffer.from("orphan-log-wal"));
+
+    const inspected = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
+    expect(inspected.kind).toBe("bundle-inspection");
+    if (inspected.kind !== "bundle-inspection") return;
+    expect(inspected.result.kind).toBe("healthy");
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+    const entry = join(quarantineRoot(stateDir), reinit.quarantineId);
+
+    expect(readFileSync(join(entry, strayName), "utf8")).toBe("orphan-log-wal");
+    expect(existsSync(join(stateDir, strayName))).toBe(false);
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
+  });
+
+  it("10b — rollback names an unlisted stray main artefact instead of calling it occupied", async () => {
+    const root = mkRoot("nookbridge-bundle-optional-stray-rollback-");
+    const { stateDir, credentialsDir } = buildLiveShapeFixture(root);
+
+    const reinit = await runBundle(
+      ["bundle", "reinitialize", APPROVE, ACK],
+      stateDir,
+      credentialsDir,
+    );
+    expect(reinit.kind).toBe("reinitialized");
+    if (reinit.kind !== "reinitialized") return;
+
+    clearFreshMembers(stateDir);
+    writeFileSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER), Buffer.from("stray-logs"));
+    const before = snapshotTreeWithInodes(stateDir);
+
+    const result = await runBundle(
+      ["bundle", "rollback", ROLLBACK, reinit.quarantineId],
+      stateDir,
+      credentialsDir,
+    );
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toBe(ROLLBACK_UNLISTED);
+    expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
   });
 });
 
@@ -539,8 +893,8 @@ describe("bundle presence — orphan SQLite sidecar with no main database", () =
   }
 });
 
-describe("bundle reinitialize — atomic three-member quarantine", () => {
-  it("quarantines all three members and reinitializes a fresh bundle", async () => {
+describe("bundle reinitialize — required/optional quarantine", () => {
+  it("quarantines all present members and reinitializes only the required bundle", async () => {
     const root = mkRoot("nookbridge-bundle-quarantine-");
     const { stateDir, credentialsDir, key, memberBytes } = buildBundleFixture(root);
 
@@ -570,14 +924,19 @@ describe("bundle reinitialize — atomic three-member quarantine", () => {
       expect(memberBytes[member]!.length).toBeGreaterThan(0);
       // Original bytes preserved bit-for-bit inside the opaque entry.
       expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
-      // A fresh encrypted member replaced it at the state root: a distinct
-      // inode, not the moved original.
+    }
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      // A fresh encrypted required member replaced it at the state root: a
+      // distinct inode, not the moved original.
       expect(existsSync(join(stateDir, member))).toBe(true);
       expect(lstatSync(join(stateDir, member)).ino).not.toBe(lstatSync(join(entry, member)).ino);
       expect(inspectEncryptedSqlite({ dbPath: join(stateDir, member), key }).status).toBe(
         "healthy",
       );
     }
+    // The optional member was preserved, but fresh state is initialized in the
+    // live production shape: the runtime does not create the log database.
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
 
     // The freshly initialized bundle inspects healthy.
     const followUp = await runBundle(["bundle", "inspect"], stateDir, credentialsDir);
@@ -851,8 +1210,12 @@ describe("bundle review fixes — lock order and quarantine root", () => {
     expect(result.quarantineId).toBe(id);
     for (const member of BUNDLE_MEMBERS) {
       expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
       expect(existsSync(join(stateDir, member))).toBe(true);
     }
+    // Fresh initialization matches the live production shape: no log database.
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
   });
 
   it("reinitialize refuses a symlinked quarantine root and moves nothing outside", async () => {
@@ -944,8 +1307,11 @@ describe("bundle reinitialize — crash checkpoints", () => {
     const entry = join(quarantineRoot(stateDir), id);
     for (const member of BUNDLE_MEMBERS) {
       expect(readFileSync(join(entry, member)).equals(memberBytes[member]!)).toBe(true);
+    }
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
       expect(existsSync(join(stateDir, member))).toBe(true);
     }
+    expect(existsSync(join(stateDir, OPTIONAL_BUNDLE_MEMBER))).toBe(false);
     const manifest = JSON.parse(readFileSync(join(entry, MANIFEST_NAME), "utf8")) as {
       status?: unknown;
     };
@@ -2700,6 +3066,8 @@ const ROLLBACK_REQUIRES =
   "nookctl recover-local-state bundle rollback requires --approve-rollback <id>";
 const ROLLBACK_OPAQUE = "nookctl recover-local-state bundle rollback: refusing opaque identifier";
 const ROLLBACK_OCCUPIED = "nookctl recover-local-state bundle rollback: destination is occupied";
+const ROLLBACK_UNLISTED =
+  "nookctl recover-local-state bundle rollback: state root contains an unlisted bundle artefact";
 const ROLLBACK_INCOMPLETE =
   "nookctl recover-local-state bundle rollback: preserved state is incomplete";
 const ROLLBACK_UNKNOWN =
@@ -3586,7 +3954,7 @@ describe("bundle recovery — review round 3 regressions", () => {
     expect(result.kind).toBe("error");
     if (result.kind !== "error") return;
     expect(result.exitCode).toBe(2);
-    expect(result.message).toBe(ROLLBACK_OCCUPIED);
+    expect(result.message).toBe(ROLLBACK_UNLISTED);
     expect(snapshotTreeWithInodes(stateDir)).toEqual(before);
   });
 
