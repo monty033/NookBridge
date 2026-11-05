@@ -2314,8 +2314,10 @@ acceptance work.
    permission changes during a read-only diagnostic.
 9. **P1-9 — Recovery does not recover the production state layout.**
    The recovery dispatcher selects development `nookbridge.db` and
-   `.d/db.key`. Production uses `nookbridge-storage.db`, `notesnook.db`,
-   `notesnook-logs.db`, and systemd credentials. `runReinitialize` refuses
+   `.d/db.key`. Production uses the required `nookbridge-storage.db` and
+   `notesnook.db` members, the optional `notesnook-logs.db`, and systemd
+   credentials. The optional log database is preserved when present but is
+   never required for a complete bundle. `runReinitialize` refuses
    any database whose integrity is not healthy, preserves only one main
    database file without the WAL/SHM bundle, and creates an empty SQLite
    file without proving resync.

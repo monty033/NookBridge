@@ -58,10 +58,11 @@ transport capabilities.
 ## P1-9 Phase 1 — production bundle recovery (source, 2026-10-14)
 
 Branch `feat/production-bundle-recovery-20261013`, local only. Not pushed; no
-PR. This is source behavior for the production database bundle
-(`nookbridge-storage.db`, `notesnook.db`, `notesnook-logs.db`, with WAL/SHM
-sidecars). It does not include a VM drill, privileged state, or live Notesnook
-access.
+PR. This is source behavior for the production database bundle: required
+`nookbridge-storage.db` and `notesnook.db`, optional `notesnook-logs.db`,
+with WAL/SHM sidecars preserved whenever a member is present. The optional
+log database is not required for a complete bundle. It does not include a VM
+drill, privileged state, or live Notesnook access.
 
 Verified behavior (source and focused tests):
 
