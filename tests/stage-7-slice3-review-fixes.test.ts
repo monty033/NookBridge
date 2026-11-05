@@ -24,11 +24,22 @@ describe("Stage 7 Slice 3 review regressions", () => {
 
   it.each([
     ["create", { kind: "create", id: "note-1", titleBytes: 257, contentBytes: 1 }],
-    ["append", { kind: "append", id: "note-1", fragmentBytes: 4097 }],
-    ["update", { kind: "update", id: "note-1", appliedFields: ["content"], contentBytes: 4097 }],
+    [
+      "append",
+      { kind: "append", id: "note-1", fragmentBytes: STAGE5_RPC_LIMITS.maxContentBytes + 1 },
+    ],
+    [
+      "update",
+      {
+        kind: "update",
+        id: "note-1",
+        appliedFields: ["content"],
+        contentBytes: STAGE5_RPC_LIMITS.maxContentBytes + 1,
+      },
+    ],
   ])("rejects oversized %s result byte counts", (_kind, result) => {
     expect(() => serializeRpcResponse({ id: "rpc-1", ok: true, result })).toThrow();
-    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(4096);
+    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(27_000);
     expect(STAGE5_RPC_LIMITS.maxQueryBytes).toBe(512);
   });
 });

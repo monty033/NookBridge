@@ -14,6 +14,7 @@ import {
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "../src/service/rpc-handler.js";
 import { ExactNotePathError } from "../src/service/exact-note-path-resolver.js";
 import { snapshotFrom } from "./helpers/note-snapshot.js";
+import { STAGE5_RPC_LIMITS } from "../src/service/rpc-protocol.js";
 import type { RpcRequest } from "../src/service/rpc-protocol.js";
 import type {
   AppendNoteResult,
@@ -457,9 +458,9 @@ describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
       );
     };
     for (const method of ["notes.create", "notes.append", "notes.update"] as const) {
-      it(`${method} accepts 4096 bytes and rejects 4097`, async () => {
-        expect((await run(method, "x".repeat(4096))).ok).toBe(true);
-        const over = await run(method, "x".repeat(4097));
+      it(`${method} accepts the content cap and rejects one byte more`, async () => {
+        expect((await run(method, "x".repeat(STAGE5_RPC_LIMITS.maxContentBytes))).ok).toBe(true);
+        const over = await run(method, "x".repeat(STAGE5_RPC_LIMITS.maxContentBytes + 1));
         expect(over.ok).toBe(false);
       });
       it(`${method} accepts multi-line Markdown (LF, CRLF, tab)`, async () => {

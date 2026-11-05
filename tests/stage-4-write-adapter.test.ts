@@ -2232,7 +2232,9 @@ nookbridge-format: 1
       }
     };
     const firstRead = publicGetMarkdown();
-    expect(Buffer.byteLength(firstRead, "utf8")).toBe(83);
+    // 81 bytes: the two underscores in `invalid_request` and `non-not_found`
+    // are inside words, so they are prose and no longer escaped.
+    expect(Buffer.byteLength(firstRead, "utf8")).toBe(81);
 
     for (let save = 0; save < 3; save += 1) {
       await adapter.updateNote({
@@ -2243,9 +2245,9 @@ nookbridge-format: 1
       expect(publicGetMarkdown()).toBe(firstRead);
     }
 
-    expect(firstRead).toContain("invalid\\_request");
+    expect(firstRead).toContain("invalid_request");
     expect(firstRead).toContain("(NookBridge proof)");
-    expect(firstRead).toContain("non-not\\_found");
+    expect(firstRead).toContain("non-not_found");
     expect(stored.data).not.toContain("nookbridge-format: 1");
     expect(database.calls.contentUpdate).toHaveLength(3);
   });

@@ -112,7 +112,24 @@ const stage5RpcLimits = objectCreate(null) as {
 };
 stage5RpcLimits.maxFrameBytes = 65_536;
 stage5RpcLimits.maxQueryBytes = 512;
-stage5RpcLimits.maxContentBytes = 4096;
+/**
+ * Content cap for `notes.create` / `notes.update` / `notes.append`.
+ *
+ * It must stay well below `maxFrameBytes`, but it must also be large enough
+ * to rewrite a note a caller can read.  The read budget is 65,536 bytes, so
+ * the previous 4,096 left ordinary notes readable and permanently
+ * unrewritable through the tool surface.
+ *
+ * The worst case for text content is JSON escaping of newlines, quotes and
+ * backslashes, which doubles the byte count: 27,000 x 2 = 54,000.  The
+ * remaining request envelope is bounded by the schema -- id, revision,
+ * title and notebook id at 256 bytes each plus sixteen tags at 256 bytes
+ * -- so it is under 5,200 bytes and every shape stays under the
+ * 65,536-byte frame.  A body made entirely of C0 control characters would
+ * encode at six bytes each and is refused by the frame preflight rather
+ * than truncated -- the frame check, not this cap, is the allocation bound.
+ */
+stage5RpcLimits.maxContentBytes = 27_000;
 stage5RpcLimits.maxResponseBytes = 65_536;
 stage5RpcLimits.maxSearchHits = 64;
 stage5RpcLimits.maxTitleBytes = 256;
@@ -2958,7 +2975,9 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         originKeys.length !== 2 ||
         !keysAreExactly(originKeys, ["operator", "unknown"])
       ) {
-        throw rpcProtocolError("rpc protocol: approve-upload preview counts have unexpected fields");
+        throw rpcProtocolError(
+          "rpc protocol: approve-upload preview counts have unexpected fields",
+        );
       }
       const operationValues = {
         create: operationRecord.create,
