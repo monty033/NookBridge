@@ -53,6 +53,8 @@ export type NookMcpErrorCode =
   | "not_found"
   | "local_sync_marker_failed"
   | "unapproved_pending"
+  | "unsupported_content"
+  | "sync_required"
   | "unknown_tool";
 
 /** Update-tool-only categorical reasons; never used on the shared RPC envelope. */
@@ -86,6 +88,8 @@ const NOOK_MCP_ERROR_MESSAGES: Readonly<Record<NookMcpErrorCode, string>> = Obje
   not_found: "Not found",
   local_sync_marker_failed: "Local change committed; sync intent not persisted",
   unapproved_pending: "Unapproved pending changes",
+  unsupported_content: "Unsupported content",
+  sync_required: "Sync required",
   unknown_tool: "Unknown tool",
 });
 

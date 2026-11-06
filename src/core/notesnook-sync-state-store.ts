@@ -9,12 +9,15 @@
  */
 
 import type { PersistentStorage } from "../storage/persistent-storage.js";
-import type { SyncCoordinatorState, SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
+import {
+  MAX_PENDING_MARKERS,
+  type SyncCoordinatorState,
+  type SyncMetadataStateStore,
+} from "./notesnook-sync-coordinator.js";
 
 /** Fixed, versioned namespace for the metadata-only queue state. */
 export const SYNC_COORDINATOR_STATE_KEY = "nookbridge:sync-coordinator-state:v1" as const;
 
-const MAX_PENDING_MARKERS = 64;
 const MAX_NOTE_ID_LENGTH = 128;
 const NOTE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 

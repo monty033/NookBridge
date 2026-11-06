@@ -64,6 +64,7 @@ import {
 } from "./service/operator-discovery-runtime.js";
 import {
   createOperatorWriteRuntime,
+  operatorPreMutationRefusal,
   type OperatorWriteSource,
 } from "./service/notes-operator-write-runtime.js";
 import { createNotesUndoStore } from "./service/notes-undo-store.js";
@@ -199,6 +200,8 @@ export function createOperatorWriteSource(
           patch: { storedContent: command.content },
         });
       } catch (error) {
+        const refusal = operatorPreMutationRefusal(error);
+        if (refusal !== undefined) return { kind: "refused", code: refusal };
         const code =
           error !== null && typeof error === "object"
             ? (error as { readonly code?: unknown }).code

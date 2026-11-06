@@ -464,7 +464,7 @@ describe("R2a — durable write-ahead sync intent", () => {
       coordinator.recordIntent({ operation: "update", noteId: `n${i}` });
     }
     expect(codeOf(() => coordinator.recordIntent({ operation: "update", noteId: "n64" }))).toBe(
-      "sync_failed",
+      "sync_required",
     );
     expect(saves.length).toBe(64);
     expect(coordinator.snapshot().pending.length).toBe(64);
@@ -750,7 +750,7 @@ describe("S7a-3 — durable origin on every pending marker", () => {
     for (let i = 0; i < 64; i++) coordinator.recordIntent({ operation: "update", noteId: `n${i}` });
     const count = saves.length;
     expect(codeOf(() => coordinator.recordCreateIntent({ origin: "operator" }))).toBe(
-      "sync_failed",
+      "sync_required",
     );
     expect(saves.length).toBe(count);
     expect(coordinator.snapshot().pending).toHaveLength(64);

@@ -999,6 +999,26 @@ describe("nookctl write — categorical formatting and non-leakage", () => {
     }
   });
 
+  it("labels a full pending queue as a sync-first refusal rather than a generic write failure", async () => {
+    const fake = createFakeDatabase();
+    const honest = capabilityFor(fake);
+    const queueFull: NotesnookLiveWriteCapability = Object.freeze({
+      createNote: () => Promise.reject(new NotesnookWriteContractError("sync_required")),
+      appendNote: honest.appendNote,
+      updateNote: honest.updateNote,
+      pendingSnapshot: honest.pendingSnapshot,
+    });
+    const result = await runWriteCommand({
+      argv: ["create", "--title", "Acceptance"],
+      env: ENABLED_ENV,
+      createWriteRuntime: () => ({ capability: queueFull }),
+    });
+    expect(result).toMatchObject({ kind: "error" });
+    const text = formatWriteCommandResult(result);
+    expect(text).toContain("pending changes must sync first");
+    expect(text).not.toContain("local write failed");
+  });
+
   it("rejects an unrecognised pending snapshot", async () => {
     const fake = createFakeDatabase();
     const honest = capabilityFor(fake);

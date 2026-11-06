@@ -186,7 +186,7 @@ describe("composition per-Database serialization (P1-1)", () => {
     }
 
     expect(error).toBeDefined();
-    expect((error as { code: string }).code).toBe("invalid_input");
+    expect((error as { code: string }).code).toBe("sync_required");
     expect(adapter.observed).toHaveLength(0);
   });
 

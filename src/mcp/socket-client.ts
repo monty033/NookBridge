@@ -82,7 +82,9 @@ export type NookdSocketFailure =
   | "vault_locked"
   | "not_found"
   | "local_sync_marker_failed"
-  | "unapproved_pending";
+  | "unapproved_pending"
+  | "unsupported_content"
+  | "sync_required";
 
 /**
  * Map a Stage 5 RPC error envelope code to the closed
@@ -112,6 +114,10 @@ function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure 
       return "local_sync_marker_failed";
     case "unapproved_pending":
       return "unapproved_pending";
+    case "unsupported_content":
+      return "unsupported_content";
+    case "sync_required":
+      return "sync_required";
     default:
       return "service_unavailable";
   }
@@ -1388,7 +1394,9 @@ function isRpcErrorCode(value: unknown): value is RpcErrorCode {
     value === "vault_locked" ||
     value === "not_found" ||
     value === "local_sync_marker_failed" ||
-    value === "unapproved_pending"
+    value === "unapproved_pending" ||
+    value === "unsupported_content" ||
+    value === "sync_required"
   );
 }
 

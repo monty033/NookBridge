@@ -32,10 +32,12 @@ describe("operator socket browse categorical mapping", () => {
     ["not_found", { kind: "missing" }],
     ["permission_denied", { kind: "denied" }],
     ["invalid_request", { kind: "invalid-input" }],
+    ["unsupported_content", { kind: "unsupported-content" }],
     ["vault_locked", { kind: "locked" }],
     ["stale_revision", { kind: "conflict" }],
     ["conflict", { kind: "conflict" }],
     ["sync_failed", { kind: "error", message: "sync failed", exitCode: 3, reason: "sync_failed" }],
+    ["sync_required", { kind: "sync-required" }],
     [
       "service_unavailable",
       {

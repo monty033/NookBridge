@@ -85,6 +85,7 @@ export type NotesnookWriteErrorCode =
   | "conflict"
   | "vault_locked"
   | "sync_failed"
+  | "sync_required"
   | "local_sync_marker_failed";
 
 const WRITE_CONTRACT_ERRORS = new WeakSet<object>();
@@ -106,6 +107,7 @@ const WRITE_CONTRACT_ERROR_MESSAGES: { readonly [K in NotesnookWriteErrorCode]: 
     conflict: "Notesnook write contract: conflict",
     vault_locked: "Notesnook write contract: vault locked",
     sync_failed: "Notesnook write contract: sync failed",
+    sync_required: "Notesnook write contract: pending changes must sync before more writes",
     local_sync_marker_failed:
       "Notesnook write contract: local change committed; sync intent not persisted",
   });

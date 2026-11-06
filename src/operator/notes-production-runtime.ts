@@ -396,6 +396,8 @@ function mapOperatorError(
       return { kind: "denied" };
     case "invalid_request":
       return { kind: "invalid-input" };
+    case "unsupported_content":
+      return { kind: "unsupported-content" };
     case "vault_locked":
       return { kind: "locked" };
     // A losing optimistic-concurrency check is the operator's own retry
@@ -407,6 +409,8 @@ function mapOperatorError(
     // These remain retryable; they do not establish whether a write applied.
     case "sync_failed":
       return { kind: "error", message: "sync failed", exitCode: 3, reason: "sync_failed" };
+    case "sync_required":
+      return { kind: "sync-required" };
     case "service_unavailable":
       return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
   }

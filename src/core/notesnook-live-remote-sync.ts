@@ -18,11 +18,12 @@ import { types } from "node:util";
 
 import { NotesnookWriteContractError } from "./notesnook-write-contract.js";
 import { withMutex } from "./notesnook-database-mutex.js";
-import type {
-  SyncCoordinatorResult,
-  SyncExecutor,
-  SyncExecutorResult,
-  SyncUploadPolicy,
+import {
+  MAX_PENDING_MARKERS,
+  type SyncCoordinatorResult,
+  type SyncExecutor,
+  type SyncExecutorResult,
+  type SyncUploadPolicy,
 } from "./notesnook-sync-coordinator.js";
 
 export type LiveRemoteSyncEnsureOpen = () => void;
@@ -61,7 +62,7 @@ function boundedAttempts(value: unknown): value is number {
 }
 
 /** Most markers the coordinator can queue; a longer batch is not one it produced. */
-const MAX_GATED_MARKERS = 64;
+const MAX_GATED_MARKERS = MAX_PENDING_MARKERS;
 
 /**
  * True only when `request.pending` is a bounded array of structurally valid
