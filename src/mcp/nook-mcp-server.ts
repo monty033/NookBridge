@@ -1588,6 +1588,10 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
       return "local_sync_marker_failed";
     case "unapproved_pending":
       return "unapproved_pending";
+    case "unsupported_content":
+      return "unsupported_content";
+    case "sync_required":
+      return "sync_required";
     case "service_unavailable":
       return "service_unavailable";
     default:

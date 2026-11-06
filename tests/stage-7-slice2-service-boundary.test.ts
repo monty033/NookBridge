@@ -278,8 +278,10 @@ describe("service audit records", () => {
       "rpc.connection.admission_rejected",
       "rpc.connection.closed",
     ]);
-    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(14);
+    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(16);
     expect(SERVICE_AUDIT_OUTCOMES).toContain("unapproved_pending");
+    expect(SERVICE_AUDIT_OUTCOMES).toContain("unsupported_content");
+    expect(SERVICE_AUDIT_OUTCOMES).toContain("sync_required");
     for (const event of SERVICE_AUDIT_EVENTS) {
       const record = buildServiceAuditRecord({
         event,

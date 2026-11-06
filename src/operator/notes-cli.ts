@@ -303,6 +303,12 @@ export type NotesCategoricalResult =
   | Readonly<{ kind: "conflict" }>
   | Readonly<{ kind: "denied" }>
   | Readonly<{ kind: "invalid-input" }>
+  // The daemon refused the content itself (the `unsupported_content` code), as
+  // opposed to a malformed request.
+  | Readonly<{ kind: "unsupported-content" }>
+  // The daemon's pending-change queue is full and nothing was applied (the
+  // `sync_required` code); the remedy is to sync, then retry.
+  | Readonly<{ kind: "sync-required" }>
   | Readonly<{ kind: "locked" }>
   | Readonly<{ kind: "missing" }>
   | Readonly<{
@@ -379,7 +385,12 @@ export interface NotesCommandRuntime {
 
 export type UploadBlockingSummary = Readonly<{
   readonly total: number;
-  readonly byOperation: Readonly<{ create: number; append: number; update: number; delete: number }>;
+  readonly byOperation: Readonly<{
+    create: number;
+    append: number;
+    update: number;
+    delete: number;
+  }>;
   readonly byOrigin: Readonly<{ operator: number; unknown: number }>;
   readonly highestSequence: number | null;
 }>;
@@ -445,9 +456,7 @@ export type RunNotesCommandOptions = Readonly<{
     readonly tty: boolean;
     readonly select?: (handles: readonly string[]) => Promise<string | undefined>;
     /** Typed confirmation for upload approval; the runner checks exact equality. */
-    readonly confirmUpload?: (
-      summary: UploadBlockingSummary,
-    ) => Promise<string | undefined>;
+    readonly confirmUpload?: (summary: UploadBlockingSummary) => Promise<string | undefined>;
     /** Print the daemon-supplied summary before confirmation, if applicable. */
     readonly showUploadSummary?: (summary: UploadBlockingSummary) => void;
   }>;
@@ -617,6 +626,10 @@ export function formatNotesResult(
         return "nookctl notes: denied\n";
       case "invalid-input":
         return "nookctl notes: invalid-input\n";
+      case "unsupported-content":
+        return "nookctl notes: unsupported-content\n";
+      case "sync-required":
+        return "nookctl notes: sync-required\n";
       case "locked":
         return "nookctl notes: locked\n";
       case "missing":

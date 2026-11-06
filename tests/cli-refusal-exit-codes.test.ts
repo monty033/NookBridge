@@ -74,6 +74,20 @@ describe("nookctl refusal exit codes", () => {
     expect((await drive(["notes", "browse"])).code).toBe(2);
   });
 
+  it("refused content prints its own label and exits 2, not as invalid input", async () => {
+    notesRuntime({ kind: "unsupported-content" });
+    const out = await drive(["notes", "browse"]);
+    expect(out.stdout).toBe("nookctl notes: unsupported-content\n");
+    expect(out.code).toBe(2);
+  });
+
+  it("a full pending-change queue prints its own label and exits 3, never 0", async () => {
+    notesRuntime({ kind: "sync-required" });
+    const out = await drive(["notes", "browse"]);
+    expect(out.stdout).toBe("nookctl notes: sync-required\n");
+    expect(out.code).toBe(3);
+  });
+
   it("tree invalid input keeps exit code 2", async () => {
     _internal.treeRuntimeFactory = () =>
       ({ list: async () => ({ kind: "invalid-input" }) }) as never;

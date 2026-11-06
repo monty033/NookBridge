@@ -2392,20 +2392,20 @@ describe("R2b — write-ahead intent precedes existing-note mutations", () => {
     };
     const composition = new NotesnookLocalWriteComposition({ adapter, coordinator });
 
-    expect(await codeOf(() => run(composition, op))).toBe("sync_failed");
+    expect(await codeOf(() => run(composition, op))).toBe("sync_required");
     expect(calls.filter((call) => MUTATING_CALLS.includes(call))).toEqual([]);
     expect(pendingOf(real)).toHaveLength(64);
   });
 
   it.each(OPS)(
-    "3b. %s: the capacity pre-check reports invalid_input before any intent is recorded",
+    "3b. %s: the capacity pre-check reports sync_required before any intent is recorded",
     async (op) => {
       const { adapter, calls } = mutatingAdapter();
       const real = new SyncCoordinator({ executor: vi.fn(), stateStore: memoryStore().store });
       for (let i = 0; i < 64; i++) real.recordIntent({ operation: "append", noteId: NOTE_ID });
       const composition = new NotesnookLocalWriteComposition({ adapter, coordinator: real });
 
-      expect(await codeOf(() => run(composition, op))).toBe("invalid_input");
+      expect(await codeOf(() => run(composition, op))).toBe("sync_required");
       expect(calls.filter((call) => MUTATING_CALLS.includes(call))).toEqual([]);
     },
   );

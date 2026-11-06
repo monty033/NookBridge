@@ -433,3 +433,67 @@ describe("R16 exact response byte accounting §13.23", () => {
     expect(mcpTools).toContain("../security-and-privacy.md#privacy-boundary-for-agents");
   });
 });
+
+const EA_HEADING = "## 13.26 Decision record EA — every readable note is editable";
+const EDITABILITY_SENTENCE =
+  "Every readable, unlocked note is editable; refusals are limited to edits that would change preserved content or to hostile markup.";
+const section1326 = plan.indexOf(EA_HEADING);
+const slice1326 = section1326 === -1 ? "" : plan.slice(section1326, appendix);
+const section15 = plan.indexOf("## 1.5 Success criteria");
+const section16 = plan.indexOf("## 1.6 ");
+const successCriteria =
+  section15 === -1 || section16 === -1 ? "" : plan.slice(section15, section16);
+const contradictions1326 = (() => {
+  const start = slice1326.indexOf("### Contradictions");
+  const end = slice1326.indexOf("### Evidence class", start);
+  return start === -1 || end === -1 ? "" : slice1326.slice(start, end);
+})();
+
+describe("EA decision record §13.26", () => {
+  it("adds §13.26 with its exact heading, once, after §13.25 and before Appendix A", () => {
+    expect(plan.split(EA_HEADING), "expected exactly one §13.26 heading").toHaveLength(2);
+    expect(section1326, "§13.26 heading is missing").toBeGreaterThan(plan.indexOf("## 13.25 "));
+    expect(section1326).toBeLessThan(appendix);
+    expect(plan).toContain("## 13.25 Remediation ordering for the phase-1 security review");
+  });
+
+  it("states the sentence verbatim in the §1.5 success criteria", () => {
+    expect(successCriteria, "§1.5 section is missing").not.toBe("");
+    expect(successCriteria).toContain(EDITABILITY_SENTENCE);
+  });
+
+  it("records the chosen option and why each alternative lost", () => {
+    expect(slice1326).toContain("Keep the markup the strict parser cannot interpret");
+    expect(slice1326).toContain("destroys its styles, block ids and attachments");
+    expect(slice1326).toContain("opened Markdown forgery paths");
+    expect(slice1326).toContain("one unknown construct currently refuses everything");
+  });
+
+  it("records all four decisions as approved on 2026-11-05 with their conditions", () => {
+    expect(slice1326).toContain("approved on 2026-11-05");
+    expect(slice1326).toContain(
+      "split `unsupported_content` (three reasons) out of `invalid_request`",
+    );
+    expect(slice1326).toContain("add `sync_required`");
+    expect(slice1326).toContain("`notes.edit-census`, which returns counts only");
+    expect(slice1326).toContain("EA-3 and the EA-7 census may read the live corpus");
+    expect(slice1326).toContain("flip one checkbox on the owner's note and flip it back");
+    expect(slice1326).toContain("stored bytes checked identical afterwards");
+  });
+
+  it("supersedes the §13.21 sentence, leaves it in place and lists it under Contradictions", () => {
+    const superseded =
+      "`unsupported_content` is not split out in this round and stays mapped to `invalid_request`.";
+    expect(slice, "§13.21 sentence must stay in place").toContain(superseded);
+    expect(slice1326).toContain("Decision 9 is resolved by this record");
+    expect(contradictions1326, "Contradictions heading is missing").not.toBe("");
+    expect(contradictions1326).toContain("§13.21");
+    expect(contradictions1326).toContain("Superseded by decision 1");
+  });
+
+  it("does not renumber the earlier sections", () => {
+    for (const heading of ["## 13.23 ", "## 13.24 ", "## 13.25 "]) {
+      expect(plan.split(heading), `expected exactly one ${heading.trim()} heading`).toHaveLength(2);
+    }
+  });
+});

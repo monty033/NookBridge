@@ -20,7 +20,11 @@ import {
 
 export { NotesnookWriteContractError };
 
-const MAX_PENDING_MARKERS = 64;
+/**
+ * Bound on pending change markers. Exported so tests assert against the real
+ * bound rather than a copied literal.
+ */
+export const MAX_PENDING_MARKERS = 64;
 const MAX_NOTE_ID_LENGTH = 128;
 const MAX_DELAY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -372,8 +376,11 @@ export class SyncCoordinator {
       fail("invalid_input");
     }
     const requested = parseOrigin(record);
+    // Nothing is persisted at the bound; an explicit sync drains the queue, so
+    // this is the same `sync_required` refusal `checkCapacity` lets a caller
+    // predict.
     if (this.#pending.length >= MAX_PENDING_MARKERS) {
-      fail("sync_failed");
+      fail("sync_required");
     }
 
     const marker = freezeMarker({
@@ -399,7 +406,7 @@ export class SyncCoordinator {
     const record = requireRecord(intent, "create intent");
     const origin = parseOrigin(record);
     if (this.#pending.length >= MAX_PENDING_MARKERS) {
-      fail("sync_failed");
+      fail("sync_required");
     }
 
     const marker = freezeMarker({

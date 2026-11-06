@@ -36,6 +36,7 @@ import {
   serializeNoteDocumentMarkdown,
 } from "../core/note-document-markdown.js";
 import { isVaultLockedRefusal } from "../core/notesnook-readonly-projection.js";
+import { isNotesnookWriteContractError } from "../core/notesnook-write-contract.js";
 import type { RpcErrorCode } from "./rpc-protocol.js";
 import type { OperatorPeer } from "./operator-server.js";
 import type { OperationRecord, OperationState } from "./notes-undo-store.js";
@@ -68,7 +69,27 @@ export interface OperatorWriteSource {
   }) => Promise<
     | Readonly<{ kind: "updated"; revision: string }>
     | Readonly<{ kind: "conflict" | "locked" | "missing" | "error" }>
+    | Readonly<{ kind: "refused"; code: OperatorPreMutationRefusal }>
   >;
+}
+
+/**
+ * Pre-mutation refusals that keep their own code across the operator boundary.
+ * Both are raised before any mutating call, each with a documented remedy
+ * (`sync_required`: sync, then retry; `unsupported_content`: the content itself
+ * was refused), so neither is an outage and neither leaves an uncertain write.
+ */
+export type OperatorPreMutationRefusal = "sync_required" | "unsupported_content";
+
+/**
+ * Identify a pre-mutation refusal by class identity, never by a `code` field on
+ * an arbitrary thrown object.
+ */
+export function operatorPreMutationRefusal(error: unknown): OperatorPreMutationRefusal | undefined {
+  if (!isNotesnookWriteContractError(error)) return undefined;
+  return error.code === "sync_required" || error.code === "unsupported_content"
+    ? error.code
+    : undefined;
 }
 
 /** The bounded subset of the encrypted operation store this runtime uses. */
@@ -363,7 +384,24 @@ export function createOperatorWriteRuntime(
               titleBytes: result.titleBytes,
               contentBytes: result.contentBytes,
             };
-          } catch {
+          } catch (error) {
+            // A pre-mutation refusal wrote nothing: abort the record, as the
+            // edit path does for conflict/locked/missing, and keep its code.
+            const refusal = operatorPreMutationRefusal(error);
+            if (refusal !== undefined) {
+              try {
+                await options.store.transition(
+                  record.handle,
+                  "committing",
+                  "aborted",
+                  undefined,
+                  owner,
+                );
+              } catch {
+                // best-effort
+              }
+              return fail(refusal);
+            }
             try {
               await options.store.transition(
                 record.handle,
@@ -531,6 +569,20 @@ export function createOperatorWriteRuntime(
           // best-effort
         }
         return fail("vault_locked");
+      }
+      if (result.kind === "refused") {
+        try {
+          await options.store.transition(
+            record.handle,
+            "committing",
+            "aborted",
+            undefined,
+            ownerKey(peer),
+          );
+        } catch {
+          // best-effort
+        }
+        return fail(result.code);
       }
       if (result.kind === "missing") {
         try {
@@ -714,6 +766,9 @@ export function createOperatorWriteRuntime(
     }
     if (result.kind === "locked") return fail("vault_locked");
     if (result.kind === "missing") return fail("not_found");
+    // A pre-mutation refusal wrote nothing. Like conflict/locked/missing above,
+    // leave the committed record as it is so the undo can be retried.
+    if (result.kind === "refused") return fail(result.code);
     if (result.kind !== "updated") {
       try {
         await options.store.transition(

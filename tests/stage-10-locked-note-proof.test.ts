@@ -110,6 +110,12 @@ describe("locked-note proof error mapping", () => {
     expect(lockedNoteProofCodeForError("sync_failed")).toBe("service_unavailable");
     expect(lockedNoteProofCodeForError("invalid_request")).toBe("service_unavailable");
   });
+
+  it("reports the split codes as not proven, never as a lock refusal", () => {
+    // A queue-full or content refusal says nothing about whether the lock held.
+    expect(lockedNoteProofCodeForError("sync_required")).toBe("service_unavailable");
+    expect(lockedNoteProofCodeForError("unsupported_content")).toBe("service_unavailable");
+  });
 });
 
 import { vi } from "vitest";

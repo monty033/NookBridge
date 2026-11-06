@@ -46,6 +46,8 @@ export type ServiceAuditOutcome =
   | "not_found"
   | "local_sync_marker_failed"
   | "unapproved_pending"
+  | "unsupported_content"
+  | "sync_required"
   | "timeout"
   | "admission_rejected"
   | "budget_exceeded";
@@ -88,6 +90,8 @@ export const SERVICE_AUDIT_OUTCOMES = objectFreeze([
   "not_found",
   "local_sync_marker_failed",
   "unapproved_pending",
+  "unsupported_content",
+  "sync_required",
   "timeout",
   "admission_rejected",
   "budget_exceeded",

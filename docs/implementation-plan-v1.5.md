@@ -156,6 +156,7 @@ permissions:
 | Linux portability | Core/service code contains no required NixOS-only APIs or hard-coded NixOS paths; state/runtime/key locations are injected so the same `nookd` build can run on conventional Linux and in a Linux container. |
 | Red-team gate | Periodic LLM-driven adversarial tests cannot obtain secrets, bypass configured permissions, invoke unavailable destructive operations, or access files outside the intended interface. |
 | Privacy clarity | Documentation explains that Notesnook sync remains E2EE while note text intentionally selected by Hermes may be sent to its configured cloud model. |
+| Editability | Every readable, unlocked note is editable; refusals are limited to edits that would change preserved content or to hostile markup. |
 
 ## 1.6 Project naming
 
@@ -3053,6 +3054,63 @@ SR-9's fix is a deployment invariant, not a code change. The homelab host now gi
 ### Evidence class
 
 Documentation only. Nothing here was reproduced by running code, and no test, build, VM, live account, or deployment was used. The single source-reading pass behind this section is not a substitute for the RED tests each item calls for.
+
+## 13.26 Decision record EA — every readable note is editable
+
+**Status date:** 2026-11-05 (America/New_York)
+**Mode:** decision record and ordering. The four decisions below were approved on 2026-11-05. This section records them and an order; the EA-0 and EA-1 rows say what is implemented, and every other row is **open**.
+
+### Supersession
+
+Decision 9 is resolved by this record. The §13.21 sentence stating that `unsupported_content` is not split out of `invalid_request` is **superseded** here; the sentence itself is left in place and listed under "Contradictions" below. Nothing else is superseded, and no plan step, ticket label or section number (D-, R-, S7a-, P-, SR-, §13.x) is renumbered, renamed or removed. The new items use the label `EA-n`.
+
+### Chosen option
+
+Keep the markup the strict parser cannot interpret as a preserved block, and let the rest of the document decode, instead of refusing the whole document. App-authored notes then decode, and an edit takes the existing preserve-and-patch path.
+
+Why the alternatives lost:
+
+- **Replace the body wholesale.** The first edit to any app-authored note destroys its styles, block ids and attachments.
+- **Repair app markup into decoded form.** This is the approach that opened Markdown forgery paths; it is not reopened.
+- **Refuse only the genuinely unrepresentable class.** The note stays uneditable, because one unknown construct currently refuses everything, so narrowing the class that is refused does not help until the parser stops treating one unknown construct as fatal.
+
+The resulting criterion is stated in §1.5: refusals are limited to edits that would change preserved content, and to hostile markup.
+
+### Binding inputs: the four decisions
+
+All four were approved on 2026-11-05, with these conditions.
+
+1. **Vocabulary.** The RPC, MCP and CLI error vocabularies split `unsupported_content` (three reasons) out of `invalid_request`, and add `sync_required`. Every consumer of the closed code set changes together, and a code is added only where a refusal produces it.
+2. **Census method.** The operator listener gains one read-only method, `notes.edit-census`, which returns counts only.
+3. **Live corpus, read-only.** EA-3 and the EA-7 census may read the live corpus. They write nothing.
+4. **One reversible write.** EA-7 may flip one checkbox on the owner's note and flip it back, with the stored bytes checked identical afterwards.
+
+Note bodies, and any fragment of a real note's content, stay out of code, tests, logs, commit messages and PR text under all four decisions. Tests use synthetic fixtures only.
+
+### Verification basis
+
+- **Reproduced by a test** means a failing test existed before the change and passes after it, at the level the daemon implements the behaviour.
+- **Verified in source** means the cited code was read; it is not confirmed by a test.
+- **Open** means neither.
+
+### Order
+
+| Order | Item | Smallest change | Depends on | Basis |
+| --- | --- | --- | --- | --- |
+| EA-0 | Decision record | Add this section and the §1.5 sentence. | none | documentation only; `tests/docs.test.ts` asserts the heading and the §1.5 sentence |
+| EA-1 | Write gate and error taxonomy | Reproduce the reported write refusal before classifying it; then split `unsupported_content` out of `invalid_request` and add `sync_required`, wired only to refusals the reproduction identifies. | EA-0 | implemented. The refusal is the bounded pending-marker queue (`MAX_PENDING_MARKERS = 64`, `notesnook-sync-coordinator.ts:23`, checked in `checkMutationCapacity`, `notesnook-write-composition.ts`), not a gate on `hasUnsyncedChanges`. `tests/ea-1-write-gate-reproduction.test.ts` drives the production runtime over a synthetic database: writes succeed while `hasUnsyncedChanges` is true, and at the bound both create and update are refused until an explicit sync drains the queue. The code `unsupported_content` is split out; a per-reason field is not carried by this change. |
+| EA-3 | Live corpus read | Reads the live corpus and writes nothing. | EA-1 | open; uses decision 3 |
+| EA-7 | Live census and checkbox proof | The census, and the one reversible checkbox edit, as bounded by decisions 2, 3 and 4. | EA-1 | open |
+
+The other EA items are not ordered by this record.
+
+### Contradictions between the plan and this record
+
+- **§13.21 says `unsupported_content` "is not split out in this round and stays mapped to `invalid_request`".** Superseded by decision 1 above. The sentence described that round correctly and is left in place. The P1-6 text earlier in §13.21, which records that keeping `unsupported_content` as its own code "was **not** decided", is resolved the same way.
+
+### Evidence class
+
+Documentation for EA-0. The EA-1 row rests on offline tests over a synthetic database; no VM, live account, sync or deployment was used.
 
 # Appendix A. Research Sources
 

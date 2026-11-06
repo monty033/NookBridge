@@ -103,14 +103,15 @@ import {
   type DeleteNoteResult,
   type UpdateNoteResult,
 } from "./notesnook-write-adapter.js";
-import type {
-  SyncCoordinatorResult,
-  SyncCoordinatorState,
-  SyncLocalCommit,
-  SyncLocalCommitResult,
-  SyncOperation,
-  SyncOrigin,
-  SyncPendingMarker,
+import {
+  MAX_PENDING_MARKERS,
+  type SyncCoordinatorResult,
+  type SyncCoordinatorState,
+  type SyncLocalCommit,
+  type SyncLocalCommitResult,
+  type SyncOperation,
+  type SyncOrigin,
+  type SyncPendingMarker,
 } from "./notesnook-sync-coordinator.js";
 import { withMutex } from "./notesnook-database-mutex.js";
 
@@ -131,14 +132,6 @@ const MAX_RESULT_TITLE_BYTES = STAGE4_WRITE_LIMITS.maxTitleLength * 4;
 
 /** Largest number of allowed patch fields an update result may report. */
 const MAX_RESULT_PATCH_FIELDS = 6;
-
-/**
- * Largest pending-marker count the composition will relay from a
- * snapshot.  This mirrors the coordinator's own published bound; the
- * coordinator does not export the constant and this slice must not
- * modify it, so the value is restated here with an explicit comment.
- */
-const MAX_PENDING_MARKERS = 64;
 
 /**
  * Largest `attempts` value the composition will relay from a
@@ -240,6 +233,7 @@ const COMPOSITION_ERROR_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.f
   "conflict",
   "vault_locked",
   "sync_failed",
+  "sync_required",
   "local_sync_marker_failed",
 ]);
 
@@ -1402,7 +1396,9 @@ function checkMutationCapacity(state: CompositionState): void {
   const record = requireRecord(raw);
   const kind = readOwnProperty(record, "kind");
   if (kind === "accept") return;
-  if (kind === "full") fail("invalid_input");
+  // The pending-marker queue is at its bound: nothing has been mutated, and an
+  // explicit sync drains the queue, so the caller's remedy is to sync and retry.
+  if (kind === "full") fail("sync_required");
   fail("sync_failed");
 }
 
@@ -1414,6 +1410,7 @@ const NOTHING_MUTATED_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.fre
   "stale_revision",
   "conflict",
   "vault_locked",
+  "sync_required",
 ]);
 
 /**

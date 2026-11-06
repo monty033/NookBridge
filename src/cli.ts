@@ -183,7 +183,11 @@ function parseArgs(argv: string[]): { subcommand: string; args: Args } {
 }
 
 /** A categorical refusal must not read as success to a script that checks only the exit code. */
-function refusalExitCode(kind: string): 0 | 4 {
+function refusalExitCode(kind: string): 0 | 2 | 3 | 4 {
+  // Refused content is an input problem (2, as `invalid-input`); a full
+  // pending-change queue is retryable after a sync (3, as a sync failure).
+  if (kind === "unsupported-content") return 2;
+  if (kind === "sync-required") return 3;
   return kind === "denied" || kind === "locked" || kind === "missing" || kind === "conflict"
     ? 4
     : 0;

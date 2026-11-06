@@ -88,6 +88,15 @@ export function formatLockedNoteProof(report: LockedNoteProofReport): string {
  * refusal was indistinguishable from a broken daemon and the acceptance proof
  * could never demonstrate that the lock was actually enforced.  Codes that
  * carry no categorical meaning still report as unavailable.
+ *
+ * `sync_required` and `unsupported_content` are deliberately NOT given their
+ * own proof codes. The proof result is a closed five-value attestation of lock
+ * enforcement (`vault_locked`, `ok`, `not_found`, `permission_denied`,
+ * `service_unavailable`) validated by the RPC protocol. A write probe refused
+ * for a full pending queue never reached the lock check, so it proves nothing
+ * about the lock; reporting it as `service_unavailable` ("not proven") is the
+ * honest outcome, and widening the attestation vocabulary would add a code
+ * that says nothing about what the proof exists to show.
  */
 export function lockedNoteProofCodeForError(code: unknown): LockedNoteProofCode {
   switch (code) {

@@ -139,12 +139,13 @@ function same<C extends RpcErrorCode>(code: C): Triple {
  */
 const T1_EXPECTED: Record<NotesnookWriteErrorCode, Triple> = {
   invalid_input: same("invalid_request"),
-  unsupported_content: same("invalid_request"),
+  unsupported_content: same("unsupported_content"),
   unsupported_patch_field: same("invalid_request"),
   stale_revision: same("stale_revision"),
   conflict: same("conflict"),
   vault_locked: same("vault_locked"),
   sync_failed: same("sync_failed"),
+  sync_required: same("sync_required"),
   local_sync_marker_failed: same("local_sync_marker_failed"),
 };
 const WRITE_CODES = Object.keys(T1_EXPECTED) as NotesnookWriteErrorCode[];
@@ -161,6 +162,8 @@ const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
   not_found: "not_found",
   local_sync_marker_failed: "local_sync_marker_failed",
   unapproved_pending: "unapproved_pending",
+  unsupported_content: "unsupported_content",
+  sync_required: "sync_required",
 };
 const RPC_CODES = Object.keys(RPC_TO_MCP) as RpcErrorCode[];
 
@@ -579,10 +582,14 @@ describe("T2 — production runtime, no injection", () => {
   it("T2 unsupported construct on append", async () => {
     const rowId = "T2 unsupported construct on append";
     await withProductionHarness({ locked: false, conflicted: false }, async (h, spies) => {
-      // Inline HTML (`<div>raw</div>`) is the stage-4 fidelity-gate
-      // construct: `assertSupportedConstructs` refuses it, the adapter
-      // normalises that refusal to `unsupported_content`, and the RPC
-      // handler maps that to `invalid_request`.
+      // NOTE: this row does NOT reach the adapter's fidelity gate
+      // (`assertSupportedConstructs`). The fixture's content row above has
+      // `type: "html"`, which the production wiring's `mapContent` does not
+      // accept (only "tiptap" and "tiny"), so `contentFindByNoteId` throws
+      // `invalid_input` before the adapter's gate runs, and the RPC handler
+      // reports `invalid_request`. The contract-level markup guard does not
+      // refuse `<div>` either. A genuine gate refusal would surface as
+      // `unsupported_content`.
       const observed = await observeWrite(h, "append", PRODUCTION_REVISION, {
         markdownFragment: UNSUPPORTED_MARKDOWN_FRAGMENT,
       });

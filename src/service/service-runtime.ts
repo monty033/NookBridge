@@ -618,6 +618,10 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
         return result;
       } catch (error) {
         if (isServiceRuntimeError(error)) throw error;
+        // Categorical write refusals keep their own code, as on update, so a
+        // create refused by the pending-queue bound is not reported as an outage.
+        if (isNotesnookWriteAdapterError(error) || isNotesnookWriteContractError(error))
+          throw error;
         throw serviceRuntimeError("service runtime note creation failed");
       }
     };

@@ -884,12 +884,13 @@ const revisionTokenPattern = /^rev_[0-9a-f]{32}$/;
  */
 const WRITE_ERROR_TO_RPC: Readonly<Record<NotesnookWriteErrorCode, RpcErrorCode>> = objectFreeze({
   invalid_input: "invalid_request",
-  unsupported_content: "invalid_request",
+  unsupported_content: "unsupported_content",
   unsupported_patch_field: "invalid_request",
   stale_revision: "stale_revision",
   conflict: "conflict",
   vault_locked: "vault_locked",
   sync_failed: "sync_failed",
+  sync_required: "sync_required",
   local_sync_marker_failed: "local_sync_marker_failed",
 });
 
@@ -2800,7 +2801,9 @@ function buildErrorEnvelope(
     | "vault_locked"
     | "not_found"
     | "local_sync_marker_failed"
-    | "unapproved_pending",
+    | "unapproved_pending"
+    | "unsupported_content"
+    | "sync_required",
 ): RpcAnyResponseEnvelope {
   const messages = {
     invalid_request: "Invalid request",
@@ -2813,6 +2816,8 @@ function buildErrorEnvelope(
     not_found: "Not found",
     local_sync_marker_failed: "Local change committed; sync intent not persisted",
     unapproved_pending: "Unapproved pending changes",
+    unsupported_content: "Unsupported content",
+    sync_required: "Sync required",
   } as const;
   const message = messages[code];
 
