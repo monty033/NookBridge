@@ -20,6 +20,7 @@ export const OPERATOR_METHODS = Object.freeze([
   "notes.operation-list",
   "notes.approve-upload",
   "notes.path_diagnostic",
+  "notes.edit-census",
 ] as const);
 
 export const OPERATOR_DISCOVERY_METHODS = Object.freeze([

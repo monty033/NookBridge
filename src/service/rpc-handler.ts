@@ -30,7 +30,6 @@
 import { Buffer } from "node:buffer";
 import {
   STAGE5_RPC_LIMITS,
-  fitsResponsePreflight,
   type RpcErrorEnvelope,
   type RpcNotesSearchRequest,
   type RpcNotesGetRequest,
@@ -86,10 +85,7 @@ import {
   type ExactNotePathInput,
   type ExactNotePathResolution,
 } from "./exact-note-path-resolver.js";
-import { decodeNoteDocumentNative } from "../core/note-document-native.js";
-import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
-import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
-import type { NoteBlock } from "../core/note-document.js";
+import { classifyNoteContentProjection } from "./note-content-projection.js";
 import {
   authorizeServiceMethod,
   createReadOnlyServicePolicy,
@@ -113,16 +109,6 @@ const arrayIsArray = Array.isArray;
 const numberIsFinite = Number.isFinite;
 const mathFloor = Math.floor;
 const bufferByteLength = Buffer.byteLength;
-
-/**
- * Bounded Markdown content size for `notes.get`. The wire protocol
- * (rpc-protocol.ts) hard-caps the entire response frame at
- * `STAGE5_RPC_LIMITS.maxResponseBytes`, so content is checked against
- * that same bound here, before building the result -- an oversize
- * note categorically withholds content ("oversize") rather than
- * letting the protocol layer reject the whole envelope.
- */
-const MAX_NOTES_GET_MARKDOWN_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
 
 // ---------------------------------------------------------------------------
 // Public runtime contract.
@@ -1017,6 +1003,7 @@ async function runAuthorizedRpcMethod(
     case "notes.approve-upload":
     case "notes.browse":
     case "notes.search-operator":
+    case "notes.edit-census":
       return buildErrorEnvelope(id, "permission_denied");
   }
 }
@@ -2179,13 +2166,9 @@ type BoundedNoteRead = {
  * `notes.get`. Nothing here reads the database: the snapshot already holds the
  * body that belongs to the revision in `note`.
  *
- * Fails closed in every direction:
- *   - note metadata already says `locked`    -> "locked"
- *   - snapshot refused the body as `locked`  -> "locked"
- *   - snapshot could not read the body       -> "unavailable"
- *   - decoded Markdown exceeds the bound      -> "oversize" (content
- *     withheld, byte count never returned either)
- *   - decoder throws for any reason           -> "unavailable"
+ * The decision order (and every category) lives in
+ * `note-content-projection.ts`, shared with the edit census so the census
+ * partitions the corpus exactly the way a read does.
  */
 function readBoundedNoteContent(
   contentRefusal: unknown,
@@ -2194,60 +2177,23 @@ function readBoundedNoteContent(
   note: Record<string, unknown>,
   requestId: string,
 ): BoundedNoteRead {
-  if (readOwnBooleanField(note, "locked") === true || contentRefusal === "locked") {
-    return { contentStatus: "locked" };
-  }
-  if (contentRefusal !== undefined || envelope === undefined) {
+  const classification = classifyNoteContentProjection({
+    contentRefusal,
+    envelope,
+    noteId,
+    note,
+    requestId,
+  });
+  if (classification.outcome === "locked") return { contentStatus: "locked" };
+  if (classification.outcome === "oversize") return { contentStatus: "oversize" };
+  if (classification.outcome === "unavailable") {
     return { contentStatus: "unavailable", contentReason: "read_failed" };
   }
-  try {
-    const revisionField = note.revision;
-    const revision = typeof revisionField === "string" ? revisionField : `rev_${"0".repeat(32)}`;
-    let markdown: string;
-    try {
-      const decoded = decodeNoteDocumentNative(envelope, { noteId, revision });
-      // A title-only note decodes to a valid but blockless document. Per the
-      // empty-note ruling its Markdown projection is the empty string, not
-      // merely the version header, so `notes.get` can return
-      // `contentStatus: "ok"` with `markdown: ""` / `markdownBytes: 0`.
-      markdown =
-        decoded.document.blocks.length === 0
-          ? ""
-          : containsOpaqueHeadings(decoded.document.blocks)
-            ? readOnlyMarkdownFallback(envelope)
-            : serializeNoteDocumentMarkdown(decoded.document);
-    } catch {
-      // Read-only approximation covers unsupported native headings too; edit/write decoding stays strict.
-      markdown = readOnlyMarkdownFallback(envelope);
-    }
-    const markdownBytes = bufferByteLength(markdown, "utf8");
-    if (markdownBytes > MAX_NOTES_GET_MARKDOWN_BYTES) {
-      return { contentStatus: "oversize" };
-    }
-    // Account for the WHOLE response, not just the markdown: mirror the
-    // serializer's preflight over every response-owned string field it
-    // will charge (see normaliseNoteResult in rpc-protocol.ts), so an
-    // over-budget note degrades to "oversize" instead of the serializer
-    // rejecting the entire envelope.  The response envelope echoes the
-    // request id, so it is charged too.  If the request id alone is so long
-    // that even the oversize note envelope cannot pass preflight (about
-    // 64,466 characters for a typical note), the serializer rejects it.
-    // A smaller error envelope could still echo ids slightly longer than
-    // that, but the servers never retry with one after a size rejection
-    // (nookd-server destroys the connection), so the connection closes.
-    const charged: string[] = [requestId];
-    for (const key of ["id", "title", "revision", "notebookId"] as const) {
-      const value = note[key];
-      if (typeof value === "string") charged.push(value);
-    }
-    charged.push(markdown);
-    if (!fitsResponsePreflight(charged)) {
-      return { contentStatus: "oversize" };
-    }
-    return { contentStatus: "ok", markdown, markdownBytes };
-  } catch {
-    return { contentStatus: "unavailable", contentReason: "read_failed" };
-  }
+  return {
+    contentStatus: "ok",
+    markdown: classification.markdown ?? "",
+    markdownBytes: classification.markdownBytes ?? 0,
+  };
 }
 
 function readNoteSnapshotMethod(
@@ -2261,28 +2207,6 @@ function readNoteSnapshotMethod(
   } catch {
     return undefined;
   }
-}
-
-function containsOpaqueHeadings(blocks: readonly NoteBlock[]): boolean {
-  return blocks.some((block) => {
-    if (block.type === "opaque") return /^h[1-6]$/.test(block.nodeType);
-    if (block.type === "blockquote" || block.type === "callout")
-      return containsOpaqueHeadings(block.blocks);
-    if (block.type === "bullet-list" || block.type === "ordered-list")
-      return block.items.some((item) => containsOpaqueHeadings(item.blocks ?? []));
-    return false;
-  });
-}
-
-function readOnlyMarkdownFallback(envelope: unknown): string {
-  if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
-  const candidate = envelope as { type?: unknown; data?: unknown };
-  if (
-    (candidate.type !== "tiptap" && candidate.type !== "html") ||
-    typeof candidate.data !== "string"
-  )
-    throw new Error("unavailable");
-  return noteHtmlReadonlyMarkdown(candidate.data);
 }
 
 function readRuntimeMethod(

@@ -7,6 +7,7 @@ import type {
   RpcNotesEditPreimageResult,
   RpcNotesOperationListResult,
   RpcNotesOperationStatusResult,
+  RpcNotesEditCensusResult,
   RpcOperatorApproveUploadParams,
   RpcNotesApproveUploadResponse,
   RpcRequest,
@@ -60,6 +61,11 @@ export interface OperatorDiscoveryRuntime {
     peer: OperatorPeer,
   ) => Promise<RpcNotesOperationStatusResult>;
   readonly operationList?: (peer: OperatorPeer) => Promise<RpcNotesOperationListResult>;
+  /** Read-only, counts-only corpus or single-note measurement. */
+  readonly editCensus?: (
+    params: Readonly<{ id?: string }>,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesEditCensusResult>;
   readonly approveUpload?: (
     params: RpcOperatorApproveUploadParams,
     peer: OperatorPeer,
@@ -127,6 +133,10 @@ export function createOperatorDiscoveryHandler(
         if (runtime.pathDiagnostic === undefined) return failure(request.id, "service_unavailable");
         return await runtime.pathDiagnostic(request, peer);
       }
+      if (request.method === "notes.edit-census") {
+        if (runtime.editCensus === undefined) return failure(request.id, "service_unavailable");
+        return mutationSuccess(request.id, await runtime.editCensus(request.params, peer));
+      }
       if (request.method === "notes.create") {
         if (runtime.create === undefined) return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.create(request.params, peer));
@@ -171,6 +181,7 @@ function mutationSuccess(
     | RpcNotesOperationStatusResult
     | RpcNotesOperationListResult
     | RpcNotesApproveUploadResponse
+    | RpcNotesEditCensusResult
     | RpcCreatedNoteResult,
 ): RpcAnyResponseEnvelope {
   return { id, ok: true, result } as RpcAnyResponseEnvelope;

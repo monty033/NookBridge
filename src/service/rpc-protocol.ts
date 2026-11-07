@@ -63,6 +63,7 @@ const stringSlice = String.prototype.slice;
 const numberFromString = Number;
 const numberIsFinite = Number.isFinite;
 const mathMax = Math.max;
+const mathFloor = Math.floor;
 
 // ---------------------------------------------------------------------------
 // Published limits — frozen constants the rest of the protocol is bounded by.
@@ -318,6 +319,11 @@ export interface RpcOperatorPageParams {
   readonly limit?: number;
 }
 
+/** Optional scoped-census address: an opaque operator handle, never a raw id. */
+export interface RpcOperatorEditCensusParams {
+  readonly id?: string;
+}
+
 export interface RpcOperatorSearchParams extends RpcOperatorPageParams {
   readonly query: string;
 }
@@ -360,7 +366,8 @@ export type RpcMethod =
   | "notes.operation-list"
   | "notes.approve-upload"
   | "notes.browse"
-  | "notes.search-operator";
+  | "notes.search-operator"
+  | "notes.edit-census";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -474,6 +481,11 @@ export interface RpcNotesSearchOperatorRequest {
   readonly method: "notes.search-operator";
   readonly params: RpcOperatorSearchParams;
 }
+export interface RpcNotesEditCensusRequest {
+  readonly id: string;
+  readonly method: "notes.edit-census";
+  readonly params: RpcOperatorEditCensusParams;
+}
 
 export type RpcRequest =
   | RpcNotesSearchRequest
@@ -496,7 +508,8 @@ export type RpcRequest =
   | RpcNotesOperationListRequest
   | RpcNotesApproveUploadRequest
   | RpcNotesBrowseRequest
-  | RpcNotesSearchOperatorRequest;
+  | RpcNotesSearchOperatorRequest
+  | RpcNotesEditCensusRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -743,6 +756,73 @@ export type RpcNotesApproveUploadResponse =
   | RpcNotesApproveUploadPreviewResult
   | RpcNotesApproveUploadResult;
 
+/**
+ * Counts-only result of the operator edit census. No body, title, raw note id
+ * or snippet is carried; a scoped call echoes only the opaque handle it was
+ * given. Decode refusals are surfaced only as counts of the four internal
+ * decode classes, and edit refusals as one separate count; individual reason
+ * names never cross this boundary.
+ *
+ * Only notes the discovery visibility filter admits are counted; a note it
+ * hides is in no bucket, not in `total` and not in `skipped`.
+ */
+export interface RpcNotesEditCensusResult {
+  readonly kind: "edit-census";
+  readonly scope: "corpus" | "note";
+  readonly note?: string;
+  /** Visible notes counted; at most `cap`. */
+  readonly total: number;
+  /**
+   * Partitions the notes whose strict native decode refused, by refusal class:
+   * one count per refused note, none for a note that decoded. Every such note
+   * is also counted once in `projection.serializerFallback`,
+   * `projection.oversize`, or `projection.unavailable` (when the read-only
+   * fallback cannot render it either), so the sum of these four is at most the
+   * sum of those three and never adds to `total`. `unclassified` is a refusal
+   * no site named; it is not preservable.
+   */
+  readonly reasons: Readonly<{
+    readonly hostile: number;
+    readonly uninterpretable: number;
+    readonly limit: number;
+    readonly unclassified: number;
+  }>;
+  /**
+   * Edit refusals (an edit that drops or moves a preserved block). Not a
+   * decode class: never in `reasons`, never preservable. A census only
+   * decodes, so this is zero unless a decode ever reports one.
+   */
+  readonly editRefusals: number;
+  /** Partitions `total` by `notes.get` projection outcome: one count per note. */
+  readonly projection: Readonly<{
+    readonly strict: number;
+    readonly strictWithPreservedBlocks: number;
+    readonly opaqueHeadingFallback: number;
+    readonly serializerFallback: number;
+    readonly locked: number;
+    readonly oversize: number;
+    readonly unavailable: number;
+  }>;
+  /**
+   * Preserved (opaque) blocks, and of those list regions, in exactly the notes
+   * counted under `projection.strictWithPreservedBlocks` and
+   * `projection.opaqueHeadingFallback`. A note that decoded and then fell back
+   * to the serializer, or went over budget, contributes none.
+   */
+  readonly preservedBlocks: number;
+  readonly preservedTaskLists: number;
+  /** The fixed per-run bound on counted notes. */
+  readonly cap: number;
+  /** Visible notes beyond `cap`, not decoded and in no other count. */
+  readonly skipped: number;
+  /**
+   * True exactly when `skipped > 0`: the run stopped at `cap`, and the visible
+   * notes after the first `cap` in listing order were not measured. There is
+   * no cursor; a repeat run measures the same first `cap` notes.
+   */
+  readonly truncated: boolean;
+}
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
@@ -763,7 +843,8 @@ export type RpcResult =
   | RpcNotesOperationStatusResult
   | RpcNotesOperationListResult
   | RpcNotesApproveUploadResponse
-  | RpcOperatorDiscoveryPageResult;
+  | RpcOperatorDiscoveryPageResult
+  | RpcNotesEditCensusResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -1262,7 +1343,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.operation-list" &&
     method !== "notes.approve-upload" &&
     method !== "notes.browse" &&
-    method !== "notes.search-operator"
+    method !== "notes.search-operator" &&
+    method !== "notes.edit-census"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -1678,6 +1760,28 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       paramsObj.noteTitle = noteTitle;
       if (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookPath"]))
         paramsObj.notebookPath = notebookPath;
+    }
+  } else if (method === "notes.edit-census") {
+    // Closed census params: the whole corpus (no fields) or one opaque handle.
+    if (paramKeys.length === 0) {
+      paramsObj = objectCreate(null) as Record<string, unknown>;
+    } else {
+      if (paramKeys.length !== 1 || paramKeys[0] !== "id") {
+        throw rpcProtocolError("rpc protocol: census params have unexpected fields");
+      }
+      const noteId = paramsRecord.id;
+      if (
+        typeof noteId !== "string" ||
+        noteId.length === 0 ||
+        noteId.length > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+          STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+        hasControlCharacter(noteId)
+      ) {
+        throw rpcProtocolError("rpc protocol: census note handle is invalid");
+      }
+      paramsObj = objectCreate(null) as Record<string, unknown>;
+      paramsObj.id = noteId;
     }
   } else if (method === "notes.browse" || method === "notes.search-operator") {
     const allowedShapes =
@@ -2612,6 +2716,180 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       resultPayload.kind = "operator-page";
       resultPayload.notes = cleanNotes;
       resultPayload.next = next;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "edit-census") {
+      const baseKeys = [
+        "kind",
+        "scope",
+        "total",
+        "reasons",
+        "editRefusals",
+        "projection",
+        "preservedBlocks",
+        "preservedTaskLists",
+        "cap",
+        "skipped",
+        "truncated",
+      ];
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        [...baseKeys, "note"],
+        "rpc protocol: edit-census result has unexpected fields",
+      );
+      const hasNote = resultKeys.includes("note");
+      const expectedKeys = hasNote ? [...baseKeys, "note"] : baseKeys;
+      if (resultKeys.length !== expectedKeys.length || !keysAreExactly(resultKeys, expectedKeys))
+        throw rpcProtocolError("rpc protocol: edit-census result has unexpected fields");
+      const scope = resultRecord.scope;
+      if (scope !== "corpus" && scope !== "note")
+        throw rpcProtocolError("rpc protocol: edit-census scope is invalid");
+      if ((scope === "note") !== hasNote)
+        throw rpcProtocolError("rpc protocol: edit-census note handle does not match scope");
+      if (hasNote) {
+        assertBoundedString(
+          resultRecord.note,
+          STAGE5_RPC_LIMITS.maxIdentifierBytes,
+          "census note handle",
+        );
+        preflightResponseStringField(resultRecord.note as string, rawSum);
+      }
+
+      const count = (value: JsonValue | undefined): value is number =>
+        isNonNegativeFiniteNumber(value) &&
+        value <= 9_007_199_254_740_991 &&
+        mathFloor(value) === value;
+
+      const total = resultRecord.total;
+      if (!count(total)) throw rpcProtocolError("rpc protocol: edit-census total is invalid");
+      const cap = resultRecord.cap;
+      const skipped = resultRecord.skipped;
+      if (
+        !count(cap) ||
+        cap === 0 ||
+        !count(skipped) ||
+        total > cap ||
+        (skipped > 0 && total !== cap) ||
+        resultRecord.truncated !== skipped > 0
+      )
+        throw rpcProtocolError("rpc protocol: edit-census cap is invalid");
+      const editRefusals = resultRecord.editRefusals;
+      if (!count(editRefusals))
+        throw rpcProtocolError("rpc protocol: edit-census edit refusals are invalid");
+
+      const reasonKeys = ["hostile", "uninterpretable", "limit", "unclassified"];
+      const reasons = resultRecord.reasons;
+      if (reasons === null || typeof reasons !== "object" || arrayIsArray(reasons))
+        throw rpcProtocolError("rpc protocol: edit-census reason counts are invalid");
+      const reasonRecord = reasons as Record<string, JsonValue>;
+      const reasonCountKeys = validateClosedObject(
+        reasonRecord,
+        reasonKeys,
+        "rpc protocol: edit-census reason counts have unexpected fields",
+      );
+      const hostileCount = reasonRecord.hostile;
+      const uninterpretableCount = reasonRecord.uninterpretable;
+      const limitCount = reasonRecord.limit;
+      const unclassifiedCount = reasonRecord.unclassified;
+      if (
+        reasonCountKeys.length !== 4 ||
+        !keysAreExactly(reasonCountKeys, reasonKeys) ||
+        !count(hostileCount) ||
+        !count(uninterpretableCount) ||
+        !count(limitCount) ||
+        !count(unclassifiedCount)
+      )
+        throw rpcProtocolError("rpc protocol: edit-census reason counts are invalid");
+
+      const projectionKeys = [
+        "strict",
+        "strictWithPreservedBlocks",
+        "opaqueHeadingFallback",
+        "serializerFallback",
+        "locked",
+        "oversize",
+        "unavailable",
+      ];
+      const projection = resultRecord.projection;
+      if (projection === null || typeof projection !== "object" || arrayIsArray(projection))
+        throw rpcProtocolError("rpc protocol: edit-census projection counts are invalid");
+      const projectionRecord = projection as Record<string, JsonValue>;
+      const projectionCountKeys = validateClosedObject(
+        projectionRecord,
+        projectionKeys,
+        "rpc protocol: edit-census projection counts have unexpected fields",
+      );
+      if (projectionCountKeys.length !== 7 || !keysAreExactly(projectionCountKeys, projectionKeys))
+        throw rpcProtocolError("rpc protocol: edit-census projection counts are invalid");
+      let projectionSum = 0;
+      for (const key of projectionKeys) {
+        const value = projectionRecord[key];
+        if (!count(value))
+          throw rpcProtocolError("rpc protocol: edit-census projection count is invalid");
+        projectionSum += value;
+      }
+      if (projectionSum !== total)
+        throw rpcProtocolError("rpc protocol: edit-census projection does not partition the total");
+      // Reasons partition only refused notes, each of which is a serializer
+      // fallback, oversize or unavailable projection; they never count against
+      // `total`. An edit refusal is one refused note too, counted apart.
+      if (
+        hostileCount + uninterpretableCount + limitCount + unclassifiedCount + editRefusals >
+        (projectionRecord.serializerFallback as number) +
+          (projectionRecord.oversize as number) +
+          (projectionRecord.unavailable as number)
+      )
+        throw rpcProtocolError("rpc protocol: edit-census reasons exceed the refused projections");
+
+      const preservedBlocks = resultRecord.preservedBlocks;
+      const preservedTaskLists = resultRecord.preservedTaskLists;
+      if (
+        !count(preservedBlocks) ||
+        !count(preservedTaskLists) ||
+        preservedTaskLists > preservedBlocks
+      )
+        throw rpcProtocolError("rpc protocol: edit-census preserved counts are invalid");
+
+      const resultPayload = objectCreate(null) as {
+        kind: "edit-census";
+        scope: "corpus" | "note";
+        note?: string;
+        total: number;
+        reasons: { hostile: number; uninterpretable: number; limit: number; unclassified: number };
+        editRefusals: number;
+        projection: Record<string, number>;
+        preservedBlocks: number;
+        preservedTaskLists: number;
+        cap: number;
+        skipped: number;
+        truncated: boolean;
+      };
+      resultPayload.kind = "edit-census";
+      resultPayload.scope = scope;
+      if (hasNote) resultPayload.note = resultRecord.note as string;
+      resultPayload.total = total;
+      resultPayload.reasons = {
+        hostile: hostileCount,
+        uninterpretable: uninterpretableCount,
+        limit: limitCount,
+        unclassified: unclassifiedCount,
+      };
+      resultPayload.editRefusals = editRefusals;
+      resultPayload.projection = {
+        strict: projectionRecord.strict as number,
+        strictWithPreservedBlocks: projectionRecord.strictWithPreservedBlocks as number,
+        opaqueHeadingFallback: projectionRecord.opaqueHeadingFallback as number,
+        serializerFallback: projectionRecord.serializerFallback as number,
+        locked: projectionRecord.locked as number,
+        oversize: projectionRecord.oversize as number,
+        unavailable: projectionRecord.unavailable as number,
+      };
+      resultPayload.preservedBlocks = preservedBlocks;
+      resultPayload.preservedTaskLists = preservedTaskLists;
+      resultPayload.cap = cap;
+      resultPayload.skipped = skipped;
+      resultPayload.truncated = skipped > 0;
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
