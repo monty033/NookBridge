@@ -9,6 +9,7 @@ import { readSafeOperatorEnvironment } from "./production-runtime.js";
 import {
   deriveCreateTitle,
   isBoundedOpaqueValue,
+  normalizeNotesEditCensusCounts,
   type NotesCategoricalResult,
   type NotesCommandRuntime,
   type UploadBlockingSummary,
@@ -215,6 +216,23 @@ export function createNotesCommandRuntimeFromOperatorSocket(
     }) => mapOperatorPage(await client.request("notes.search-operator", command)),
     get: async (command: { readonly handle: string }) =>
       mapOperatorView(await client.request("notes.get-view", { id: command.handle })),
+    /**
+     * Read-only census.  Only the opaque handle crosses the socket, as `id`,
+     * and the scoped result must echo that same handle back.
+     */
+    editCensus: async (command: { readonly handle?: string }) => {
+      try {
+        return mapOperatorEditCensus(
+          await client.request(
+            "notes.edit-census",
+            command.handle === undefined ? {} : { id: command.handle },
+          ),
+          command.handle,
+        );
+      } catch {
+        return { ...UNAVAILABLE_RESULT, reason: "service_unavailable" };
+      }
+    },
 
     /**
      * Capture the trusted preimage, hand the Markdown to the operator's
@@ -384,6 +402,63 @@ function mapOperatorView(result: OperatorSocketResult): NotesCategoricalResult {
     kind: "note",
     content: { label: "note", markdown: result.result.markdown, bytes: result.result.contentBytes },
   };
+}
+
+const EDIT_CENSUS_WIRE_KEYS = [
+  "kind",
+  "scope",
+  "total",
+  "reasons",
+  "editRefusals",
+  "projection",
+  "preservedBlocks",
+  "preservedTaskLists",
+  "cap",
+  "skipped",
+  "truncated",
+] as const;
+
+/**
+ * Map the `notes.edit-census` wire result onto the counts-only CLI shape.
+ *
+ * The operator client does not re-validate results, so this does: the wire
+ * object must have exactly the protocol's keys (a stray field such as a title
+ * makes the response invalid rather than silently dropped), the scope must be
+ * the one requested, a scoped result must echo the requested handle, and the
+ * counts must satisfy the census invariants.  The wire's `reasons` are the
+ * four class counts and become `classes`; nothing else is renamed.
+ */
+function mapOperatorEditCensus(
+  result: OperatorSocketResult,
+  handle: string | undefined,
+): NotesCategoricalResult {
+  if (!result.ok) return mapOperatorError(result);
+  const invalid = { ...UNAVAILABLE_RESULT, reason: "invalid_response" as const };
+  const wire = result.result as unknown;
+  if (wire === null || typeof wire !== "object" || Array.isArray(wire)) return invalid;
+  const record = wire as Record<string, unknown>;
+  if (record.kind !== "edit-census") return invalid;
+  const expectedKeys: readonly string[] =
+    handle === undefined ? EDIT_CENSUS_WIRE_KEYS : [...EDIT_CENSUS_WIRE_KEYS, "note"];
+  const keys = Object.keys(record);
+  if (keys.length !== expectedKeys.length || !expectedKeys.every((key) => keys.includes(key)))
+    return invalid;
+  if (record.scope !== (handle === undefined ? "corpus" : "note")) return invalid;
+  if (handle !== undefined && record.note !== handle) return invalid;
+  const census = normalizeNotesEditCensusCounts({
+    scope: record.scope,
+    ...(handle === undefined ? {} : { handle }),
+    total: record.total,
+    classes: record.reasons,
+    editRefusals: record.editRefusals,
+    projection: record.projection,
+    preservedBlocks: record.preservedBlocks,
+    preservedTaskLists: record.preservedTaskLists,
+    cap: record.cap,
+    skipped: record.skipped,
+    truncated: record.truncated,
+  });
+  return census === undefined ? invalid : { kind: "edit-census", census };
 }
 
 function mapOperatorError(

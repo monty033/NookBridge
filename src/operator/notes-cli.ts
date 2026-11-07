@@ -10,12 +10,14 @@ import { TextEncoder } from "node:util";
  *   nookctl notes browse [--cursor <opaque-cursor>] [--limit <1..100>]
  *   nookctl notes search --stdin [--cursor <opaque-cursor>] [--limit <1..100>]
  *   nookctl notes get --handle <opaque-handle>
+ *   nookctl notes edit-census [--handle <opaque-handle>]
  *   nookctl notes edit --handle <opaque-handle> --approve-edit --stdin
  *   nookctl notes undo --approve-edit --stdin
  *
  * Security contract (pinned in §13.11):
  *
- *   - read-only default (`help`, `browse`, `search`, `get`) is ungated
+ *   - read-only default (`help`, `browse`, `search`, `get`,
+ *     `edit-census`) is ungated
  *     and never constructs a mutation/runtime handle;
  *   - `edit` and `undo` require the EXACT `--approve-edit` argv flag;
  *   - `edit` and `undo` also require the EXACT `--stdin` flag (note
@@ -213,6 +215,12 @@ export type ParsedNotesCommand =
       handle: string;
     }>
   | Readonly<{
+      kind: "edit-census";
+      subcommand: "edit-census";
+      /** Absent for the corpus census; the opaque handle for a scoped one. */
+      handle?: string;
+    }>
+  | Readonly<{
       kind: "create";
       subcommand: "create";
       /**
@@ -270,6 +278,41 @@ export type BoundedNoteContent = Readonly<{
   readonly bytes: number;
 }>;
 
+/**
+ * Counts-only edit census, as `notes.edit-census` carries it.
+ *
+ * `classes` are the four decode-refusal class counts; individual reason
+ * names never reach the client.  `handle` is present exactly for the scoped
+ * census and is the opaque handle the operator supplied, never anything
+ * derived from the note.
+ */
+export type NotesEditCensusCounts = Readonly<{
+  readonly scope: "corpus" | "note";
+  readonly handle?: string;
+  readonly total: number;
+  readonly classes: Readonly<{
+    readonly hostile: number;
+    readonly uninterpretable: number;
+    readonly limit: number;
+    readonly unclassified: number;
+  }>;
+  readonly editRefusals: number;
+  readonly projection: Readonly<{
+    readonly strict: number;
+    readonly strictWithPreservedBlocks: number;
+    readonly opaqueHeadingFallback: number;
+    readonly serializerFallback: number;
+    readonly locked: number;
+    readonly oversize: number;
+    readonly unavailable: number;
+  }>;
+  readonly preservedBlocks: number;
+  readonly preservedTaskLists: number;
+  readonly cap: number;
+  readonly skipped: number;
+  readonly truncated: boolean;
+}>;
+
 export type NotesCategoricalResult =
   | Readonly<{ kind: "help"; text: string }>
   | Readonly<{
@@ -279,6 +322,7 @@ export type NotesCategoricalResult =
     }>
   | Readonly<{ kind: "empty" }>
   | Readonly<{ kind: "note"; content: BoundedNoteContent }>
+  | Readonly<{ kind: "edit-census"; census: NotesEditCensusCounts }>
   | Readonly<{ kind: "updated" }>
   /**
    * The operator saved without changing anything.  Distinct from
@@ -352,6 +396,12 @@ export interface NotesCommandRuntime {
     readonly limit?: number;
   }) => Promise<NotesCategoricalResult>;
   readonly get: (command: { readonly handle: string }) => Promise<NotesCategoricalResult>;
+  /**
+   * Read-only, counts-only edit census: the corpus without a handle, one note
+   * with one.  Optional because only the daemon can measure; a runtime without
+   * it reports the command unavailable.
+   */
+  readonly editCensus?: (command: { readonly handle?: string }) => Promise<NotesCategoricalResult>;
   /**
    * Bounded edit.  The body does NOT cross this interface: the runtime
    * captures the trusted preimage from the daemon, runs the operator's
@@ -485,6 +535,7 @@ export function formatNotesHelp(): string {
     "  nookctl notes browse [--cursor <opaque-cursor>] [--limit <1..100>]",
     "  nookctl notes search --stdin [--cursor <opaque-cursor>] [--limit <1..100>]",
     `  nookctl notes get --handle <opaque-handle>`,
+    "  nookctl notes edit-census [--handle <opaque-handle>]",
     `  nookctl notes create ${APPROVE_EDIT_FLAG} [--notebook-id <id>]`,
     `  nookctl notes edit --handle <opaque-handle> ${APPROVE_EDIT_FLAG}`,
     `  nookctl notes undo ${APPROVE_EDIT_FLAG} [--status|--list]`,
@@ -504,6 +555,7 @@ export function formatNotesHelp(): string {
     "  browse                     paginate bounded note metadata (read-only)",
     "  search                     paginate search matches (read-only, stdin query)",
     "  get                        return a single bounded note view (read-only)",
+    "  edit-census                count edit/projection outcomes, corpus or one note (read-only)",
     "  create                     new note in $EDITOR (approval-gated)",
     "  edit                       bounded edit in $EDITOR (approval-gated)",
     "  undo                       reverse a prior edit (approval-gated, by opaque handle)",
@@ -516,6 +568,7 @@ export function formatNotesHelp(): string {
     "    no level-1 heading is refused as invalid-input rather than guessed",
     "  - create and edit bodies are edited in $EDITOR; they never cross argv, env or stdin",
     "  - undo selects a daemon-minted opaque handle; no token is accepted",
+    "  - `notes edit-census` prints counts only; a scoped census echoes only its handle",
     "  - credentials, keys, paths, and revisions are not accepted through argv or env",
     "  - `notes delete` is intentionally absent",
     "",
@@ -531,7 +584,7 @@ export function formatNotesHelp(): string {
  */
 export function formatNotesResult(
   result: NotesCategoricalResult,
-  context: "legacy" | "browse" = "legacy",
+  context: "legacy" | "browse" | "edit-census" = "legacy",
 ): string {
   try {
     switch (result.kind) {
@@ -580,6 +633,36 @@ export function formatNotesResult(
             : `${result.content.markdown}\n`;
         }
         return `nookctl notes: note\nbytes: ${result.content.bytes}\n`;
+      }
+      case "edit-census": {
+        // Print the validated copy, so a malformed census is an error rather
+        // than a plausible-looking set of zeros.
+        const census = normalizeNotesEditCensusCounts(result.census);
+        if (census === undefined) return "nookctl notes: error\n";
+        return [
+          "nookctl notes: edit-census",
+          `scope: ${census.scope}`,
+          ...(census.handle === undefined ? [] : [`handle: ${census.handle}`]),
+          `total: ${census.total}`,
+          `projection-strict: ${census.projection.strict}`,
+          `projection-strict-with-preserved-blocks: ${census.projection.strictWithPreservedBlocks}`,
+          `projection-opaque-heading-fallback: ${census.projection.opaqueHeadingFallback}`,
+          `projection-serializer-fallback: ${census.projection.serializerFallback}`,
+          `projection-locked: ${census.projection.locked}`,
+          `projection-oversize: ${census.projection.oversize}`,
+          `projection-unavailable: ${census.projection.unavailable}`,
+          `class-hostile: ${census.classes.hostile}`,
+          `class-uninterpretable: ${census.classes.uninterpretable}`,
+          `class-limit: ${census.classes.limit}`,
+          `class-unclassified: ${census.classes.unclassified}`,
+          `edit-refusals: ${census.editRefusals}`,
+          `preserved-blocks: ${census.preservedBlocks}`,
+          `preserved-task-lists: ${census.preservedTaskLists}`,
+          `cap: ${census.cap}`,
+          `skipped: ${census.skipped}`,
+          `truncated: ${census.truncated ? "yes" : "no"}`,
+          "",
+        ].join("\n");
       }
       case "updated":
         return "nookctl notes: updated\n";
@@ -637,7 +720,7 @@ export function formatNotesResult(
       case "empty":
         return "nookctl notes: empty\n";
       case "error": {
-        if (context !== "browse") return "nookctl notes: error\n";
+        if (context === "legacy") return "nookctl notes: error\n";
         let reason: unknown;
         try {
           const descriptor = Object.getOwnPropertyDescriptor(result, "reason");
@@ -758,6 +841,8 @@ export function parseNotesCommand(
         return parseBrowseOrSearch("search", stringArgv.slice(1), { requireStdin: true });
       case "get":
         return parseGet(stringArgv.slice(1));
+      case "edit-census":
+        return parseEditCensus(stringArgv.slice(1));
       case "create":
         return parseCreate(stringArgv.slice(1));
       case "edit":
@@ -918,6 +1003,46 @@ function parseGet(rest: readonly string[]): ParseNotesCommandResult {
   return {
     kind: "parsed",
     command: { kind: "get", subcommand: "get", handle },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// edit-census.
+//
+// Exact shapes:
+//   (nothing)                  corpus census
+//   --handle <opaque-handle>   census of the one note behind the handle
+//
+// Read-only and ungated like `get`: `--approve-edit`, `--stdin`, unknown
+// flags, duplicates and extra positionals are all refused.
+// ---------------------------------------------------------------------------
+
+function parseEditCensus(rest: readonly string[]): ParseNotesCommandResult {
+  let handle: string | undefined;
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (token === undefined) return invalidParseInput();
+
+    if (token === "--handle") {
+      if (handle !== undefined) return invalidParseInput();
+      const value = rest[i + 1];
+      if (typeof value !== "string") return invalidParseInput();
+      if (value.startsWith("--")) return invalidParseInput();
+      if (!isBoundedOpaqueValue(value)) return invalidParseInput();
+      handle = value;
+      i += 1;
+      continue;
+    }
+    return invalidParseInput();
+  }
+
+  return {
+    kind: "parsed",
+    command:
+      handle === undefined
+        ? { kind: "edit-census", subcommand: "edit-census" }
+        : { kind: "edit-census", subcommand: "edit-census", handle },
   };
 }
 
@@ -1188,6 +1313,150 @@ export function isBoundedOpaqueValue(value: string): boolean {
   return OPAQUE_VALUE_PATTERN.test(value);
 }
 
+const EDIT_CENSUS_CLASS_KEYS = ["hostile", "uninterpretable", "limit", "unclassified"] as const;
+const EDIT_CENSUS_PROJECTION_KEYS = [
+  "strict",
+  "strictWithPreservedBlocks",
+  "opaqueHeadingFallback",
+  "serializerFallback",
+  "locked",
+  "oversize",
+  "unavailable",
+] as const;
+const EDIT_CENSUS_KEYS = [
+  "scope",
+  "total",
+  "classes",
+  "editRefusals",
+  "projection",
+  "preservedBlocks",
+  "preservedTaskLists",
+  "cap",
+  "skipped",
+  "truncated",
+] as const;
+
+/**
+ * A fresh copy of `value` if it is a well-formed counts-only census, else
+ * `undefined`.
+ *
+ * Well-formed means closed keys held as plain data properties, every count a
+ * non-negative safe integer, and the same invariants the daemon's serializer
+ * enforces: the projection partitions `total`, the cap bounds it, refusals fit
+ * inside the refused projections, task lists are preserved blocks, and a
+ * bounded opaque handle is present exactly for the scoped census.  Callers
+ * print the copy, so what is printed is exactly what was checked.
+ */
+export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusCounts | undefined {
+  try {
+    const scope = isRecord(value) ? Object.getOwnPropertyDescriptor(value, "scope") : undefined;
+    const scoped = scope !== undefined && "value" in scope && scope.value === "note";
+    const record = closedRecord(value, [...EDIT_CENSUS_KEYS, ...(scoped ? ["handle"] : [])]);
+    if (record === undefined) return undefined;
+    const classes = closedRecord(record.classes, EDIT_CENSUS_CLASS_KEYS);
+    const projection = closedRecord(record.projection, EDIT_CENSUS_PROJECTION_KEYS);
+    if (classes === undefined || projection === undefined) return undefined;
+    if (record.scope !== "corpus" && record.scope !== "note") return undefined;
+    if (
+      record.scope === "note" &&
+      (typeof record.handle !== "string" || !isBoundedOpaqueValue(record.handle))
+    )
+      return undefined;
+    const counts = [
+      record.total,
+      record.editRefusals,
+      record.preservedBlocks,
+      record.preservedTaskLists,
+      record.cap,
+      record.skipped,
+      ...Object.values(classes),
+      ...Object.values(projection),
+    ];
+    if (!counts.every(isCount)) return undefined;
+
+    const census: NotesEditCensusCounts = Object.freeze({
+      scope: record.scope,
+      ...(record.scope === "note" ? { handle: record.handle as string } : {}),
+      total: record.total as number,
+      classes: Object.freeze({
+        hostile: classes.hostile as number,
+        uninterpretable: classes.uninterpretable as number,
+        limit: classes.limit as number,
+        unclassified: classes.unclassified as number,
+      }),
+      editRefusals: record.editRefusals as number,
+      projection: Object.freeze({
+        strict: projection.strict as number,
+        strictWithPreservedBlocks: projection.strictWithPreservedBlocks as number,
+        opaqueHeadingFallback: projection.opaqueHeadingFallback as number,
+        serializerFallback: projection.serializerFallback as number,
+        locked: projection.locked as number,
+        oversize: projection.oversize as number,
+        unavailable: projection.unavailable as number,
+      }),
+      preservedBlocks: record.preservedBlocks as number,
+      preservedTaskLists: record.preservedTaskLists as number,
+      cap: record.cap as number,
+      skipped: record.skipped as number,
+      truncated: record.truncated === true,
+    });
+
+    const p = census.projection;
+    const c = census.classes;
+    const projectionSum =
+      p.strict +
+      p.strictWithPreservedBlocks +
+      p.opaqueHeadingFallback +
+      p.serializerFallback +
+      p.locked +
+      p.oversize +
+      p.unavailable;
+    const refusals = c.hostile + c.uninterpretable + c.limit + c.unclassified + census.editRefusals;
+    if (
+      typeof record.truncated !== "boolean" ||
+      projectionSum !== census.total ||
+      census.cap < 1 ||
+      census.total > census.cap ||
+      (census.skipped > 0 && census.total !== census.cap) ||
+      census.truncated !== census.skipped > 0 ||
+      refusals > p.serializerFallback + p.oversize + p.unavailable ||
+      census.preservedTaskLists > census.preservedBlocks
+    )
+      return undefined;
+    return census;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * A plain copy of `value` if it has exactly `keys` as own data properties,
+ * else `undefined`.  Accessors are refused so nothing is evaluated twice.
+ */
+function closedRecord(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const own = Reflect.ownKeys(value);
+  if (own.length !== keys.length || !keys.every((key) => own.includes(key))) return undefined;
+  const copy: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    copy[key] = descriptor.value;
+  }
+  return copy;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
  * `true` iff `value` parses as a bounded integer in the closed
  * `1..100` range.  Empty strings, whitespace, decimals, signs, and
@@ -1284,7 +1553,7 @@ export async function runNotesCommand(
 
   // The runtime factory is constructed ONLY after parse + approval
   // gate have both passed.  Read-only commands (`browse`, `search`,
-  // `get`) and `undo --status`/`--list` are ungated but they still go
+  // `get`, `edit-census`) and `undo --status`/`--list` are ungated but they still go
   // through this single seam.
   let runtime: NotesCommandRuntime;
   try {
@@ -1314,6 +1583,8 @@ export async function runNotesCommand(
         });
       case "get":
         return await runtime.get({ handle: command.handle });
+      case "edit-census":
+        return await runEditCensus(runtime, command);
       case "edit":
         // The body never crosses this boundary: the runtime captures the
         // trusted preimage, runs the operator's editor, and applies the
@@ -1340,6 +1611,58 @@ export async function runNotesCommand(
       message: "nookctl notes: runtime error",
     };
   }
+}
+
+/**
+ * `notes edit-census` — read-only, counts only.
+ *
+ * A census must answer the scope that was asked: the corpus when no handle
+ * was given, and otherwise the given handle exactly.  Anything else, or a
+ * success shape belonging to another command, is an invalid response rather
+ * than something to print.
+ */
+async function runEditCensus(
+  runtime: NotesCommandRuntime,
+  command: Extract<ParsedNotesCommand, { kind: "edit-census" }>,
+): Promise<NotesCategoricalResult> {
+  if (typeof runtime.editCensus !== "function") {
+    return {
+      kind: "error",
+      exitCode: 3,
+      message: "nookctl notes: runtime unavailable",
+      reason: "service_unavailable",
+    };
+  }
+  const result = await runtime.editCensus(
+    command.handle === undefined ? {} : { handle: command.handle },
+  );
+  switch (result.kind) {
+    case "edit-census": {
+      const census = normalizeNotesEditCensusCounts(result.census);
+      if (
+        census !== undefined &&
+        census.scope === (command.handle === undefined ? "corpus" : "note") &&
+        census.handle === command.handle
+      )
+        return { kind: "edit-census", census };
+      break;
+    }
+    case "missing":
+    case "denied":
+    case "invalid-input":
+    case "locked":
+    case "conflict":
+    case "unsupported-content":
+    case "sync-required":
+    case "error":
+      return result;
+  }
+  return {
+    kind: "error",
+    exitCode: 3,
+    message: "nookctl notes: runtime unavailable",
+    reason: "invalid_response",
+  };
 }
 
 async function runApproveUpload(
