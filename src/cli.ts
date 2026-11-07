@@ -514,7 +514,12 @@ async function runNotes(args: Args): Promise<number> {
   });
   try {
     process.stdout.write(
-      formatNotesResult(result, parsed.command.kind === "browse" ? "browse" : "legacy"),
+      formatNotesResult(
+        result,
+        parsed.command.kind === "browse" || parsed.command.kind === "edit-census"
+          ? parsed.command.kind
+          : "legacy",
+      ),
     );
     if (result.kind === "error") return result.exitCode;
     return result.kind === "invalid-input" ? 2 : refusalExitCode(result.kind);
@@ -1080,7 +1085,7 @@ function printHelp(): void {
       "  nookctl sync <status|read-only|help>",
       "  nookctl write <create|append|update|sync|help>",
       "  nookctl conflicts <list|observe|help>",
-      "  nookctl notes <help|browse|search|get|create|edit|undo>",
+      "  nookctl notes <help|browse|search|get|edit-census|create|edit|undo>",
       "  nookctl settings <show|validate|edit|reset|help>",
       "  nookctl tree <help|list>",
       "",
