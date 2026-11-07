@@ -241,6 +241,7 @@ describe("nookd Unix socket server", () => {
       "notes.operation-status": { operationHandle: "op1" },
       "notes.operation-list": {},
       "notes.approve-upload": {},
+      "notes.edit-census": {},
       "notes.browse": {},
       "notes.search-operator": { query: "q" },
     };

@@ -90,6 +90,14 @@ export interface DiscoveryVisibilityOptions {
 export interface DiscoveryVisibility {
   readonly searchHits: (query: string) => Promise<ReadonlyArray<DiscoverySearchHit>>;
   readonly listNotes: () => Promise<ReadonlyArray<Readonly<{ id: string; title: string }>>>;
+  /**
+   * `listNotes`, but `undefined` when the hierarchy snapshot or notebook
+   * membership cannot be loaded, where `listNotes` fails closed to an empty
+   * list. For a caller that must tell "unknown" from "none" (the edit census).
+   */
+  readonly listNotesIfKnown?: () => Promise<
+    ReadonlyArray<Readonly<{ id: string; title: string }>> | undefined
+  >;
   readonly filterNotebooks: <T extends Readonly<{ id: string }>>(
     notebooks: ReadonlyArray<T>,
   ) => Promise<ReadonlyArray<T>>;
@@ -347,14 +355,19 @@ export function createDiscoveryVisibility(
     return Object.freeze(out);
   };
 
-  const listNotes = async (): Promise<ReadonlyArray<Readonly<{ id: string; title: string }>>> => {
+  const listNotesIfKnown = async (): Promise<
+    ReadonlyArray<Readonly<{ id: string; title: string }>> | undefined
+  > => {
     const notes = await source.listNotes();
     const snapshot = await loadSnapshot();
-    if (snapshot === undefined) return Object.freeze([]); // fail closed
+    if (snapshot === undefined) return undefined;
     const membership = await buildMembership(snapshot);
-    if (membership === undefined) return Object.freeze([]); // fail closed
+    if (membership === undefined) return undefined;
     return Object.freeze(await filterNoteList(notes, membership, snapshot));
   };
+
+  const listNotes = async (): Promise<ReadonlyArray<Readonly<{ id: string; title: string }>>> =>
+    (await listNotesIfKnown()) ?? Object.freeze([]); // fail closed
 
   const filterNotebooks = async <T extends Readonly<{ id: string }>>(
     notebooks: ReadonlyArray<T>,
@@ -364,5 +377,5 @@ export function createDiscoveryVisibility(
     return Object.freeze(notebooks.filter((notebook) => notebookVisible(notebook.id, snapshot)));
   };
 
-  return Object.freeze({ searchHits, listNotes, filterNotebooks });
+  return Object.freeze({ searchHits, listNotes, listNotesIfKnown, filterNotebooks });
 }

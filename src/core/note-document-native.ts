@@ -8,7 +8,9 @@ import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { types } from "node:util";
 import { URL } from "node:url";
 import {
+  isNoteDocumentError,
   validateNoteDocument,
+  type NoteDocumentErrorCode,
   type NoteDocumentV1,
   type NoteBlock,
   type NoteInline,
@@ -37,30 +39,293 @@ export interface NativeNoteSerializeOptions {
   readonly listKind?: NotesnookListKind;
   readonly writer?: "html" | "json";
 }
+/**
+ * Internal class of a whole-document refusal. Owner's rule: anything that
+ * fetches, executes, or that a browser would silently repair is hostile;
+ * anything merely outside the grammar is preservable (`uninterpretable`).
+ *
+ *   - `hostile` — the markup is actively unsafe (or a parser differential).
+ *   - `uninterpretable` — well-formed with a known extent, outside the grammar.
+ *   - `limit` — a size or count bound.
+ *   - `unclassified` — a throw no `fail` site named (for example a URL parser
+ *     exception or a validator check outside the bounds). Nothing is known
+ *     about it, so it is NOT preservable: it must be treated like `hostile`
+ *     until a site is given a reason, and never counted as `uninterpretable`.
+ *   - `edit_refusal` — not a decode class: an edit that drops or moves a
+ *     preserved block. It is neither hostile nor preservable, is never counted
+ *     as a decode failure, and no preservation step may relax it.
+ *
+ * When one decoded document has several faults, the worst one decides its
+ * class: hostile, then unclassified, then limit, then uninterpretable (see
+ * `FAULT_SEVERITY`). An uninterpretable fault is deferred and the scan goes on,
+ * so a document classed `uninterpretable` was scanned to its end and holds no
+ * hostile, unclassified or limit fault anywhere. The reason is the worst
+ * fault's; between faults of one class it is the first reached. A limit stops
+ * the scan, so nothing past it is examined; a limit is never preservable.
+ * Serialization is outside this rule: its first fault wins.
+ *
+ * Internal only: the class never crosses an RPC error, an operator message or
+ * the client boundary.
+ */
+export type NativeFailureClass =
+  | "hostile"
+  | "uninterpretable"
+  | "limit"
+  | "unclassified"
+  | "edit_refusal";
+/** Closed internal vocabulary: one reason per whole-document failure site. */
+export type NativeFailureReason =
+  | "internal_failure"
+  | "document_bounds_exceeded"
+  | "control_character"
+  | "crlf_line_ending"
+  | "envelope_too_complex"
+  | "envelope_too_large"
+  | "envelope_proxy"
+  | "envelope_not_plain"
+  | "envelope_bad_prototype"
+  | "envelope_forbidden_key"
+  | "envelope_accessor"
+  | "envelope_non_index_key"
+  | "envelope_sparse_array"
+  | "envelope_not_record"
+  | "envelope_unexpected_field"
+  | "binding_invalid"
+  | "document_too_large"
+  | "url_not_permitted"
+  | "url_inert"
+  | "url_credentials"
+  | "document_too_complex"
+  | "stray_text_in_table"
+  | "stray_text_in_container"
+  | "mismatched_tag"
+  | "malformed_markup"
+  | "forbidden_tag"
+  | "misnested_block"
+  | "nested_anchor"
+  | "nested_list"
+  | "invalid_child"
+  | "orphan_list_item"
+  | "misplaced_element"
+  | "malformed_attribute"
+  | "duplicate_attribute"
+  | "active_attribute"
+  | "fetching_attribute"
+  | "attr_unrecognised"
+  | "unsafe_style"
+  | "dir_unrecognised"
+  | "entity_encoded_url"
+  | "url_raw_ampersand"
+  | "self_closing_element"
+  | "unclosed_element"
+  | "duplicate_mark"
+  | "duplicate_opaque_token"
+  | "envelope_shape"
+  | "document_without_blocks"
+  | "duplicate_mark_output"
+  | "unknown_mark"
+  | "code_language_invalid"
+  | "table_without_columns"
+  | "block_not_serializable"
+  | "opaque_payload_missing"
+  | "options_not_plain"
+  | "options_unexpected_field"
+  | "json_writer_disabled"
+  | "writer_unsupported"
+  | "context_unknown"
+  | "context_binding_mismatch"
+  | "context_references_mismatch";
+
+const NATIVE_FAILURE_CLASSES: Readonly<Record<NativeFailureReason, NativeFailureClass>> =
+  Object.freeze({
+    internal_failure: "unclassified",
+    document_bounds_exceeded: "limit",
+    control_character: "hostile",
+    crlf_line_ending: "uninterpretable",
+    envelope_too_complex: "limit",
+    envelope_too_large: "limit",
+    envelope_proxy: "hostile",
+    envelope_not_plain: "uninterpretable",
+    envelope_bad_prototype: "uninterpretable",
+    envelope_forbidden_key: "hostile",
+    envelope_accessor: "hostile",
+    envelope_non_index_key: "uninterpretable",
+    envelope_sparse_array: "uninterpretable",
+    // The binding is not a record, so the body is never scanned. Nothing here can
+    // certify the document free of hostile content, so it is not preservable.
+    envelope_not_record: "unclassified",
+    envelope_unexpected_field: "uninterpretable",
+    binding_invalid: "uninterpretable",
+    document_too_large: "limit",
+    url_not_permitted: "hostile",
+    url_inert: "uninterpretable",
+    url_credentials: "hostile",
+    document_too_complex: "limit",
+    stray_text_in_table: "hostile",
+    stray_text_in_container: "uninterpretable",
+    mismatched_tag: "hostile",
+    malformed_markup: "hostile",
+    forbidden_tag: "hostile",
+    misnested_block: "hostile",
+    nested_anchor: "hostile",
+    nested_list: "uninterpretable",
+    invalid_child: "hostile",
+    orphan_list_item: "uninterpretable",
+    misplaced_element: "hostile",
+    malformed_attribute: "hostile",
+    duplicate_attribute: "hostile",
+    active_attribute: "hostile",
+    fetching_attribute: "hostile",
+    attr_unrecognised: "uninterpretable",
+    unsafe_style: "hostile",
+    dir_unrecognised: "uninterpretable",
+    entity_encoded_url: "hostile",
+    url_raw_ampersand: "uninterpretable",
+    self_closing_element: "hostile",
+    unclosed_element: "hostile",
+    duplicate_mark: "uninterpretable",
+    duplicate_opaque_token: "hostile",
+    envelope_shape: "uninterpretable",
+    document_without_blocks: "uninterpretable",
+    duplicate_mark_output: "uninterpretable",
+    unknown_mark: "uninterpretable",
+    code_language_invalid: "uninterpretable",
+    table_without_columns: "uninterpretable",
+    block_not_serializable: "uninterpretable",
+    opaque_payload_missing: "uninterpretable",
+    options_not_plain: "uninterpretable",
+    options_unexpected_field: "uninterpretable",
+    json_writer_disabled: "uninterpretable",
+    writer_unsupported: "uninterpretable",
+    context_unknown: "uninterpretable",
+    context_binding_mismatch: "hostile",
+    context_references_mismatch: "edit_refusal",
+  });
+
+/**
+ * The closed reason vocabulary as data, for exhaustiveness checks over the
+ * class table. No reason crosses the census wire, which carries class counts.
+ */
+export const NATIVE_FAILURE_REASONS: ReadonlyArray<NativeFailureReason> = Object.freeze(
+  Object.keys(NATIVE_FAILURE_CLASSES) as NativeFailureReason[],
+);
+
+export function nativeFailureClass(reason: NativeFailureReason): NativeFailureClass {
+  return NATIVE_FAILURE_CLASSES[reason];
+}
+
 export class NoteDocumentNativeError extends Error {
   readonly code = "unsupported_content";
-  constructor() {
+  /**
+   * The internal reason.  Deliberately non-enumerable so `JSON.stringify` of a
+   * refusal (or of an envelope that mistakenly embeds one) never carries it.
+   */
+  readonly reason: NativeFailureReason;
+  constructor(reason: NativeFailureReason) {
     super("Native note content is not supported");
     this.name = "NoteDocumentNativeError";
+    this.reason = reason;
+    Object.defineProperty(this, "reason", {
+      value: reason,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
     Object.defineProperty(this, "cause", { value: undefined });
     Object.defineProperty(this, "__context__", { value: undefined });
   }
 }
-function fail(): never {
-  throw new NoteDocumentNativeError();
+/** Worst first. Only an `uninterpretable` fault is ever deferred. */
+const FAULT_SEVERITY: Readonly<Record<NativeFailureClass, number>> = Object.freeze({
+  hostile: 4,
+  unclassified: 3,
+  limit: 2,
+  uninterpretable: 1,
+  edit_refusal: 0,
+});
+const severity = (reason: NativeFailureReason): number =>
+  FAULT_SEVERITY[NATIVE_FAILURE_CLASSES[reason]];
+/**
+ * The worst deferred fault of the decode in progress. Decoding is synchronous
+ * and never re-enters, so one slot suffices; `scanned` owns it.
+ */
+let scanning = false;
+let deferred: NativeFailureReason | undefined;
+/** Throw the worse of this fault and any deferred one; a tie keeps the earlier. */
+function fail(reason: NativeFailureReason): never {
+  throw new NoteDocumentNativeError(
+    deferred !== undefined && severity(deferred) >= severity(reason) ? deferred : reason,
+  );
+}
+/**
+ * A fault the scan can continue past. Inside a decode an uninterpretable one is
+ * recorded and the caller carries on, so a worse fault later in the document
+ * still decides the class; anywhere else, or for any worse class, it throws.
+ */
+function defer(reason: NativeFailureReason): void {
+  if (!scanning || NATIVE_FAILURE_CLASSES[reason] !== "uninterpretable") fail(reason);
+  if (deferred === undefined || severity(reason) > severity(deferred)) deferred = reason;
+}
+/** Run a whole-document decode under the worst-fault rule. */
+function scanned<T>(run: () => T): T {
+  scanning = true;
+  deferred = undefined;
+  try {
+    const out = guard(run);
+    if (deferred !== undefined) fail(deferred);
+    return out;
+  } finally {
+    scanning = false;
+    deferred = undefined;
+  }
 }
 function guard<T>(run: () => T): T {
   try {
     return run();
-  } catch {
-    return fail();
+  } catch (error) {
+    // A classified refusal keeps its reason; an unexpected throw (for example a
+    // URL parser exception) becomes the unclassified internal failure.
+    if (error instanceof NoteDocumentNativeError) throw error;
+    return fail("internal_failure");
+  }
+}
+/** The document validator's size, count and depth bounds. */
+const VALIDATOR_BOUND_CODES: ReadonlySet<NoteDocumentErrorCode> = new Set([
+  "oversize_document",
+  "oversize_block",
+  "oversize_inline",
+  "oversize_sentinel",
+  "depth_exceeded",
+]);
+/**
+ * `validateNoteDocument`, with its bound failures classed as `limit`. Any
+ * other validator failure propagates to `guard` and stays unclassified.
+ */
+function validated(doc: unknown): asserts doc is NoteDocumentV1 {
+  try {
+    validateNoteDocument(doc);
+  } catch (error) {
+    if (isNoteDocumentError(error) && VALIDATOR_BOUND_CODES.has(error.code))
+      fail("document_bounds_exceeded");
+    throw error;
   }
 }
 function clean(s: string): string {
+  let hostile = false;
+  let crlf = false;
+  let cr = false;
   for (const c of s) {
     const cp = c.codePointAt(0)!;
-    if ((cp < 32 && cp !== 9 && cp !== 10) || cp === 127 || (cp >= 0xd800 && cp <= 0xdfff)) fail();
+    // A carriage return is a line ending only as the first half of a CRLF.
+    if (cr && cp !== 10) hostile = true;
+    cr = cp === 13;
+    if (cr) crlf = true;
+    else if ((cp < 32 && cp !== 9 && cp !== 10) || cp === 127 || (cp >= 0xd800 && cp <= 0xdfff))
+      hostile = true;
   }
+  if (hostile || cr) fail("control_character");
+  // After the whole string, so a hostile character anywhere in it wins.
+  if (crlf) defer("crlf_line_ending");
   return s;
 }
 // Snapshot own data only; never invoke accessors, proxies, toJSON or cycles.
@@ -69,17 +334,25 @@ function snapshot(value: unknown): unknown {
   let count = 0;
   let bytes = 0;
   function walk(v: unknown, depth: number): unknown {
-    if (++count > 100_000 || depth > 80) fail();
+    if (++count > 100_000 || depth > 80) fail("envelope_too_complex");
     if (typeof v === "string") {
       bytes += Buffer.byteLength(v);
-      if (bytes > MAX_NOTE_DOCUMENT_NATIVE_BYTES * 8) fail();
+      if (bytes > MAX_NOTE_DOCUMENT_NATIVE_BYTES * 8) fail("envelope_too_large");
       return clean(v);
     }
     if (v === undefined || v === null || typeof v === "boolean" || typeof v === "number") return v;
-    if (typeof v !== "object" || types.isProxy(v) || active.has(v)) fail();
+    // A Proxy runs code whenever it is inspected: hostile, not merely non-plain.
+    if (types.isProxy(v)) fail("envelope_proxy");
+    // Each uninterpretable fault below is deferred and the walk goes on over
+    // own data descriptors only, so a hostile value beside it still decides.
+    if (typeof v !== "object" || active.has(v)) {
+      defer("envelope_not_plain");
+      return undefined;
+    }
     const array = Array.isArray(v);
     const proto = Object.getPrototypeOf(v);
-    if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail();
+    if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null)
+      defer("envelope_bad_prototype");
     active.add(v);
     const out: Record<string, unknown> = array
       ? ([] as unknown as Record<string, unknown>)
@@ -87,22 +360,27 @@ function snapshot(value: unknown): unknown {
     const descriptors = Object.getOwnPropertyDescriptors(v);
     for (const key of Reflect.ownKeys(descriptors)) {
       if (typeof key !== "string" || ["__proto__", "constructor", "prototype"].includes(key))
-        fail();
+        fail("envelope_forbidden_key");
       const d = descriptors[key]!;
-      if (!("value" in d)) fail();
+      if (!("value" in d)) fail("envelope_accessor");
       if (array && key === "length") continue;
-      if (array && !/^(0|[1-9][0-9]*)$/.test(key)) fail();
+      if (array && !/^(0|[1-9][0-9]*)$/.test(key)) {
+        defer("envelope_non_index_key");
+        walk(d.value, depth + 1);
+        continue;
+      }
       out[key] = walk(d.value, depth + 1);
     }
-    if (array && Object.keys(out).length !== (v as unknown[]).length) fail();
+    if (array && Object.keys(out).length !== (v as unknown[]).length)
+      defer("envelope_sparse_array");
     active.delete(v);
     return out;
   }
   return walk(value, 0);
 }
 function record(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) fail();
-  if (Object.keys(value).some((k) => !keys.includes(k))) fail();
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("envelope_not_record");
+  if (Object.keys(value).some((k) => !keys.includes(k))) defer("envelope_unexpected_field");
   return value as Record<string, unknown>;
 }
 /**
@@ -136,17 +414,42 @@ function bindingKey(value: unknown): string {
   const r = record(snapshot(value), ["noteId", "revision"]);
   const noteId = r.noteId;
   const revision = r.revision;
-  if (typeof noteId !== "string" || !noteId || typeof revision !== "string" || !revision) fail();
+  // Deferred in a decode, so a bad binding never ends the scan of the content.
+  if (typeof noteId !== "string" || !noteId || typeof revision !== "string" || !revision)
+    defer("binding_invalid");
   return JSON.stringify([noteId, revision]);
 }
 function bounded(stored: NotesnookStoredContent): NotesnookStoredContent {
-  if (Buffer.byteLength(JSON.stringify(stored)) > MAX_NOTE_DOCUMENT_NATIVE_BYTES) fail();
+  if (Buffer.byteLength(JSON.stringify(stored)) > MAX_NOTE_DOCUMENT_NATIVE_BYTES)
+    fail("document_too_large");
   return Object.freeze(stored);
 }
-function url(s: string): string {
-  if (!/^(https?:\/\/|mailto:)/i.test(s) || /[\s\\]/u.test(clean(s))) fail();
-  const parsed = new URL(s);
-  if (parsed.username || parsed.password) fail();
+/**
+ * A link target that neither runs nor fetches: a fragment, a path-relative
+ * reference, `tel:`, or an `nn://` note link without credentials. A
+ * network-path reference (`//host`) names a host, so it is not one.
+ */
+function inertLink(s: string): boolean {
+  if (/^nn:\/\//i.test(s)) return !/^nn:\/\/[^/?#]*@/i.test(s);
+  if (/^tel:/i.test(s) || s.startsWith("#")) return true;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(s) && !s.startsWith("//");
+}
+/**
+ * `fetched` marks an attribute the browser loads on render (`src`). An inert
+ * link is outside the grammar there too, but a relative one would be fetched,
+ * so only a link that is merely followed can be `url_inert`.
+ */
+function url(s: string, fetched = false): string {
+  // A browser silently strips whitespace from a URL and reads `\` as `/`.
+  const repaired = /[\s\\]/u.test(s);
+  const permitted = /^(https?:\/\/|mailto:)/i.test(s);
+  if (!repaired && !permitted && !fetched && inertLink(clean(s))) {
+    defer("url_inert");
+    return s;
+  }
+  if (repaired || !permitted) fail("url_not_permitted");
+  const parsed = new URL(clean(s));
+  if (parsed.username || parsed.password) fail("url_credentials");
   return s;
 }
 const escape = (s: string): string =>
@@ -156,11 +459,20 @@ const escape = (s: string): string =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-function entities(s: string): { value: string; unsupported: boolean } {
+/**
+ * True when a browser leaves this `&` literal in an attribute value: nothing
+ * that could start a character reference follows it, or an alphanumeric run
+ * ends at `=` (the query-string case). A browser may decode anything else.
+ */
+const literalAmpersand = (name: string): boolean => /^(?:$|[^a-z0-9#]|[a-z0-9]+=)/i.test(name);
+/** `raw`: every undecoded `&` is one a browser also leaves literal. */
+function entities(s: string): { value: string; unsupported: boolean; raw: boolean } {
   let unsupported = false;
+  let raw = true;
   const value = s.replace(/&([^;\s<&]*);?/g, (whole, name: string) => {
     if (!whole.endsWith(";")) {
       unsupported = true;
+      raw &&= literalAmpersand(name);
       return whole;
     }
     const named: Record<string, string> = {
@@ -180,9 +492,10 @@ function entities(s: string): { value: string; unsupported: boolean } {
     // Keep an entity the model cannot decode attached to its original block.
     // Its source bytes are retained in the private opaque payload below.
     unsupported = true;
+    raw &&= literalAmpersand(name);
     return whole;
   });
-  return { value: clean(value), unsupported };
+  return { value: clean(value), unsupported, raw };
 }
 interface Element {
   tag: string;
@@ -249,6 +562,39 @@ const forbiddenExternalReferenceAttributes = new Set([
   "poster",
   "srcset",
 ]);
+/**
+ * Attribute names a browser loads a resource from (or, for `http-equiv`, is
+ * redirected by) on some element this parser does not refuse by tag:
+ * `background` on table cells, `src` on `input` or `image`. Outside the
+ * per-tag allow-list they are hostile, not merely unrecognised.
+ */
+const fetchingAttributes = new Set([
+  "background",
+  "dynsrc",
+  "http-equiv",
+  "lowsrc",
+  "manifest",
+  "src",
+]);
+/**
+ * Open elements that stop a browser's search for an `<li>` to close when a new
+ * `<li>` starts: special elements other than `div` and `p`. Phrasing and
+ * unknown elements do not stop it.
+ */
+const listItemScopeStops = new Set(
+  "h1 h2 h3 h4 h5 h6 ul ol pre blockquote table thead tbody tfoot tr th td figure figcaption".split(
+    " ",
+  ),
+);
+/** True when a browser would silently close an open `<li>` at a new `<li>`. */
+function closesOpenListItem(stack: readonly Element[]): boolean {
+  for (let i = stack.length - 1; i > 0; i--) {
+    const tag = stack[i]!.tag;
+    if (tag === "li") return true;
+    if (listItemScopeStops.has(tag)) return false;
+  }
+  return false;
+}
 const inertAttributeTags: Readonly<Record<string, ReadonlySet<string>>> = {
   alt: new Set(["img"]),
   colspan: new Set(["td", "th"]),
@@ -368,34 +714,36 @@ function parseHtml(html: string): HtmlNode[] {
   let pos = 0;
   let count = 0;
   while (pos < html.length) {
-    if (++count > 30_000 || stack.length > 64) fail();
+    if (++count > 30_000 || stack.length > 64) fail("document_too_complex");
     const parent = stack.at(-1)!;
     if (html[pos] !== "<") {
       const end = html.indexOf("<", pos);
       const next = end < 0 ? html.length : end;
       const decoded = entities(html.slice(pos, next));
       if (decoded.unsupported) parent.unsupported = true;
-      if (
-        ["ul", "ol", "table", "thead", "tbody", "tfoot", "tr"].includes(parent.tag) &&
-        decoded.value.trim()
-      )
-        fail();
+      if (decoded.value.trim()) {
+        // A browser moves text out of a table (foster parenting); it keeps
+        // text in a list where it is.
+        if (["table", "thead", "tbody", "tfoot", "tr"].includes(parent.tag))
+          fail("stray_text_in_table");
+        if (["ul", "ol"].includes(parent.tag)) defer("stray_text_in_container");
+      }
       parent.children.push(decoded.value);
       pos = next;
       continue;
     }
     const closing = /^<\/([a-z][a-z0-9:_-]*)\s*>/i.exec(html.slice(pos));
     if (closing) {
-      if (stack.length === 1 || parent.tag !== closing[1]!.toLowerCase()) fail();
+      if (stack.length === 1 || parent.tag !== closing[1]!.toLowerCase()) fail("mismatched_tag");
       pos += closing[0].length;
       parent.raw = html.slice(parent.start, pos);
       stack.pop();
       continue;
     }
     const open = /^<([a-z][a-z0-9:_-]*)/i.exec(html.slice(pos));
-    if (!open) fail();
+    if (!open) fail("malformed_markup");
     const tag = open[1]!.toLowerCase();
-    if (forbiddenTags.has(tag)) fail();
+    if (forbiddenTags.has(tag)) fail("forbidden_tag");
     const knownTag = tags.has(tag);
     // Reject structures a browser would repair/reparent before rendering.
     const phrasing = new Set(
@@ -407,8 +755,8 @@ function parseHtml(html: string): HtmlNode[] {
         phrasing.has(parent.tag)) &&
       !phrasing.has(tag)
     )
-      fail();
-    if (knownTag && tag === "a" && stack.some((n) => n.tag === "a")) fail();
+      fail("misnested_block");
+    if (knownTag && tag === "a" && stack.some((n) => n.tag === "a")) fail("nested_anchor");
     const requiredChildren: Record<string, string[]> = {
       ul: ["li"],
       ol: ["li"],
@@ -418,8 +766,11 @@ function parseHtml(html: string): HtmlNode[] {
       tfoot: ["tr"],
       tr: ["th", "td"],
     };
-    if (knownTag && requiredChildren[parent.tag] && !requiredChildren[parent.tag]!.includes(tag))
-      fail();
+    if (knownTag && requiredChildren[parent.tag] && !requiredChildren[parent.tag]!.includes(tag)) {
+      // A browser keeps a list directly inside a list where it is.
+      if (["ul", "ol"].includes(parent.tag) && ["ul", "ol"].includes(tag)) defer("nested_list");
+      else fail("invalid_child");
+    }
     const requiredParents: Record<string, string[]> = {
       li: ["ul", "ol"],
       thead: ["table"],
@@ -434,8 +785,11 @@ function parseHtml(html: string): HtmlNode[] {
       (parent.tag === "root" || tags.has(parent.tag)) &&
       requiredParents[tag] &&
       !requiredParents[tag]!.includes(parent.tag)
-    )
-      fail();
+    ) {
+      // A bare `<li>` stays where it is, unless it would close an open one.
+      if (tag === "li" && !closesOpenListItem(stack)) defer("orphan_list_item");
+      else fail("misplaced_element");
+    }
     const start = pos;
     pos += open[0].length;
     const attrs: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -444,12 +798,13 @@ function parseHtml(html: string): HtmlNode[] {
       const attr = /^\s+([a-z][a-z0-9:_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(
         html.slice(pos),
       );
-      if (!attr) fail();
+      if (!attr) fail("malformed_attribute");
       const key = attr[1]!.toLowerCase();
       const rawValue = attr[2] ?? attr[3] ?? attr[4] ?? "";
       const decoded = entities(rawValue);
-      if (Object.hasOwn(attrs, key)) fail();
-      if (key.startsWith("on") || forbiddenExternalReferenceAttributes.has(key)) fail();
+      if (Object.hasOwn(attrs, key)) fail("duplicate_attribute");
+      if (key.startsWith("on") || forbiddenExternalReferenceAttributes.has(key))
+        fail("active_attribute");
       // These inert decorations are retained opaquely when the model cannot
       // represent them; style declarations pass a closed property allowlist.
       const paragraphDecoration = tag === "p" && key === "id";
@@ -461,20 +816,29 @@ function parseHtml(html: string): HtmlNode[] {
         key === "dir" ||
         inertAttributeTags[key]?.has(tag) === true ||
         paragraphDecoration;
-      if (!allowed) fail();
-      if (key === "style" && (decoded.unsupported || !safeOpaqueStyle(decoded.value))) fail();
-      if (key === "dir" && !/^(ltr|rtl|auto)$/i.test(decoded.value)) fail();
+      // Every attribute of the element is examined: an unrecognised one is
+      // deferred, so a fetching or active attribute after it still decides.
+      if (!allowed) {
+        if (fetchingAttributes.has(key)) fail("fetching_attribute");
+        defer("attr_unrecognised");
+      }
+      if (key === "style" && (decoded.unsupported || !safeOpaqueStyle(decoded.value)))
+        fail("unsafe_style");
+      if (key === "dir" && !/^(ltr|rtl|auto)$/i.test(decoded.value)) defer("dir_unrecognised");
       if (decoded.unsupported) unsupported = true;
       if (key === "href" || key === "src") {
-        if (decoded.unsupported) fail();
-        url(decoded.value);
+        // Hostile first: an entity a browser may decode, then the URL itself
+        // (which still holds any raw `&` literally), then the raw `&`.
+        if (decoded.unsupported && !decoded.raw) fail("entity_encoded_url");
+        url(decoded.value, key === "src");
+        if (decoded.unsupported) defer("url_raw_ampersand");
       }
       attrs[key] = decoded.value;
       pos += attr[0].length;
     }
     const end = /^\s*(\/?)>/.exec(html.slice(pos))!;
     pos += end[0].length;
-    if (end[1] && !voids.has(tag)) fail();
+    if (end[1] && !voids.has(tag)) fail("self_closing_element");
     const raw = html.slice(start, pos);
     const node: Element = {
       tag,
@@ -488,7 +852,7 @@ function parseHtml(html: string): HtmlNode[] {
     parent.children.push(node);
     if (!end[1] && !voids.has(tag)) stack.push(node);
   }
-  if (stack.length !== 1) fail();
+  if (stack.length !== 1) fail("unclosed_element");
   return root.children;
 }
 /** Fail-closed preflight for legacy writers that cannot retain rich-list titles. */
@@ -553,9 +917,14 @@ function canonicalMarks(marks: readonly NoteInlineMark[]): NoteInlineMark[] {
 function canonicalRuns(inlines: readonly NoteInline[]): NoteInline[] {
   const runs: NoteInline[] = [];
   for (const run of inlines) {
-    const marks = canonicalMarks(run.marks ?? []);
+    let marks = canonicalMarks(run.marks ?? []);
     const keys = marks.map((m) => (typeof m === "string" ? m : m.type));
-    if (new Set(keys).size !== keys.length) fail();
+    if (new Set(keys).size !== keys.length) {
+      // Deferred in a decode: keep the first of each mark so the document
+      // stays valid and the scan reaches the validator's bounds.
+      defer("duplicate_mark");
+      marks = marks.filter((_, i) => keys.indexOf(keys[i]!) === i);
+    }
     if (!run.text) continue;
     const last = runs.at(-1);
     if (last && JSON.stringify(last.marks ?? []) === JSON.stringify(marks))
@@ -735,7 +1104,7 @@ function references(doc: NoteDocumentV1): string[] {
     };
     for (const b of blocks) {
       if (b.type === "opaque") {
-        if (tokens.has(b.sentinel.token)) fail();
+        if (tokens.has(b.sentinel.token)) fail("duplicate_opaque_token");
         tokens.add(b.sentinel.token);
         refs.push(
           JSON.stringify([
@@ -1019,14 +1388,18 @@ export function decodeNoteDocumentNative(
   envelope: unknown,
   binding: NativeNoteBinding,
 ): { readonly document: NoteDocumentV1; readonly context: NativeNoteContext } {
-  return guard(() => {
+  return scanned(() => {
     const key = bindingKey(binding);
     const r = record(snapshot(envelope), ["type", "data"]);
-    if ((r.type !== "html" && r.type !== "tiptap") || typeof r.data !== "string") fail();
-    const original = bounded({ type: r.type, data: r.data });
-    const nodes = parseHtml(r.data);
+    if ((r.type !== "html" && r.type !== "tiptap") || typeof r.data !== "string")
+      defer("envelope_shape");
+    // A string body under an unknown type is still scanned as markup, so its
+    // class is certified like any other; with no string body there is none.
+    const data = typeof r.data === "string" ? r.data : "";
+    const original = bounded({ type: r.type as NotesnookStoredContent["type"], data });
+    const nodes = parseHtml(data);
     const roots = elements(nodes);
-    if (!roots.length && r.data.trim()) fail();
+    if (!roots.length && data.trim()) defer("document_without_blocks");
     let content: HtmlNode[] = roots;
     let container: string | undefined;
     // The document container is structural. Its accepted presentation and data
@@ -1047,7 +1420,7 @@ export function decodeNoteDocumentNative(
       version: 1,
       blocks: decodeBlocks(content, payloads, key, true, blocks),
     };
-    validateNoteDocument(document);
+    validated(document);
     const context: NativeNoteContext = Object.freeze({ version: 1 });
     contexts.set(context, {
       binding: key,
@@ -1069,7 +1442,7 @@ function renderInline(inlines: readonly NoteInline[]): string {
       const sorted = canonicalMarks(run.marks ?? []);
       for (const mark of sorted.reverse()) {
         const key = typeof mark === "string" ? mark : mark.type;
-        if (seen.has(key)) fail();
+        if (seen.has(key)) fail("duplicate_mark_output");
         seen.add(key);
         if (typeof mark === "object") out = `<a href="${escape(url(mark.href))}">${out}</a>`;
         else {
@@ -1079,7 +1452,7 @@ function renderInline(inlines: readonly NoteInline[]): string {
                 string,
                 string
               >
-            )[mark] ?? fail();
+            )[mark] ?? fail("unknown_mark");
           out = `<${tag}>${out}</${tag}>`;
         }
       }
@@ -1124,10 +1497,11 @@ function renderBlocks(
         case "blockquote":
           return `${aligned?.record.open ?? "<blockquote>"}${render(b.blocks, aligned?.record.children)}</blockquote>`;
         case "code-block":
-          if (b.language !== undefined && !/^[A-Za-z0-9_+-]+$/.test(b.language)) fail();
+          if (b.language !== undefined && !/^[A-Za-z0-9_+-]+$/.test(b.language))
+            fail("code_language_invalid");
           return `<pre><code${b.language ? ` class="language-${escape(b.language)}"` : ""}>${escape(b.text)}</code></pre>`;
         case "table":
-          if (!b.columns.length) fail();
+          if (!b.columns.length) fail("table_without_columns");
           return `<table><thead><tr>${b.columns.map((c) => `<th>${escape(c)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((row) => `<tr>${row.map((c) => `<td>${escape(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
         case "callout":
           return `${aligned?.record.open ?? `<div data-type="callout" data-variant="${b.variant}">`}${render(b.blocks, aligned?.record.children)}</div>`;
@@ -1137,9 +1511,9 @@ function renderBlocks(
         case "attachment":
         case "embed":
           // These node types still have no native HTML encoding.
-          return fail();
+          return fail("block_not_serializable");
         case "opaque":
-          return payloads?.get(b.sentinel.token) ?? fail();
+          return payloads?.get(b.sentinel.token) ?? fail("opaque_payload_missing");
       }
     })
     .join("");
@@ -1201,21 +1575,24 @@ export function serializeNoteDocumentNative(
   return guard(() => {
     // Inspect option descriptors without copying the context capability identity.
     if (types.isProxy(options) || !options || Object.getPrototypeOf(options) !== Object.prototype)
-      fail();
+      fail("options_not_plain");
     const descriptors = Object.getOwnPropertyDescriptors(options);
     for (const [key, d] of Object.entries(descriptors))
-      if (!["context", "binding", "listKind", "writer"].includes(key) || !("value" in d)) fail();
+      if (!["context", "binding", "listKind", "writer"].includes(key) || !("value" in d))
+        fail("options_unexpected_field");
     const writer = options.writer ?? "html";
-    if (writer === "json" && !NOTESNOOK_JSON_WRITER_ENABLED) fail();
-    if (writer !== "html") fail();
+    if (writer === "json" && !NOTESNOOK_JSON_WRITER_ENABLED) fail("json_writer_disabled");
+    if (writer !== "html") fail("writer_unsupported");
     const kind = normaliseNotesnookListKind(options.listKind);
     const doc = snapshot(document);
-    validateNoteDocument(doc);
+    validated(doc);
     closedDocument(doc);
     const context = options.context === undefined ? undefined : contexts.get(options.context);
-    if (options.context !== undefined && !context) fail();
-    if (context && context.binding !== bindingKey(options.binding)) fail();
-    if (JSON.stringify(references(doc)) !== JSON.stringify(context?.refs ?? [])) fail();
+    if (options.context !== undefined && !context) fail("context_unknown");
+    if (context && context.binding !== bindingKey(options.binding))
+      fail("context_binding_mismatch");
+    if (JSON.stringify(references(doc)) !== JSON.stringify(context?.refs ?? []))
+      fail("context_references_mismatch");
     if (context && fingerprint(doc) === context.baseline) return context.original;
     return bounded({
       type: context?.original.type ?? "tiptap",

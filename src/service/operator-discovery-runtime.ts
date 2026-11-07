@@ -11,6 +11,7 @@ import type {
 } from "./operator-discovery-handler.js";
 import type { OperatorPeer } from "./operator-server.js";
 import { OperatorWriteError } from "./notes-operator-write-runtime.js";
+import { createNotesEditCensus } from "./notes-edit-census.js";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MAX_CURSOR_COUNT = 512;
@@ -111,6 +112,20 @@ export function createOperatorDiscoveryRuntime(
   visibility: DiscoveryVisibility,
 ): OperatorDiscoveryRuntime {
   const cursors = new Map<string, CursorState>();
+  const readOnly = service.readOnly;
+  // The census enumerates through the same visibility filter as `browse`, so
+  // it can count only notes browse would list. It needs the variant that tells
+  // an unloadable filter from an empty one; without it there is no census.
+  const listNotesIfKnown = visibility.listNotesIfKnown;
+  const census =
+    readOnly !== undefined &&
+    typeof readOnly.readNoteSnapshot === "function" &&
+    listNotesIfKnown !== undefined
+      ? createNotesEditCensus({
+          listVisibleNotes: () => listNotesIfKnown(),
+          readNoteSnapshot: (id) => readOnly.readNoteSnapshot!(id),
+        })
+      : undefined;
 
   return {
     // Every entry point validates the peer before any downstream call.
@@ -135,6 +150,16 @@ export function createOperatorDiscoveryRuntime(
         params.query,
         peer,
       );
+    },
+    editCensus: async ({ id }, peer) => {
+      requirePeer(peer);
+      if (census === undefined) throw new Error("census unavailable");
+      if (id === undefined) return census.corpus();
+      const noteId = registry.resolve(id, peer);
+      if (noteId === undefined) throw new OperatorWriteError("not_found");
+      const measured = await census.note(noteId, id);
+      if (measured === undefined) throw new OperatorWriteError("not_found");
+      return measured;
     },
     view: async ({ id }, peer) => {
       requirePeer(peer);

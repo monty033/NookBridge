@@ -78,6 +78,7 @@ describe("operator policy — closed method vocabulary", () => {
       "notes.operation-list",
       "notes.approve-upload",
       "notes.path_diagnostic",
+      "notes.edit-census",
     ]);
   });
 
