@@ -46,6 +46,7 @@ import {
   type NotesCategoricalResult,
   type ParsedNotesCommand,
 } from "../src/operator/notes-cli.js";
+import { STAGE5_RPC_LIMITS } from "../src/service/rpc-protocol.js";
 
 // ---------------------------------------------------------------------------
 // Test fixtures.
@@ -1062,28 +1063,35 @@ describe("parseNotesSearchQuery — bounded stdin query contract", () => {
     expect(parseNotesSearchQuery("").kind).toBe("invalid");
   });
 
-  it("rejects a query that exceeds MAX_NOTES_QUERY_BYTES UTF-8 bytes categorically", () => {
-    // Build a query one byte larger than the cap by padding an ASCII char.
-    const tooLong = "x".repeat(MAX_NOTES_QUERY_BYTES + 1);
+  it("rejects a query that exceeds the daemon's query bound categorically", () => {
+    // The stdin reader allows 4 MiB, but the daemon's protocol refuses
+    // anything over maxQueryBytes by destroying the connection, which the
+    // operator sees only as a generic error. The parser owns that bound now.
+    const tooLong = "x".repeat(STAGE5_RPC_LIMITS.maxQueryBytes + 1);
     expect(parseNotesSearchQuery(tooLong).kind).toBe("invalid");
   });
 
-  it("accepts a query whose byte length equals MAX_NOTES_QUERY_BYTES (closed bound)", () => {
-    const atCap = "y".repeat(MAX_NOTES_QUERY_BYTES);
+  it("accepts a query whose byte length equals the daemon's bound (closed bound)", () => {
+    const atCap = "y".repeat(STAGE5_RPC_LIMITS.maxQueryBytes);
     const bytes = new TextEncoder().encode(atCap).byteLength;
-    expect(bytes).toBe(MAX_NOTES_QUERY_BYTES);
+    expect(bytes).toBe(STAGE5_RPC_LIMITS.maxQueryBytes);
     const verdict = parseNotesSearchQuery(atCap);
     expect(verdict.kind).toBe("query");
   });
 
-  it("rejects a UTF-8 query whose byte length exceeds MAX_NOTES_QUERY_BYTES categorically", () => {
-    // Each '\u00e9' is two UTF-8 bytes; 3 chars => 6 bytes; padding to exceed.
-    // Two-byte char * (MAX/2 + 1) guarantees byte overflow with character
-    // count still under MAX.
-    const twoByte = "\u00e9".repeat(Math.floor(MAX_NOTES_QUERY_BYTES / 2) + 2);
+  it("rejects a UTF-8 query whose byte length exceeds the daemon's bound categorically", () => {
+    // Each '\u00e9' is two UTF-8 bytes; padding to one over the byte bound
+    // keeps the character count under it.
+    const twoByte = "\u00e9".repeat(Math.floor(STAGE5_RPC_LIMITS.maxQueryBytes / 2) + 2);
     const bytes = new TextEncoder().encode(twoByte).byteLength;
-    expect(bytes).toBeGreaterThan(MAX_NOTES_QUERY_BYTES);
+    expect(bytes).toBeGreaterThan(STAGE5_RPC_LIMITS.maxQueryBytes);
     expect(parseNotesSearchQuery(twoByte).kind).toBe("invalid");
+  });
+
+  it("refuses a query the stdin reader would have accepted", () => {
+    // 4 MiB is inside the stdin cap and outside the daemon's; it must not
+    // reach the socket.
+    expect(parseNotesSearchQuery("z".repeat(4 * 1024 * 1024)).kind).toBe("invalid");
   });
 
   it("exposes MAX_NOTES_QUERY_BYTES as the established 4 MiB upper bound", () => {

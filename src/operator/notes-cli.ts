@@ -1,5 +1,7 @@
 import { TextEncoder } from "node:util";
 
+import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+
 /**
  * NookBridge Stage 9 §13.11 — operator-only `nookctl notes <subcommand>`.
  *
@@ -67,11 +69,16 @@ export const APPROVE_EDIT_FLAG = "--approve-edit" as const;
 const OPAQUE_VALUE_MAX_LENGTH = 128;
 
 /**
- * Bounded maximum UTF-8 byte length for the caller-supplied stdin
+ * Bounded maximum UTF-8 byte length the stdin reader will accept for a
  * search query.  Matches the established 4 MiB upper bound used by
- * `NOTES_UNDO_CONTENT_MAX_BYTES` for body payloads so a search
- * query can never push more data through the operator boundary
- * than the bounded bodies it queries against.
+ * `NOTES_UNDO_CONTENT_MAX_BYTES` for body payloads so a search query can
+ * never push more data through the operator boundary than the bounded
+ * bodies it queries against.
+ *
+ * This is NOT the query contract: `parseNotesSearchQuery` refuses anything
+ * over the daemon's `STAGE5_RPC_LIMITS.maxQueryBytes`, because a query the
+ * daemon rejects takes the connection down with it.  This bound only decides
+ * how much the reader consumes before refusing.
  */
 export const MAX_NOTES_QUERY_BYTES = 4 * 1024 * 1024;
 /** Maximum Markdown body emitted by `notes get`. */
@@ -386,7 +393,7 @@ export interface NotesCommandRuntime {
      * Bounded, validated, caller-supplied search query.  The query
      * arrives through the runner's stdin plumbing (NEVER argv /
      * env / process I/O inside these contract files); the runner
-     * validates the query against `MAX_NOTES_QUERY_BYTES` and
+     * validates the query against the daemon's query bound through
      * `parseNotesSearchQuery` BEFORE invoking the runtime, so a
      * runtime implementation MUST treat `query` as already bounded
      * and never re-echo it through a result.
@@ -457,25 +464,42 @@ export type ParseNotesSearchQueryResult =
   | Readonly<{ kind: "invalid" }>;
 
 /**
- * Parse the caller-supplied stdin search query.
+ * Validate one bounded, single-line search query.
  *
- * The query MUST be a non-empty string whose UTF-8 byte length is
- * `<= MAX_NOTES_QUERY_BYTES`.  Every other shape collapses to
- * `{ kind: "invalid" }` without echoing the underlying value across
- * the formatter boundary.  This parser does NOT touch
- * `process.stdin`, `process.argv`, or `process.env`; it accepts
- * the already-read string the CLI dispatcher hands it.
+ * The bounded stdin read hands over the pipe's bytes verbatim, so a normal
+ * `printf '%s\n' <query> | nookctl notes search --stdin` arrives with a
+ * trailing newline.  That terminator is removed here — exactly one, so an
+ * embedded newline stays a refusal rather than being silently joined.
+ *
+ * Everything the daemon would treat as a protocol fault is refused here,
+ * before a request is built, because the daemon answers such a fault by
+ * closing the connection without a reply, and the client can only report a
+ * silent close as an unavailable service.  The operator saw that as a generic
+ * error for an ordinary piped search.  A query is refused when, after the
+ * terminator is gone, it is empty, contains only whitespace, still contains a
+ * control character, or exceeds the daemon's query bound.
  */
 export function parseNotesSearchQuery(value: unknown): ParseNotesSearchQueryResult {
   if (typeof value !== "string") return { kind: "invalid" };
-  if (value.length === 0) return { kind: "invalid" };
+  const withoutTerminator = value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
+  if (withoutTerminator.length === 0) return { kind: "invalid" };
+  if (withoutTerminator.trim().length === 0) return { kind: "invalid" };
+  // eslint-disable-next-line no-control-regex -- rejecting control characters is the intent here
+  if (/[\u0000-\u001f\u007f]/.test(withoutTerminator)) return { kind: "invalid" };
   try {
-    const bytes = new TextEncoder().encode(value).byteLength;
-    if (bytes > MAX_NOTES_QUERY_BYTES) return { kind: "invalid" };
+    const bytes = new TextEncoder().encode(withoutTerminator).byteLength;
+    // The stdin reader allows far more than the daemon will accept; a query
+    // over the daemon's bound would otherwise build a request the protocol
+    // rejects by destroying the connection, so the bound is enforced here.
+    if (bytes > STAGE5_RPC_LIMITS.maxQueryBytes) return { kind: "invalid" };
   } catch {
     return { kind: "invalid" };
   }
-  return { kind: "query", query: value };
+  return { kind: "query", query: withoutTerminator };
 }
 
 export type NotesCommandRuntimeFactory = () => NotesCommandRuntime | Promise<NotesCommandRuntime>;
@@ -485,7 +509,7 @@ export type RunNotesCommandOptions = Readonly<{
   env: Readonly<Record<string, string | undefined>>;
   /**
    * Caller-supplied stdin search query.  The runner validates this
-   * value via `parseNotesSearchQuery` against `MAX_NOTES_QUERY_BYTES`
+   * value via `parseNotesSearchQuery` (the daemon's query bound)
    * BEFORE invoking the runtime; the contract files do NOT read
    * `process.stdin`.  A missing / wrong-shaped / empty / oversized
    * value collapses to the categorical `invalid-input` result
