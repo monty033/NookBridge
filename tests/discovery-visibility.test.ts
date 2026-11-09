@@ -101,6 +101,134 @@ function bootIndex() {
   return buildNotebookIndex(NOTEBOOKS);
 }
 
+describe("discovery visibility — one named note", () => {
+  // A caller holding a handle names a note directly. The decision must not
+  // depend on the note being present in `listNotes`: the listing is narrower
+  // than what search and `notes.get` serve.
+  it("admits a note in an allowed notebook even when the listing omits it", async () => {
+    const vis = visibility(allowPublic, source({ listNotes: async () => [] }));
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBe(true);
+  });
+
+  it("refuses a note in a denied notebook", async () => {
+    await expect(visibility(allowPublic).isNoteVisible("n-priv")).resolves.toBe(false);
+  });
+
+  it("refuses a locked note", async () => {
+    await expect(visibility(allowPublic).isNoteVisible("n-locked")).resolves.toBe(false);
+  });
+
+  it("refuses a note whose metadata is absent", async () => {
+    const vis = visibility(allowPublic, source({ noteMetadata: async () => undefined }));
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBe(false);
+  });
+
+  it("reports unknown, not hidden, when the note cannot be inspected", async () => {
+    const vis = visibility(
+      allowPublic,
+      source({
+        noteMetadata: async (id) => {
+          if (id === "n-pub") throw new Error("database unavailable");
+          return { title: NOTE_TITLES[id] };
+        },
+      }),
+    );
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBeUndefined();
+  });
+
+  it("reports unknown, not hidden, when there is no hierarchy source", async () => {
+    await expect(
+      visibility(allowPublic, source(), null).isNoteVisible("n-pub"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses a note whose title cannot be read, rather than admitting it past a title deny", async () => {
+    const settings: SettingsFile = {
+      version: 1,
+      upload: "attributed",
+      defaults: { read: false, edit: false, create: false, delete: false },
+      overrides: [
+        { notebooks: ["Public"], read: true },
+        { notes: ["Public/Secret"], read: false },
+      ],
+    };
+    const vis = visibility(
+      settings,
+      source({ noteMetadata: async () => ({ title: undefined, notebookId: MEMBERSHIP["n-pub"] }) }),
+    );
+    // The notebook allows it; the note-level deny cannot match without a
+    // title, so the note must not be admitted on the notebook rule alone.
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBe(false);
+  });
+
+  it("applies a note-title deny on the per-note path", async () => {
+    const settings: SettingsFile = {
+      version: 1,
+      upload: "attributed",
+      defaults: { read: false, edit: false, create: false, delete: false },
+      overrides: [
+        { notebooks: ["Public"], read: true },
+        { notes: ["Public/Secret"], read: false },
+      ],
+    };
+    await expect(visibility(settings).isNoteVisible("n-secret-title")).resolves.toBe(false);
+  });
+
+  it("reports undecided, not hidden, when the lock state cannot be read", async () => {
+    const vis = visibility(
+      allowPublic,
+      source({
+        readNoteLockState: async (id: string) => {
+          if (id === "n-pub") throw new Error("lock probe unavailable");
+          return "unlocked";
+        },
+      }),
+    );
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBeUndefined();
+  });
+
+  it("reports undecided, not hidden, when no lock probe exists", async () => {
+    const src = source();
+    const withoutLock = { ...src, readNoteLockState: undefined } as unknown as typeof src;
+    await expect(
+      visibility(allowPublic, withoutLock).isNoteVisible("n-pub"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reports undecided, not hidden, when the membership probe throws", async () => {
+    const vis = visibility(
+      allowPublic,
+      source({
+        hasNoteInNotebook: async (notebookId: string) => {
+          if (notebookId.startsWith("nb-")) throw new Error("membership probe unavailable");
+          return false;
+        },
+      }),
+    );
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBeUndefined();
+  });
+
+  it("reports undecided, not hidden, when the settings evaluator throws", async () => {
+    const realEvaluator = createSettingsEvaluator(allowPublic, bootIndex());
+    const vis = createDiscoveryVisibility({
+      source: source(),
+      listNotebooksForSettings: async () => NOTEBOOKS,
+      settingsEvaluator: ((action, context) => {
+        if (context.noteTitle === "Shopping") throw new Error("policy evaluator unavailable");
+        return realEvaluator(action, context);
+      }) as ReturnType<typeof createSettingsEvaluator>,
+    });
+    await expect(vis.isNoteVisible("n-pub")).resolves.toBeUndefined();
+    // The listing still excludes it: undecided is not admitted.
+    const hits = await vis.searchHits("a");
+    expect(hits.map((hit) => hit.id)).not.toContain("n-pub");
+  });
+
+  it("treats an empty id as not admissible", async () => {
+    await expect(visibility(allowPublic).isNoteVisible("")).resolves.toBe(false);
+  });
+});
+
 describe("discovery visibility — notes.search / operator search", () => {
   it("keeps an unlocked note in an allowed notebook", async () => {
     const hits = await visibility(allowPublic).searchHits("a");

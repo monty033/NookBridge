@@ -101,6 +101,18 @@ export interface DiscoveryVisibility {
   readonly filterNotebooks: <T extends Readonly<{ id: string }>>(
     notebooks: ReadonlyArray<T>,
   ) => Promise<ReadonlyArray<T>>;
+  /**
+   * Decide one note the caller can already name.
+   *
+   * `listNotes` is the projection's listing, and it does not contain every
+   * note the read path serves: a note reachable by `search` and `notes.get`
+   * can be missing from it. A caller holding a handle must be able to ask
+   * about that note directly, so this applies the same rule the listing
+   * applies, to one id. `undefined` means the decision could not be made —
+   * no hierarchy snapshot, or membership unknown — and must not be read as
+   * "hidden".
+   */
+  readonly isNoteVisible: (noteId: string) => Promise<boolean | undefined>;
 }
 
 /** Per-request note id → every notebook id whose (recursive) listing contained it. */
@@ -130,6 +142,10 @@ export const FAIL_CLOSED_DISCOVERY_VISIBILITY: DiscoveryVisibility = Object.free
   searchHits: async () => Object.freeze([]),
   listNotes: async () => Object.freeze([]),
   filterNotebooks: async () => Object.freeze([]),
+  // No visibility layer means no decision can be made. The census is never
+  // built on this object (it has no `listNotesIfKnown`), and "undecided" is
+  // the truthful answer if it ever is.
+  isNoteVisible: async () => undefined,
 });
 
 export const DISCOVERY_MAX_HIERARCHY_RECORDS = 1_000;
@@ -280,33 +296,91 @@ export function createDiscoveryVisibility(
     title: string,
     claimants: ReadonlyArray<string>,
     snapshot: HierarchySnapshot,
-  ): Promise<boolean> => {
+  ): Promise<boolean | undefined> => {
+    // `false` is "not admitted"; `undefined` is "could not be decided". The
+    // listing admits only `true`, so its behaviour is unchanged, while a caller
+    // that names the note can tell a hidden note from an unreadable decision.
+    if (source.readNoteLockState === undefined) return undefined;
+    let lockState: "locked" | "unlocked";
     try {
-      // Fail closed: a missing probe, a throw, or any value other than
-      // "unlocked" excludes the note.
-      if (source.readNoteLockState === undefined) return false;
-      if ((await source.readNoteLockState(noteId)) !== "unlocked") return false;
-      const notebookPath = await governingPath(noteId, claimants, snapshot);
-      if (notebookPath === undefined) return false;
+      lockState = await source.readNoteLockState(noteId);
+    } catch {
+      return undefined;
+    }
+    if (lockState !== "unlocked") return false;
+    let notebookPath: string | undefined;
+    try {
+      notebookPath = await governingPath(noteId, claimants, snapshot);
+    } catch {
+      return undefined;
+    }
+    if (notebookPath === undefined) return undefined;
+    try {
       return settingsEvaluator("read", { notebookPath, noteTitle: title }).allowed === true;
     } catch {
-      return false;
+      return undefined;
     }
   };
 
   /** Root-level decision: only for notes the projection confirms belong to no notebook. */
-  const decideRootNote = async (noteId: string, title: string): Promise<boolean> => {
+  const decideRootNote = async (noteId: string, title: string): Promise<boolean | undefined> => {
+    let metadata: unknown;
     try {
-      const metadata = await source.noteMetadata(noteId);
-      if (ownField(metadata, "notebookAbsenceConfirmed") !== true) return false;
-      // A note that also names a notebook contradicts the confirmation.
-      if (ownField(metadata, "notebookId") !== undefined) return false;
-      if (source.readNoteLockState === undefined) return false;
-      if ((await source.readNoteLockState(noteId)) !== "unlocked") return false;
+      metadata = await source.noteMetadata(noteId);
+    } catch {
+      return undefined;
+    }
+    if (ownField(metadata, "notebookAbsenceConfirmed") !== true) return false;
+    // A note that also names a notebook contradicts the confirmation.
+    if (ownField(metadata, "notebookId") !== undefined) return false;
+    if (source.readNoteLockState === undefined) return undefined;
+    let lockState: "locked" | "unlocked";
+    try {
+      lockState = await source.readNoteLockState(noteId);
+    } catch {
+      return undefined;
+    }
+    if (lockState !== "unlocked") return false;
+    try {
       return settingsEvaluator("read", { noteTitle: title }).allowed === true;
     } catch {
-      return false;
+      return undefined;
     }
+  };
+
+  /**
+   * One note's visibility, decided exactly as `filterNoteList` decides it.
+   *
+   * The listing carries the title the settings evaluator receives, so the
+   * metadata is read here for that reason only; a note whose metadata cannot
+   * be read is not admitted.
+   */
+  const isNoteVisible = async (noteId: string): Promise<boolean | undefined> => {
+    if (typeof noteId !== "string" || noteId.length === 0) return false;
+    const snapshot = await loadSnapshot();
+    if (snapshot === undefined) return undefined;
+    const membership = await buildMembership(snapshot);
+    if (membership === undefined) return undefined;
+    let metadata: unknown;
+    try {
+      metadata = await source.noteMetadata(noteId);
+    } catch {
+      // Unlike the listing — where a failing note is simply left out — a
+      // per-note read failure says nothing about the note itself, so this is
+      // reported as undecided rather than as hidden.
+      return undefined;
+    }
+    const record = typeof metadata === "object" && metadata !== null ? metadata : undefined;
+    if (record === undefined) return false;
+    const title = ownField(record, "title");
+    // Settings can deny a note by `<notebookPath>/<title>`. A missing title
+    // would silently fail to match a deny rule and admit the note, so a note
+    // that cannot be named cannot be admitted.
+    if (typeof title !== "string") return false;
+    const claimants = membership.get(noteId);
+    return claimants === undefined
+      ? await decideRootNote(noteId, title)
+      : await decideNote(noteId, title, claimants, snapshot);
   };
 
   const filterNoteList = async (
@@ -321,7 +395,7 @@ export function createDiscoveryVisibility(
         claimants === undefined
           ? await decideRootNote(note.id, note.title)
           : await decideNote(note.id, note.title, claimants, snapshot);
-      if (ok) visible.push(Object.freeze({ id: note.id, title: note.title }));
+      if (ok === true) visible.push(Object.freeze({ id: note.id, title: note.title }));
     }
     return visible;
   };
@@ -377,5 +451,5 @@ export function createDiscoveryVisibility(
     return Object.freeze(notebooks.filter((notebook) => notebookVisible(notebook.id, snapshot)));
   };
 
-  return Object.freeze({ searchHits, listNotes, listNotesIfKnown, filterNotebooks });
+  return Object.freeze({ searchHits, listNotes, listNotesIfKnown, filterNotebooks, isNoteVisible });
 }

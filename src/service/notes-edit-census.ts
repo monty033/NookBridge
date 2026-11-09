@@ -6,11 +6,15 @@
  * closed internal reason. It never returns a body, a title, a raw note id or a
  * snippet. A scoped call echoes only the opaque handle the caller supplied.
  *
- * Visibility comes first. The census counts only notes the discovery visibility
- * filter admits (the filter `notes.browse` lists from), and it decides that
- * before any snapshot is read. A note browse hides (locked, or in a notebook
- * whose settings deny `read`) is never read and is counted in no bucket, so
- * the aggregate cannot disclose that it exists.
+ * Visibility comes first, and it is decided before any snapshot is read. A note
+ * in no bucket is never read. A corpus call counts the notes the discovery
+ * visibility listing carries; a scoped call decides the named note itself, with
+ * the same rule, because the listing is narrower than what the read path
+ * serves — `notes.search-operator` and `notes.get` reach notes the listing
+ * omits, and a scoped census that consulted only the listing answered `missing`
+ * for a note the caller could open. The listing is bounded upstream at 256
+ * notes (`MAX_LIST_NOTES`), so a corpus call covers at most the listed notes;
+ * that ceiling is upstream and is not removed here.
  *
  * Bounded per run: a corpus call counts at most `MAX_EDIT_CENSUS_NOTES_PER_RUN`
  * visible notes, in listing order, and reports the cap, how many visible notes
@@ -19,12 +23,15 @@
  * note is decoded synchronously, so the cap is what keeps a large corpus from
  * stalling live requests on the same loop.
  *
- * Unknown is not empty: when the visibility filter cannot be established the
- * census throws `NotesEditCensusUnavailableError` (an unavailable outcome on
- * the wire) instead of reporting a corpus of zero.
+ * Unknown is not empty, and undecided is not hidden: when the visibility
+ * listing cannot be established, or a scoped call cannot decide the named note
+ * (no hierarchy snapshot, or the note's metadata cannot be read), the census
+ * throws `NotesEditCensusUnavailableError` (an unavailable outcome on the wire)
+ * instead of reporting a zero or claiming the note does not exist.
  *
  * Read-only by construction:
- *   - the only source methods are `listVisibleNotes` and `readNoteSnapshot`;
+ *   - the source methods are `listVisibleNotes`, the optional `isNoteVisible`
+ *     (visibility only) and `readNoteSnapshot`;
  *   - the classifier is the same pure function `notes.get` uses;
  *   - no write adapter, operation store, pending marker or mutation is imported.
  */
@@ -54,6 +61,15 @@ export interface NotesEditCensusSource {
    * list. `undefined` means the filter could not be established.
    */
   readonly listVisibleNotes: () => Promise<ReadonlyArray<Readonly<{ id: string }>> | undefined>;
+  /**
+   * Visibility of ONE named note.
+   *
+   * The listing is not the whole corpus: a note `search` and `notes.get`
+   * serve can be absent from it, and a scoped census that consulted only the
+   * listing reported such a note as missing. `undefined` means unknown, which
+   * is reported as unavailable rather than as a missing note.
+   */
+  readonly isNoteVisible?: (id: string) => Promise<boolean | undefined>;
   readonly readNoteSnapshot: (id: string) => Promise<unknown | undefined>;
 }
 
@@ -190,6 +206,7 @@ function result(
 export function createNotesEditCensus(source: NotesEditCensusSource): NotesEditCensus {
   const readSnapshot = source.readNoteSnapshot;
   const listVisibleNotes = source.listVisibleNotes;
+  const isNoteVisible = source.isNoteVisible;
 
   /**
    * The visible notes, as `[id, listed record]`; malformed entries are skipped.
@@ -222,9 +239,17 @@ export function createNotesEditCensus(source: NotesEditCensusSource): NotesEditC
     },
     note: async (noteId: string, handle: string): Promise<RpcNotesEditCensusResult | undefined> => {
       if (bufferByteLength(handle, "utf8") === 0) return undefined;
-      // A handle outlives the browse that minted it; a note hidden since then is
+      // A handle outlives the minting call; a note hidden since then is
       // indistinguishable from an unknown handle, and its snapshot is not read.
-      if (!(await visibleNotes()).some(([visibleId]) => visibleId === noteId)) return undefined;
+      if (isNoteVisible === undefined) {
+        if (!(await visibleNotes()).some(([visibleId]) => visibleId === noteId)) return undefined;
+      } else {
+        const visible = await isNoteVisible(noteId);
+        // Unknown visibility is not a hidden note: reporting "missing" would
+        // assert something the census could not establish.
+        if (visible === undefined) throw new NotesEditCensusUnavailableError();
+        if (visible !== true) return undefined;
+      }
       const snapshot = await readSnapshot(noteId);
       const snapshotRecord = ownRecord(snapshot);
       const metadata =

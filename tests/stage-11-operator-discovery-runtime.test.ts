@@ -48,6 +48,8 @@ function visibilityDouble(
     filterNotebooks: async <T extends Readonly<{ id: string }>>(
       notebooks: ReadonlyArray<T>,
     ): Promise<ReadonlyArray<T>> => Object.freeze([...notebooks]),
+    // This double admits exactly what it lists.
+    isNoteVisible: async (id: string) => (await options.listNotes()).some((note) => note.id === id),
   };
 }
 
@@ -107,6 +109,68 @@ async function viewFixture(reader: (id: string) => Promise<unknown>) {
   if (handle === undefined) throw new Error("missing test handle");
   return { runtime, handle };
 }
+
+describe("daemon operator discovery runtime — scoped census over a search handle", () => {
+  /**
+   * Live defect: `notes.search-operator` returned a handle, `notes.get` served
+   * the note, and `notes.edit-census --handle` answered "missing", because the
+   * census consulted only the listing and the listing does not carry every
+   * note the read path serves.
+   *
+   * The stub below reproduces exactly that split: search finds the note, the
+   * listing leaves it out. The runtime must measure it, which it can only do by
+   * asking the visibility layer about the named note.
+   */
+  function splitCorpusRuntime() {
+    const readOnlyStub = {
+      search: async () => [{ id: "n-unlisted", title: "Unlisted", source: "note" }],
+      listNotes: async () => [],
+      noteMetadata: async (id: string) => ({ id, title: "Unlisted", revision: REVISION }),
+      readOperatorNoteContent: async () => ({
+        type: "tiptap",
+        data: JSON.stringify({ type: "doc", content: [{ type: "paragraph" }] }),
+      }),
+    };
+    const raw = withSnapshot(readOnlyStub) as unknown as Service["readOnly"];
+    const runtime = createOperatorDiscoveryRuntime({ readOnly: raw } as Service, undefined, {
+      listNotes: () => raw.listNotes(),
+      listNotesIfKnown: () => raw.listNotes(),
+      searchHits: (query: string) => raw.search(query),
+      filterNotebooks: async <T extends Readonly<{ id: string }>>(
+        notebooks: ReadonlyArray<T>,
+      ): Promise<ReadonlyArray<T>> => Object.freeze([...notebooks]),
+      isNoteVisible: async () => true,
+    });
+    return runtime;
+  }
+
+  it("measures a note the listing omits, through a handle minted by search", async () => {
+    const runtime = splitCorpusRuntime();
+
+    const browse = await runtime.browse({ limit: 10 }, PEER_A);
+    expect(browse.notes).toHaveLength(0);
+
+    const search = await runtime.search({ query: "Unlisted" }, PEER_A);
+    expect(search.notes).toHaveLength(1);
+    const handle = search.notes[0]?.handle;
+    if (handle === undefined) throw new Error("search did not mint a handle");
+
+    const editCensus = runtime.editCensus;
+    if (editCensus === undefined) throw new Error("the runtime exposes no census");
+    const measured = await editCensus({ id: handle }, PEER_A);
+    expect(measured.scope).toBe("note");
+    expect(measured.note).toBe(handle);
+    expect(measured.total).toBe(1);
+  });
+
+  it("still reports an unknown handle as missing", async () => {
+    const editCensus = splitCorpusRuntime().editCensus;
+    if (editCensus === undefined) throw new Error("the runtime exposes no census");
+    await expect(editCensus({ id: "h_unknown" }, PEER_A)).rejects.toMatchObject({
+      code: "not_found",
+    });
+  });
+});
 
 describe("daemon operator discovery runtime", () => {
   it("expires opaque handles after their configured TTL", () => {
