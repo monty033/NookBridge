@@ -37,6 +37,7 @@ import {
 import {
   createNotesEditCensus,
   MAX_EDIT_CENSUS_NOTES_PER_RUN,
+  NotesEditCensusUnavailableError,
 } from "../src/service/notes-edit-census.js";
 import type * as NoteDocumentMarkdownModule from "../src/core/note-document-markdown.js";
 import type * as NoteDocumentNativeModule from "../src/core/note-document-native.js";
@@ -531,6 +532,65 @@ describe("EA-2 — the census is read-only", () => {
     expect(result.projection.unavailable).toBe(1);
     expect(result.reasons).toEqual({ hostile: 0, uninterpretable: 1, limit: 0, unclassified: 0 });
     expect(() => serializeRpcResponse({ id: "r", ok: true, result } as never)).not.toThrow();
+  });
+});
+
+describe("EA-2 — a scoped census decides visibility for the named note", () => {
+  // Live finding: a note `search` and `notes.get` both served was reported
+  // `missing` by the scoped census, because the census only looked for it in
+  // the listing, and the listing is not the whole corpus.
+  const HANDLE = `h_${"a".repeat(24)}`;
+
+  it("measures a note the caller can name even when the listing omits it", async () => {
+    const census = createNotesEditCensus({
+      listVisibleNotes: async () => [],
+      isNoteVisible: async () => true,
+      readNoteSnapshot: async (id) => ({
+        metadata: { id, locked: false, revision: `rev_${"0".repeat(32)}` },
+        content: { type: "tiptap" as const, data: STRICT },
+      }),
+    });
+    const result = await census.note("n-unlisted", HANDLE);
+    expect(result?.scope).toBe("note");
+    expect(result?.note).toBe(HANDLE);
+    expect(result?.total).toBe(1);
+    expect(result?.projection.strict).toBe(1);
+  });
+
+  it("reports unknown visibility as unavailable rather than as a missing note", async () => {
+    const census = createNotesEditCensus({
+      listVisibleNotes: async () => [],
+      isNoteVisible: async () => undefined,
+      readNoteSnapshot: async () => {
+        throw new Error("a snapshot must not be read for an undecided note");
+      },
+    });
+    await expect(census.note("n-unknown", HANDLE)).rejects.toBeInstanceOf(
+      NotesEditCensusUnavailableError,
+    );
+  });
+
+  it("still reports a hidden note as missing, without reading it", async () => {
+    const census = createNotesEditCensus({
+      listVisibleNotes: async () => [{ id: "n-hidden" }],
+      isNoteVisible: async () => false,
+      readNoteSnapshot: async () => {
+        throw new Error("a snapshot must not be read for a hidden note");
+      },
+    });
+    await expect(census.note("n-hidden", HANDLE)).resolves.toBeUndefined();
+  });
+
+  it("falls back to the listing when the source has no per-note check", async () => {
+    const census = createNotesEditCensus({
+      listVisibleNotes: async () => [{ id: "n-listed" }],
+      readNoteSnapshot: async (id) => ({
+        metadata: { id, locked: false, revision: `rev_${"0".repeat(32)}` },
+        content: { type: "tiptap" as const, data: STRICT },
+      }),
+    });
+    await expect(census.note("n-absent", HANDLE)).resolves.toBeUndefined();
+    await expect(census.note("n-listed", HANDLE)).resolves.toMatchObject({ total: 1 });
   });
 });
 

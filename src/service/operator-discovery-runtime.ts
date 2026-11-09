@@ -113,9 +113,10 @@ export function createOperatorDiscoveryRuntime(
 ): OperatorDiscoveryRuntime {
   const cursors = new Map<string, CursorState>();
   const readOnly = service.readOnly;
-  // The census enumerates through the same visibility filter as `browse`, so
-  // it can count only notes browse would list. It needs the variant that tells
-  // an unloadable filter from an empty one; without it there is no census.
+  // A corpus census enumerates the same visibility listing `browse` reads, so
+  // it counts only listed notes; a scoped census asks the visibility filter
+  // about the named note, because that listing is not the whole corpus. Both
+  // need the variant that tells an unloadable filter from an empty one.
   const listNotesIfKnown = visibility.listNotesIfKnown;
   const census =
     readOnly !== undefined &&
@@ -123,6 +124,7 @@ export function createOperatorDiscoveryRuntime(
     listNotesIfKnown !== undefined
       ? createNotesEditCensus({
           listVisibleNotes: () => listNotesIfKnown(),
+          isNoteVisible: (id) => visibility.isNoteVisible(id),
           readNoteSnapshot: (id) => readOnly.readNoteSnapshot!(id),
         })
       : undefined;

@@ -906,6 +906,7 @@ describe("operator reads use the snapshot", () => {
         listNotes: async () => [{ id: NOTE_ID, title: "Memo" }],
         searchHits: async () => [],
         filterNotebooks: async (notebooks) => notebooks,
+        isNoteVisible: async (id: string) => id === NOTE_ID,
       },
     );
     const page = await runtime.browse({ limit: 1 }, PEER);
@@ -929,6 +930,7 @@ describe("operator reads use the snapshot", () => {
         listNotes: async () => [{ id: NOTE_ID, title: "Memo" }],
         searchHits: async () => [],
         filterNotebooks: async (notebooks) => notebooks,
+        isNoteVisible: async (id: string) => id === NOTE_ID,
       },
     );
     const page = await runtime.browse({ limit: 1 }, PEER);
@@ -947,6 +949,7 @@ describe("operator reads use the snapshot", () => {
         listNotes: async () => [{ id: NOTE_ID, title: "Memo" }],
         searchHits: async () => [],
         filterNotebooks: async (notebooks) => notebooks,
+        isNoteVisible: async (id: string) => id === NOTE_ID,
       },
     );
     const page = await runtime.browse({ limit: 1 }, PEER);

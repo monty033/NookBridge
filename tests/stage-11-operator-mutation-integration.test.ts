@@ -29,6 +29,9 @@ function passThroughVisibility(readOnly: ServiceRuntime["readOnly"]): DiscoveryV
     filterNotebooks: async <T extends Readonly<{ id: string }>>(
       notebooks: ReadonlyArray<T>,
     ): Promise<ReadonlyArray<T>> => Object.freeze([...notebooks]),
+    // This double admits exactly what it lists.
+    isNoteVisible: async (id: string) =>
+      (await readOnly.listNotes()).some((note) => note.id === id),
   };
 }
 
