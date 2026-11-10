@@ -629,7 +629,7 @@ describe("EA-2 — the census is capped per run", () => {
 });
 
 describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
-  it("a Markdown failure after a clean decode is a serializer fallback with no reason", async () => {
+  it("a Markdown failure after a clean decode is a serializer fallback, named as unclassified", async () => {
     const MARKDOWN = "../src/core/note-document-markdown.js";
     vi.resetModules();
     vi.doMock(MARKDOWN, async (importOriginal) => ({
@@ -652,9 +652,13 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
       const result = await census.corpus();
       expect(result.projection.serializerFallback).toBe(2);
       expect(result.reasons).toEqual({ hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 });
-      // `n-preserved` decoded with one preserved block, then fell back: the
-      // preserved counts cover only the preserving outcomes, so it adds none.
-      expect(result.preservedBlocks).toBe(0);
+      // `n-preserved` decoded with one preserved block, then fell back. The
+      // fallback is counted with its preserved totals, so the census can tell
+      // this note apart from one with no preserved content at all.
+      expect(result.preservedBlocks).toBe(1);
+      // The throw was not the serializer's own shape, so it is unclassified.
+      expect(result.serializationRefusals).toEqual({ unclassified: 2 });
+      expect(result.serializationFallbackWithPreserved).toBe(1);
       expect(result.preservedTaskLists).toBe(0);
     } finally {
       vi.doUnmock(MARKDOWN);
@@ -695,6 +699,82 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
     }
   });
 
+  it("the wire refuses a serializer-refusal count that is not a closed code", () => {
+    const base = {
+      kind: "edit-census",
+      scope: "corpus",
+      total: 1,
+      reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
+      editRefusals: 0,
+      serializationRefusals: {},
+      serializationFallbackWithPreserved: 0,
+      cap: MAX_EDIT_CENSUS_NOTES_PER_RUN,
+      skipped: 0,
+      truncated: false,
+      projection: {
+        strict: 0,
+        strictWithPreservedBlocks: 0,
+        opaqueHeadingFallback: 0,
+        serializerFallback: 1,
+        locked: 0,
+        oversize: 0,
+        unavailable: 0,
+      },
+      preservedBlocks: 0,
+      preservedTaskLists: 0,
+    };
+    const envelope = (result: object) => ({ id: "r", ok: true, result }) as never;
+    expect(() => serializeRpcResponse(envelope(base))).not.toThrow();
+    // A code outside the closed vocabulary is refused, not named.
+    expect(() =>
+      serializeRpcResponse(envelope({ ...base, serializationRefusals: { not_a_real_code: 1 } })),
+    ).toThrow();
+    // A non-count value is refused.
+    expect(() =>
+      serializeRpcResponse(envelope({ ...base, serializationRefusals: { malformed_link: "x" } })),
+    ).toThrow();
+    // More refusals than serializer fallbacks is refused.
+    expect(() =>
+      serializeRpcResponse(envelope({ ...base, serializationRefusals: { malformed_link: 2 } })),
+    ).toThrow();
+    // More "with preserved" notes than refusals is refused. The preserved
+    // count is raised so that only this rule can fire: the preserved-count
+    // rule below has its own case.
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationRefusals: { malformed_link: 1 },
+          serializationFallbackWithPreserved: 2,
+          preservedBlocks: 2,
+        }),
+      ),
+    ).toThrow();
+    // Fewer preserved blocks than preserving notes is refused: every note
+    // counted as preserving holds at least one preserved block.
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationRefusals: { malformed_link: 1 },
+          serializationFallbackWithPreserved: 1,
+          preservedBlocks: 0,
+        }),
+      ),
+    ).toThrow();
+    // A refusal that is counted, with a preserved note behind it, is accepted.
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationRefusals: { malformed_link: 1 },
+          serializationFallbackWithPreserved: 1,
+          preservedBlocks: 1,
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it("the wire refuses more refusal reasons than refused projections", () => {
     const base = {
       kind: "edit-census",
@@ -702,6 +782,8 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
       total: 2,
       reasons: { hostile: 1, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
+      serializationRefusals: {},
+      serializationFallbackWithPreserved: 0,
       cap: MAX_EDIT_CENSUS_NOTES_PER_RUN,
       skipped: 0,
       truncated: false,

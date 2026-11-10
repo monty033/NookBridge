@@ -1,5 +1,6 @@
 import { TextEncoder } from "node:util";
 
+import { SERIALIZATION_REFUSAL_CODES as CORE_SERIALIZATION_REFUSAL_CODES } from "../core/note-document.js";
 import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
 
 /**
@@ -304,6 +305,13 @@ export type NotesEditCensusCounts = Readonly<{
     readonly unclassified: number;
   }>;
   readonly editRefusals: number;
+  /**
+   * Serializer refusals by the validator's closed code. Counts only: no
+   * message, position or content ever reaches this shape, and an unknown key
+   * makes the whole census invalid.
+   */
+  readonly serializationRefusals: Readonly<Record<SerializationRefusalCode, number>>;
+  readonly serializationFallbackWithPreserved: number;
   readonly projection: Readonly<{
     readonly strict: number;
     readonly strictWithPreservedBlocks: number;
@@ -680,6 +688,16 @@ export function formatNotesResult(
           `class-limit: ${census.classes.limit}`,
           `class-unclassified: ${census.classes.unclassified}`,
           `edit-refusals: ${census.editRefusals}`,
+          `serializer-refusals: ${Object.values(census.serializationRefusals).reduce(
+            (sum, count) => sum + count,
+            0,
+          )}`,
+          // One line per code, in the same `key: count` shape as every other
+          // census line, so a reader can see which class refused the note.
+          ...Object.entries(census.serializationRefusals)
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+            .map(([code, count]) => `serializer-refusal-${code.replace(/_/g, "-")}: ${count}`),
+          `serializer-fallback-with-preserved: ${census.serializationFallbackWithPreserved}`,
           `preserved-blocks: ${census.preservedBlocks}`,
           `preserved-task-lists: ${census.preservedTaskLists}`,
           `cap: ${census.cap}`,
@@ -1338,6 +1356,13 @@ export function isBoundedOpaqueValue(value: string): boolean {
 }
 
 const EDIT_CENSUS_CLASS_KEYS = ["hostile", "uninterpretable", "limit", "unclassified"] as const;
+/**
+ * The closed serializer-refusal vocabulary, taken from the core list so the
+ * daemon and this client cannot drift apart. A census carrying any other key
+ * is rejected rather than printed.
+ */
+const SERIALIZATION_REFUSAL_CODES = CORE_SERIALIZATION_REFUSAL_CODES;
+type SerializationRefusalCode = (typeof SERIALIZATION_REFUSAL_CODES)[number];
 const EDIT_CENSUS_PROJECTION_KEYS = [
   "strict",
   "strictWithPreservedBlocks",
@@ -1352,6 +1377,8 @@ const EDIT_CENSUS_KEYS = [
   "total",
   "classes",
   "editRefusals",
+  "serializationRefusals",
+  "serializationFallbackWithPreserved",
   "projection",
   "preservedBlocks",
   "preservedTaskLists",
@@ -1379,7 +1406,12 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
     if (record === undefined) return undefined;
     const classes = closedRecord(record.classes, EDIT_CENSUS_CLASS_KEYS);
     const projection = closedRecord(record.projection, EDIT_CENSUS_PROJECTION_KEYS);
+    const serializationRefusals = closedSubsetRecord(
+      record.serializationRefusals,
+      SERIALIZATION_REFUSAL_CODES,
+    );
     if (classes === undefined || projection === undefined) return undefined;
+    if (serializationRefusals === undefined) return undefined;
     if (record.scope !== "corpus" && record.scope !== "note") return undefined;
     if (
       record.scope === "note" &&
@@ -1389,12 +1421,14 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
     const counts = [
       record.total,
       record.editRefusals,
+      record.serializationFallbackWithPreserved,
       record.preservedBlocks,
       record.preservedTaskLists,
       record.cap,
       record.skipped,
       ...Object.values(classes),
       ...Object.values(projection),
+      ...Object.values(serializationRefusals),
     ];
     if (!counts.every(isCount)) return undefined;
 
@@ -1409,6 +1443,10 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
         unclassified: classes.unclassified as number,
       }),
       editRefusals: record.editRefusals as number,
+      serializationRefusals: Object.freeze(serializationRefusals) as Readonly<
+        Record<SerializationRefusalCode, number>
+      >,
+      serializationFallbackWithPreserved: record.serializationFallbackWithPreserved as number,
       projection: Object.freeze({
         strict: projection.strict as number,
         strictWithPreservedBlocks: projection.strictWithPreservedBlocks as number,
@@ -1427,6 +1465,10 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
 
     const p = census.projection;
     const c = census.classes;
+    const serializationRefusalSum = Object.values(census.serializationRefusals).reduce(
+      (sum, count) => sum + count,
+      0,
+    );
     const projectionSum =
       p.strict +
       p.strictWithPreservedBlocks +
@@ -1444,6 +1486,13 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
       (census.skipped > 0 && census.total !== census.cap) ||
       census.truncated !== census.skipped > 0 ||
       refusals > p.serializerFallback + p.oversize + p.unavailable ||
+      // Serializer refusals are a subset of the serializer fallbacks, and the
+      // "with preserved" count is a subset of those.
+      serializationRefusalSum > p.serializerFallback ||
+      census.serializationFallbackWithPreserved > serializationRefusalSum ||
+      // Every note counted as preserving has at least one preserved block.
+      census.preservedBlocks <
+        p.strictWithPreservedBlocks + census.serializationFallbackWithPreserved ||
       census.preservedTaskLists > census.preservedBlocks
     )
       return undefined;
@@ -1455,6 +1504,28 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * A record whose keys are a subset of a closed vocabulary and whose values are
+ * all counts. Unlike {@link closedRecord} it tolerates absent keys, because the
+ * census reports only the codes that actually occurred.
+ */
+function closedSubsetRecord(
+  value: unknown,
+  allowed: readonly string[],
+): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const own = Reflect.ownKeys(value);
+  const copy: Record<string, number> = {};
+  for (const key of own) {
+    if (typeof key !== "string" || !allowed.includes(key)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    if (!isCount(descriptor.value)) return undefined;
+    copy[key] = descriptor.value;
+  }
+  return copy;
 }
 
 /**

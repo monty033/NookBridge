@@ -29,6 +29,7 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 
+import { SERIALIZATION_REFUSAL_CODES } from "../core/note-document.js";
 import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
@@ -793,6 +794,24 @@ export interface RpcNotesEditCensusResult {
    * decodes, so this is zero unless a decode ever reports one.
    */
   readonly editRefusals: number;
+  /**
+   * Notes that decoded and then were refused by the strict Markdown serializer,
+   * partitioned by the validator's closed error code (`invalid_shape`,
+   * `malformed_link`, `unsupported_mark`, …) or `unclassified` for a throw that
+   * was neither. Counts only; a code is never accompanied by a message, a
+   * position or any content.
+   *
+   * Kept beside `reasons` rather than inside it: that field partitions *decode*
+   * refusals and is already published, so a second stage is not folded into it.
+   * The sum is at most `projection.serializerFallback`.
+   */
+  readonly serializationRefusals: Readonly<Record<string, number>>;
+  /**
+   * Of those, the notes whose decoded document carried at least one preserved
+   * block before the serializer refused it. Separates "preservation made this
+   * uneditable" from "ordinary content cannot be serialised".
+   */
+  readonly serializationFallbackWithPreserved: number;
   /** Partitions `total` by `notes.get` projection outcome: one count per note. */
   readonly projection: Readonly<{
     readonly strict: number;
@@ -805,10 +824,11 @@ export interface RpcNotesEditCensusResult {
     readonly unavailable: number;
   }>;
   /**
-   * Preserved (opaque) blocks, and of those list regions, in exactly the notes
-   * counted under `projection.strictWithPreservedBlocks`. A note that decoded
-   * and then fell back to the serializer, or went over budget, contributes
-   * none; `projection.opaqueHeadingFallback` is always 0 from EA-4.
+   * Preserved (opaque) blocks, and of those list regions, in the notes counted
+   * under `projection.strictWithPreservedBlocks` and in the serializer
+   * fallbacks counted under `serializationFallbackWithPreserved`. A note that
+   * could not be decoded, or went over budget, contributes none;
+   * `projection.opaqueHeadingFallback` is always 0 from EA-4.
    */
   readonly preservedBlocks: number;
   readonly preservedTaskLists: number;
@@ -2727,6 +2747,8 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         "total",
         "reasons",
         "editRefusals",
+        "serializationRefusals",
+        "serializationFallbackWithPreserved",
         "projection",
         "preservedBlocks",
         "preservedTaskLists",
@@ -2843,6 +2865,45 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       )
         throw rpcProtocolError("rpc protocol: edit-census reasons exceed the refused projections");
 
+      // The serializer refusals: a closed code vocabulary, counts only.
+      const serializationRefusals = resultRecord.serializationRefusals;
+      if (
+        serializationRefusals === null ||
+        typeof serializationRefusals !== "object" ||
+        arrayIsArray(serializationRefusals)
+      )
+        throw rpcProtocolError("rpc protocol: edit-census serialization refusals are invalid");
+      const serializationRecord = serializationRefusals as Record<string, JsonValue>;
+      const serializationKeys = Reflect.ownKeys(serializationRecord);
+      if (serializationKeys.length > SERIALIZATION_REFUSAL_CODES.length)
+        throw rpcProtocolError("rpc protocol: edit-census serialization refusals are invalid");
+      const serializationCounts: Record<string, number> = {};
+      let serializationTotal = 0;
+      for (const key of serializationKeys) {
+        if (
+          typeof key !== "string" ||
+          !(SERIALIZATION_REFUSAL_CODES as readonly string[]).includes(key)
+        )
+          throw rpcProtocolError("rpc protocol: edit-census serialization refusals are invalid");
+        const value = serializationRecord[key];
+        if (!count(value))
+          throw rpcProtocolError(
+            "rpc protocol: edit-census serialization refusal count is invalid",
+          );
+        serializationCounts[key] = value;
+        serializationTotal += value;
+      }
+      const serializationFallbackWithPreserved = resultRecord.serializationFallbackWithPreserved;
+      if (!count(serializationFallbackWithPreserved))
+        throw rpcProtocolError("rpc protocol: edit-census serialization fallback count is invalid");
+      if (
+        serializationTotal > (projectionRecord.serializerFallback as number) ||
+        serializationFallbackWithPreserved > serializationTotal
+      )
+        throw rpcProtocolError(
+          "rpc protocol: edit-census serialization refusals exceed the fallbacks",
+        );
+
       const preservedBlocks = resultRecord.preservedBlocks;
       const preservedTaskLists = resultRecord.preservedTaskLists;
       if (
@@ -2851,6 +2912,12 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         preservedTaskLists > preservedBlocks
       )
         throw rpcProtocolError("rpc protocol: edit-census preserved counts are invalid");
+      // Every note counted as preserving holds at least one preserved block.
+      if (
+        (preservedBlocks as number) <
+        (projectionRecord.strictWithPreservedBlocks as number) + serializationFallbackWithPreserved
+      )
+        throw rpcProtocolError("rpc protocol: edit-census preserved counts are inconsistent");
 
       const resultPayload = objectCreate(null) as {
         kind: "edit-census";
@@ -2859,6 +2926,8 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         total: number;
         reasons: { hostile: number; uninterpretable: number; limit: number; unclassified: number };
         editRefusals: number;
+        serializationRefusals: Record<string, number>;
+        serializationFallbackWithPreserved: number;
         projection: Record<string, number>;
         preservedBlocks: number;
         preservedTaskLists: number;
@@ -2877,6 +2946,8 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         unclassified: unclassifiedCount,
       };
       resultPayload.editRefusals = editRefusals;
+      resultPayload.serializationRefusals = serializationCounts;
+      resultPayload.serializationFallbackWithPreserved = serializationFallbackWithPreserved;
       resultPayload.projection = {
         strict: projectionRecord.strict as number,
         strictWithPreservedBlocks: projectionRecord.strictWithPreservedBlocks as number,
