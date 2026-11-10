@@ -367,7 +367,7 @@ describe("daemon operator write runtime", () => {
     const f = await fixture({ native: image });
     const preimage = await runtime(f).editPreimage({ id: HANDLE }, PEER);
     const match = preimage.markdown.match(
-      /^:::nookbridge opaque img\nref:1:native-html:([A-Za-z0-9_-]+)\n:::$/m,
+      /^:::nookbridge opaque img(?: text="[^"]*")?\nref:1:native-html:([A-Za-z0-9_-]+)\n:::$/m,
     );
     if (match === null) throw new Error("missing image opaque sentinel");
     expect(match[1]).toBe(keyedToken(0, image));
@@ -476,8 +476,10 @@ describe("daemon operator write runtime", () => {
     const rt = runtime(f);
 
     const preimage = await rt.editPreimage({ id: HANDLE }, PEER);
+    // EA-4: each preserved block also carries its readable text on the
+    // opening line, ahead of the reference.
     const placeholders = preimage.markdown.match(
-      /^:::nookbridge opaque [A-Za-z][A-Za-z0-9_-]*\nref:1:(?:native-html|native-tiptap):[A-Za-z0-9_-]+\n:::$/gm,
+      /^:::nookbridge opaque [A-Za-z][A-Za-z0-9_-]*(?: text="[^"]*")?\nref:1:(?:native-html|native-tiptap):[A-Za-z0-9_-]+\n:::$/gm,
     );
     expect(placeholders, "expected three opaque placeholders").toHaveLength(3);
     expect(preimage.markdown).not.toContain("example.com");

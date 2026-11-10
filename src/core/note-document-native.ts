@@ -6,8 +6,11 @@
 import { Buffer } from "node:buffer";
 import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { types } from "node:util";
+import { noteHtmlReadonlyMarkdown } from "./note-html-readonly-markdown.js";
 import { URL } from "node:url";
 import {
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
   isNoteDocumentError,
   validateNoteDocument,
   type NoteDocumentErrorCode,
@@ -1113,6 +1116,7 @@ function references(doc: NoteDocumentV1): string[] {
             b.sentinel.version,
             b.sentinel.source,
             b.sentinel.token,
+            b.text,
           ]),
         );
       }
@@ -1198,18 +1202,78 @@ function align(
   });
   return plan;
 }
+/** What a derived text costs on the wire: escaped into the directive, then JSON-encoded again. */
+function opaqueTextCharge(text: string): number {
+  return Buffer.byteLength(JSON.stringify(JSON.stringify(text)), "utf8");
+}
+
+/**
+ * Readable Markdown for a preserved region, bounded by the wire budget.
+ *
+ * The bytes are rendered by the read-only HTML renderer, which never executes
+ * or fetches anything, and then clamped to whichever is smaller: the per-block
+ * cap the editor document admits, or the budget the caller has left. Both are
+ * measured as they cost on the wire — the text is escaped into the directive and
+ * the whole body is JSON-encoded again in the response — so a budget of N is a
+ * promise about the frame, not about raw bytes. Clamping keeps the decoder's
+ * output a document its own validator accepts; an unbounded rendering of a large
+ * region would otherwise fail validation, turning preserving into a refusal.
+ *
+ * The clamp is on a code-point boundary, so the text stays valid UTF-8, and it
+ * ends with an ellipsis so a reader can tell the text is incomplete.
+ */
+export function readableOpaqueText(
+  raw: string,
+  wireBudget = opaqueTextCharge("x".repeat(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES)),
+): string | undefined {
+  // Rendering costs time; below this floor no useful prefix can fit anyway.
+  if (wireBudget < 68) return undefined;
+  let rendered: string;
+  try {
+    rendered = noteHtmlReadonlyMarkdown(raw);
+  } catch {
+    // The read-only renderer has its own bounds and tokenizer, so it can refuse
+    // bytes the native parser preserved. A refusal here means the region stays
+    // reference-only: it must not turn preserving into a decode failure.
+    return undefined;
+  }
+  // A region that renders to nothing carries no text at all: an empty
+  // `text=""` would claim a readability it does not add.
+  if (rendered.length === 0) return undefined;
+  const fits = (value: string): boolean =>
+    Buffer.byteLength(value, "utf8") <= MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES &&
+    opaqueTextCharge(value) <= wireBudget;
+  if (fits(rendered)) return rendered;
+  // Leave room for a marker, so the reader can tell the text is incomplete.
+  const marker = "\u2026";
+  const characters = [...rendered];
+  let low = 0;
+  let high = characters.length;
+  // The largest prefix whose charge, with the marker, still fits.
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(characters.slice(0, mid).join("") + marker)) low = mid;
+    else high = mid - 1;
+  }
+  // Below this floor the clamp would mint a stub ("#…") that helps no reader,
+  // so the region keeps its reference and carries no text.
+  if (low < 64) return undefined;
+  return characters.slice(0, low).join("") + marker;
+}
 function decodeBlocks(
   nodes: HtmlNode[],
   payloads: Map<string, string>,
   binding: string,
-  topLevel = false,
-  records: BlockRecord[] = [],
+  topLevel: boolean,
+  records: BlockRecord[],
+  textBudget: { remaining: number },
+  mintText: boolean,
 ): NoteBlock[] {
   return elements(nodes).map((n) => {
     const children: BlockRecord[] = [];
     try {
       if (containsUnsupportedMarkup(n)) preserve();
-      const block = decodeBlock(n, payloads, binding, topLevel, children);
+      const block = decodeBlock(n, payloads, binding, topLevel, children, textBudget, mintText);
       const canon = fingerprint(block);
       records.push({
         raw: n.raw,
@@ -1237,9 +1301,14 @@ function decodeBlocks(
         .digest("hex")
         .slice(0, 36);
       payloads.set(token, n.raw);
+      // `readableOpaqueText` clamps against the budget it is given, measured as
+      // the text costs on the wire, so a minted value already fits the budget.
+      const text = mintText ? readableOpaqueText(n.raw, textBudget.remaining) : undefined;
+      if (text !== undefined) textBudget.remaining -= opaqueTextCharge(text);
       const block: NoteBlock = {
         type: "opaque",
         nodeType: n.tag,
+        ...(text === undefined ? {} : { text }),
         sentinel: { version: 1, source: "native-html", token },
       };
       const canon = fingerprint(block);
@@ -1269,6 +1338,8 @@ function decodeBlock(
   binding: string,
   topLevel: boolean,
   children: BlockRecord[],
+  textBudget: { remaining: number },
+  mintText: boolean,
 ): NoteBlock {
   if (n.tag === "hr") {
     const canonicalStyle =
@@ -1335,7 +1406,7 @@ function decodeBlock(
     attrs(n);
     return {
       type: "blockquote",
-      blocks: decodeBlocks(n.children, payloads, binding, false, children),
+      blocks: decodeBlocks(n.children, payloads, binding, false, children, textBudget, mintText),
     };
   }
   if (n.tag === "pre") {
@@ -1379,7 +1450,7 @@ function decodeBlock(
     return {
       type: "callout",
       variant: variant as "info" | "warning" | "success" | "danger",
-      blocks: decodeBlocks(n.children, payloads, binding, false, children),
+      blocks: decodeBlocks(n.children, payloads, binding, false, children, textBudget, mintText),
     };
   }
   return preserve();
@@ -1414,13 +1485,34 @@ export function decodeNoteDocumentNative(
       content = roots[0]!.children;
       container = roots[0]!.open;
     }
-    const payloads = new Map<string, string>();
-    const blocks: BlockRecord[] = [];
-    const document: NoteDocumentV1 = {
-      version: 1,
-      blocks: decodeBlocks(content, payloads, key, true, blocks),
+    // Readable `text` is minted first, on the assumption that the note fits.
+    // A container whose own byte cap is now reached by its children's text
+    // would make `validated` reject a document the decoder itself produced, so
+    // the decode is retried once with the text left out. The retry depends only
+    // on the input, so the read decode and the write decode still agree.
+    const build = (mintText: boolean) => {
+      const payloads = new Map<string, string>();
+      const blocks: BlockRecord[] = [];
+      const textBudget = { remaining: MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES };
+      const document: NoteDocumentV1 = {
+        version: 1,
+        blocks: decodeBlocks(content, payloads, key, true, blocks, textBudget, mintText),
+      };
+      return { document, payloads, blocks };
     };
-    validated(document);
+    let built = build(true);
+    try {
+      validated(built.document);
+    } catch (error) {
+      // Only a bound failure can be caused by the text itself: a container's
+      // byte cap counts its children, and readable text makes children big.
+      const boundExceeded =
+        error instanceof NoteDocumentNativeError && error.reason === "document_bounds_exceeded";
+      if (!boundExceeded) throw error;
+      built = build(false);
+      validated(built.document);
+    }
+    const { document, payloads, blocks } = built;
     const context: NativeNoteContext = Object.freeze({ version: 1 });
     contexts.set(context, {
       binding: key,
@@ -1551,7 +1643,7 @@ function closedDocument(doc: NoteDocumentV1): void {
         image: ["type", "url", "alt"],
         attachment: ["type", "url", "name", "mime"],
         embed: ["type", "url"],
-        opaque: ["type", "nodeType", "sentinel"],
+        opaque: ["type", "nodeType", "sentinel", "text"],
       };
       record(b, fields[b.type]);
       if (b.type === "paragraph" || b.type === "heading") runs(b.inlines);

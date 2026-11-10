@@ -2973,7 +2973,7 @@ nookbridge-format: 1
 
   it.each([
     {
-      name: "styled heading fallback",
+      name: "readable preserved heading",
       native:
         '<h4><span style="color:red">Real note</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>',
     },
@@ -2988,7 +2988,7 @@ nookbridge-format: 1
         '<div data-type="document"><table><tr><th title="keep">Name</th></tr><tr><td>Value</td></tr></table></div>',
     },
     {
-      name: "version-claim fallback",
+      name: "preserved heading with version-claim prose",
       native: "<hr /><p>nookbridge-format: 1</p><h4>Title</h4>",
     },
   ])("accepts the exact notes.get body on notes.update for $name", async ({ name, native }) => {
@@ -3034,10 +3034,13 @@ nookbridge-format: 1
     const readRevision = getResponse.result.note.revision;
     expect(echoedBody).toBeDefined();
     expect(readRevision).toBe(initialRevision);
-    if (name === "styled heading fallback") {
-      expect(echoedBody).toBe("#### Real note\n\n- [x] Done");
-    } else if (name === "version-claim fallback") {
-      expect(echoedBody).toBe("---\n\nnookbridge-format: 1\n\n#### Title");
+    if (name === "readable preserved heading") {
+      expect(echoedBody).toMatch(/^---\nnookbridge-format: 1\n---\n/);
+      expect(echoedBody).toContain(':::nookbridge opaque h4 text="#### Real note"');
+      expect(echoedBody).toContain("- [x] Done");
+    } else if (name === "preserved heading with version-claim prose") {
+      expect(echoedBody).toContain(':::nookbridge opaque h4 text="#### Title"');
+      expect(echoedBody).toContain(':::nookbridge opaque hr text="---"');
     } else if (name === "opaque image block") {
       expect(echoedBody).toContain(":::nookbridge opaque img");
     } else {
@@ -3064,7 +3067,266 @@ nookbridge-format: 1
     expect(revisionToken(NOTE_ID, note.dateEdited)).not.toBe(initialRevision);
   });
 
-  it("still refuses a changed version-claiming fallback body", async () => {
+  it("keeps a styled paragraph's bytes while a sibling edit lands", async () => {
+    // A styled paragraph is preserved for the same reason a heading is: the
+    // Markdown grammar has no inline style, so rewriting it would lose the
+    // author's formatting. Editing the list beside it must not touch it.
+    const preservedParagraph = '<p><span style="color:red">Keep this styled paragraph</span></p>';
+    const native = `${preservedParagraph}<ul class="checklist"><li class="checklist--item"><p>Todo</p></li></ul>`;
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      listNotebooks: async () => [],
+      noteMetadata: async (id) =>
+        id === NOTE_ID
+          ? {
+              id,
+              title: note.title,
+              revision: revisionToken(NOTE_ID, note.dateEdited),
+              notebookAbsenceConfirmed: true,
+            }
+          : undefined,
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({
+            id,
+            title: note.title,
+            revision: revisionToken(NOTE_ID, note.dateEdited),
+          }),
+          async () => ({ type: original.type, data: original.data }),
+        ),
+      },
+      updateNote: (command) => adapter.updateNote(command),
+    };
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const read = await handleRpcRequest(
+      { id: "styled-get", method: "notes.get", params: { id: NOTE_ID } },
+      runtime,
+      policy,
+    );
+    if (!read.ok || read.result.kind !== "note") throw new Error("expected notes.get result");
+    const body = read.result.markdown ?? "";
+    expect(body).toContain(':::nookbridge opaque p text="Keep this styled paragraph"');
+
+    const update = await handleRpcRequest(
+      {
+        id: "styled-update",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: read.result.note.revision ?? "",
+          patch: { content: body.replace("- [ ] Todo", "- [x] Todo") },
+        },
+      },
+      runtime,
+      policy,
+    );
+
+    expect(update.ok).toBe(true);
+    const stored = (await database.contentFindByNoteId(NOTE_ID))!.data;
+    expect(stored).not.toBe(original.data);
+    expect(stored).toContain(preservedParagraph);
+    expect(stored).toContain('class="checked checklist--item"');
+  });
+
+  it("accepts an edit beside a preserved region and keeps that region's bytes", async () => {
+    // The plan's acceptance case: a note whose heading is preserved stays
+    // editable, and the preserved bytes survive the edit verbatim.
+    const preservedHeading = '<h4><span style="color:red">Real note</span></h4>';
+    const native = `${preservedHeading}<ul class="checklist"><li class="checklist--item checked"><p>Done</p></li><li class="checklist--item"><p>Todo</p></li></ul>`;
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      listNotebooks: async () => [],
+      noteMetadata: async (id) =>
+        id === NOTE_ID
+          ? {
+              id,
+              title: note.title,
+              revision: revisionToken(NOTE_ID, note.dateEdited),
+              notebookAbsenceConfirmed: true,
+            }
+          : undefined,
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({
+            id,
+            title: note.title,
+            revision: revisionToken(NOTE_ID, note.dateEdited),
+          }),
+          async () => ({ type: original.type, data: original.data }),
+        ),
+      },
+      updateNote: (command) => adapter.updateNote(command),
+    };
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const read = await handleRpcRequest(
+      { id: "preserved-get", method: "notes.get", params: { id: NOTE_ID } },
+      runtime,
+      policy,
+    );
+    if (!read.ok || read.result.kind !== "note") throw new Error("expected notes.get result");
+    const body = read.result.markdown ?? "";
+    expect(body).toContain(':::nookbridge opaque h4 text="#### Real note"');
+
+    const edited = body.replace("- [x] Done", "- [ ] Done").replace("- [ ] Todo", "- [x] Todo");
+    expect(edited).not.toBe(body);
+    const update = await handleRpcRequest(
+      {
+        id: "preserved-update",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: read.result.note.revision ?? "",
+          patch: { content: edited },
+        },
+      },
+      runtime,
+      policy,
+    );
+
+    expect(update.ok).toBe(true);
+    expect(database.calls.contentUpdate).toHaveLength(1);
+    // The edit landed — the stored bytes are not the original — and the
+    // preserved region is byte-for-byte what it was.
+    const stored = (await database.contentFindByNoteId(NOTE_ID))!.data;
+    expect(stored).not.toBe(original.data);
+    expect(stored).toContain(preservedHeading);
+    // Both checkbox flips are in the stored HTML, not just "the title is there":
+    // Done lost its checked class and Todo gained it.
+    expect(stored).toContain('<li class="checklist--item"><p>Done</p></li>');
+    expect(stored).toContain('<li class="checked checklist--item"><p>Todo</p></li>');
+  });
+
+  it("refuses a preserved region whose derived text was edited", async () => {
+    const native =
+      '<h4><span style="color:red">Real note</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>';
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      listNotebooks: async () => [],
+      noteMetadata: async (id) =>
+        id === NOTE_ID
+          ? {
+              id,
+              title: note.title,
+              revision: revisionToken(NOTE_ID, note.dateEdited),
+              notebookAbsenceConfirmed: true,
+            }
+          : undefined,
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({
+            id,
+            title: note.title,
+            revision: revisionToken(NOTE_ID, note.dateEdited),
+          }),
+          async () => ({ type: original.type, data: original.data }),
+        ),
+      },
+      updateNote: (command) => adapter.updateNote(command),
+    };
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const read = await handleRpcRequest(
+      { id: "text-get", method: "notes.get", params: { id: NOTE_ID } },
+      runtime,
+      policy,
+    );
+    if (!read.ok || read.result.kind !== "note") throw new Error("expected notes.get result");
+    const tampered = (read.result.markdown ?? "").replace(
+      'text="#### Real note"',
+      'text="#### Something else"',
+    );
+    expect(tampered).not.toBe(read.result.markdown ?? "");
+
+    const update = await handleRpcRequest(
+      {
+        id: "text-update",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: read.result.note.revision ?? "",
+          patch: { content: tampered },
+        },
+      },
+      runtime,
+      policy,
+    );
+
+    expect(update.ok).toBe(false);
+    if (update.ok) throw new Error("expected refusal");
+    expect(update.error.code).toBe("unsupported_content");
+    expect(database.calls.contentUpdate).toHaveLength(0);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).toBe(original.data);
+  });
+
+  it("accepts a header-stripped body whose preserved text escapes markup", async () => {
+    // A client may drop the format header; the write path accepts that when the
+    // body carries directives. The derived text is escaped markup from the
+    // daemon's own renderer, so it must not be read as authored HTML.
+    const native =
+      '<h4><span style="color:red">Real &lt;script&gt; tag</span></h4><ul class="checklist"><li class="checklist--item checked"><p>Done</p></li></ul>';
+    const { adapter, database, note } = setupUpdatable(undefined, native);
+    const original = (await database.contentFindByNoteId(NOTE_ID))!;
+    const runtime: RpcHandlerRuntimeLike = {
+      search: async () => [],
+      listNotebooks: async () => [],
+      noteMetadata: async (id) =>
+        id === NOTE_ID
+          ? {
+              id,
+              title: note.title,
+              revision: revisionToken(NOTE_ID, note.dateEdited),
+              notebookAbsenceConfirmed: true,
+            }
+          : undefined,
+      readOnly: {
+        readNoteSnapshot: snapshotFrom(
+          async (id) => ({
+            id,
+            title: note.title,
+            revision: revisionToken(NOTE_ID, note.dateEdited),
+          }),
+          async () => ({ type: original.type, data: original.data }),
+        ),
+      },
+      updateNote: (command) => adapter.updateNote(command),
+    };
+    const policy = createReadWriteNoDeleteServicePolicy();
+    const read = await handleRpcRequest(
+      { id: "headerless-get", method: "notes.get", params: { id: NOTE_ID } },
+      runtime,
+      policy,
+    );
+    if (!read.ok || read.result.kind !== "note") throw new Error("expected notes.get result");
+    const body = read.result.markdown ?? "";
+    // The renderer escapes it, so the derived field carries `\<script\>`: the
+    // bytes are readable text, not an opened tag.
+    // The derived field carries the escaped rendering: `\<script\>`, not a tag.
+    expect(body).toMatch(/text="#### Real \\*<script\\*> tag"/);
+    const stripped = body.replace(/^---\nnookbridge-format: 1\n---\n/, "");
+    expect(stripped).not.toBe(body);
+    const update = await handleRpcRequest(
+      {
+        id: "headerless-update",
+        method: "notes.update",
+        params: {
+          id: NOTE_ID,
+          expectedRevision: read.result.note.revision ?? "",
+          patch: { content: stripped.replace("- [x] Done", "- [ ] Done") },
+        },
+      },
+      runtime,
+      policy,
+    );
+    expect(update.ok).toBe(true);
+    expect((await database.contentFindByNoteId(NOTE_ID))!.data).not.toBe(original.data);
+  });
+
+  it("still refuses a changed body that claims a version", async () => {
     const native = "<hr /><p>nookbridge-format: 1</p><h4>Title</h4>";
     const { adapter, database, note } = setupUpdatable(undefined, native);
     const original = (await database.contentFindByNoteId(NOTE_ID))!;

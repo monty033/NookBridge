@@ -9,11 +9,10 @@
  *   2. no body, or the snapshot refused it for another reason -> unavailable
  *   3. decode; a decode refusal -> serializer fallback (tolerant HTML)
  *   4. empty document -> strict (empty Markdown)
- *   5. opaque heading -> opaque-heading fallback
- *   6. otherwise strict; "strict with preserved blocks" when the decoded
- *      document still carries opaque non-heading blocks
- *   7. a failing strict serializer -> serializer fallback
- *   8. decoded Markdown over the response budget, or the whole response over
+ *   5. otherwise strict; "strict with preserved blocks" when the decoded
+ *      document still carries opaque blocks
+ *   6. a failing strict serializer -> serializer fallback
+ *   7. decoded Markdown over the response budget, or the whole response over
  *      preflight -> oversize
  *
  * The refusal reason is carried only so the operator census can count it.  It is
@@ -41,6 +40,12 @@ const MAX_PROJECTION_MARKDOWN_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
 export type NoteProjectionOutcome =
   | "strict"
   | "strict_with_preserved_blocks"
+  /**
+   * Never produced from EA-4 on: the fallback was deleted, so an opaque heading is
+   * preserved with readable `text` like any other preserved block. The value
+   * stays in the closed vocabulary because the census field is on the wire and
+   * a published field is not removed from under a client.
+   */
   | "opaque_heading_fallback"
   | "serializer_fallback"
   | "locked"
@@ -68,10 +73,15 @@ export interface NoteProjectionClassification {
   readonly preservedTaskLists: number;
 }
 
-/** The outcomes of a successful decode whose document held preserved blocks. */
+/**
+ * The outcomes of a successful decode whose document held preserved blocks.
+ *
+ * `opaque_heading_fallback` was one of them until EA-4 deleted that branch; it
+ * is no longer produced, so counting preserved blocks for it would be counting
+ * a case that cannot occur.
+ */
 const PRESERVING_OUTCOMES: ReadonlySet<NoteProjectionOutcome> = new Set([
   "strict_with_preserved_blocks",
-  "opaque_heading_fallback",
 ]);
 
 export interface ClassifyNoteContentInput {
@@ -124,17 +134,6 @@ function countPreserved(
   }
 }
 
-function containsOpaqueHeadings(blocks: readonly NoteBlock[]): boolean {
-  return blocks.some((block) => {
-    if (block.type === "opaque") return /^h[1-6]$/.test(block.nodeType);
-    if (block.type === "blockquote" || block.type === "callout")
-      return containsOpaqueHeadings(block.blocks);
-    if (block.type === "bullet-list" || block.type === "ordered-list")
-      return block.items.some((item) => containsOpaqueHeadings(item.blocks ?? []));
-    return false;
-  });
-}
-
 function readOnlyMarkdownFallback(envelope: unknown): string {
   if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
   const candidate = envelope as { type?: unknown; data?: unknown };
@@ -172,9 +171,6 @@ export function classifyNoteContentProjection(
       if (decoded.document.blocks.length === 0) {
         markdown = "";
         outcome = "strict";
-      } else if (containsOpaqueHeadings(decoded.document.blocks)) {
-        markdown = readOnlyMarkdownFallback(input.envelope);
-        outcome = "opaque_heading_fallback";
       } else {
         markdown = serializeNoteDocumentMarkdown(decoded.document);
         outcome = preserved.blocks > 0 ? "strict_with_preserved_blocks" : "strict";

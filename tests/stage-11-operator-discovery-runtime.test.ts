@@ -265,19 +265,24 @@ describe("daemon operator discovery runtime", () => {
       throw new Error("missing get-view opaque sentinels");
     expect(
       placeholders?.map(
-        (placeholder) => /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)\n/.exec(placeholder)?.[1],
+        (placeholder) =>
+          /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)(?: text="[^"]*")?\n/.exec(
+            placeholder,
+          )?.[1],
       ),
     ).toEqual(["img", "div", "div"]);
     const divTokens = placeholders
-      ?.filter((placeholder) => placeholder.startsWith(":::nookbridge opaque div\n"))
+      ?.filter((placeholder) => /^:::nookbridge opaque div(?: text="[^"]*")?\n/.test(placeholder))
       .map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]);
     expect(divTokens).toHaveLength(2);
     expect(new Set(divTokens).size).toBe(2);
     expect(
       placeholders?.map((placeholder) => /native-html:([A-Za-z0-9_-]+)/.exec(placeholder)?.[1]),
     ).toEqual([0, 1, 2].map((index) => expectedToken(REVISION, index)));
+    // EA-4: a preserved block carries its readable text on the opening line.
+    // It is derived Markdown, never the stored bytes.
     expect(placeholders?.[0]).toBe(
-      `:::nookbridge opaque img\nref:1:native-html:${expectedToken(REVISION, 0)}\n:::`,
+      `:::nookbridge opaque img text="[image]"\nref:1:native-html:${expectedToken(REVISION, 0)}\n:::`,
     );
     expect(second?.markdown).not.toBe(first?.markdown);
     const secondPlaceholders = second?.markdown.match(/:::nookbridge opaque [\s\S]*?:::/g);
@@ -287,7 +292,7 @@ describe("daemon operator discovery runtime", () => {
       ),
     ).toEqual([0, 1, 2].map((index) => expectedToken(`rev_${"2".repeat(32)}`, index)));
     expect(second?.markdown).toContain(
-      `:::nookbridge opaque img\nref:1:native-html:${expectedToken(`rev_${"2".repeat(32)}`, 0)}\n:::`,
+      `:::nookbridge opaque img text="[image]"\nref:1:native-html:${expectedToken(`rev_${"2".repeat(32)}`, 0)}\n:::`,
     );
     expect(first?.markdown).not.toContain("example.com");
     expect(first?.markdown).not.toContain("attachment-opaque");

@@ -52,6 +52,9 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
     expect(reader).toHaveBeenCalledWith("n1");
   });
 
+  // EA-4 retired the whole-note tolerant fallback: a note with an opaque
+  // heading now takes the strict projection, and the heading is preserved with
+  // its readable text, so the reader still sees it.
   it("returns readable Markdown when unsupported native content is preserved opaquely", async () => {
     const reader = vi.fn(async () => ({
       type: "html" as const,
@@ -62,10 +65,10 @@ describe("notes.get — notes confirmed to be outside every notebook", () => {
       runtime(rootNote({ notebookAbsenceConfirmed: true }), reader),
       policyFor([]),
     );
-    expect(response).toMatchObject({
-      ok: true,
-      result: { kind: "note", contentStatus: "ok", markdown: "#### Real note\n\n- [x] Done" },
-    });
+    expect(response).toMatchObject({ ok: true, result: { kind: "note", contentStatus: "ok" } });
+    const markdown = (response as { result: { markdown: string } }).result.markdown;
+    expect(markdown).toContain(':::nookbridge opaque h4 text="#### Real note"');
+    expect(markdown).toContain("- [x] Done");
   });
 
   it("does not leak the confirmation flag into the client-visible note", async () => {

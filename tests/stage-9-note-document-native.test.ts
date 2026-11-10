@@ -1,8 +1,10 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   configureOpaquePlaceholderKey,
   decodeNoteDocumentNative,
+  readableOpaqueText,
   serializeNoteDocumentNative,
   NOTESNOOK_JSON_WRITER_ENABLED,
 } from "../src/core/note-document-native.js";
@@ -10,7 +12,13 @@ import {
   parseNoteDocumentMarkdown,
   serializeNoteDocumentMarkdown,
 } from "../src/core/note-document-markdown.js";
-import type { NoteDocumentV1 } from "../src/core/note-document.js";
+import {
+  MAX_NOTE_DOCUMENT_BLOCK_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+  validateNoteDocument,
+  type NoteDocumentV1,
+} from "../src/core/note-document.js";
 
 const binding = { noteId: "fixture-note", revision: "fixture-revision" };
 const wrap = (s: string) => ({
@@ -28,6 +36,114 @@ function roundTrip(html: string) {
     stored: serializeNoteDocumentNative(document, { context: decoded.context, binding }),
   };
 }
+
+describe("readable opaque text budget", () => {
+  it("stops minting once the document budget is spent, and keeps the note strict", () => {
+    // Each region is large enough that the document budget binds partway
+    // through, so this fails if the budget is removed: without it every region
+    // would carry text and the total would exceed the budget.
+    const region = (n: number) =>
+      `<h4><span style="color:red">region ${n} ${"word ".repeat(300)}</span></h4>`;
+    const inner = Array.from({ length: 12 }, (_, i) => region(i)).join("");
+    const decoded = decodeNoteDocumentNative(wrap(inner), binding);
+    const blocks = decoded.document.blocks.filter(
+      (block): block is Extract<typeof block, { type: "opaque" }> => block.type === "opaque",
+    );
+    expect(blocks.length).toBe(12);
+    const charged = blocks.map((block) =>
+      block.text === undefined
+        ? 0
+        : Buffer.byteLength(JSON.stringify(JSON.stringify(block.text)), "utf8"),
+    );
+    // The budget binds: the first regions carry text, the last ones do not.
+    expect(charged[0]).toBeGreaterThan(0);
+    expect(blocks[blocks.length - 1]?.text).toBeUndefined();
+    expect(charged.reduce((sum, bytes) => sum + bytes, 0)).toBeLessThanOrEqual(
+      MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+    );
+    for (const block of blocks) {
+      const bytes = block.text === undefined ? 0 : Buffer.byteLength(block.text, "utf8");
+      expect(bytes).toBeLessThanOrEqual(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES);
+    }
+    // The note still validates and still reads as a strict projection with
+    // preserved blocks — which is what keeps it editable.
+    expect(() => validateNoteDocument(decoded.document)).not.toThrow();
+    expect(serializeNoteDocumentMarkdown(decoded.document).length).toBeGreaterThan(0);
+  });
+
+  it("charges the escaped cost, not the raw byte count", () => {
+    // A quote is one byte raw and four bytes once escaped into the directive and
+    // JSON-encoded again, so two regions of 3,000 quotes cost ~6,000 bytes raw
+    // but ~24,000 on the wire. With raw-byte charging both would fit the 16,384
+    // document budget; charging the wire cost leaves the second without text.
+    const region = `<h4><span style="color:red">${"&quot;".repeat(3000)}</span></h4>`;
+    const decoded = decodeNoteDocumentNative(wrap(region.repeat(2)), binding);
+    const opaque = decoded.document.blocks.filter((block) => block.type === "opaque");
+    expect(opaque).toHaveLength(2);
+    const charged = opaque.map((block) => {
+      if (block.type !== "opaque" || block.text === undefined) return 0;
+      return Buffer.byteLength(JSON.stringify(JSON.stringify(block.text)), "utf8");
+    });
+    // The first region is rendered whole; the second is clamped hard, because
+    // the wire charge — not the raw bytes — is what the budget counts.
+    expect(charged[0] ?? 0).toBeGreaterThan(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES / 2);
+    expect((charged[0] ?? 0) + (charged[1] ?? 0)).toBeLessThanOrEqual(
+      MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+    );
+    const second = opaque[1];
+    expect(second?.type === "opaque" && second.text?.endsWith("\u2026")).toBe(true);
+    if (second?.type !== "opaque" || second.text === undefined)
+      throw new Error("expected clamped text");
+    expect(Buffer.byteLength(second.text, "utf8")).toBeLessThan(
+      Buffer.byteLength((opaque[0] as { text?: string }).text ?? "", "utf8") / 2,
+    );
+    // Raw bytes say both regions would fit; only the escaped charge explains
+    // the second one being cut.
+    const rawBoth = 2 * 3_000;
+    expect(rawBoth).toBeLessThan(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES);
+  });
+
+  it("drops text rather than exceeding a container's own byte bound", () => {
+    // A callout's byte cap counts its children, and readable text makes them
+    // big: nine long paragraphs plus three preserved headings push the callout
+    // past its 65,536-byte cap once each heading carries a 4 KB rendering, even
+    // though the same content without text fits. Without the retry this decodes
+    // to a document its own validator rejects, and the note is refused.
+    const paragraphs = `<p>${"word ".repeat(1400)}</p>`;
+    const preserved = `<h4><span style="color:red">${"note ".repeat(800)}</span></h4>`;
+    const inner = `<div data-type="callout" data-variant="info">${paragraphs.repeat(9)}${preserved.repeat(3)}</div>`;
+    expect(Buffer.byteLength(inner, "utf8")).toBeGreaterThan(MAX_NOTE_DOCUMENT_BLOCK_BYTES);
+    const decoded = decodeNoteDocumentNative(wrap(inner), binding);
+    expect(() => validateNoteDocument(decoded.document)).not.toThrow();
+    const callout = decoded.document.blocks[0];
+    if (callout?.type !== "callout") throw new Error("fixture");
+    const opaque = callout.blocks.filter((block) => block.type === "opaque");
+    expect(opaque).toHaveLength(3);
+    // The retry left every preserved region reference-only rather than
+    // producing an invalid document.
+    for (const block of opaque) expect(block).not.toHaveProperty("text");
+    // And the note still round-trips as Markdown.
+    expect(serializeNoteDocumentMarkdown(decoded.document)).toContain(":::nookbridge opaque h4");
+  });
+});
+
+describe("readable opaque text", () => {
+  it("clamps to the cap on a code-point boundary and says it was cut", () => {
+    // `#### a` is 6 bytes, so the 8,187 bytes left are 3 mod 4: a 4-byte
+    // character straddles the boundary and must be dropped whole.
+    const clamped = readableOpaqueText(`<h4>a${"😀".repeat(3000)}</h4>`);
+    const expected = "#### a" + "😀".repeat(2045) + "\u2026";
+    expect(clamped).toBe(expected);
+    expect(Buffer.byteLength(clamped!, "utf8")).toBe(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES - 3);
+    // Valid UTF-8: no lone surrogate survived the clamp.
+    expect(Buffer.from(clamped!, "utf8").toString("utf8")).toBe(clamped);
+    // Small regions are returned whole, unaltered; empty ones carry no text.
+    expect(readableOpaqueText("<h4>Small</h4>")).toBe("#### Small");
+    expect(readableOpaqueText("")).toBeUndefined();
+    // A budget too small for a meaningful prefix mints nothing.
+    expect(readableOpaqueText(`<h4>${"word ".repeat(50)}</h4>`, 32)).toBeUndefined();
+  });
+});
 
 describe("T03 native HTML adapter", () => {
   it.each([
@@ -248,6 +364,32 @@ describe("T03 native HTML adapter", () => {
       ).toThrow(expect.objectContaining({ code: "unsupported_content" }));
     },
   );
+
+  it("binds readable opaque text to the native reference and round-trips escaped Markdown", () => {
+    const decoded = decodeNoteDocumentNative(
+      wrap("<h4>Readable &quot;quote&quot;\nnext</h4>"),
+      binding,
+    );
+    const block = decoded.document.blocks[0]!;
+    expect(block).toMatchObject({ type: "opaque", text: '#### Readable "quote" next' });
+    const markdown = serializeNoteDocumentMarkdown(decoded.document);
+    expect(parseNoteDocumentMarkdown(markdown, { preimage: decoded.document })).toEqual(
+      decoded.document,
+    );
+    const edited: NoteDocumentV1 = {
+      version: 1,
+      blocks: [{ ...block, text: "changed" } as typeof block],
+    };
+    let refused: unknown;
+    try {
+      serializeNoteDocumentNative(edited, { context: decoded.context, binding });
+    } catch (error) {
+      refused = error;
+    }
+    expect((refused as { reason?: string } | undefined)?.reason).toBe(
+      "context_references_mismatch",
+    );
+  });
 
   it("retains an adjacent task title and opaque block when reconstructing a rule document", () => {
     const style = "display:block;border:0;border-top:1px solid currentColor;height:0;margin:1em 0";
@@ -570,11 +712,15 @@ describe("T03 native HTML adapter", () => {
     const decoded = decodeNoteDocumentNative(original, binding);
     const opaque = decoded.document.blocks[0]!;
     if (opaque.type !== "opaque") throw new Error("fixture");
+    // The decoder mints readable text for the preserved region: dropping it
+    // silently would leave the reader with a bare reference.
+    expect(opaque.text).toBe("[attachment]");
     const document: NoteDocumentV1 = {
       blocks: [
         {
           sentinel: { token: opaque.sentinel.token, source: "native-html", version: 1 },
           nodeType: opaque.nodeType,
+          ...(opaque.text === undefined ? {} : { text: opaque.text }),
           type: "opaque",
         },
         { inlines: [{ text: "plain" }], type: "paragraph" },
@@ -750,9 +896,9 @@ describe("T13 document container tolerance", () => {
       expect(stored.data).toContain(decorated);
       expect(stored.data).toContain("<p>updated</p>");
 
-      const opaqueBlock = markdown.match(/:::nookbridge opaque p\n[^\n]+\n:::/)?.[0];
+      const opaqueBlock = markdown.match(/:::nookbridge opaque p text="old"\n[^\n]+\n:::/)?.[0];
       expect(opaqueBlock).toBeDefined();
-      expect(markdown).not.toContain("old");
+      expect(markdown).toContain('text="old"');
       const attemptedTextEdit = markdown.replace(opaqueBlock!, "changed");
       expect(() =>
         parseNoteDocumentMarkdown(attemptedTextEdit, { preimage: decoded.document }),
