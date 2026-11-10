@@ -96,6 +96,14 @@ type OutcomeCounts = Record<NoteProjectionOutcome, number>;
 interface Accumulator {
   total: number;
   readonly reasons: Record<DecodeRefusalClass, number>;
+  /**
+   * Serializer refusals by the validator's closed code. Kept separate from
+   * `reasons` on purpose: those partition *decode* refusals, and this field is
+   * already published, so a stage is not folded into it after the fact.
+   */
+  readonly serializationRefusals: Record<string, number>;
+  /** Notes that decoded with preserved blocks and then fell back. */
+  serializationFallbackWithPreserved: number;
   /** Never a decode failure and never preservable: counted on its own. */
   editRefusals: number;
   readonly projection: OutcomeCounts;
@@ -107,6 +115,8 @@ function emptyAccumulator(): Accumulator {
   return {
     total: 0,
     reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
+    serializationRefusals: {},
+    serializationFallbackWithPreserved: 0,
     editRefusals: 0,
     projection: {
       strict: 0,
@@ -144,6 +154,20 @@ function record(acc: Accumulator, classification: NoteProjectionClassification):
   acc.projection[classification.outcome] += 1;
   acc.preservedBlocks += classification.preservedBlocks;
   acc.preservedTaskLists += classification.preservedTaskLists;
+  // Only a serializer fallback is a serializer refusal. A note whose refusal
+  // then turned out to be over budget, or unreadable, keeps the reason but is
+  // counted under `oversize` or `unavailable` — and counting it here as well
+  // would make the client's own invariant (refusals are a subset of the
+  // fallbacks) fail. The outcome check is therefore not redundant: the reason
+  // survives into the oversize and unavailable outcomes.
+  if (
+    classification.outcome === "serializer_fallback" &&
+    classification.serializationReason !== undefined
+  ) {
+    const code = classification.serializationReason;
+    acc.serializationRefusals[code] = (acc.serializationRefusals[code] ?? 0) + 1;
+    if (classification.preservedBlocks > 0) acc.serializationFallbackWithPreserved += 1;
+  }
   const reason = classification.reason;
   if (reason === undefined) return;
   const failureClass = nativeFailureClass(reason);
@@ -193,6 +217,8 @@ function result(
     ...(handle === undefined ? {} : { note: handle }),
     total: acc.total,
     reasons: Object.freeze({ ...acc.reasons }),
+    serializationRefusals: Object.freeze({ ...acc.serializationRefusals }),
+    serializationFallbackWithPreserved: acc.serializationFallbackWithPreserved,
     editRefusals: acc.editRefusals,
     projection,
     preservedBlocks: acc.preservedBlocks,

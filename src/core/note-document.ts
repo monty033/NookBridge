@@ -144,6 +144,55 @@ const NOTE_DOCUMENT_ERROR_MESSAGES: { readonly [K in NoteDocumentErrorCode]: str
     invalid_reference_url: "NoteDocumentV1: reference URL rejected by URL policy",
   });
 
+/**
+ * Every error code the validator can produce, in one list.
+ *
+ * The census prints a code by name, so the list it accepts has to be the
+ * validator's own: a code that could be raised but not named would be counted
+ * as unclassified, which is the blindness this list exists to remove.
+ */
+export const NOTE_DOCUMENT_ERROR_CODES = Object.freeze([
+  "invalid_shape",
+  "oversize_document",
+  "oversize_block",
+  "oversize_inline",
+  "oversize_sentinel",
+  "depth_exceeded",
+  "unsupported_node",
+  "unsupported_list_kind",
+  "unsupported_mark",
+  "unsupported_callout_variant",
+  "opaque_payload_forbidden",
+  "malformed_link",
+  "table_column_mismatch",
+  "invalid_reference_url",
+] as const satisfies readonly NoteDocumentErrorCode[]);
+
+/**
+ * Compile-time exhaustiveness: a code added to {@link NoteDocumentErrorCode}
+ * without being listed above fails the build, rather than becoming a code the
+ * operator census could not name.
+ */
+type _NoteDocumentErrorCodesAreExhaustive =
+  Exclude<NoteDocumentErrorCode, (typeof NOTE_DOCUMENT_ERROR_CODES)[number]> extends never
+    ? true
+    : never;
+const _noteDocumentErrorCodesAreExhaustive: _NoteDocumentErrorCodesAreExhaustive = true;
+void _noteDocumentErrorCodesAreExhaustive;
+
+/**
+ * The vocabulary a serializer refusal may be named by: the validator's own
+ * error codes plus `unclassified` for a throw it did not name.
+ *
+ * It lives beside the codes so the daemon and the operator client cannot drift
+ * apart: a code the daemon could raise but the client could not print would be
+ * counted as unclassified, which is the blindness this vocabulary removes.
+ */
+export const SERIALIZATION_REFUSAL_CODES = Object.freeze([
+  ...NOTE_DOCUMENT_ERROR_CODES,
+  "unclassified",
+] as const);
+
 /** Identity predicate for {@link NoteDocumentError}. */
 export function isNoteDocumentError(value: unknown): value is NoteDocumentError {
   return (

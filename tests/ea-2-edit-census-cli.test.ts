@@ -41,6 +41,13 @@ const CORPUS: RpcNotesEditCensusResult = {
   total: MAX_EDIT_CENSUS_NOTES_PER_RUN,
   reasons: { hostile: 1, uninterpretable: 2, limit: 1, unclassified: 1 },
   editRefusals: 0,
+  serializationRefusals: {
+    malformed_link: 2,
+    unsupported_mark: 1,
+    invalid_shape: 1,
+    unclassified: 1,
+  },
+  serializationFallbackWithPreserved: 1,
   projection: {
     strict: MAX_EDIT_CENSUS_NOTES_PER_RUN - 20,
     strictWithPreservedBlocks: 6,
@@ -64,6 +71,8 @@ const NOTE: RpcNotesEditCensusResult = {
   total: 1,
   reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
   editRefusals: 0,
+  serializationRefusals: {},
+  serializationFallbackWithPreserved: 0,
   projection: {
     strict: 0,
     strictWithPreservedBlocks: 1,
@@ -85,6 +94,8 @@ const EMPTY_CORPUS: RpcNotesEditCensusResult = {
   ...CORPUS,
   total: 0,
   reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
+  serializationRefusals: {},
+  serializationFallbackWithPreserved: 0,
   projection: {
     strict: 0,
     strictWithPreservedBlocks: 0,
@@ -119,6 +130,12 @@ const CORPUS_OUTPUT = [
   "class-limit: 1",
   "class-unclassified: 1",
   "edit-refusals: 0",
+  "serializer-refusals: 5",
+  "serializer-refusal-invalid-shape: 1",
+  "serializer-refusal-malformed-link: 2",
+  "serializer-refusal-unclassified: 1",
+  "serializer-refusal-unsupported-mark: 1",
+  "serializer-fallback-with-preserved: 1",
   "preserved-blocks: 11",
   "preserved-task-lists: 4",
   "cap: 500",
@@ -144,6 +161,8 @@ const NOTE_OUTPUT = [
   "class-limit: 0",
   "class-unclassified: 0",
   "edit-refusals: 0",
+  "serializer-refusals: 0",
+  "serializer-fallback-with-preserved: 0",
   "preserved-blocks: 2",
   "preserved-task-lists: 1",
   "cap: 500",
@@ -151,6 +170,25 @@ const NOTE_OUTPUT = [
   "truncated: no",
   "",
 ].join("\n");
+
+/** The closed serializer-refusal codes, in the kebab form the CLI prints. */
+const SERIALIZATION_REFUSAL_CODE_KEYS: readonly string[] = [
+  "invalid-shape",
+  "oversize-document",
+  "oversize-block",
+  "oversize-inline",
+  "oversize-sentinel",
+  "depth-exceeded",
+  "unsupported-node",
+  "unsupported-list-kind",
+  "unsupported-mark",
+  "unsupported-callout-variant",
+  "opaque-payload-forbidden",
+  "malformed-link",
+  "table-column-mismatch",
+  "invalid-reference-url",
+  "unclassified",
+];
 
 /**
  * The exact vocabulary the census may print. A permissive "some key: some
@@ -163,6 +201,8 @@ const CENSUS_KEYS: readonly string[] = [
   "cap",
   "skipped",
   "edit-refusals",
+  "serializer-refusals",
+  "serializer-fallback-with-preserved",
   "preserved-blocks",
   "preserved-task-lists",
   "projection-strict",
@@ -194,7 +234,15 @@ function expectCountsOnly(output: string, handle?: string): void {
     const match = /^([a-z-]+): (\d+)$/.exec(line);
     expect(match, line).not.toBeNull();
     if (match === null) continue;
-    expect(CENSUS_KEYS, line).toContain(match[1]);
+    // A per-code line names one of the closed serializer-refusal codes.
+    const key = match[1] ?? "";
+    if (key.startsWith("serializer-refusal-")) {
+      expect(SERIALIZATION_REFUSAL_CODE_KEYS, line).toContain(
+        key.slice("serializer-refusal-".length),
+      );
+      continue;
+    }
+    expect(CENSUS_KEYS, line).toContain(key);
   }
 }
 

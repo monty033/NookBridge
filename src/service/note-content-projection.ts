@@ -11,7 +11,8 @@
  *   4. empty document -> strict (empty Markdown)
  *   5. otherwise strict; "strict with preserved blocks" when the decoded
  *      document still carries opaque blocks
- *   6. a failing strict serializer -> serializer fallback
+ *   6. a failing strict serializer -> serializer fallback, whose closed
+ *      validator code is recorded so the census can say why
  *   7. decoded Markdown over the response budget, or the whole response over
  *      preflight -> oversize
  *
@@ -26,7 +27,11 @@ import {
   NoteDocumentNativeError,
   type NativeFailureReason,
 } from "../core/note-document-native.js";
-import type { NoteBlock } from "../core/note-document.js";
+import {
+  isNoteDocumentError,
+  type NoteBlock,
+  type NoteDocumentErrorCode,
+} from "../core/note-document.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
 import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "./rpc-protocol.js";
@@ -61,6 +66,21 @@ export interface NoteProjectionClassification {
    * render it either (an `envelope_shape` refusal always lands there).
    */
   readonly reason?: NativeFailureReason;
+  /**
+   * Internal reason the strict Markdown serializer refused a document that
+   * decoded successfully: the validator's own closed code, or `unclassified`
+   * for anything else. Present exactly when the decode succeeded and the
+   * serializer threw, so it and {@link reason} never appear together.
+   *
+   * `invalid_shape` is the serializer's catch-all: its own guard turns every
+   * throw it does not recognise into that code, so it means "the serializer
+   * refused, cause not named", not a precise shape fault.
+   *
+   * It exists so the census can name the failing stage instead of reporting
+   * every refusal as a generic serializer fallback. Like {@link reason} it is
+   * never included in the `notes.get` projection.
+   */
+  readonly serializationReason?: NoteDocumentErrorCode | "unclassified";
   readonly markdown?: string;
   readonly markdownBytes?: number;
   /**
@@ -157,6 +177,7 @@ export function classifyNoteContentProjection(
   }
   // Outside the try, so a refusal survives a fallback that throws as well.
   let reason: NativeFailureReason | undefined;
+  let serializationReason: NoteDocumentErrorCode | "unclassified" | undefined;
   try {
     const revision = readOwnStringField(input.note, "revision") ?? `rev_${"0".repeat(32)}`;
     let markdown: string;
@@ -176,18 +197,29 @@ export function classifyNoteContentProjection(
         outcome = preserved.blocks > 0 ? "strict_with_preserved_blocks" : "strict";
       }
     } catch (error) {
-      // Only a native refusal carries a reason. Every throw inside the decoder
-      // already arrives as one (`guard`); a throw from the Markdown steps after
-      // a successful decode is a projection outcome, not a refusal reason.
+      // Every throw inside the decoder already arrives as a native refusal
+      // (`guard`). Anything else came from the Markdown steps after a
+      // successful decode, and the serializer's own guard makes those a
+      // `NoteDocumentError` carrying a closed code — which is the only thing
+      // that can tell an operator why a note is not editable.
       if (error instanceof NoteDocumentNativeError) reason = error.reason;
+      else if (isNoteDocumentError(error)) serializationReason = error.code;
+      else serializationReason = "unclassified";
       markdown = readOnlyMarkdownFallback(input.envelope);
       outcome = "serializer_fallback";
     }
     const markdownBytes = bufferByteLength(markdown, "utf8");
+    // A fallback is counted with its preserved totals only when the decode
+    // succeeded: that is the note shape the preservation work is about, and
+    // zeroing it would hide whether a refused note even had preserved content.
+    const reportsPreserved =
+      PRESERVING_OUTCOMES.has(outcome) ||
+      (serializationReason !== undefined && outcome === "serializer_fallback");
     const result = {
       outcome,
       ...(reason === undefined ? {} : { reason }),
-      ...(PRESERVING_OUTCOMES.has(outcome)
+      ...(serializationReason === undefined ? {} : { serializationReason }),
+      ...(reportsPreserved
         ? { preservedBlocks: preserved.blocks, preservedTaskLists: preserved.lists }
         : nothing),
     } as const;
@@ -204,6 +236,11 @@ export function classifyNoteContentProjection(
     if (!fitsResponsePreflight(charged)) return oversize;
     return { ...result, markdown, markdownBytes };
   } catch {
-    return { outcome: "unavailable", ...(reason === undefined ? {} : { reason }), ...nothing };
+    return {
+      outcome: "unavailable",
+      ...(reason === undefined ? {} : { reason }),
+      ...(serializationReason === undefined ? {} : { serializationReason }),
+      ...nothing,
+    };
   }
 }
