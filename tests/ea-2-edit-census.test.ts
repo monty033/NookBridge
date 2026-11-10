@@ -231,8 +231,10 @@ describe("EA-2 — the census counts the synthetic corpus", () => {
     expect(result.total).toBe(6);
     expect(result.projection).toEqual({
       strict: 1,
-      strictWithPreservedBlocks: 1,
-      opaqueHeadingFallback: 1,
+      // EA-4 deleted the opaque-heading fallback: that note is now a strict
+      // projection whose heading is a preserved block with readable text.
+      strictWithPreservedBlocks: 2,
+      opaqueHeadingFallback: 0,
       serializerFallback: 3,
       locked: 0,
       oversize: 0,

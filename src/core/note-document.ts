@@ -219,6 +219,24 @@ export const MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST = 2048;
 export const MAX_NOTE_DOCUMENT_TASK_CHILDREN = 1024;
 export const MAX_NOTE_DOCUMENT_DEPTH = 16;
 export const MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES = 128;
+/** Derived readable Markdown is capped at 8192 UTF-8 bytes per preserved block. */
+export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES = 8192;
+
+/**
+ * Total derived readable Markdown a single decoded document may carry.
+ *
+ * A response frame is 65,536 bytes and the Markdown escapes into it, so an
+ * unbounded total would push a note with several large preserved regions from
+ * a strict projection into `oversize` — which is a note nobody can read or edit
+ * — when the whole point of preserving is that the note stays usable. Past this
+ * budget the remaining regions keep their reference and simply carry no text.
+ *
+ * Decoder-only: the validator does not enforce it, because a document read from
+ * a client legitimately carries text the decoder minted under this budget, and
+ * refusing it there would turn an upgrade into a refusal. The per-block cap
+ * above is the one the schema checks.
+ */
+export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES = 16_384;
 export const MAX_NOTE_DOCUMENT_OPAQUE_PAYLOAD_BYTES = 0;
 export const MAX_NOTE_DOCUMENT_TEXT_BYTES = MAX_NOTE_DOCUMENT_INLINE_BYTES;
 
@@ -411,6 +429,8 @@ export interface NoteOpaqueSentinel {
 export interface NoteOpaqueBlock {
   readonly type: "opaque";
   readonly nodeType: string;
+  /** Derived read-only Markdown; never the preserved source bytes. */
+  readonly text?: string;
   readonly sentinel: NoteOpaqueSentinel;
 }
 
@@ -551,11 +571,14 @@ function validateReferenceUrl(value: unknown): void {
   if (parsed.hostname.length === 0) fail("invalid_reference_url");
 }
 
-/** Validate an optional bounded reference label (alt/name/mime/provider). */
-function validateOptionalReferenceLabel(value: unknown): void {
+/** Validate an optional string against a UTF-8 byte cap. */
+function validateOptionalBoundedString(
+  value: unknown,
+  maxBytes = MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES,
+): void {
   if (value === undefined) return;
   if (typeof value !== "string") fail("invalid_shape");
-  if (Buffer.byteLength(value, "utf8") > MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES) {
+  if (Buffer.byteLength(value, "utf8") > maxBytes) {
     fail("oversize_inline");
   }
 }
@@ -771,15 +794,15 @@ function validateHorizontalRule(value: Record<string, unknown>): void {
 function validateImage(value: Record<string, unknown>): void {
   rejectUnknownKeys(value, IMAGE_KEYS);
   validateReferenceUrl(value.url);
-  validateOptionalReferenceLabel(value.alt);
+  validateOptionalBoundedString(value.alt);
   serialiseAndCapBlockBytes(value, "image");
 }
 
 function validateAttachment(value: Record<string, unknown>): void {
   rejectUnknownKeys(value, ATTACHMENT_KEYS);
   validateReferenceUrl(value.url);
-  validateOptionalReferenceLabel(value.name);
-  validateOptionalReferenceLabel(value.mime);
+  validateOptionalBoundedString(value.name);
+  validateOptionalBoundedString(value.mime);
   serialiseAndCapBlockBytes(value, "attachment");
 }
 
@@ -814,6 +837,9 @@ function validateOpaqueBlock(value: Record<string, unknown>): void {
   if ("data" in sentinel) fail("opaque_payload_forbidden");
   if ("html" in sentinel) fail("opaque_payload_forbidden");
   if ("attrs" in sentinel) fail("opaque_payload_forbidden");
+  rejectUnknownKeys(value, new Set(["type", "nodeType", "sentinel", "text"]));
+  rejectUnknownKeys(sentinel, new Set(["version", "source", "token"]));
+  validateOptionalBoundedString(value.text, MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES);
   serialiseAndCapBlockBytes(value, "opaque");
 }
 

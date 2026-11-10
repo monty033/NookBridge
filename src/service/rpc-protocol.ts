@@ -797,6 +797,7 @@ export interface RpcNotesEditCensusResult {
   readonly projection: Readonly<{
     readonly strict: number;
     readonly strictWithPreservedBlocks: number;
+    /** Never produced from EA-4 on: the opaque-heading fallback it counted was deleted. */
     readonly opaqueHeadingFallback: number;
     readonly serializerFallback: number;
     readonly locked: number;
@@ -805,9 +806,9 @@ export interface RpcNotesEditCensusResult {
   }>;
   /**
    * Preserved (opaque) blocks, and of those list regions, in exactly the notes
-   * counted under `projection.strictWithPreservedBlocks` and
-   * `projection.opaqueHeadingFallback`. A note that decoded and then fell back
-   * to the serializer, or went over budget, contributes none.
+   * counted under `projection.strictWithPreservedBlocks`. A note that decoded
+   * and then fell back to the serializer, or went over budget, contributes
+   * none; `projection.opaqueHeadingFallback` is always 0 from EA-4.
    */
   readonly preservedBlocks: number;
   readonly preservedTaskLists: number;

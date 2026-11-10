@@ -2173,8 +2173,10 @@ describe("notes.get bounded content read", () => {
     expect(response.result.note.revision).toBe(metadata.revision);
     const expected = expectedPlaceholderToken("note-1", metadata.revision, 0, rawImage);
     expect(response.result.contentStatus).toBe("ok");
+    // EA-4: the preserved block also carries its readable text, which is the
+    // read-only rendering of the preserved bytes, never those bytes.
     expect(response.result.markdown).toBe(
-      `---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque img\nref:1:native-html:${expected}\n:::\n`,
+      `---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque img text="[image]"\nref:1:native-html:${expected}\n:::\n`,
     );
     expect(response.result.markdown).not.toContain("/private/notes/");
   });

@@ -473,6 +473,37 @@ describe("NoteDocumentV1 — opaque-reference sentinel types", () => {
     ).not.toThrow();
   });
 
+  it("admits bounded readable text and rejects nonstrings, oversized text and payload keys", () => {
+    const block = {
+      type: "opaque",
+      nodeType: "h4",
+      text: "Readable",
+      sentinel: { version: 1, token: "ref", source: "native-html" },
+    };
+    const validate = (value: unknown) => validateNoteDocument({ version: 1, blocks: [value] });
+    expect(() => validate(block)).not.toThrow();
+    expect(() => validate({ ...block, text: "é".repeat(4096) })).not.toThrow();
+    for (const text of [42, null, {}, "é".repeat(4097)]) {
+      expect(() => validate({ ...block, text })).toThrow(NoteDocumentError);
+    }
+    // A payload key on the block is an unknown field, so it fails as a shape
+    // error; on the sentinel, D7's own categorical code names it.
+    for (const key of ["payload", "data", "html", "attrs"]) {
+      expect(() => validate({ ...block, [key]: "source" })).toThrow(
+        expect.objectContaining({ code: "invalid_shape" }),
+      );
+      expect(() =>
+        validate({ ...block, sentinel: { ...block.sentinel, [key]: "source" } }),
+      ).toThrow(expect.objectContaining({ code: "opaque_payload_forbidden" }));
+    }
+    expect(() => validate({ ...block, unknown: "source" })).toThrow(
+      expect.objectContaining({ code: "invalid_shape" }),
+    );
+    expect(() =>
+      validate({ ...block, sentinel: { ...block.sentinel, unknown: "source" } }),
+    ).toThrow(expect.objectContaining({ code: "invalid_shape" }));
+  });
+
   it("rejects an `opaque` block that smuggles an opaque payload field", () => {
     // Per T00 D7, T01 defines the SENTINEL TYPE only — no opaque payload
     // bytes are admitted on the editor document.  A future T02/T03 may

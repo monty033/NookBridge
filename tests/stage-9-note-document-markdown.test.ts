@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NoteDocumentError, type NoteDocumentV1 } from "../src/core/note-document.js";
 import {
+  inspectNoteDocumentMarkdownWithoutTaskTitles,
   parseNoteDocumentMarkdown as parse,
   serializeNoteDocumentMarkdown as serialize,
   NOTE_DOCUMENT_MARKDOWN_HEADER as H,
@@ -20,16 +21,12 @@ function rejects(run: () => unknown, code = "invalid_shape") {
     expect((error as Error).message).not.toContain("CANARY");
   }
 }
-const opaque: NoteDocumentV1 = {
-  version: 1,
-  blocks: [
-    {
-      type: "opaque",
-      nodeType: "image",
-      sentinel: { version: 1, source: "native-html", token: "ref_0123456789abcdef" },
-    },
-  ],
+const opaqueBlock = {
+  type: "opaque" as const,
+  nodeType: "image",
+  sentinel: { version: 1 as const, source: "native-html" as const, token: "ref_0123456789abcdef" },
 };
+const opaque: NoteDocumentV1 = { version: 1, blocks: [opaqueBlock] };
 
 describe("T02 deterministic Markdown interchange", () => {
   it("publishes the frozen version header and editor budget", () => {
@@ -163,6 +160,78 @@ describe("T02 deterministic Markdown interchange", () => {
       vi.unstubAllGlobals();
     }
   });
+  it.each([undefined, "", "Readable"])(
+    "renders exact opaque bytes and round-trips text %s",
+    (text) => {
+      const doc: NoteDocumentV1 = {
+        version: 1,
+        blocks: [{ ...opaque.blocks[0]!, ...(text === undefined ? {} : { text }) }],
+      };
+      const expected =
+        text === undefined
+          ? "---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque image\nref:1:native-html:ref_0123456789abcdef\n:::\n"
+          : text === ""
+            ? '---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque image text=""\nref:1:native-html:ref_0123456789abcdef\n:::\n'
+            : '---\nnookbridge-format: 1\n---\n\n:::nookbridge opaque image text="Readable"\nref:1:native-html:ref_0123456789abcdef\n:::\n';
+      expect(serialize(doc)).toBe(expected);
+      expect(parse(serialize(doc), { preimage: doc })).toEqual(doc);
+      if (text !== undefined) {
+        rejects(
+          () =>
+            parse(serialize(doc).replace(`text=${JSON.stringify(text)}`, 'text="changed"'), {
+              preimage: doc,
+            }),
+          "opaque_payload_forbidden",
+        );
+      }
+    },
+  );
+  it.each([
+    ["text=42", "invalid_shape"],
+    ["text=null", "invalid_shape"],
+    ['text="\\u006fk"', "invalid_shape"],
+    ['text= "ok"', "invalid_shape"],
+    ['text="ok" ', "invalid_shape"],
+    ["text=", "invalid_shape"],
+    ['text="ok" payload="CANARY"', "invalid_shape"],
+  ])("rejects the directive attribute %s", (attribute, code) => {
+    // The preimage carries `text`, so replacing it is a real edit of a real
+    // field: a body with no `text` would be refused for the wrong reason and
+    // prove nothing about the grammar. A non-canonical re-stringify, a stray
+    // space, an empty value or a payload key must all be refused.
+    const preimage: NoteDocumentV1 = { version: 1, blocks: [{ ...opaqueBlock, text: "ok" }] };
+    const input = serialize(preimage).replace('text="ok"', attribute);
+    expect(input).not.toBe(serialize(preimage));
+    rejects(() => parse(input, { preimage }), code);
+  });
+
+  it("rejects a directive that names text twice", () => {
+    const preimage: NoteDocumentV1 = { version: 1, blocks: [{ ...opaqueBlock, text: "ok" }] };
+    const input = serialize(preimage).replace('text="ok"', 'text="ok" text="ok"');
+    rejects(() => parse(input, { preimage }), "invalid_shape");
+  });
+
+  it("refuses a removed or added text against the preimage", () => {
+    const withText: NoteDocumentV1 = { version: 1, blocks: [{ ...opaqueBlock, text: "ok" }] };
+    rejects(() => parse(serialize(opaque), { preimage: withText }), "opaque_payload_forbidden");
+    rejects(() => parse(serialize(withText), { preimage: opaque }), "opaque_payload_forbidden");
+  });
+
+  it("masks derived opaque text when inspecting for embedded markup", () => {
+    // The readable text is derived from the preserved bytes, so it can hold
+    // escaped markup (`\<script\>`). It is bound to the preimage by the
+    // reference tuple, so masking it cannot let a client smuggle markup in.
+    const doc: NoteDocumentV1 = {
+      version: 1,
+      blocks: [{ ...opaqueBlock, text: "\\<script>alert(1)</script>" }],
+    };
+    const serialised = serialize(doc);
+    expect(serialised).toContain("script");
+    const inspected = inspectNoteDocumentMarkdownWithoutTaskTitles(serialised);
+    expect(inspected).not.toMatch(/<\s*script/i);
+    expect(inspected).toContain(`ref:1:native-html:${opaqueBlock.sentinel.token}`);
+  });
+
   it("round-trips opaque references only against a trusted preimage", () => {
     const input = serialize(opaque);
     expect(serialize(parse(input, { preimage: opaque }))).toBe(input);

@@ -48,20 +48,33 @@ import {
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
 
-import { inspectNoteDocumentMarkdownWithoutTaskTitles } from "./note-document-markdown.js";
+import {
+  NOTE_DOCUMENT_MARKDOWN_HEADER,
+  inspectNoteDocumentMarkdownWithoutTaskTitles,
+} from "./note-document-markdown.js";
 
-// Canonical task-list titles are JSON text, not authored HTML. Parse the whole
-// document before masking only title payloads; malformed directives fail closed.
+// Canonical task-list titles are JSON text, not authored HTML, and the same is
+// true of a preserved block's derived `text`. Parse the whole document before
+// masking those payloads; malformed directives fail closed.
+//
+// A client may drop the format header — the write path accepts a headerless body
+// when it carries directives, and normalises it before parsing — so the header
+// is restored here too. Otherwise a legal body would be refused for the one
+// thing it is allowed to contain: escaped markup inside a derived field.
 function hasForbiddenEmbeddedMarkup(value: string, allowCanonicalTaskTitles = false): boolean {
-  let checked = value;
-  if (allowCanonicalTaskTitles && /<\s*(?:script|style|iframe|object|embed)\b/i.test(value)) {
+  const pattern = /<\s*(script|style|iframe|object|embed)\b/i;
+  if (!allowCanonicalTaskTitles || !pattern.test(value)) return pattern.test(value);
+  const candidates = value.startsWith(NOTE_DOCUMENT_MARKDOWN_HEADER)
+    ? [value]
+    : [value, NOTE_DOCUMENT_MARKDOWN_HEADER + value];
+  for (const candidate of candidates) {
     try {
-      checked = inspectNoteDocumentMarkdownWithoutTaskTitles(value);
+      return pattern.test(inspectNoteDocumentMarkdownWithoutTaskTitles(candidate));
     } catch {
-      return true;
+      // Try the next shape; the last one failing means the body is malformed.
     }
   }
-  return /<\s*(script|style|iframe|object|embed)\b/i.test(checked);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

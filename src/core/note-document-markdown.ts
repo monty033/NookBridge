@@ -408,7 +408,7 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
           break;
         }
         case "opaque":
-          keys(block, ["type", "nodeType", "sentinel"]);
+          keys(block, ["type", "nodeType", "sentinel", "text"]);
           keys(block.sentinel, ["version", "source", "token"]);
           if (
             !/^[A-Za-z][A-Za-z0-9_-]*$/.test(block.nodeType) ||
@@ -420,7 +420,7 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
             MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES,
             "oversize_sentinel",
           );
-          out = `:::nookbridge opaque ${block.nodeType}\nref:1:${block.sentinel.source}:${block.sentinel.token}\n:::`;
+          out = `:::nookbridge opaque ${block.nodeType}${block.text === undefined ? "" : ` text=${JSON.stringify(block.text)}`}\nref:1:${block.sentinel.source}:${block.sentinel.token}\n:::`;
           break;
         case "horizontal-rule":
           keys(block, ["type"]);
@@ -524,8 +524,22 @@ class Parser {
           ...(title === undefined ? {} : { title }),
         };
       }
-      const opaque = /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)$/.exec(line);
+      // `[\s\S]` rather than `.`: JSON.stringify leaves U+2028/U+2029 raw, and
+      // `.` does not match them, which would drop a preserved pre/code region to
+      // a parse failure instead of reading it back.
+      const opaque = /^:::nookbridge opaque ([A-Za-z][A-Za-z0-9_-]*)(?: text=([\s\S]*))?$/.exec(
+        line,
+      );
       if (opaque) {
+        let text: string | undefined;
+        if (opaque[2] !== undefined) {
+          try {
+            text = JSON.parse(opaque[2]);
+            if (typeof text !== "string" || JSON.stringify(text) !== opaque[2]) fail();
+          } catch {
+            fail();
+          }
+        }
         const body = this.lines[this.pos++] ?? fail("opaque_payload_forbidden");
         const ref = /^ref:1:(native-html|native-tiptap):([A-Za-z0-9_-]+)$/.exec(body);
         if (!ref || this.lines[this.pos++] !== ":::") fail("opaque_payload_forbidden");
@@ -533,6 +547,7 @@ class Parser {
         return {
           type: "opaque",
           nodeType: opaque[1]!,
+          ...(text === undefined ? {} : { text }),
           sentinel: {
             version: 1,
             source: ref[1] as "native-html" | "native-tiptap",
@@ -619,7 +634,14 @@ function references(doc: NoteDocumentV1): string[] {
         if (tokens.has(b.sentinel.token)) fail("opaque_payload_forbidden");
         tokens.add(b.sentinel.token);
         refs.push(
-          JSON.stringify([at, b.nodeType, b.sentinel.version, b.sentinel.source, b.sentinel.token]),
+          JSON.stringify([
+            at,
+            b.nodeType,
+            b.sentinel.version,
+            b.sentinel.source,
+            b.sentinel.token,
+            b.text,
+          ]),
         );
       }
       if (b.type === "callout" || b.type === "blockquote")
@@ -673,23 +695,51 @@ export function parseNoteDocumentMarkdown(
  * The write adapter must still parse the ORIGINAL input against its trusted
  * preimage; this inspection deliberately does not supply or mint that authority.
  */
+/**
+ * Drop fields the daemon derived rather than received.
+ *
+ * Opaque `text` is rendered from the preserved bytes and bound to the preimage
+ * by the reference tuple, so a client cannot have authored it; it can render
+ * escaped markup (`\\<script\\>`) that would otherwise trip the embedded-markup
+ * ban on a body the daemon itself produced. Task titles are the same kind of
+ * field. Nested blocks are walked, because a preserved region inside a
+ * blockquote, callout or list item carries text just as a top-level one does.
+ */
+function derivedMasked(block: NoteBlock): NoteBlock {
+  if (block.type === "opaque") {
+    const { text: _derived, ...rest } = block;
+    return rest;
+  }
+  if (block.type === "task-list") {
+    return {
+      type: block.type,
+      ...(block.kind === undefined ? {} : { kind: block.kind }),
+      items: block.items,
+    };
+  }
+  if (block.type === "blockquote") {
+    return { ...block, blocks: block.blocks.map(derivedMasked) };
+  }
+  if (block.type === "callout") {
+    return { ...block, blocks: block.blocks.map(derivedMasked) };
+  }
+  if (block.type === "bullet-list" || block.type === "ordered-list") {
+    return {
+      ...block,
+      items: block.items.map((item) =>
+        item.blocks === undefined ? item : { ...item, blocks: item.blocks.map(derivedMasked) },
+      ),
+    };
+  }
+  return block;
+}
+
 export function inspectNoteDocumentMarkdownWithoutTaskTitles(input: string): string {
   return guard(() => {
     const doc = decode(input);
     references(doc);
     if (emit(doc) !== input) fail();
-    return emit({
-      ...doc,
-      blocks: doc.blocks.map((block) =>
-        block.type === "task-list"
-          ? {
-              type: block.type,
-              ...(block.kind === undefined ? {} : { kind: block.kind }),
-              items: block.items,
-            }
-          : block,
-      ),
-    });
+    return emit({ ...doc, blocks: doc.blocks.map(derivedMasked) });
   });
 }
 
