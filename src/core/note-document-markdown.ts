@@ -68,7 +68,14 @@ function guard<T>(run: () => T): T {
   }
 }
 
-function atSerializationStage<T>(
+/**
+ * Run one serialization stage, tagging any refusal with its stage.
+ *
+ * Exported so the tagging contract can be pinned directly: a refusal the codec
+ * raised keeps its code and takes this stage, while an unexpected throw stays
+ * `unclassified` instead of borrowing the stage's authority.
+ */
+export function atSerializationStage<T>(
   stage: Exclude<NoteDocumentSerializationStage, "unclassified">,
   run: () => T,
 ): T {
@@ -76,7 +83,10 @@ function atSerializationStage<T>(
     return run();
   } catch (error) {
     if (isNoteDocumentError(error)) throw new NoteDocumentError(error.code, stage);
-    throw new NoteDocumentError("invalid_shape", stage);
+    // An unexpected throw is not a verdict about the Markdown subset, so it must
+    // not borrow the stage's authority: keep it unclassified, where no caller
+    // can mistake it for a representability refusal.
+    throw new NoteDocumentError("invalid_shape", "unclassified");
   }
 }
 
@@ -356,6 +366,12 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
             block,
             block.type === "heading" ? ["type", "level", "inlines"] : ["type", "inlines"],
           );
+          if (block.type === "paragraph" && block.inlines.length === 0) {
+            // A blank line is a block separator, so an empty paragraph needs a
+            // spelling of its own; without one the note could not round-trip.
+            out = ":::nookbridge paragraph\n:::";
+            break;
+          }
           out =
             (block.type === "heading" ? "#".repeat(block.level) + " " : "") +
             renderInlines(block.inlines);
@@ -375,10 +391,14 @@ function renderBlocks(blocks: readonly NoteBlock[], depth = 1): string {
             JSON.stringify({ columns: block.columns, rows: block.rows }) +
             "\n:::";
           break;
-        case "callout":
+        case "callout": {
           keys(block, ["type", "variant", "blocks"]);
-          out = `:::nookbridge callout ${block.variant}\n${renderBlocks(block.blocks, depth + 1)}\n:::`;
+          // An empty container must not emit a blank line inside the directive:
+          // the nested parser reads that blank as a block separator and refuses.
+          const body = renderBlocks(block.blocks, depth + 1);
+          out = `:::nookbridge callout ${block.variant}\n${body ? body + "\n" : ""}:::`;
           break;
+        }
         case "blockquote":
           keys(block, ["type", "blocks"]);
           out = renderBlocks(block.blocks, depth + 1)
@@ -502,6 +522,10 @@ class Parser {
         validateNoteDocument({ version: 1, blocks: [block] });
         return block as NoteBlock;
       }
+      if (line === ":::nookbridge paragraph") {
+        if (this.lines[this.pos++] !== ":::") fail();
+        return { type: "paragraph", inlines: [] };
+      }
       const callout = /^:::nookbridge callout (\S+)$/.exec(line);
       if (callout) {
         if (!["info", "warning", "success", "danger"].includes(callout[1]!))
@@ -601,6 +625,9 @@ class Parser {
       const quote = [line.slice(2)];
       while (this.pos < this.lines.length && /^>( |$)/.test(this.lines[this.pos]!))
         quote.push(this.lines[this.pos++]!.slice(2));
+      // `>` alone is the canonical spelling of an empty quote; it is not a
+      // paragraph, so it must not reach the inline parser.
+      if (quote.length === 1 && quote[0] === "") return { type: "blockquote", blocks: [] };
       return { type: "blockquote", blocks: new Parser(quote).blocks(depth + 1) };
     }
     const heading = /^(#{1,3}) (.*)$/.exec(line);

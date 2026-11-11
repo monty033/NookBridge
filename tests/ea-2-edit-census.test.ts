@@ -637,15 +637,25 @@ describe("EA-2 — the census is capped per run", () => {
 });
 
 describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
-  it("a Markdown failure after a clean decode is a serializer fallback, named as unclassified", async () => {
+  it("a whole-document Markdown failure after a clean decode is a serializer fallback, named as unclassified", async () => {
     const MARKDOWN = "../src/core/note-document-markdown.js";
+    const strictTwoBlocks = `${STRICT}<p>Synthetic second strict block</p>`;
+    const preservedTwoBlocks = `${PRESERVED}<p>Synthetic preserved tail</p>`;
     vi.resetModules();
-    vi.doMock(MARKDOWN, async (importOriginal) => ({
-      ...(await importOriginal<typeof NoteDocumentMarkdownModule>()),
-      serializeNoteDocumentMarkdown: () => {
-        throw new Error("synthetic Markdown failure");
-      },
-    }));
+    vi.doMock(MARKDOWN, async (importOriginal) => {
+      const actual = await importOriginal<typeof NoteDocumentMarkdownModule>();
+      return {
+        ...actual,
+        serializeNoteDocumentMarkdown: ((
+          document: Parameters<typeof actual.serializeNoteDocumentMarkdown>[0],
+        ) => {
+          // Native decoding checks each block alone; fail only when the public
+          // projection serializes the complete two-block document.
+          if (document.blocks.length > 1) throw new Error("synthetic Markdown failure");
+          return actual.serializeNoteDocumentMarkdown(document);
+        }) as typeof actual.serializeNoteDocumentMarkdown,
+      };
+    });
     try {
       const { createNotesEditCensus: fresh } = (await import(
         "../src/service/notes-edit-census.js"
@@ -654,7 +664,10 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
         listVisibleNotes: async () => [{ id: "n-strict" }, { id: "n-preserved" }],
         readNoteSnapshot: async (id) => ({
           metadata: { id, locked: false, revision: `rev_${"0".repeat(32)}` },
-          content: { type: "tiptap" as const, data: id === "n-preserved" ? PRESERVED : STRICT },
+          content: {
+            type: "tiptap" as const,
+            data: id === "n-preserved" ? preservedTwoBlocks : strictTwoBlocks,
+          },
         }),
       });
       const result = await census.corpus();
@@ -666,6 +679,13 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
       expect(result.preservedBlocks).toBe(1);
       // The throw was not the serializer's own shape, so it is unclassified.
       expect(result.serializationRefusals).toEqual({ unclassified: 2 });
+      expect(result.serializationStages).toEqual({
+        validation: 0,
+        reference_check: 0,
+        markdown_emission: 0,
+        round_trip: 0,
+        unclassified: 2,
+      });
       expect(result.serializationFallbackWithPreserved).toBe(1);
       expect(result.preservedTaskLists).toBe(0);
     } finally {
