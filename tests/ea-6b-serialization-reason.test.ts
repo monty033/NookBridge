@@ -21,6 +21,10 @@ import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-pol
 import { snapshotFrom } from "./helpers/note-snapshot.js";
 import { classifyNoteContentProjection } from "../src/service/note-content-projection.js";
 import { NOTE_DOCUMENT_ERROR_CODES } from "../src/core/note-document.js";
+import type { NoteDocumentErrorCode } from "../src/core/note-document.js";
+import type * as NoteDocumentMarkdownModule from "../src/core/note-document-markdown.js";
+import type * as NoteContentProjectionModule from "../src/service/note-content-projection.js";
+import type * as NotesEditCensusModule from "../src/service/notes-edit-census.js";
 import { normalizeNotesEditCensusCounts } from "../src/operator/notes-cli.js";
 
 const serializationStages = (total: number) => ({
@@ -50,17 +54,71 @@ const classify = (data: string) =>
     requestId: "req_ea6b",
   });
 
+/**
+ * Classify a note while the Markdown codec refuses the *complete* document.
+ *
+ * Since EA-5, a block the codec cannot spell is preserved instead of failing
+ * the note, so a note-level serializer refusal can no longer be produced by a
+ * real fixture: it is a defence-in-depth path for shapes the decoder cannot
+ * emit today. Injecting it is the only honest way to keep the reporting
+ * contract pinned, and it keeps the assertion about *reporting* rather than
+ * about which content happens to be unrepresentable this week.
+ */
+async function classifyWithRefusal(data: string, code: NoteDocumentErrorCode = "malformed_link") {
+  const MARKDOWN = "../src/core/note-document-markdown.js";
+  vi.resetModules();
+  // `NoteDocumentError` is recognised by prototype identity, so the error must
+  // be built from the same module instance the projection will import.
+  const document = await import("../src/core/note-document.js");
+  vi.doMock(MARKDOWN, async (importOriginal) => {
+    const actual = await importOriginal<typeof NoteDocumentMarkdownModule>();
+    return {
+      ...actual,
+      serializeNoteDocumentMarkdown: ((
+        input: Parameters<typeof actual.serializeNoteDocumentMarkdown>[0],
+      ) => {
+        // Single blocks are the decoder's own representability probe.
+        if (input.blocks.length > 1)
+          throw new document.NoteDocumentError(code, "markdown_emission");
+        return actual.serializeNoteDocumentMarkdown(input);
+      }) as typeof actual.serializeNoteDocumentMarkdown,
+    };
+  });
+  try {
+    const { classifyNoteContentProjection: fresh } = (await import(
+      "../src/service/note-content-projection.js"
+    )) as typeof NoteContentProjectionModule;
+    return fresh({
+      contentRefusal: undefined,
+      envelope: envelope(data),
+      noteId: note.id,
+      note,
+      requestId: "req_ea6b",
+    });
+  } finally {
+    vi.doUnmock(MARKDOWN);
+    vi.resetModules();
+  }
+}
+
+/** Two ordinary paragraphs: each is representable, the pair is refused. */
+const TWO_PARAGRAPHS = "<p>alpha</p><p>beta</p>";
+/** One preserved heading beside an ordinary paragraph. */
+const PRESERVED_HEADING_AND_PARAGRAPH =
+  '<h4><span style="color:red">Heading</span></h4><p>beta</p>';
+
 /** A link the serializer refuses: its URL grammar rejects parentheses. */
 const REFUSED_LINK = '<p><a href="https://example.com/a(b)">x</a></p>';
-/** A preserved heading beside that link: the note decodes, and then fails. */
+/** A preserved heading beside that link. */
 const REFUSED_LINK_WITH_PRESERVED =
   '<h4><span style="color:red">Heading</span></h4>' + REFUSED_LINK;
 
 describe("EA-6b — a serialization refusal is named, a decode refusal is not confused with it", () => {
-  it("records the serializer's closed code for a note that decoded and then failed", () => {
-    const result = classify(REFUSED_LINK);
+  it("records the serializer's closed code for a note that decoded and then failed", async () => {
+    const result = await classifyWithRefusal(TWO_PARAGRAPHS);
     expect(result.outcome).toBe("serializer_fallback");
     expect(result.serializationReason).toBe("malformed_link");
+    expect(result.serializationStage).toBe("markdown_emission");
     // The two reasons are exclusive: a decode refusal is a different field.
     expect(result.reason).toBeUndefined();
   });
@@ -72,12 +130,22 @@ describe("EA-6b — a serialization refusal is named, a decode refusal is not co
     expect(result.serializationReason).toBeUndefined();
   });
 
-  it("still counts the preserved blocks of a note that decoded and then failed", () => {
-    const result = classify(REFUSED_LINK_WITH_PRESERVED);
+  it("still counts the preserved blocks of a note that decoded and then failed", async () => {
+    const result = await classifyWithRefusal(PRESERVED_HEADING_AND_PARAGRAPH);
     expect(result.outcome).toBe("serializer_fallback");
     expect(result.serializationReason).toBe("malformed_link");
     // The preserved heading is real: zeroing it is what hid the shape.
     expect(result.preservedBlocks).toBe(1);
+  });
+
+  it("preserves a block the codec cannot spell instead of failing the whole note", () => {
+    // EA-5: this note used to be a serializer fallback. The link's URL grammar
+    // is outside the Markdown subset, but that is the block's problem, not the
+    // note's — so it is preserved and everything beside it stays editable.
+    const result = classify(REFUSED_LINK_WITH_PRESERVED);
+    expect(result.outcome).toBe("strict_with_preserved_blocks");
+    expect(result.serializationReason).toBeUndefined();
+    expect(result.preservedBlocks).toBe(2);
   });
 
   it("reports no preserved blocks for a note that never decoded", () => {
@@ -362,12 +430,52 @@ describe("EA-6b — the census counts the refusals it names", () => {
       },
     });
 
+  /** The same census, with the Markdown codec refusing every multi-block note. */
+  async function censusWithRefusal(bodies: readonly string[]) {
+    const MARKDOWN = "../src/core/note-document-markdown.js";
+    vi.resetModules();
+    const document = await import("../src/core/note-document.js");
+    vi.doMock(MARKDOWN, async (importOriginal) => {
+      const actual = await importOriginal<typeof NoteDocumentMarkdownModule>();
+      return {
+        ...actual,
+        serializeNoteDocumentMarkdown: ((
+          input: Parameters<typeof actual.serializeNoteDocumentMarkdown>[0],
+        ) => {
+          if (input.blocks.length > 1)
+            throw new document.NoteDocumentError("malformed_link", "markdown_emission");
+          return actual.serializeNoteDocumentMarkdown(input);
+        }) as typeof actual.serializeNoteDocumentMarkdown,
+      };
+    });
+    try {
+      const { createNotesEditCensus: fresh } = (await import(
+        "../src/service/notes-edit-census.js"
+      )) as typeof NotesEditCensusModule;
+      return await fresh({
+        listVisibleNotes: async () => bodies.map((_, index) => ({ id: `${noteId}_${index}` })),
+        readNoteSnapshot: async (id) => {
+          const index = Number(id.slice(`${noteId}_`.length));
+          const body = bodies[index];
+          if (body === undefined) return undefined;
+          return {
+            metadata,
+            content: { type: "tiptap", data: `<div data-type="document">${body}</div>` },
+          };
+        },
+      }).corpus();
+    } finally {
+      vi.doUnmock(MARKDOWN);
+      vi.resetModules();
+    }
+  }
+
   it("partitions serializer refusals by code and counts the preserved ones", async () => {
-    const census = await censusOver([
-      REFUSED_LINK,
-      REFUSED_LINK_WITH_PRESERVED,
+    const census = await censusWithRefusal([
+      TWO_PARAGRAPHS,
+      PRESERVED_HEADING_AND_PARAGRAPH,
       "<p>plain</p>",
-    ]).corpus();
+    ]);
     expect(census.total).toBe(3);
     expect(census.projection.serializerFallback).toBe(2);
     expect(census.serializationRefusals).toEqual({ malformed_link: 2 });
@@ -389,6 +497,18 @@ describe("EA-6b — the census counts the refusals it names", () => {
       limit: 0,
       unclassified: 0,
     });
+  });
+
+  it("counts a note the codec can now spell as preserved, not refused", async () => {
+    // The same two bodies without the injected refusal: EA-5 preserves the
+    // unspellable block and keeps the rest of the note writable, so neither
+    // note is a serializer fallback any more.
+    const census = await censusOver([REFUSED_LINK, REFUSED_LINK_WITH_PRESERVED]).corpus();
+    expect(census.total).toBe(2);
+    expect(census.projection.serializerFallback).toBe(0);
+    expect(census.projection.strictWithPreservedBlocks).toBe(2);
+    expect(census.serializationRefusals).toEqual({});
+    expect(census.preservedBlocks).toBe(3);
   });
 
   it("does not count a decode refusal as a serializer refusal", async () => {
@@ -420,7 +540,10 @@ describe("EA-6b — a refusal that turns out to be over budget is not a serializ
       data: `<div data-type="document">${REFUSED_LINK}</div>`,
     };
 
-    // The note reaches the serializer, and the serializer is what refuses it.
+    // The note reaches the serializer, and the response is what goes over
+    // budget. Since EA-5 the link is preserved rather than refused, so the note
+    // is over budget with no serializer refusal behind it — the invariant the
+    // client checks must still accept that.
     const classification = classifyNoteContentProjection({
       contentRefusal: undefined,
       envelope: content,
@@ -428,8 +551,8 @@ describe("EA-6b — a refusal that turns out to be over budget is not a serializ
       note: metadata,
       requestId: "req_ea6b",
     });
-    expect(classification.serializationReason).toBe("malformed_link");
     expect(classification.outcome).toBe("oversize");
+    expect(classification.serializationReason).toBeUndefined();
 
     const census = await createNotesEditCensus({
       listVisibleNotes: async () => [{ id: noteId }],

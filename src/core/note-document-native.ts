@@ -7,6 +7,7 @@ import { Buffer } from "node:buffer";
 import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { types } from "node:util";
 import { noteHtmlReadonlyMarkdown } from "./note-html-readonly-markdown.js";
+import { serializeNoteDocumentMarkdown } from "./note-document-markdown.js";
 import { URL } from "node:url";
 import {
   MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES,
@@ -1260,6 +1261,45 @@ export function readableOpaqueText(
   if (low < 64) return undefined;
   return characters.slice(0, low).join("") + marker;
 }
+
+const MARKDOWN_LIMIT_ERRORS: ReadonlySet<NoteDocumentErrorCode> = new Set([
+  "oversize_document",
+  "oversize_block",
+  "oversize_inline",
+  "oversize_sentinel",
+  "depth_exceeded",
+]);
+
+/**
+ * A native block is only modelled when the public Markdown interchange can
+ * represent it losslessly. A safe native shape outside that grammar stays as
+ * one opaque reference instead of making the whole note fall back.
+ *
+ * Only an emission or round-trip refusal is a representability verdict about
+ * this block: those stages are the codec saying it cannot spell what it was
+ * given. A validation or reference refusal is the codec disagreeing with the
+ * document model itself, which a preserved block must not paper over — the
+ * block stays typed and the note-level serializer refuses the note, so the
+ * fallback is reported rather than silently converted. Size and depth codes are
+ * never demoted either: a Markdown-side limit refusal leaves the block typed and
+ * surfaces as a note-level serializer fallback, not a silent rewrite. The
+ * decoder's own bounded opaque-text retry is a different mechanism, triggered
+ * only by a native `document_bounds_exceeded`.
+ */
+function preserveIfMarkdownUnrepresentable(block: NoteBlock): void {
+  try {
+    serializeNoteDocumentMarkdown({ version: 1, blocks: [block] });
+  } catch (error) {
+    if (!isNoteDocumentError(error)) throw error;
+    if (MARKDOWN_LIMIT_ERRORS.has(error.code)) return;
+    if (
+      error.serializationStage === "markdown_emission" ||
+      error.serializationStage === "round_trip"
+    )
+      preserve();
+  }
+}
+
 function decodeBlocks(
   nodes: HtmlNode[],
   payloads: Map<string, string>,
@@ -1274,6 +1314,7 @@ function decodeBlocks(
     try {
       if (containsUnsupportedMarkup(n)) preserve();
       const block = decodeBlock(n, payloads, binding, topLevel, children, textBudget, mintText);
+      preserveIfMarkdownUnrepresentable(block);
       const canon = fingerprint(block);
       records.push({
         raw: n.raw,

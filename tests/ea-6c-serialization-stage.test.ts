@@ -56,7 +56,7 @@ describe("EA-6c — serializer refusal stage is content-free", () => {
     expect(JSON.stringify([validationError, roundTripError])).not.toContain("c#");
   });
 
-  it("carries the stage through the projection without exposing it on normal reads", () => {
+  it("keeps a safe native block opaque when Markdown cannot emit it", () => {
     const result = classifyNoteContentProjection({
       contentRefusal: undefined,
       envelope: envelope('<p><a href="https://example.com/a(b)">x</a></p>'),
@@ -65,9 +65,10 @@ describe("EA-6c — serializer refusal stage is content-free", () => {
       requestId: "req_ea6c",
     });
     expect(result).toMatchObject({
-      outcome: "serializer_fallback",
-      serializationReason: "malformed_link",
-      serializationStage: "markdown_emission",
+      outcome: "strict_with_preserved_blocks",
+      preservedBlocks: 1,
     });
+    expect(result).not.toHaveProperty("serializationReason");
+    expect(result).not.toHaveProperty("serializationStage");
   });
 });
