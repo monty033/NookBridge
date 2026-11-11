@@ -909,22 +909,44 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       });
     }
     if (resultRecord.kind === "status") {
+      // conflictedCount is optional: absent means "not measured". When present
+      // it must be a safe non-negative integer; it is never defaulted to zero.
+      const measured = Object.prototype.hasOwnProperty.call(resultRecord, "conflictedCount");
       if (
-        !hasExactOwnKeys(resultRecord, ["kind", "lastSynced", "hasUnsyncedChanges"]) ||
+        !hasExactOwnKeys(
+          resultRecord,
+          measured
+            ? ["kind", "lastSynced", "hasUnsyncedChanges", "conflictedCount"]
+            : ["kind", "lastSynced", "hasUnsyncedChanges"],
+        ) ||
         typeof resultRecord.lastSynced !== "number" ||
         !Number.isFinite(resultRecord.lastSynced) ||
         resultRecord.lastSynced < 0 ||
-        typeof resultRecord.hasUnsyncedChanges !== "boolean"
+        typeof resultRecord.hasUnsyncedChanges !== "boolean" ||
+        (measured &&
+          (typeof resultRecord.conflictedCount !== "number" ||
+            !Number.isSafeInteger(resultRecord.conflictedCount) ||
+            resultRecord.conflictedCount < 0))
       )
         throw new Error("invalid response");
+      const conflictedCount = resultRecord.conflictedCount;
+      const statusResult =
+        measured && typeof conflictedCount === "number"
+          ? {
+              kind: "status" as const,
+              lastSynced: resultRecord.lastSynced,
+              hasUnsyncedChanges: resultRecord.hasUnsyncedChanges,
+              conflictedCount,
+            }
+          : {
+              kind: "status" as const,
+              lastSynced: resultRecord.lastSynced,
+              hasUnsyncedChanges: resultRecord.hasUnsyncedChanges,
+            };
       return Object.freeze({
         id: candidate.id,
         ok: true,
-        result: Object.freeze({
-          kind: "status",
-          lastSynced: resultRecord.lastSynced,
-          hasUnsyncedChanges: resultRecord.hasUnsyncedChanges,
-        }),
+        result: Object.freeze(statusResult),
       });
     }
     if (resultRecord.kind === "notebooks") {

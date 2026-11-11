@@ -122,7 +122,18 @@ export interface ServiceRuntime {
    * categorically without ever touching the real-core.
    */
   readonly search: (query: string) => Promise<ReadonlyArray<Readonly<{ title: string }>>>;
-  readonly status: () => Promise<Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean }>>;
+  /**
+   * Sync status.  `hasUnsyncedChanges: false` does NOT mean nothing is stranded:
+   * conflicted rows are excluded from the unsynced set, so a note in conflict is
+   * invisible to that flag.  `conflictedCount`, when present, is the number of
+   * conflicted notes: a count only, with no titles, ids, revisions, or content.
+   * It is bounded by the local conflict cap; a set beyond that cap fails status.
+   * When the counter is not wired, the field is ABSENT, meaning "not measured".
+   * An absent field is never reported as zero.
+   */
+  readonly status: () => Promise<
+    Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean; conflictedCount?: number }>
+  >;
   readonly listNotebooks: () => Promise<
     ReadonlyArray<
       Readonly<{
@@ -316,15 +327,22 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
   };
 
   const status = async (): Promise<
-    Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean }>
+    Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean; conflictedCount?: number }>
   > => {
     if (lifecycle.isClosed()) throw serviceRuntimeError("service runtime is unavailable");
     try {
-      const [lastSynced, hasUnsyncedChanges] = await Promise.all([
+      // An unwired counter omits the field ("not measured"); it is never zero.
+      const counter = core.handle.localConflictCounter;
+      const [lastSynced, hasUnsyncedChanges, conflictedCount] = await Promise.all([
         readOnly.lastSynced(),
         readOnly.hasUnsyncedChanges(),
+        counter === undefined ? undefined : counter.countLocalConflicts(),
       ]);
-      return Object.freeze({ lastSynced, hasUnsyncedChanges });
+      return Object.freeze({
+        lastSynced,
+        hasUnsyncedChanges,
+        ...(conflictedCount === undefined ? {} : { conflictedCount }),
+      });
     } catch {
       throw serviceRuntimeError("service runtime status failed");
     }

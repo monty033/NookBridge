@@ -106,6 +106,9 @@ export async function createProductionLiveLoginRuntime(
     ...(core.handle.localConflictObserver === undefined
       ? {}
       : { localConflictObserver: core.handle.localConflictObserver }),
+    ...(core.handle.localConflictInspector === undefined
+      ? {}
+      : { localConflictInspector: core.handle.localConflictInspector }),
   };
 }
 

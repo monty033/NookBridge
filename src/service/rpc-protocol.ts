@@ -533,7 +533,18 @@ export interface RpcSearchResult {
 export interface RpcStatusResult {
   readonly kind: "status";
   readonly lastSynced: number;
+  /**
+   * `false` does NOT mean nothing is stranded: conflicted rows are excluded from
+   * the unsynced set.  Read `conflictedCount` for the conflicted notes.
+   */
   readonly hasUnsyncedChanges: boolean;
+  /**
+   * Count of conflicted notes, a count only, with no titles, ids, revisions, or
+   * content.  Bounded by the local conflict cap; a set beyond the cap fails
+   * status.  ABSENT when the daemon does not measure it: absence means "not
+   * measured", never zero.
+   */
+  readonly conflictedCount?: number;
 }
 
 export interface RpcNotebookSummary {
@@ -2142,20 +2153,23 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     }
 
     if (kind === "status") {
+      const baseStatusKeys = ["kind", "lastSynced", "hasUnsyncedChanges"];
+      const measuredStatusKeys = [...baseStatusKeys, "conflictedCount"];
       const resultKeys = validateClosedObject(
         resultRecord,
-        ["kind", "lastSynced", "hasUnsyncedChanges"],
+        measuredStatusKeys,
         "rpc protocol: status result has unexpected fields",
       );
-      if (
-        resultKeys.length !== 3 ||
-        !keysAreExactly(resultKeys, ["kind", "lastSynced", "hasUnsyncedChanges"])
-      ) {
+      const measured = resultKeys.includes("conflictedCount");
+      const expectedKeys = measured ? measuredStatusKeys : baseStatusKeys;
+      if (resultKeys.length !== expectedKeys.length || !keysAreExactly(resultKeys, expectedKeys)) {
         throw rpcProtocolError("rpc protocol: status result has unexpected fields");
       }
+      const conflictedCount = resultRecord.conflictedCount;
       if (
         !isNonNegativeFiniteNumber(resultRecord.lastSynced) ||
-        typeof resultRecord.hasUnsyncedChanges !== "boolean"
+        typeof resultRecord.hasUnsyncedChanges !== "boolean" ||
+        (measured && !isSafeNonNegativeInteger(conflictedCount))
       ) {
         throw rpcProtocolError("rpc protocol: status result fields are invalid");
       }
@@ -2163,10 +2177,14 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         kind: "status";
         lastSynced: number;
         hasUnsyncedChanges: boolean;
+        conflictedCount?: number;
       };
       resultPayload.kind = "status";
       resultPayload.lastSynced = resultRecord.lastSynced;
       resultPayload.hasUnsyncedChanges = resultRecord.hasUnsyncedChanges;
+      if (isSafeNonNegativeInteger(conflictedCount)) {
+        resultPayload.conflictedCount = conflictedCount;
+      }
       return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
@@ -3595,6 +3613,10 @@ function assertBoundedMarkdown(
   if (value.length > maxBytes || utf8ByteLength(value, maxBytes) > maxBytes) {
     throw rpcProtocolError(`rpc protocol: ${label} exceeds maximum bytes`);
   }
+}
+
+function isSafeNonNegativeInteger(value: JsonValue | undefined): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isNonNegativeFiniteNumber(value: JsonValue | undefined): value is number {

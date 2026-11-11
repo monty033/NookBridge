@@ -130,7 +130,9 @@ export interface RpcHandlerRuntimeLike {
    * before the handler returns.
    */
   readonly search: (query: string) => Promise<ReadonlyArray<Readonly<{ title: string }>>>;
-  readonly status?: () => Promise<Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean }>>;
+  readonly status?: () => Promise<
+    Readonly<{ lastSynced: number; hasUnsyncedChanges: boolean; conflictedCount?: number }>
+  >;
   readonly listNotebooks?: () => Promise<
     ReadonlyArray<
       Readonly<{
@@ -1925,21 +1927,41 @@ async function runNotesStatus(
   const status = raw as Record<string, unknown>;
   const lastSynced = readOwnNumberField(status, "lastSynced");
   const hasUnsyncedChanges = readOwnBooleanField(status, "hasUnsyncedChanges");
-  if (lastSynced === undefined || hasUnsyncedChanges === undefined) {
+  // An absent conflictedCount means "not measured" and is omitted. A present
+  // but invalid value fails closed; it is never coerced to zero.
+  const conflictedCountPresent = hasOwnField(status, "conflictedCount");
+  const conflictedCount = conflictedCountPresent
+    ? readOwnNumberField(status, "conflictedCount")
+    : undefined;
+  if (
+    lastSynced === undefined ||
+    hasUnsyncedChanges === undefined ||
+    (conflictedCountPresent &&
+      (conflictedCount === undefined ||
+        !Number.isSafeInteger(conflictedCount) ||
+        conflictedCount < 0))
+  ) {
     return buildErrorEnvelope(id, "service_unavailable");
   }
-  const result = objectFreeze(
-    objectCreate(null, {
-      kind: { value: "status", enumerable: true, configurable: false, writable: false },
-      lastSynced: { value: lastSynced, enumerable: true, configurable: false, writable: false },
-      hasUnsyncedChanges: {
-        value: hasUnsyncedChanges,
-        enumerable: true,
-        configurable: false,
-        writable: false,
-      },
-    }),
-  ) as RpcStatusResult;
+  const descriptors: PropertyDescriptorMap = {
+    kind: { value: "status", enumerable: true, configurable: false, writable: false },
+    lastSynced: { value: lastSynced, enumerable: true, configurable: false, writable: false },
+    hasUnsyncedChanges: {
+      value: hasUnsyncedChanges,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    },
+  };
+  if (conflictedCount !== undefined) {
+    descriptors.conflictedCount = {
+      value: conflictedCount,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    };
+  }
+  const result = objectFreeze(objectCreate(null, descriptors)) as RpcStatusResult;
   return buildResultSuccessEnvelope(id, result);
 }
 
@@ -2238,6 +2260,16 @@ function readRuntimeMethod(
     return descriptor.value as (...args: unknown[]) => unknown;
   } catch {
     return undefined;
+  }
+}
+
+// Fails closed: a throwing descriptor read counts as present, so the caller
+// then rejects the value instead of silently omitting it.
+function hasOwnField(record: Record<string, unknown>, key: string): boolean {
+  try {
+    return objectGetOwnPropertyDescriptor(record, key) !== undefined;
+  } catch {
+    return true;
   }
 }
 

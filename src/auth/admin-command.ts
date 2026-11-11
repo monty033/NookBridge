@@ -36,7 +36,10 @@ import { runLiveAuthCommand, type LiveProviderFactory } from "./live-auth-runner
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookLiveWriteCapability } from "../core/notesnook-write-admin.js";
 import type { NotesnookLiveRemoteSyncCapability } from "../core/notesnook-live-remote-sync.js";
-import type { NotesnookLocalConflictObserver } from "../core/notesnook-local-conflict-projection.js";
+import type {
+  NotesnookLocalConflictInspector,
+  NotesnookLocalConflictObserver,
+} from "../core/notesnook-local-conflict-projection.js";
 import type { AuthSession } from "./types.js";
 
 /**
@@ -391,6 +394,8 @@ export type LiveLoginRuntime = Readonly<{
   remoteSync?: NotesnookLiveRemoteSyncCapability;
   /** Separately named Stage 5 local conflict-marker observer. */
   localConflictObserver?: NotesnookLocalConflictObserver;
+  /** Separately named Stage 5 read-only local conflict inspector. */
+  localConflictInspector?: NotesnookLocalConflictInspector;
 }>;
 
 export type LiveLoginRuntimeOptions = Readonly<{

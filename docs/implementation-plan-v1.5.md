@@ -127,7 +127,7 @@ permissions:
 ## 1.4 Explicit non-goals for the MVP
 
 - Deleting notes or notebooks.
-- Bridge-implemented conflict resolution or silent last-write-wins behavior. Notesnook core remains the authority for native sync/conflict behavior; NookBridge only controls authorization, lifecycle, serialization, bounded retries, and result projection.
+- Bridge-implemented conflict resolution or silent last-write-wins behavior. Notesnook core remains the authority for native sync/conflict behavior; NookBridge only controls authorization, lifecycle, serialization, bounded retries, and result projection. **Owner-authorized amendment (EA-CR, 2026-11-11):** NookBridge MAY invoke core's own native conflict-resolution protocol in *keep-both* mode on an explicit operator or agent request — the original note adopts the side every other device already shows, and the bridge's local side is preserved as a new note that inherits the original's notebook and tags. Nothing is trashed, and no side is discarded. A merge algorithm, last-write-wins, discarding a side, and automatic or background resolution all remain forbidden.
 - Private Vault unlocking/management. Locked-note discovery/read behavior is defined explicitly in Section 4.8, but the bridge does not accept, store, or expose a Vault-unlock credential or tool in the MVP.
 - Attachment upload/download or content extraction.
 - Semantic/vector search.
@@ -398,7 +398,7 @@ Provisioning is an administrative action, not an agent action. `nookctl provisio
 | 429 / throttling | Honor `Retry-After` when available; otherwise use bounded exponential backoff with jitter. |
 | Transient network/server failure | Back off, retain dirty/pending state, and expose sync-pending/error status; do not busy-loop. |
 | Persistent auth/protocol failure | Stop automatic retry after a bounded policy and surface operator-visible health failure. |
-| Conflict detected | Return a conflict result with note identity/revision metadata. Do not auto-resolve. |
+| Conflict detected | Return a conflict result with note identity/revision metadata. Do not auto-resolve. An explicit operator- or agent-invoked keep-both resolution under the EA-CR amendment is the only permitted resolution path. |
 
 DR-S7a (§13.22) supersedes this table's upload behaviour. Uploads happen only on an explicit `notes.sync`; nothing schedules or triggers a send/full sync after writes or before reads, and reads use the fetch-only boundary. The rows above are left unchanged. Such syncs are refused with `unapproved_pending` while unapproved operator- or unknown-origin changes are pending, or when an empty marker batch lacks a strictly false database unsynced status (SR-7).
 
@@ -589,7 +589,7 @@ Objective: prove the central claim: the headless client participates in real Not
 | Remote → bridge | Create/edit a note on phone/laptop, fetch sync, then return only the explicitly requested bounded content/metadata. |
 | Search | Known title/body keywords return expected note IDs without creating a plaintext side index. |
 | Restart + sync | Restart, fetch changes made while offline, and return them correctly. |
-| Conflict visibility | Generate a two-device conflict; bridge identifies it and does not silently resolve it. |
+| Conflict visibility | Generate a two-device conflict; bridge identifies it and does not silently resolve it. Resolution is explicit, operator- or agent-invoked, and keep-both only (EA-CR amendment). |
 | Locked note | Locked-note titles are suppressed from production discovery with no body leakage; `getNote` returns `vault_locked`. (The historical Stage 3 live receipt below predates this suppression.) |
 
 **Security checkpoint S3:** LLM red-team attempts to locate decrypted note bodies in state directories, temp directories, logs, process arguments, and crash outputs. Only explicitly requested content in process responses/memory is acceptable.
