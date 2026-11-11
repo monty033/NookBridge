@@ -100,8 +100,9 @@ export type NoteDocumentErrorCode =
  */
 export class NoteDocumentError extends Error {
   public readonly code!: NoteDocumentErrorCode;
+  public readonly serializationStage?: NoteDocumentSerializationStage;
 
-  constructor(code: NoteDocumentErrorCode) {
+  constructor(code: NoteDocumentErrorCode, serializationStage?: NoteDocumentSerializationStage) {
     super(NOTE_DOCUMENT_ERROR_MESSAGES[code]);
     Object.setPrototypeOf(this, NoteDocumentError.prototype);
     Object.defineProperty(this, "code", {
@@ -110,6 +111,14 @@ export class NoteDocumentError extends Error {
       writable: false,
       value: code,
     });
+    if (serializationStage !== undefined) {
+      Object.defineProperty(this, "serializationStage", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: serializationStage,
+      });
+    }
     // Strip caller-controlled data: a `cause` is never read by callers,
     // and clearing it stops prototypes / option bags from smuggling
     // secrets through the rejection path.
@@ -192,6 +201,16 @@ export const SERIALIZATION_REFUSAL_CODES = Object.freeze([
   ...NOTE_DOCUMENT_ERROR_CODES,
   "unclassified",
 ] as const);
+
+/** Closed, content-free stage vocabulary for strict Markdown serialization. */
+export const NOTE_DOCUMENT_SERIALIZATION_STAGES = Object.freeze([
+  "validation",
+  "reference_check",
+  "markdown_emission",
+  "round_trip",
+  "unclassified",
+] as const);
+export type NoteDocumentSerializationStage = (typeof NOTE_DOCUMENT_SERIALIZATION_STAGES)[number];
 
 /** Identity predicate for {@link NoteDocumentError}. */
 export function isNoteDocumentError(value: unknown): value is NoteDocumentError {

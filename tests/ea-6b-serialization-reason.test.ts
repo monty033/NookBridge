@@ -23,6 +23,14 @@ import { classifyNoteContentProjection } from "../src/service/note-content-proje
 import { NOTE_DOCUMENT_ERROR_CODES } from "../src/core/note-document.js";
 import { normalizeNotesEditCensusCounts } from "../src/operator/notes-cli.js";
 
+const serializationStages = (total: number) => ({
+  validation: 0,
+  reference_check: 0,
+  markdown_emission: 0,
+  round_trip: 0,
+  unclassified: total,
+});
+
 const note = {
   id: "n_ea6b",
   title: "Synthetic",
@@ -137,6 +145,7 @@ describe("EA-6b — the census wire shape stays closed", () => {
       classes: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: { malformed_link: 1 },
+      serializationStages: serializationStages(1),
       serializationFallbackWithPreserved: 1,
       projection: {
         strict: 0,
@@ -155,6 +164,13 @@ describe("EA-6b — the census wire shape stays closed", () => {
     });
     expect(census).toBeDefined();
     expect(census?.serializationRefusals).toEqual({ malformed_link: 1 });
+    expect(census?.serializationStages).toEqual({
+      validation: 0,
+      reference_check: 0,
+      markdown_emission: 0,
+      round_trip: 0,
+      unclassified: 1,
+    });
     expect(census?.serializationFallbackWithPreserved).toBe(1);
   });
 
@@ -192,6 +208,7 @@ describe("EA-6b — the census wire shape stays closed", () => {
       classes: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: { malformed_link: 5 },
+      serializationStages: serializationStages(5),
       serializationFallbackWithPreserved: 0,
       projection: {
         strict: 0,
@@ -221,6 +238,7 @@ describe("EA-6b — the census wire shape stays closed", () => {
       classes: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: { malformed_link: 1 },
+      serializationStages: serializationStages(1),
       serializationFallbackWithPreserved: 1,
       projection: {
         strict: 0,
@@ -247,6 +265,7 @@ describe("EA-6b — the census wire shape stays closed", () => {
       classes: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: { malformed_link: 1 },
+      serializationStages: serializationStages(1),
       serializationFallbackWithPreserved: 2,
       projection: {
         strict: 0,
@@ -295,6 +314,7 @@ describe("EA-6b — the census wire shape stays closed", () => {
       classes: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: Object.fromEntries(codes.map((code) => [code, 1])),
+      serializationStages: serializationStages(codes.length),
       serializationFallbackWithPreserved: 0,
       projection: {
         strict: 0,
@@ -351,6 +371,13 @@ describe("EA-6b — the census counts the refusals it names", () => {
     expect(census.total).toBe(3);
     expect(census.projection.serializerFallback).toBe(2);
     expect(census.serializationRefusals).toEqual({ malformed_link: 2 });
+    expect(census.serializationStages).toEqual({
+      validation: 0,
+      reference_check: 0,
+      markdown_emission: 2,
+      round_trip: 0,
+      unclassified: 0,
+    });
     // One of the two refused notes carried a preserved block: the count that
     // used to be zeroed, and that separates "preservation broke this" from
     // "ordinary content cannot be written".
@@ -428,6 +455,7 @@ describe("EA-6b — a refusal that turns out to be over budget is not a serializ
         classes: census.reasons,
         editRefusals: census.editRefusals,
         serializationRefusals: census.serializationRefusals,
+        serializationStages: census.serializationStages,
         serializationFallbackWithPreserved: census.serializationFallbackWithPreserved,
         projection: {
           strict: census.projection.strict,

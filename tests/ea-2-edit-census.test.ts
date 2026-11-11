@@ -52,6 +52,14 @@ import {
   type SeedNote,
 } from "./helpers/ea-synthetic-daemon.js";
 
+const serializationStages = (markdownEmission = 0) => ({
+  validation: 0,
+  reference_check: 0,
+  markdown_emission: markdownEmission,
+  round_trip: 0,
+  unclassified: 0,
+});
+
 const OPERATOR: OperatorPeer = {
   uid: 1,
   gid: 2,
@@ -707,6 +715,7 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
       reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: {},
+      serializationStages: serializationStages(),
       serializationFallbackWithPreserved: 0,
       cap: MAX_EDIT_CENSUS_NOTES_PER_RUN,
       skipped: 0,
@@ -725,6 +734,29 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
     };
     const envelope = (result: object) => ({ id: "r", ok: true, result }) as never;
     expect(() => serializeRpcResponse(envelope(base))).not.toThrow();
+    const encoded = serializeRpcResponse(
+      envelope({
+        ...base,
+        serializationRefusals: { invalid_shape: 1 },
+        serializationStages: {
+          validation: 0,
+          reference_check: 0,
+          markdown_emission: 0,
+          round_trip: 1,
+          unclassified: 0,
+        },
+      }),
+    );
+    const decoded = JSON.parse(Buffer.from(encoded.subarray(4)).toString("utf8")) as {
+      result: { serializationStages: Record<string, number> };
+    };
+    expect(decoded.result.serializationStages).toEqual({
+      validation: 0,
+      reference_check: 0,
+      markdown_emission: 0,
+      round_trip: 1,
+      unclassified: 0,
+    });
     // A code outside the closed vocabulary is refused, not named.
     expect(() =>
       serializeRpcResponse(envelope({ ...base, serializationRefusals: { not_a_real_code: 1 } })),
@@ -745,6 +777,7 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
         envelope({
           ...base,
           serializationRefusals: { malformed_link: 1 },
+          serializationStages: serializationStages(1),
           serializationFallbackWithPreserved: 2,
           preservedBlocks: 2,
         }),
@@ -757,6 +790,7 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
         envelope({
           ...base,
           serializationRefusals: { malformed_link: 1 },
+          serializationStages: serializationStages(1),
           serializationFallbackWithPreserved: 1,
           preservedBlocks: 0,
         }),
@@ -768,11 +802,43 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
         envelope({
           ...base,
           serializationRefusals: { malformed_link: 1 },
+          serializationStages: serializationStages(1),
           serializationFallbackWithPreserved: 1,
           preservedBlocks: 1,
         }),
       ),
     ).not.toThrow();
+    // Every refusal must have exactly one content-free stage assignment.
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationRefusals: { malformed_link: 1 },
+          serializationStages: serializationStages(),
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationStages: { ...serializationStages(), extra: 0 },
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      serializeRpcResponse(
+        envelope({
+          ...base,
+          serializationStages: {
+            validation: 0,
+            reference_check: 0,
+            markdown_emission: 0,
+            round_trip: 0,
+          },
+        }),
+      ),
+    ).toThrow();
   });
 
   it("the wire refuses more refusal reasons than refused projections", () => {
@@ -783,6 +849,7 @@ describe("EA-2 — the reasons bucket counts only refusal reasons", () => {
       reasons: { hostile: 1, uninterpretable: 0, limit: 0, unclassified: 0 },
       editRefusals: 0,
       serializationRefusals: {},
+      serializationStages: serializationStages(),
       serializationFallbackWithPreserved: 0,
       cap: MAX_EDIT_CENSUS_NOTES_PER_RUN,
       skipped: 0,

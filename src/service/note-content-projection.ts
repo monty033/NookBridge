@@ -31,6 +31,7 @@ import {
   isNoteDocumentError,
   type NoteBlock,
   type NoteDocumentErrorCode,
+  type NoteDocumentSerializationStage,
 } from "../core/note-document.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
@@ -81,6 +82,8 @@ export interface NoteProjectionClassification {
    * never included in the `notes.get` projection.
    */
   readonly serializationReason?: NoteDocumentErrorCode | "unclassified";
+  /** Content-free stage of the strict serializer refusal, when known. */
+  readonly serializationStage?: NoteDocumentSerializationStage;
   readonly markdown?: string;
   readonly markdownBytes?: number;
   /**
@@ -178,6 +181,7 @@ export function classifyNoteContentProjection(
   // Outside the try, so a refusal survives a fallback that throws as well.
   let reason: NativeFailureReason | undefined;
   let serializationReason: NoteDocumentErrorCode | "unclassified" | undefined;
+  let serializationStage: NoteDocumentSerializationStage | undefined;
   try {
     const revision = readOwnStringField(input.note, "revision") ?? `rev_${"0".repeat(32)}`;
     let markdown: string;
@@ -203,8 +207,13 @@ export function classifyNoteContentProjection(
       // `NoteDocumentError` carrying a closed code — which is the only thing
       // that can tell an operator why a note is not editable.
       if (error instanceof NoteDocumentNativeError) reason = error.reason;
-      else if (isNoteDocumentError(error)) serializationReason = error.code;
-      else serializationReason = "unclassified";
+      else if (isNoteDocumentError(error)) {
+        serializationReason = error.code;
+        serializationStage = error.serializationStage ?? "unclassified";
+      } else {
+        serializationReason = "unclassified";
+        serializationStage = "unclassified";
+      }
       markdown = readOnlyMarkdownFallback(input.envelope);
       outcome = "serializer_fallback";
     }
@@ -219,6 +228,7 @@ export function classifyNoteContentProjection(
       outcome,
       ...(reason === undefined ? {} : { reason }),
       ...(serializationReason === undefined ? {} : { serializationReason }),
+      ...(serializationStage === undefined ? {} : { serializationStage }),
       ...(reportsPreserved
         ? { preservedBlocks: preserved.blocks, preservedTaskLists: preserved.lists }
         : nothing),
