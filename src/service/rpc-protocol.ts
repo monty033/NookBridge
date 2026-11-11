@@ -29,7 +29,11 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 
-import { SERIALIZATION_REFUSAL_CODES } from "../core/note-document.js";
+import {
+  NOTE_DOCUMENT_SERIALIZATION_STAGES,
+  SERIALIZATION_REFUSAL_CODES,
+  type NoteDocumentSerializationStage,
+} from "../core/note-document.js";
 import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
@@ -806,6 +810,8 @@ export interface RpcNotesEditCensusResult {
    * The sum is at most `projection.serializerFallback`.
    */
   readonly serializationRefusals: Readonly<Record<string, number>>;
+  /** Serializer refusal counts by closed processing stage; no note data. */
+  readonly serializationStages: Readonly<Record<NoteDocumentSerializationStage, number>>;
   /**
    * Of those, the notes whose decoded document carried at least one preserved
    * block before the serializer refused it. Separates "preservation made this
@@ -2748,6 +2754,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         "reasons",
         "editRefusals",
         "serializationRefusals",
+        "serializationStages",
         "serializationFallbackWithPreserved",
         "projection",
         "preservedBlocks",
@@ -2904,6 +2911,32 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
           "rpc protocol: edit-census serialization refusals exceed the fallbacks",
         );
 
+      const serializationStages = resultRecord.serializationStages;
+      if (
+        serializationStages === null ||
+        typeof serializationStages !== "object" ||
+        arrayIsArray(serializationStages)
+      )
+        throw rpcProtocolError("rpc protocol: edit-census serialization stages are invalid");
+      const stageRecord = serializationStages as Record<string, JsonValue>;
+      const stageKeys = Reflect.ownKeys(stageRecord);
+      if (
+        stageKeys.length !== NOTE_DOCUMENT_SERIALIZATION_STAGES.length ||
+        NOTE_DOCUMENT_SERIALIZATION_STAGES.some((stage) => !stageKeys.includes(stage))
+      )
+        throw rpcProtocolError("rpc protocol: edit-census serialization stages are invalid");
+      const stageCounts = objectCreate(null) as Record<string, number>;
+      let stageTotal = 0;
+      for (const stage of NOTE_DOCUMENT_SERIALIZATION_STAGES) {
+        const value = stageRecord[stage];
+        if (!count(value))
+          throw rpcProtocolError("rpc protocol: edit-census serialization stage count is invalid");
+        stageCounts[stage] = value;
+        stageTotal += value;
+      }
+      if (stageTotal !== serializationTotal)
+        throw rpcProtocolError("rpc protocol: edit-census serialization stages are inconsistent");
+
       const preservedBlocks = resultRecord.preservedBlocks;
       const preservedTaskLists = resultRecord.preservedTaskLists;
       if (
@@ -2927,6 +2960,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         reasons: { hostile: number; uninterpretable: number; limit: number; unclassified: number };
         editRefusals: number;
         serializationRefusals: Record<string, number>;
+        serializationStages: Record<NoteDocumentSerializationStage, number>;
         serializationFallbackWithPreserved: number;
         projection: Record<string, number>;
         preservedBlocks: number;
@@ -2947,6 +2981,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       };
       resultPayload.editRefusals = editRefusals;
       resultPayload.serializationRefusals = serializationCounts;
+      resultPayload.serializationStages = stageCounts;
       resultPayload.serializationFallbackWithPreserved = serializationFallbackWithPreserved;
       resultPayload.projection = {
         strict: projectionRecord.strict as number,

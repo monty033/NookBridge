@@ -39,6 +39,10 @@
 import { Buffer } from "node:buffer";
 
 import { nativeFailureClass, type NativeFailureClass } from "../core/note-document-native.js";
+import {
+  NOTE_DOCUMENT_SERIALIZATION_STAGES,
+  type NoteDocumentSerializationStage,
+} from "../core/note-document.js";
 import type { RpcNotesEditCensusResult } from "./rpc-protocol.js";
 import {
   classifyNoteContentProjection,
@@ -102,6 +106,7 @@ interface Accumulator {
    * already published, so a stage is not folded into it after the fact.
    */
   readonly serializationRefusals: Record<string, number>;
+  readonly serializationStages: Record<NoteDocumentSerializationStage, number>;
   /** Notes that decoded with preserved blocks and then fell back. */
   serializationFallbackWithPreserved: number;
   /** Never a decode failure and never preservable: counted on its own. */
@@ -116,6 +121,9 @@ function emptyAccumulator(): Accumulator {
     total: 0,
     reasons: { hostile: 0, uninterpretable: 0, limit: 0, unclassified: 0 },
     serializationRefusals: {},
+    serializationStages: Object.fromEntries(
+      NOTE_DOCUMENT_SERIALIZATION_STAGES.map((stage) => [stage, 0]),
+    ) as Record<NoteDocumentSerializationStage, number>,
     serializationFallbackWithPreserved: 0,
     editRefusals: 0,
     projection: {
@@ -166,6 +174,8 @@ function record(acc: Accumulator, classification: NoteProjectionClassification):
   ) {
     const code = classification.serializationReason;
     acc.serializationRefusals[code] = (acc.serializationRefusals[code] ?? 0) + 1;
+    const stage = classification.serializationStage ?? "unclassified";
+    acc.serializationStages[stage] += 1;
     if (classification.preservedBlocks > 0) acc.serializationFallbackWithPreserved += 1;
   }
   const reason = classification.reason;
@@ -218,6 +228,7 @@ function result(
     total: acc.total,
     reasons: Object.freeze({ ...acc.reasons }),
     serializationRefusals: Object.freeze({ ...acc.serializationRefusals }),
+    serializationStages: Object.freeze({ ...acc.serializationStages }),
     serializationFallbackWithPreserved: acc.serializationFallbackWithPreserved,
     editRefusals: acc.editRefusals,
     projection,

@@ -32,6 +32,7 @@ import {
   MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST,
   MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES,
   type NoteDocumentErrorCode,
+  type NoteDocumentSerializationStage,
   type NoteDocumentV1,
   type NoteBlock,
   type NoteInline,
@@ -64,6 +65,18 @@ function guard<T>(run: () => T): T {
   } catch (error) {
     if (isNoteDocumentError(error)) throw error;
     return fail();
+  }
+}
+
+function atSerializationStage<T>(
+  stage: Exclude<NoteDocumentSerializationStage, "unclassified">,
+  run: () => T,
+): T {
+  try {
+    return run();
+  } catch (error) {
+    if (isNoteDocumentError(error)) throw new NoteDocumentError(error.code, stage);
+    throw new NoteDocumentError("invalid_shape", stage);
   }
 }
 
@@ -786,13 +799,15 @@ function semantics(value: unknown): string {
 }
 export function serializeNoteDocumentMarkdown(document: NoteDocumentV1): string {
   return guard(() => {
-    const doc = safeDocument(document);
-    references(doc);
-    const result = emit(doc);
+    const doc = atSerializationStage("validation", () => safeDocument(document));
+    atSerializationStage("reference_check", () => references(doc));
+    const result = atSerializationStage("markdown_emission", () => emit(doc));
     // Verify that generated syntax has exactly the semantics emitted; reject
     // delimiter collisions and AST constructs outside the lossless subset.
-    const decoded = decode(result);
-    if (emit(decoded) !== result || semantics(doc) !== semantics(decoded)) fail();
+    const decoded = atSerializationStage("round_trip", () => decode(result));
+    atSerializationStage("round_trip", () => {
+      if (emit(decoded) !== result || semantics(doc) !== semantics(decoded)) fail();
+    });
     return result;
   });
 }

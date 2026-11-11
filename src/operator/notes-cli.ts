@@ -1,6 +1,9 @@
 import { TextEncoder } from "node:util";
 
-import { SERIALIZATION_REFUSAL_CODES as CORE_SERIALIZATION_REFUSAL_CODES } from "../core/note-document.js";
+import {
+  NOTE_DOCUMENT_SERIALIZATION_STAGES,
+  SERIALIZATION_REFUSAL_CODES as CORE_SERIALIZATION_REFUSAL_CODES,
+} from "../core/note-document.js";
 import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
 
 /**
@@ -311,6 +314,9 @@ export type NotesEditCensusCounts = Readonly<{
    * makes the whole census invalid.
    */
   readonly serializationRefusals: Readonly<Record<SerializationRefusalCode, number>>;
+  readonly serializationStages: Readonly<
+    Record<(typeof NOTE_DOCUMENT_SERIALIZATION_STAGES)[number], number>
+  >;
   readonly serializationFallbackWithPreserved: number;
   readonly projection: Readonly<{
     readonly strict: number;
@@ -697,6 +703,10 @@ export function formatNotesResult(
           ...Object.entries(census.serializationRefusals)
             .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
             .map(([code, count]) => `serializer-refusal-${code.replace(/_/g, "-")}: ${count}`),
+          ...NOTE_DOCUMENT_SERIALIZATION_STAGES.map(
+            (stage) =>
+              `serializer-stage-${stage.replace(/_/g, "-")}: ${census.serializationStages[stage]}`,
+          ),
           `serializer-fallback-with-preserved: ${census.serializationFallbackWithPreserved}`,
           `preserved-blocks: ${census.preservedBlocks}`,
           `preserved-task-lists: ${census.preservedTaskLists}`,
@@ -1378,6 +1388,7 @@ const EDIT_CENSUS_KEYS = [
   "classes",
   "editRefusals",
   "serializationRefusals",
+  "serializationStages",
   "serializationFallbackWithPreserved",
   "projection",
   "preservedBlocks",
@@ -1410,8 +1421,12 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
       record.serializationRefusals,
       SERIALIZATION_REFUSAL_CODES,
     );
+    const serializationStages = closedRecord(
+      record.serializationStages,
+      NOTE_DOCUMENT_SERIALIZATION_STAGES,
+    );
     if (classes === undefined || projection === undefined) return undefined;
-    if (serializationRefusals === undefined) return undefined;
+    if (serializationRefusals === undefined || serializationStages === undefined) return undefined;
     if (record.scope !== "corpus" && record.scope !== "note") return undefined;
     if (
       record.scope === "note" &&
@@ -1429,6 +1444,7 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
       ...Object.values(classes),
       ...Object.values(projection),
       ...Object.values(serializationRefusals),
+      ...Object.values(serializationStages),
     ];
     if (!counts.every(isCount)) return undefined;
 
@@ -1445,6 +1461,9 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
       editRefusals: record.editRefusals as number,
       serializationRefusals: Object.freeze(serializationRefusals) as Readonly<
         Record<SerializationRefusalCode, number>
+      >,
+      serializationStages: Object.freeze(serializationStages) as Readonly<
+        Record<(typeof NOTE_DOCUMENT_SERIALIZATION_STAGES)[number], number>
       >,
       serializationFallbackWithPreserved: record.serializationFallbackWithPreserved as number,
       projection: Object.freeze({
@@ -1489,6 +1508,8 @@ export function normalizeNotesEditCensusCounts(value: unknown): NotesEditCensusC
       // Serializer refusals are a subset of the serializer fallbacks, and the
       // "with preserved" count is a subset of those.
       serializationRefusalSum > p.serializerFallback ||
+      Object.values(census.serializationStages).reduce((sum, count) => sum + count, 0) !==
+        serializationRefusalSum ||
       census.serializationFallbackWithPreserved > serializationRefusalSum ||
       // Every note counted as preserving has at least one preserved block.
       census.preservedBlocks <
