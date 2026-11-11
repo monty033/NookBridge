@@ -1068,3 +1068,135 @@ function createFakeModuleWrapper(options: NotesnookDatabaseSetupOptions): Notesn
     Database: FakeLiveDatabase as unknown as NotesnookRealCoreModule["Database"],
   });
 }
+
+// ===========================================================================
+// Stage 5 S3 — the live handle exposes a local-conflict inspector that reads
+// content only through the PURE by-id `content.collection.get`. `content.get`
+// and `content.findByNoteId` run `preProcess` and persist the row, so the
+// inspection path must never reach them, nor `collection.update`.
+// ===========================================================================
+
+const CONFLICT_LOCAL_BODY = "<p>local side</p>";
+const CONFLICT_REMOTE_BODY = "<p>remote side</p>";
+
+function requireFakeDatabase(): FakeDatabase {
+  if (!db) throw new Error("test setup missing fake database");
+  return db;
+}
+
+/**
+ * Install a constructor whose instance carries a conflicted note surface and
+ * a content surface. Every call is recorded, so an exact-sequence assertion
+ * catches any write-capable reader on the inspection path.
+ */
+function installConflictSurface(
+  fake: FakeDatabase,
+  calls: string[],
+  options: { withCollection: boolean },
+): void {
+  const row = {
+    id: "content-1",
+    noteId: "conflict-note",
+    type: "tiptap",
+    locked: false,
+    data: CONFLICT_LOCAL_BODY,
+    conflicted: {
+      id: "content-1",
+      noteId: "conflict-note",
+      type: "tiptap",
+      locked: false,
+      data: CONFLICT_REMOTE_BODY,
+      dateModified: 2_000,
+    },
+  };
+  const notes = {
+    conflicted: { ids: async () => ["conflict-note"] },
+    note: async (id: string) => {
+      calls.push(`notes.note:${id}`);
+      return id === "conflict-note"
+        ? { id, title: "Locally conflicted note", contentId: "content-1", conflicted: true }
+        : undefined;
+    },
+  };
+  const content = {
+    get: async (id: string) => {
+      calls.push(`content.get:${id}`);
+      return row;
+    },
+    findByNoteId: async (noteId: string) => {
+      calls.push(`content.findByNoteId:${noteId}`);
+      return row;
+    },
+    preProcess: () => {
+      calls.push("content.preProcess");
+      return false;
+    },
+    collection: options.withCollection
+      ? {
+          get: async (id: string) => {
+            calls.push(`collection.get:${id}`);
+            return id === "content-1" ? row : undefined;
+          },
+          update: async () => {
+            calls.push("collection.update");
+          },
+        }
+      : undefined,
+  };
+  fake.ctor.mockImplementation(function Ctor() {
+    return {
+      setup: (...args: unknown[]) => fake.setup(...args),
+      host: (...args: unknown[]) => fake.host(...args),
+      init: (...args: unknown[]) => fake.init(...args),
+      user: fake.user,
+      tokenManager: fake.token,
+      kv: fake.kv,
+      notes,
+      content,
+    };
+  });
+}
+
+describe("Stage 5 S3 — live local-conflict inspector wiring", () => {
+  it("exposes an inspector that reads content only through collection.get", async () => {
+    const calls: string[] = [];
+    installConflictSurface(requireFakeDatabase(), calls, { withCollection: true });
+
+    const handle = await createHandle();
+    expect(handle.localConflictInspector).toBeDefined();
+
+    const inspection = await handle.localConflictInspector!.inspectConflict("conflict-note");
+    expect(inspection).toMatchObject({
+      outcome: "inspected",
+      sidesEqual: false,
+      remoteHasAttachments: false,
+    });
+    expect(calls).toEqual(["notes.note:conflict-note", "collection.get:content-1"]);
+  });
+
+  it("fails closed once the handle has been cleaned up", async () => {
+    installConflictSurface(requireFakeDatabase(), [], { withCollection: true });
+
+    const handle = await createHandle();
+    await handle.cleanup();
+    await expect(handle.localConflictInspector!.inspectConflict("conflict-note")).rejects.toThrow();
+  });
+
+  it("exposes a counter that reads only the conflicted selector, with no note lookup", async () => {
+    const calls: string[] = [];
+    installConflictSurface(requireFakeDatabase(), calls, { withCollection: true });
+
+    const handle = await createHandle();
+    expect(handle.localConflictCounter).toBeDefined();
+    await expect(handle.localConflictCounter!.countLocalConflicts()).resolves.toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("omits the inspector when no pure content reader exists, and keeps the observer", async () => {
+    installConflictSurface(requireFakeDatabase(), [], { withCollection: false });
+
+    const handle = await createHandle();
+    expect(handle.localConflictInspector).toBeUndefined();
+    expect(handle.localConflictObserver).toBeDefined();
+  });
+});

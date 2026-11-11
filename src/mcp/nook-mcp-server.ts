@@ -219,7 +219,8 @@ const EMPTY_INPUT_SCHEMA = Object.freeze({
 
 const STATUS_TOOL_DEFINITION = Object.freeze({
   name: NOOK_MCP_STATUS_TOOL_NAME,
-  description: "Return sync status without exposing credentials, paths, or note content.",
+  description:
+    "Return sync status without exposing credentials, paths, or note content. hasUnsyncedChanges=false does NOT mean nothing is stranded: conflicted notes are excluded from it, so read conflictedCount (a count only) for those. conflictedCount is omitted when not measured; absence means not measured, never zero.",
   inputSchema: EMPTY_INPUT_SCHEMA,
   annotations: SEARCH_TOOL_ANNOTATIONS,
 }) as unknown as Tool;
@@ -1290,10 +1291,13 @@ async function invokeStatus(
   if (!result.ok) return toMcpErrorResult(socketFailureToCode(result.code));
   try {
     if (result.envelope.result.kind !== "status") return toMcpErrorResult("service_unavailable");
+    // conflictedCount is passed through only when measured; absent means "not measured".
+    const measured = result.envelope.result.conflictedCount;
     return textResult({
       kind: "status",
       lastSynced: result.envelope.result.lastSynced,
       hasUnsyncedChanges: result.envelope.result.hasUnsyncedChanges,
+      ...(measured === undefined ? {} : { conflictedCount: measured }),
     });
   } catch {
     return toMcpErrorResult("service_unavailable");

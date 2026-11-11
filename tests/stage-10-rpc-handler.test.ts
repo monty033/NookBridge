@@ -102,6 +102,48 @@ function updateResult(): UpdateNoteResult {
   };
 }
 
+describe("Stage 5 S4 — notes.status conflictedCount passthrough", () => {
+  it("carries a measured conflictedCount through the response", async () => {
+    const response = await handleRpcRequest(
+      request("notes.status", {}),
+      makeRuntime({
+        status: async () => ({ lastSynced: 1, hasUnsyncedChanges: false, conflictedCount: 3 }),
+      }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: { kind: "status", lastSynced: 1, hasUnsyncedChanges: false, conflictedCount: 3 },
+    });
+  });
+
+  it("omits conflictedCount when the runtime does not measure it, and never defaults it", async () => {
+    const response = await handleRpcRequest(
+      request("notes.status", {}),
+      makeRuntime({ status: async () => ({ lastSynced: 1, hasUnsyncedChanges: false }) }),
+      createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+    );
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    expect(Object.prototype.hasOwnProperty.call(response.result, "conflictedCount")).toBe(false);
+  });
+
+  it("refuses a measured conflictedCount that is negative or fractional", async () => {
+    for (const conflictedCount of [-1, 1.5]) {
+      const response = await handleRpcRequest(
+        request("notes.status", {}),
+        makeRuntime({
+          status: async () => ({ lastSynced: 1, hasUnsyncedChanges: false, conflictedCount }),
+        }),
+        createReadWriteNoDeleteServicePolicy(makeEvaluator(true).evaluator),
+      );
+      expect(response.ok).toBe(false);
+    }
+  });
+});
+
 describe("Stage 10 Task 7 — RPC handler settings enforcement", () => {
   it("evaluates global read methods with an empty context", async () => {
     const { calls, evaluator } = makeEvaluator(true);

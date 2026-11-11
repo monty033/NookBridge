@@ -150,7 +150,7 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
       return {
         id: request.id,
         ok: true,
-        result: { kind: "status", lastSynced: 123, hasUnsyncedChanges: false },
+        result: { kind: "status", lastSynced: 123, hasUnsyncedChanges: false, conflictedCount: 2 },
       };
     });
     const client = new NookdSocketClient({ socketPath });
@@ -162,7 +162,45 @@ describe("Stage 6 Slice 2 — MCP tool surface", () => {
       kind: "status",
       lastSynced: 123,
       hasUnsyncedChanges: false,
+      conflictedCount: 2,
     });
+  });
+
+  it("omits conflictedCount when the daemon does not measure it, and never defaults it", async () => {
+    const socketPath = await startFakeDaemon((request) => ({
+      id: request.id,
+      ok: true,
+      result: { kind: "status", lastSynced: 123, hasUnsyncedChanges: false },
+    }));
+    const client = new NookdSocketClient({ socketPath });
+    const result = await buildNookMcpServer({ client }).callTool("notesnook_status", {});
+
+    expect(result.isError).toBeFalsy();
+    expect(textPayload(result)).toEqual({
+      kind: "status",
+      lastSynced: 123,
+      hasUnsyncedChanges: false,
+    });
+    expect(Object.prototype.hasOwnProperty.call(textPayload(result), "conflictedCount")).toBe(false);
+  });
+
+  it("refuses a status frame whose measured conflictedCount is negative or fractional", async () => {
+    const malformedResults: Array<Record<string, unknown>> = [
+      { kind: "status", lastSynced: 123, hasUnsyncedChanges: false, conflictedCount: -1 },
+      { kind: "status", lastSynced: 123, hasUnsyncedChanges: false, conflictedCount: 1.5 },
+    ];
+    for (const malformed of malformedResults) {
+      const socketPath = await startFakeDaemon((request) => ({
+        id: request.id,
+        ok: true,
+        result: malformed,
+      }));
+      const client = new NookdSocketClient({ socketPath });
+      const result = await buildNookMcpServer({ client }).callTool("notesnook_status", {});
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('"lastSynced"');
+    }
   });
 
   it("maps notebook listing and strips unallowlisted fields", async () => {

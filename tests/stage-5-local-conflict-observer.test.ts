@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createNotesnookLocalConflictCounter,
   createNotesnookLocalConflictObserver,
   isNotesnookLocalConflictProjectionError,
   type NotesnookLocalConflictSource,
@@ -271,5 +272,110 @@ describe("Stage 5 local conflict observer", () => {
     await expect(observer.listLocalConflicts()).rejects.toMatchObject({
       message: "local conflict selector ids result",
     });
+  });
+});
+
+describe("Stage 5 S4 local conflict counter", () => {
+  it("counts the conflicted set from the selector alone, with no note lookup", async () => {
+    let noteCalls = 0;
+    const counter = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: { ids: async () => ["conflict-a", "conflict-b"] },
+        note: async (id: string) => {
+          noteCalls += 1;
+          return { id, title: "Hidden title", conflicted: true, body: "must never be read" };
+        },
+      },
+    });
+
+    await expect(counter.countLocalConflicts()).resolves.toBe(2);
+    expect(noteCalls).toBe(0);
+    expect(Object.getOwnPropertyNames(counter)).toEqual(["countLocalConflicts"]);
+    expect(Object.isFrozen(counter)).toBe(true);
+  });
+
+  it("agrees with the observer listing for the same selector result", async () => {
+    const source: NotesnookLocalConflictSource = {
+      notes: {
+        conflicted: { ids: async () => ["one", "two", "three"] },
+        note: async (id: string) => ({ id, title: id, conflicted: true }),
+      },
+    };
+    const listed = await createNotesnookLocalConflictObserver(source).listLocalConflicts();
+    await expect(createNotesnookLocalConflictCounter(source).countLocalConflicts()).resolves.toBe(
+      listed.length,
+    );
+  });
+
+  it("reports zero for an empty conflicted set", async () => {
+    const counter = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: { ids: async () => [] },
+        note: async () => undefined,
+      },
+    });
+    await expect(counter.countLocalConflicts()).resolves.toBe(0);
+  });
+
+  it("accepts exactly the bound and rejects one beyond it", async () => {
+    const atBound = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: {
+          ids: async () => Array.from({ length: 256 }, (_, index) => `note-${index}`),
+        },
+        note: async () => undefined,
+      },
+    });
+    await expect(atBound.countLocalConflicts()).resolves.toBe(256);
+
+    const beyondBound = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: {
+          ids: async () => Array.from({ length: 257 }, (_, index) => `note-${index}`),
+        },
+        note: async () => undefined,
+      },
+    });
+    await expect(beyondBound.countLocalConflicts()).rejects.toMatchObject({
+      message: "local conflict selector ids result",
+    });
+  });
+
+  it("rejects duplicate and malformed selector ids categorically", async () => {
+    const duplicate = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: { ids: async () => ["same-note", "same-note"] },
+        note: async () => undefined,
+      },
+    });
+    await expect(duplicate.countLocalConflicts()).rejects.toMatchObject({
+      message: "local conflict selector returned duplicate ids",
+    });
+
+    const malformed = createNotesnookLocalConflictCounter({
+      notes: {
+        conflicted: { ids: async () => ["bad id"] },
+        note: async () => undefined,
+      },
+    });
+    await expect(malformed.countLocalConflicts()).rejects.toMatchObject({
+      message: "local conflict selector returned an invalid id",
+    });
+  });
+
+  it("fails closed at construction when the selector is hostile, without leaking detail", () => {
+    const hostileSelector = {
+      notes: {
+        conflicted: {
+          get ids(): never {
+            throw new Error("PRIVATE-SELECTOR-DETAIL");
+          },
+        },
+        note: async () => undefined,
+      },
+    } as unknown as NotesnookLocalConflictSource;
+    expect(() => createNotesnookLocalConflictCounter(hostileSelector)).toThrow(
+      "local conflict selector ids is unavailable",
+    );
   });
 });

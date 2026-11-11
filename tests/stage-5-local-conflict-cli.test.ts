@@ -25,6 +25,7 @@
 
 import { describe, expect, it } from "vitest";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import process from "node:process";
 
 import {
@@ -34,9 +35,11 @@ import {
   runConflictCommand,
   type RunConflictCommandOptions,
 } from "../src/core/notesnook-conflict-admin.js";
-import type {
-  NotesnookLocalConflictObservation,
-  NotesnookLocalConflictObserver,
+import {
+  createNotesnookLocalConflictInspector,
+  type NotesnookLocalConflictInspector,
+  type NotesnookLocalConflictObservation,
+  type NotesnookLocalConflictObserver,
 } from "../src/core/notesnook-local-conflict-projection.js";
 
 const ENABLED_ENV = Object.freeze({ NOOKBRIDGE_ENABLE_LIVE_SYNC: "1" }) as Readonly<
@@ -903,5 +906,392 @@ describe("RunConflictCommandOptions type seam", () => {
     };
     const result = await runConflictCommand(options);
     expect(result.kind).toBe("report");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 5 S2 — `nookctl conflicts inspect --title <exact-title>`.
+//
+// Inspect resolves the exact title through the same list-and-match path as
+// `observe`, then calls the S1 inspector by internal id. Ids, bodies, and side
+// digests never reach the output.
+// ---------------------------------------------------------------------------
+
+const INSPECT_LOCAL_BODY = '<p data-block-id="l1">local edit</p>';
+const INSPECT_REMOTE_BODY = '<p data-block-id="r1">remote edit</p>';
+const INSPECT_CIPHER = { cipher: "ciphertext", iv: "initialisation", salt: "salt", length: 10 };
+
+function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function inspectNoteRecord(): Record<string, unknown> {
+  return {
+    id: "conflict-note",
+    title: "Locally conflicted note",
+    contentId: "content-1",
+    conflicted: true,
+  };
+}
+
+function inspectContentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "content-1",
+    noteId: "conflict-note",
+    type: "tiptap",
+    locked: false,
+    data: INSPECT_LOCAL_BODY,
+    conflicted: {
+      id: "content-1",
+      noteId: "conflict-note",
+      type: "tiptap",
+      locked: false,
+      data: INSPECT_REMOTE_BODY,
+      dateModified: 2_000,
+    },
+    ...overrides,
+  };
+}
+
+function realInspector(note: unknown, row: unknown): NotesnookLocalConflictInspector {
+  return createNotesnookLocalConflictInspector({
+    notes: { note: async () => note },
+    contentWithConflicted: { get: async () => row },
+  });
+}
+
+/** Wrap the observer and inspector so each test can assert the exact calls made. */
+function recordingRuntime(
+  observer: NotesnookLocalConflictObserver,
+  inspector?: NotesnookLocalConflictInspector,
+) {
+  const calls: string[] = [];
+  let cleanupCount = 0;
+  return {
+    calls,
+    cleanupCount: () => cleanupCount,
+    createObserverRuntime: async () => {
+      calls.push("createObserverRuntime");
+      return {
+        observer: Object.freeze({
+          listLocalConflicts: async () => {
+            calls.push("listLocalConflicts");
+            return observer.listLocalConflicts();
+          },
+          observeNoteConflict: async (id: string) => {
+            calls.push("observeNoteConflict");
+            return observer.observeNoteConflict(id);
+          },
+        }),
+        ...(inspector === undefined
+          ? {}
+          : {
+              inspector: Object.freeze({
+                inspectConflict: async (id: string) => {
+                  calls.push(`inspectConflict:${id}`);
+                  return inspector.inspectConflict(id);
+                },
+              }),
+            }),
+        cleanup: async () => {
+          calls.push("cleanup");
+          cleanupCount += 1;
+        },
+      };
+    },
+  };
+}
+
+describe("nookctl conflicts inspect — parsing, help, and gate", () => {
+  it("parses an exact title and rejects a missing or id-shaped title", () => {
+    expect(
+      parseConflictCommand(["inspect", "--title", "Locally conflicted note"], ENABLED_ENV),
+    ).toEqual({
+      kind: "parsed",
+      command: { kind: "inspect", subcommand: "inspect", title: "Locally conflicted note" },
+    });
+    expect(parseConflictCommand(["inspect"], ENABLED_ENV)).toMatchObject({
+      kind: "error",
+      exitCode: 2,
+    });
+    expect(
+      parseConflictCommand(["inspect", "--title", "vV0eHj6QXlf3DtSd8M4kFLk5"], ENABLED_ENV),
+    ).toMatchObject({ kind: "error", exitCode: 2 });
+  });
+
+  it("rejects --resolve, --apply, and --force before runtime construction", async () => {
+    for (const flag of ["--resolve", "--apply", "--force"]) {
+      const runtime = recordingRuntime(
+        makeFakeObserver("detecting"),
+        realInspector(inspectNoteRecord(), inspectContentRow()),
+      );
+      const result = await runConflictCommand({
+        argv: ["inspect", "--title", "Locally conflicted note", flag],
+        env: ENABLED_ENV,
+        createObserverRuntime: runtime.createObserverRuntime,
+      });
+      expect(result, flag).toMatchObject({ kind: "error", exitCode: 2 });
+      expect(runtime.calls, flag).toEqual([]);
+    }
+  });
+
+  it("requires the live-sync gate and never constructs the runtime without it", async () => {
+    const runtime = recordingRuntime(makeFakeObserver("detecting"));
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: {},
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "error", exitCode: 2 });
+    if (result.kind === "error") {
+      expect(result.message).toContain("NOOKBRIDGE_ENABLE_LIVE_SYNC");
+    }
+    expect(runtime.calls).toEqual([]);
+  });
+
+  it("lists the inspect subcommand in help", () => {
+    expect(formatConflictHelp()).toContain("nookctl conflicts inspect --title <title>");
+  });
+});
+
+describe("nookctl conflicts inspect — outcomes via the S1 inspector", () => {
+  it("reports inspected facts for an exact-title conflict, reading list then inspect", async () => {
+    const runtime = recordingRuntime(
+      makeFakeObserver("detecting"),
+      realInspector(inspectNoteRecord(), inspectContentRow()),
+    );
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result.kind).toBe("inspection");
+    if (result.kind !== "inspection") throw new Error("expected inspection");
+    expect(result.report).toEqual({
+      kind: "inspected",
+      local: {
+        present: true,
+        unlocked: true,
+        tiptap: true,
+        byteSize: Buffer.byteLength(INSPECT_LOCAL_BODY, "utf8"),
+      },
+      remote: {
+        present: true,
+        unlocked: true,
+        tiptap: true,
+        byteSize: Buffer.byteLength(INSPECT_REMOTE_BODY, "utf8"),
+      },
+      sidesEqual: false,
+      remoteHasAttachments: false,
+      binding: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(runtime.calls).toEqual([
+      "createObserverRuntime",
+      "listLocalConflicts",
+      "inspectConflict:conflict-note",
+      "cleanup",
+    ]);
+    expect(runtime.cleanupCount()).toBe(1);
+  });
+
+  it("prints only categorical inspect text for an inspected conflict", async () => {
+    const runtime = recordingRuntime(
+      makeFakeObserver("detecting"),
+      realInspector(inspectNoteRecord(), inspectContentRow()),
+    );
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    const text = formatConflictCommandResult(result);
+
+    expect(text).toMatch(
+      /^nookctl conflicts inspect: inspected\n {2}local: present=yes unlocked=yes tiptap=yes bytes=\d+\n {2}remote: present=yes unlocked=yes tiptap=yes bytes=\d+\n {2}sidesEqual=no remoteHasAttachments=no\n {2}binding=[0-9a-f]{64}$/,
+    );
+    for (const forbidden of [
+      INSPECT_LOCAL_BODY,
+      INSPECT_REMOTE_BODY,
+      "local edit",
+      "remote edit",
+      "data-block-id",
+      "conflict-note",
+      "content-1",
+      "Locally conflicted note",
+      sha256Hex(INSPECT_LOCAL_BODY),
+      sha256Hex(INSPECT_REMOTE_BODY),
+      "/var/state",
+    ]) {
+      expect(text, forbidden).not.toContain(forbidden);
+    }
+  });
+
+  it("prints unreadable side facts without ciphertext or a size for a locked side", async () => {
+    const runtime = recordingRuntime(
+      makeFakeObserver("detecting"),
+      realInspector(inspectNoteRecord(), inspectContentRow({ locked: true, data: INSPECT_CIPHER })),
+    );
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result.kind).toBe("inspection");
+    const text = formatConflictCommandResult(result);
+    expect(text).toMatch(
+      /^nookctl conflicts inspect: unreadable\n {2}local: present=yes unlocked=no tiptap=yes bytes=none\n {2}remote: present=yes unlocked=yes tiptap=yes bytes=\d+$/,
+    );
+    expect(text).not.toContain("ciphertext");
+  });
+
+  it("reports not-conflicted for a title outside the conflicted set, without inspecting", async () => {
+    const runtime = recordingRuntime(
+      makeFakeObserver("detecting"),
+      realInspector(undefined, undefined),
+    );
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "No such note title"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "inspection", report: { kind: "not-conflicted" } });
+    expect(formatConflictCommandResult(result)).toBe("nookctl conflicts inspect: not-conflicted");
+    expect(runtime.calls.some((call) => call.startsWith("inspectConflict"))).toBe(false);
+    expect(runtime.cleanupCount()).toBe(1);
+  });
+
+  it("reports not-found only when the inspector finds the id gone after the list", async () => {
+    const inspector = {
+      inspectConflict: async () => ({ outcome: "not-found" as const }),
+    };
+    const runtime = recordingRuntime(makeFakeObserver("detecting"), inspector);
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "inspection", report: { kind: "not-found" } });
+    expect(formatConflictCommandResult(result)).toBe("nookctl conflicts inspect: not-found");
+    expect(runtime.calls).toContain("inspectConflict:conflict-note");
+  });
+
+  it("documents the not-conflicted and not-found mapping in help", () => {
+    const help = formatConflictHelp();
+    expect(help).toContain("not-conflicted");
+    expect(help).toContain("not-found");
+    expect(help).toContain("absent from the conflicted set");
+  });
+
+  it("passes not-conflicted through from the inspector", async () => {
+    const inspector = {
+      inspectConflict: async () => ({ outcome: "not-conflicted" as const }),
+    };
+    const runtime = recordingRuntime(makeFakeObserver("detecting"), inspector);
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "inspection", report: { kind: "not-conflicted" } });
+    expect(formatConflictCommandResult(result)).toBe("nookctl conflicts inspect: not-conflicted");
+  });
+
+  it("fails closed (exit 2) when the runtime supplies no inspector, and still cleans up", async () => {
+    const runtime = recordingRuntime(makeFakeObserver("detecting"));
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "error", exitCode: 2 });
+    if (result.kind === "error") expect(result.message).toContain("inspector is unavailable");
+    expect(runtime.cleanupCount()).toBe(1);
+  });
+
+  it("maps an upstream-throwing inspector to a fixed error without leaking detail", async () => {
+    const secret = "CANARY-INSPECT-UPSTREAM-7f3a";
+    const inspector = {
+      inspectConflict: async () => {
+        throw new Error(secret);
+      },
+    };
+    const runtime = recordingRuntime(makeFakeObserver("detecting"), inspector);
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl conflicts inspect: local conflict inspection failed",
+    });
+    if (result.kind === "error") expect(result.message).not.toContain(secret);
+    expect(runtime.cleanupCount()).toBe(1);
+  });
+
+  it("rejects inspector results that break the closed shape, without echoing them", async () => {
+    const malformed: unknown[] = [
+      { outcome: "bogus" },
+      {
+        outcome: "inspected",
+        local: { present: true, unlocked: true, tiptap: true, byteSize: 4 },
+        remote: { present: true, unlocked: true, tiptap: true, byteSize: 4 },
+        sidesEqual: false,
+        remoteHasAttachments: false,
+        binding: "CANARY-NOT-A-DIGEST",
+      },
+      {
+        outcome: "unreadable",
+        local: { present: true, unlocked: true, tiptap: true, byteSize: -1 },
+        remote: { present: true, unlocked: true, tiptap: true, byteSize: 4 },
+      },
+    ];
+    for (const value of malformed) {
+      const inspector = {
+        inspectConflict: async () => value,
+      } as unknown as NotesnookLocalConflictInspector;
+      const runtime = recordingRuntime(makeFakeObserver("detecting"), inspector);
+      const result = await runConflictCommand({
+        argv: ["inspect", "--title", "Locally conflicted note"],
+        env: ENABLED_ENV,
+        createObserverRuntime: runtime.createObserverRuntime,
+      });
+      expect(result).toMatchObject({ kind: "error", exitCode: 2 });
+      if (result.kind === "error") expect(result.message).not.toContain("CANARY");
+    }
+  });
+
+  it("fails closed when the title lookup fails, without calling the inspector", async () => {
+    let inspected = false;
+    const inspector = {
+      inspectConflict: async () => {
+        inspected = true;
+        return { outcome: "not-conflicted" as const };
+      },
+    };
+    const runtime = recordingRuntime(makeFakeObserver("fail"), inspector);
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: runtime.createObserverRuntime,
+    });
+    expect(result).toMatchObject({ kind: "error", exitCode: 2 });
+    expect(inspected).toBe(false);
+  });
+
+  it("fails with exit 3 when cleanup throws after an inspection", async () => {
+    const result = await runConflictCommand({
+      argv: ["inspect", "--title", "Locally conflicted note"],
+      env: ENABLED_ENV,
+      createObserverRuntime: async () => ({
+        observer: makeFakeObserver("detecting"),
+        inspector: realInspector(inspectNoteRecord(), inspectContentRow()),
+        cleanup: async () => {
+          throw new Error("CANARY-CLEANUP-FAILURE");
+        },
+      }),
+    });
+    expect(result).toMatchObject({ kind: "error", exitCode: 3 });
   });
 });

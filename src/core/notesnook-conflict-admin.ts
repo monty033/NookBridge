@@ -18,6 +18,7 @@
  *   nookctl conflicts help
  *   nookctl conflicts list
  *   nookctl conflicts observe --title <exact-title>
+ *   nookctl conflicts inspect --title <exact-title>
  *
  * Boundaries enforced here
  * ------------------------
@@ -57,12 +58,19 @@
  *     internal id, the note body, a revision token, the state path, the
  *     upstream message, the cause, or the stack.  Failures are mapped to
  *     a fixed small label set.
+ *   - **Inspect mapping.**  `inspect` resolves the title only through the
+ *     conflicted set, so an absent title is `not-conflicted`, not `not-found`.
+ *     `not-found` means the id vanished between the list and the read.
  *   - **Cleanup.**  When the runtime factory supplies a `cleanup`, it is
  *     awaited on every path (success, categorical failure, unexpected
  *     throw).  A cleanup failure is itself categorical (exit code 3).
  */
 
-import type { NotesnookLocalConflictObserver } from "./notesnook-local-conflict-projection.js";
+import type {
+  NotesnookConflictSideFacts,
+  NotesnookLocalConflictInspector,
+  NotesnookLocalConflictObserver,
+} from "./notesnook-local-conflict-projection.js";
 
 // ---------------------------------------------------------------------------
 // Public gate name — deliberately the SAME non-secret opt-in the Stage 3
@@ -172,7 +180,7 @@ function isBoundedExactTitle(value: string): boolean {
 // Parsed command shapes.
 // ---------------------------------------------------------------------------
 
-export type ConflictSubcommand = "help" | "list" | "observe";
+export type ConflictSubcommand = "help" | "list" | "observe" | "inspect";
 
 export type ParsedConflictCommand =
   | Readonly<{ kind: "help"; subcommand: "help" }>
@@ -180,6 +188,11 @@ export type ParsedConflictCommand =
   | Readonly<{
       kind: "observe";
       subcommand: "observe";
+      title: string;
+    }>
+  | Readonly<{
+      kind: "inspect";
+      subcommand: "inspect";
       title: string;
     }>;
 
@@ -198,12 +211,44 @@ export type ConflictObservationReport =
   | Readonly<{ kind: "not-observed"; count?: undefined }>
   | Readonly<{ kind: "not-observed"; count: number }>;
 
+/**
+ * Bounded categorical inspection report.  `inspected` carries only side facts,
+ * the two equality flags, and the binding token.  Bodies, raw ids, side
+ * digests, and paths are never copied into this shape.
+ *
+ * Outcome mapping:
+ *   - `not-conflicted`: the exact title is absent from the conflicted set.
+ *     Only conflicted notes are listed, so this does not mean the note is
+ *     missing.
+ *   - `not-found`: the id left the conflicted set between the list and the
+ *     inspector's read.
+ *   - `unreadable` / `inspected`: the inspector's own categories, as defined
+ *     by the S1 projection.
+ */
+export type ConflictInspectionReport =
+  | Readonly<{ kind: "not-found" }>
+  | Readonly<{ kind: "not-conflicted" }>
+  | Readonly<{
+      kind: "unreadable";
+      local: NotesnookConflictSideFacts;
+      remote: NotesnookConflictSideFacts;
+    }>
+  | Readonly<{
+      kind: "inspected";
+      local: NotesnookConflictSideFacts;
+      remote: NotesnookConflictSideFacts;
+      sidesEqual: boolean;
+      remoteHasAttachments: boolean;
+      binding: string;
+    }>;
+
 export type RunConflictCommandResult =
   | Readonly<{
       kind: "report";
       subcommand: "list" | "observe";
       report: ConflictObservationReport;
     }>
+  | Readonly<{ kind: "inspection"; report: ConflictInspectionReport }>
   | Readonly<{ kind: "help"; text: string }>
   | Readonly<{ kind: "error"; message: string; exitCode: 2 | 3 }>;
 
@@ -219,6 +264,11 @@ export type RunConflictCommandResult =
 
 export type NotesnookLocalConflictRuntime = Readonly<{
   observer: NotesnookLocalConflictObserver;
+  /**
+   * Optional until the live factory supplies one. Without it, `inspect` fails
+   * closed with exit code 2 and `list` / `observe` are unaffected.
+   */
+  inspector?: NotesnookLocalConflictInspector;
   cleanup?: () => void | Promise<void>;
 }>;
 
@@ -342,7 +392,9 @@ export function parseConflictCommand(
         if (stringArgv.length !== 1) return invalidParseInput();
         return { kind: "parsed", command: { kind: "list", subcommand: "list" } };
       case "observe":
-        return parseObserve(stringArgv);
+        return parseTitleCommand(stringArgv, "observe");
+      case "inspect":
+        return parseTitleCommand(stringArgv, "inspect");
       default:
         return {
           kind: "error",
@@ -379,7 +431,10 @@ function readFlagValue(
   return undefined;
 }
 
-function parseObserve(argv: readonly string[]): ParseConflictCommandResult {
+function parseTitleCommand(
+  argv: readonly string[],
+  subcommand: "observe" | "inspect",
+): ParseConflictCommandResult {
   let title: string | undefined;
   for (let index = 1; index < argv.length; index += 1) {
     const current = argv[index];
@@ -395,7 +450,11 @@ function parseObserve(argv: readonly string[]): ParseConflictCommandResult {
     }
   }
   if (title === undefined) return invalidParseInput();
-  return { kind: "parsed", command: { kind: "observe", subcommand: "observe", title } };
+  const command: ParsedConflictCommand =
+    subcommand === "observe"
+      ? { kind: "observe", subcommand: "observe", title }
+      : { kind: "inspect", subcommand: "inspect", title };
+  return { kind: "parsed", command };
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +469,17 @@ export function formatConflictHelp(): string {
     "  nookctl conflicts list                  observe the local conflict marker list",
     "  nookctl conflicts observe --title <title>",
     "                                        observe the marker for an exact note title",
+    "  nookctl conflicts inspect --title <title>",
+    "                                        inspect the marker and side facts for an exact note title",
     "  nookctl conflicts help                  show this help",
+    "",
+    "Inspect outcomes:",
+    "  not-conflicted  the exact title is absent from the conflicted set.  This does",
+    "                  NOT mean the note does not exist: only conflicted notes are listed.",
+    "  not-found       the note left the conflicted set between the list and the read.",
+    "  unreadable      a side is locked or cannot be read; only side facts are printed.",
+    "  inspected       both sides readable; sidesEqual, remoteHasAttachments, and a",
+    "                  binding token are printed.  No body, id, or digest is printed.",
     "",
     "Read-only observation only:",
     "  This command NEVER mutates, NEVER resolves, and NEVER triggers",
@@ -562,7 +631,7 @@ export async function runConflictCommand(
   let outcome: RunConflictCommandResult;
   let cleanupFailed = false;
   try {
-    outcome = await dispatchObservation(runtime.observer, command);
+    outcome = await dispatchObservation(runtime, command);
   } catch {
     outcome = {
       kind: "error",
@@ -597,13 +666,14 @@ export async function runConflictCommand(
 const MAX_CONFLICT_RECORDS = 256;
 const INTERNAL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-/** Dispatch exactly one bounded observer operation. */
+/** Dispatch exactly one bounded observer or inspector operation. */
 async function dispatchObservation(
-  observer: NotesnookLocalConflictObserver,
+  runtime: NotesnookLocalConflictRuntime,
   command: Exclude<ParsedConflictCommand, { kind: "help" }>,
 ): Promise<RunConflictCommandResult> {
-  if (command.kind === "list") return dispatchList(observer);
-  return dispatchObserve(observer, command.title);
+  if (command.kind === "list") return dispatchList(runtime.observer);
+  if (command.kind === "observe") return dispatchObserve(runtime.observer, command.title);
+  return dispatchInspect(runtime.observer, runtime.inspector, command.title);
 }
 
 async function dispatchList(
@@ -639,46 +709,31 @@ async function dispatchObserve(
   // This keeps the operator input title-only while retaining the projection's
   // request-identity binding and explicit `conflicted === true` proof.
   try {
-    const conflicts = await observer.listLocalConflicts();
-    if (!Array.isArray(conflicts)) throw new Error("invalid result");
-    const count = conflicts.length;
-    if (!Number.isSafeInteger(count) || count < 0 || count > MAX_CONFLICT_RECORDS) {
+    const id = await findConflictIdByTitle(observer, title);
+    if (id === undefined) {
+      return { kind: "report", subcommand: "observe", report: { kind: "not-observed" } };
+    }
+
+    const observation = await observer.observeNoteConflict(id);
+    if (observation === false) {
+      return { kind: "report", subcommand: "observe", report: { kind: "not-observed" } };
+    }
+    if (observation === null || typeof observation !== "object" || Array.isArray(observation)) {
       throw new Error("invalid result");
     }
-    for (let index = 0; index < count; index += 1) {
-      const metadata = conflicts[index];
-      if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
-        throw new Error("invalid result");
-      }
-      const id = readOwnString(metadata, "id");
-      const candidateTitle = readOwnString(metadata, "title");
-      if (id === undefined || candidateTitle === undefined || !isInternalIdentifier(id)) {
-        throw new Error("invalid result");
-      }
-      if (candidateTitle !== title) continue;
-
-      const observation = await observer.observeNoteConflict(id);
-      if (observation === false) {
-        return { kind: "report", subcommand: "observe", report: { kind: "not-observed" } };
-      }
-      if (observation === null || typeof observation !== "object" || Array.isArray(observation)) {
-        throw new Error("invalid result");
-      }
-      const observedId = readOwnString(observation, "id");
-      const observedTitle = readOwnString(observation, "title");
-      const marker = Reflect.getOwnPropertyDescriptor(observation, "conflicted");
-      if (
-        observedId !== id ||
-        observedTitle !== title ||
-        marker === undefined ||
-        !Object.prototype.hasOwnProperty.call(marker, "value") ||
-        marker.value !== true
-      ) {
-        throw new Error("invalid result");
-      }
-      return { kind: "report", subcommand: "observe", report: { kind: "observed" } };
+    const observedId = readOwnString(observation, "id");
+    const observedTitle = readOwnString(observation, "title");
+    const marker = Reflect.getOwnPropertyDescriptor(observation, "conflicted");
+    if (
+      observedId !== id ||
+      observedTitle !== title ||
+      marker === undefined ||
+      !Object.prototype.hasOwnProperty.call(marker, "value") ||
+      marker.value !== true
+    ) {
+      throw new Error("invalid result");
     }
-    return { kind: "report", subcommand: "observe", report: { kind: "not-observed" } };
+    return { kind: "report", subcommand: "observe", report: { kind: "observed" } };
   } catch {
     return {
       kind: "error",
@@ -686,6 +741,154 @@ async function dispatchObserve(
       message: "nookctl conflicts observe: local conflict observation failed",
     };
   }
+}
+
+/**
+ * Shared exact-title lookup for `observe` and `inspect`.  Lists the
+ * conflict-marked metadata and returns the first internal id whose title
+ * matches exactly, or `undefined` when no conflict-marked note has that title.
+ * Throws on any malformed metadata so the caller fails closed.
+ */
+async function findConflictIdByTitle(
+  observer: NotesnookLocalConflictObserver,
+  title: string,
+): Promise<string | undefined> {
+  const conflicts = await observer.listLocalConflicts();
+  if (!Array.isArray(conflicts)) throw new Error("invalid result");
+  const count = conflicts.length;
+  if (!Number.isSafeInteger(count) || count < 0 || count > MAX_CONFLICT_RECORDS) {
+    throw new Error("invalid result");
+  }
+  for (let index = 0; index < count; index += 1) {
+    const metadata = conflicts[index];
+    if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new Error("invalid result");
+    }
+    const id = readOwnString(metadata, "id");
+    const candidateTitle = readOwnString(metadata, "title");
+    if (id === undefined || candidateTitle === undefined || !isInternalIdentifier(id)) {
+      throw new Error("invalid result");
+    }
+    if (candidateTitle === title) return id;
+  }
+  return undefined;
+}
+
+/**
+ * Inspect the exact title. The title is resolved only through the conflicted
+ * set, so a title outside that set is reported as `not-conflicted`. That is
+ * not a claim that no such note exists. `not-found` comes only from the
+ * inspector, when the id has left the set between the list and the read.
+ */
+async function dispatchInspect(
+  observer: NotesnookLocalConflictObserver,
+  inspector: NotesnookLocalConflictInspector | undefined,
+  title: string,
+): Promise<RunConflictCommandResult> {
+  if (inspector === undefined || typeof inspector.inspectConflict !== "function") {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl conflicts inspect: local conflict inspector is unavailable",
+    };
+  }
+  try {
+    const id = await findConflictIdByTitle(observer, title);
+    if (id === undefined) {
+      return { kind: "inspection", report: { kind: "not-conflicted" } };
+    }
+    const inspection = await inspector.inspectConflict(id);
+    return { kind: "inspection", report: projectInspection(inspection) };
+  } catch {
+    return {
+      kind: "error",
+      exitCode: 2,
+      message: "nookctl conflicts inspect: local conflict inspection failed",
+    };
+  }
+}
+
+const BINDING_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Rebuild the inspector's result field by field.  The inspector is an
+ * injected dependency, so nothing is copied through unchecked: every value is
+ * type-checked, and anything outside the closed shape throws.  Ids, bodies,
+ * and digests are never copied into the report, apart from the binding.
+ */
+function projectInspection(value: unknown): ConflictInspectionReport {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid result");
+  }
+  const outcome = readOwnData(value, "outcome");
+  switch (outcome) {
+    case "not-conflicted":
+      return { kind: "not-conflicted" };
+    case "not-found":
+      return { kind: "not-found" };
+    case "unreadable":
+      return {
+        kind: "unreadable",
+        local: projectSide(readOwnData(value, "local")),
+        remote: projectSide(readOwnData(value, "remote")),
+      };
+    case "inspected": {
+      const binding = readOwnData(value, "binding");
+      const sidesEqual = readOwnData(value, "sidesEqual");
+      const remoteHasAttachments = readOwnData(value, "remoteHasAttachments");
+      if (
+        typeof binding !== "string" ||
+        !BINDING_PATTERN.test(binding) ||
+        typeof sidesEqual !== "boolean" ||
+        typeof remoteHasAttachments !== "boolean"
+      ) {
+        throw new Error("invalid result");
+      }
+      return {
+        kind: "inspected",
+        local: projectSide(readOwnData(value, "local")),
+        remote: projectSide(readOwnData(value, "remote")),
+        sidesEqual,
+        remoteHasAttachments,
+        binding,
+      };
+    }
+    default:
+      throw new Error("invalid result");
+  }
+}
+
+function projectSide(value: unknown): NotesnookConflictSideFacts {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid result");
+  }
+  const present = readOwnData(value, "present");
+  const unlocked = readOwnData(value, "unlocked");
+  const tiptap = readOwnData(value, "tiptap");
+  const byteSize = readOwnData(value, "byteSize");
+  if (
+    typeof present !== "boolean" ||
+    typeof unlocked !== "boolean" ||
+    typeof tiptap !== "boolean"
+  ) {
+    throw new Error("invalid result");
+  }
+  if (
+    byteSize !== null &&
+    !(typeof byteSize === "number" && Number.isSafeInteger(byteSize) && byteSize >= 0)
+  ) {
+    throw new Error("invalid result");
+  }
+  return { present, unlocked, tiptap, byteSize };
+}
+
+/** Read an own data property. Accessors and missing keys throw. */
+function readOwnData(value: object, key: string): unknown {
+  const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+    throw new Error("invalid result");
+  }
+  return descriptor.value;
 }
 
 function readOwnString(value: object, key: "id" | "title"): string | undefined {
@@ -719,5 +922,39 @@ export function formatConflictCommandResult(result: RunConflictCommandResult): s
       }
       return `nookctl conflicts ${result.subcommand}: ${category}`;
     }
+    case "inspection":
+      return formatInspectionReport(result.report);
   }
+}
+
+function formatInspectionReport(report: ConflictInspectionReport): string {
+  const header = `nookctl conflicts inspect: ${report.kind}`;
+  switch (report.kind) {
+    case "not-found":
+    case "not-conflicted":
+      return header;
+    case "unreadable":
+      return [
+        header,
+        formatSideFacts("local", report.local),
+        formatSideFacts("remote", report.remote),
+      ].join("\n");
+    case "inspected":
+      return [
+        header,
+        formatSideFacts("local", report.local),
+        formatSideFacts("remote", report.remote),
+        `  sidesEqual=${yesNo(report.sidesEqual)} remoteHasAttachments=${yesNo(report.remoteHasAttachments)}`,
+        `  binding=${report.binding}`,
+      ].join("\n");
+  }
+}
+
+function formatSideFacts(label: "local" | "remote", side: NotesnookConflictSideFacts): string {
+  const bytes = side.byteSize === null ? "none" : String(side.byteSize);
+  return `  ${label}: present=${yesNo(side.present)} unlocked=${yesNo(side.unlocked)} tiptap=${yesNo(side.tiptap)} bytes=${bytes}`;
+}
+
+function yesNo(value: boolean): "yes" | "no" {
+  return value ? "yes" : "no";
 }

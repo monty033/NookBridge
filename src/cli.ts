@@ -14,7 +14,7 @@
  *   nookctl doctor [--state-dir <path>] [--endpoint <url>]
  *   nookctl auth login|live-login|status|logout|reset-local-client|help
  *   nookctl write create|append|update|sync|help
- *   nookctl conflicts list|observe|help
+ *   nookctl conflicts list|observe|inspect|help
  *
  * Exit codes:
  *   0  doctor probe all `pass` (warnings allowed); auth deferred or
@@ -738,7 +738,7 @@ function readExistingKeyWithoutMutation(keyPath: string): string | undefined {
  * This is a separately named, read-only local-marker observer.  Help and
  * parse failures return before the live runtime is imported.  Observation
  * commands are gated by the exact non-secret opt-in and receive only the
- * narrow observer capability from the production runtime.
+ * narrow observer and inspector capabilities from the production runtime.
  */
 async function runConflicts(args: Args): Promise<number> {
   const argv = args.conflictsArgs ?? [];
@@ -773,6 +773,9 @@ async function runConflicts(args: Args): Promise<number> {
       }
       return {
         observer: runtime.localConflictObserver,
+        ...(runtime.localConflictInspector === undefined
+          ? {}
+          : { inspector: runtime.localConflictInspector }),
         cleanup: runtime.cleanup,
       };
     },
@@ -785,6 +788,7 @@ async function runConflicts(args: Args): Promise<number> {
       process.stdout.write(result.text);
       return 0;
     case "report":
+    case "inspection":
       process.stdout.write(`${formatConflictCommandResult(result)}\n`);
       return 0;
   }

@@ -75,7 +75,12 @@ import type { SyncMetadataStateStore } from "./notesnook-sync-coordinator.js";
 
 import type { NotesnookLiveWriteCapability } from "./notesnook-write-admin.js";
 import {
+  createNotesnookLocalConflictCounter,
+  createNotesnookLocalConflictInspector,
   createNotesnookLocalConflictObserver,
+  type NotesnookLocalConflictCounter,
+  type NotesnookLocalConflictInspectSource,
+  type NotesnookLocalConflictInspector,
   type NotesnookLocalConflictObserver,
   type NotesnookLocalConflictSource,
 } from "./notesnook-local-conflict-projection.js";
@@ -197,6 +202,22 @@ export interface NotesnookLiveCoreHandle {
    * `remoteSync`: the conflict observer cannot reach any other surface.
    */
   readonly localConflictObserver?: NotesnookLocalConflictObserver;
+  /**
+   * Separately named Stage 5 read-only local-conflict inspector. Built over the
+   * same `notes` surface as the observer, plus the PURE by-id
+   * `content.collection.get`. Absent when that reader is unavailable; the
+   * inspector never falls back to `content.get` or `content.findByNoteId`,
+   * which run `preProcess` and persist the row.
+   */
+  readonly localConflictInspector?: NotesnookLocalConflictInspector;
+  /**
+   * Separately named Stage 5 read-only conflicted-note counter, used only by the
+   * `notes.status` projection. Built from the same `notes.conflicted` selector
+   * as the observer, with no per-note lookup. Absent when that selector is
+   * unavailable, and `notes.status` then OMITS `conflictedCount`: an absent
+   * field means "not measured" and is never reported as zero.
+   */
+  readonly localConflictCounter?: NotesnookLocalConflictCounter;
 }
 
 /**
@@ -393,6 +414,16 @@ export async function createNotesnookLiveCoreFactory(
       normalized.injectedModule === undefined
         ? buildLiveLocalConflictObserver(db as unknown as object, ensureOpen)
         : buildOptionalLiveLocalConflictObserver(db as unknown as object, ensureOpen);
+    // The inspector is optional in production as well: a database without a
+    // pure content reader must not make live login fail for every command.
+    const localConflictInspector = buildOptionalLiveLocalConflictInspector(
+      db as unknown as object,
+      ensureOpen,
+    );
+    const localConflictCounter = buildOptionalLiveLocalConflictCounter(
+      db as unknown as object,
+      ensureOpen,
+    );
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -425,6 +456,8 @@ export async function createNotesnookLiveCoreFactory(
       ...(operatorLocalWrite === undefined ? {} : { operatorLocalWrite }),
       ...(remoteSync === undefined ? {} : { remoteSync }),
       ...(localConflictObserver === undefined ? {} : { localConflictObserver }),
+      ...(localConflictInspector === undefined ? {} : { localConflictInspector }),
+      ...(localConflictCounter === undefined ? {} : { localConflictCounter }),
     });
 
     return handle;
@@ -728,6 +761,92 @@ function buildOptionalLiveLocalConflictObserver(
     return buildLiveLocalConflictObserver(database, ensureOpen);
   } catch {
     return undefined;
+  }
+}
+
+function buildLiveLocalConflictCounter(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictCounter {
+  const source = readLocalConflictSource(database, true);
+  if (source === undefined) throw factoryError("local conflict counter surface is unavailable");
+  const counter = createNotesnookLocalConflictCounter(source);
+  return Object.freeze({
+    countLocalConflicts: async () => {
+      ensureOpen();
+      return counter.countLocalConflicts();
+    },
+  });
+}
+
+function buildOptionalLiveLocalConflictCounter(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictCounter | undefined {
+  try {
+    return buildLiveLocalConflictCounter(database, ensureOpen);
+  } catch {
+    return undefined;
+  }
+}
+
+function buildLiveLocalConflictInspector(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictInspector {
+  const source = readLocalConflictSource(database, true);
+  if (source === undefined) throw factoryError("local conflict inspector surface is unavailable");
+  const inspector = createNotesnookLocalConflictInspector({
+    notes: source.notes,
+    contentWithConflicted: readPureContentReader(database),
+  });
+  return Object.freeze({
+    inspectConflict: async (id: string) => {
+      ensureOpen();
+      return inspector.inspectConflict(id);
+    },
+  });
+}
+
+function buildOptionalLiveLocalConflictInspector(
+  database: object,
+  ensureOpen: () => void,
+): NotesnookLocalConflictInspector | undefined {
+  try {
+    return buildLiveLocalConflictInspector(database, ensureOpen);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read `db.content.collection.get` as a detached, pure by-id reader. The
+ * collection's `get` is a plain select; `db.content.get` and
+ * `db.content.findByNoteId` are deliberately NOT read, because they run
+ * `preProcess` and persist the rewritten row.
+ */
+function readPureContentReader(
+  database: object,
+): NotesnookLocalConflictInspectSource["contentWithConflicted"] {
+  try {
+    const content = Reflect.get(database, "content");
+    if (content === null || typeof content !== "object") {
+      throw factoryError("local conflict content slot is unavailable");
+    }
+    const collection = Reflect.get(content, "collection");
+    if (collection === null || typeof collection !== "object") {
+      throw factoryError("local conflict content collection is unavailable");
+    }
+    const get = Reflect.get(collection, "get");
+    if (typeof get !== "function") {
+      throw factoryError("local conflict content lookup is unavailable");
+    }
+    return Object.freeze({
+      get: async (contentId: string) => Reflect.apply(get, collection, [contentId]),
+    });
+  } catch (error) {
+    if (isFactoryError(error)) throw error;
+    throw factoryError("local conflict content slot is unavailable");
   }
 }
 
