@@ -507,6 +507,19 @@ export function copyTitleFor(title: string): string {
 }
 
 /**
+ * The copy's local text, read back through the copy step's identity checks.
+ * `undefined` when the copy is absent, retitled, or not its own row.
+ */
+export async function readCopyLocalText(
+  seam: NotesnookConflictResolveSeam,
+  copyId: string,
+  copyTitle: string,
+): Promise<string | undefined> {
+  const checked = validateIdentifier(copyId, "conflict resolve copy id is invalid");
+  return await readCopyText(captureSlots(seam), checked, copyTitle);
+}
+
+/**
  * Read the copy back by its note id. The copy must carry the derived copy title,
  * so a row that is not the copy this resolve asked for cannot satisfy the check.
  * Returns `undefined` on any mismatch or failure.

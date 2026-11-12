@@ -294,6 +294,21 @@ command removes its pending marker.
 - **Disposition: decided for Stage 1.** Undoing a resolve is not supported, and a
   reversal would need its own design.
 
+### 10. The copy is checked at three points, not held
+
+The copy's id and a digest of its local side are recorded in the operation before the
+original is touched. The copy is re-read before the original's content write, and again
+before recovery clears the flag. A copy that was edited or deleted while the operation
+was unresolved is refused, not reported as resolved.
+
+A window remains between the last copy read-back and the content write. The copy row is
+not locked, so a change inside that window is not caught.
+
+- **Operator action**: after any `resolved` result, check the copy's title and text
+  match the local side you inspected. Do not rely on the copy surviving untouched.
+- **Disposition: undecided, needs the owner.** Closing the window needs a store-level
+  copy lock or a second confirmation read, which is a design choice.
+
 ### 9. Titles cross the operator socket and print to the terminal
 
 The `resolved` result carries the original title and the copy title. The CLI prints

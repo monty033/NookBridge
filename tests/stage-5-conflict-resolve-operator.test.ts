@@ -675,6 +675,102 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect((await operationsOf(store))[0]?.state).toBe("unresolved");
   });
 
+  it("records the copy's id in the operation before the original is touched", async () => {
+    const fake = createFake();
+    fake.failOnce.add("noteClearConflict");
+    const { runtime, store } = await harness(fake);
+    const binding = await bindingOf(fake);
+
+    await runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A);
+
+    const record = (await operationsOf(store))[0];
+    expect(JSON.parse(record?.payload ?? "{}")).toMatchObject({ copyId: "note-copy-1" });
+  });
+
+  it("records no copy id when the copy does not read back as the local side", async () => {
+    const base = createFake();
+    const realAdd = base.seam.notesAddVerbatim;
+    const fake: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        notesAddVerbatim: async (input) => {
+          const created = await realAdd(input);
+          // The copy's content row now carries a foreign id, so it cannot read back.
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) {
+            base.contents.set("content-copy-1", { ...row, id: "content-copy-other" });
+          }
+          return created;
+        },
+      },
+    };
+    const { runtime, store } = await harness(fake);
+    const binding = await bindingOf(base);
+
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).resolves.toMatchObject({ outcome: "copy_unverified" });
+
+    const payload = JSON.parse((await operationsOf(store))[0]?.payload ?? "{}");
+    expect(payload).not.toHaveProperty("copyId");
+    expect(payload).not.toHaveProperty("localDigest");
+  });
+
+  it("refuses to adopt the remote side when the copy changed after it was made", async () => {
+    const base = createFake();
+    const realRelate = base.seam.noteRelate;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        noteRelate: async (input) => {
+          await realRelate(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+        },
+      },
+    };
+    const { runtime } = await harness(wrapped);
+    const binding = await bindingOf(base);
+    const originalBefore = base.contents.get("content-1");
+
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).resolves.toMatchObject({ outcome: "content_write_failed" });
+    expect(writesOf(base)).not.toContain("contentResolve");
+    expect(base.contents.get("content-1")).toEqual(originalBefore);
+  });
+
+  it.each<[string, (fake: Fake) => void]>([
+    [
+      "altered",
+      (fake) => {
+        const row = fake.contents.get("content-copy-1");
+        if (row !== undefined) fake.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+      },
+    ],
+    ["deleted", (fake) => fake.notes.delete("note-copy-1")],
+  ])(
+    "refuses recovery when the copy was %s while the operation was unresolved",
+    async (_, change) => {
+      const fake = createFake();
+      fake.failOnce.add("noteClearConflict");
+      const { runtime, store } = await harness(fake);
+      const binding = await bindingOf(fake);
+
+      await expect(
+        runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+      ).resolves.toEqual({ kind: "conflict-resolve", outcome: "resolved_flag_pending" });
+      change(fake);
+
+      await expect(
+        runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+      ).rejects.toMatchObject({ code: "service_unavailable" });
+      expect((await operationsOf(store))[0]?.state).not.toBe("committed");
+    },
+  );
+
   it("refuses recovery when the note read after the flag clear carries a different id", async () => {
     // First attempt fails at the flag clear, leaving the operation unresolved.
     // The second attempt then runs recovery, which clears the flag and reads the
