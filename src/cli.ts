@@ -454,6 +454,14 @@ async function runNotes(args: Args): Promise<number> {
   if (argv[0] === "path-diagnostic") {
     return runPathDiagnosticCommand(argv.slice(1), environment);
   }
+  // Confirmation-gated keep-both resolve.  Routed before the notes parser
+  // because it owns its own flag grammar and its own terminal confirmation.
+  if (argv[0] === "resolve-conflict") {
+    const { runResolveConflictFromTerminal } = await import(
+      "./operator/notes-resolve-conflict-cli.js"
+    );
+    return runResolveConflictFromTerminal(argv.slice(1));
+  }
   const parsed = parseNotesCommand(argv, environment);
   if (parsed.kind === "error") {
     process.stderr.write(`nookctl: ${parsed.message}\n`);

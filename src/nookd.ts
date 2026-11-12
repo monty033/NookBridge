@@ -67,6 +67,8 @@ import {
   operatorPreMutationRefusal,
   type OperatorWriteSource,
 } from "./service/notes-operator-write-runtime.js";
+import { createOperatorConflictResolveRuntime } from "./service/notes-conflict-resolve-runtime.js";
+import { createOperatorConflictInspectRuntime } from "./service/notes-conflict-inspect-runtime.js";
 import { createNotesUndoStore } from "./service/notes-undo-store.js";
 import {
   createOperationStoreFs,
@@ -138,6 +140,8 @@ export type NookdStartupRuntime = Pick<ServiceRuntime, "search" | "cleanup"> &
       | "updateNote"
       | "operatorCreateNote"
       | "operatorUpdateNote"
+      | "localConflictResolve"
+      | "localConflictInspector"
       | "deleteNote"
       | "resolveNotePath"
       | "pathDiagnostic"
@@ -426,6 +430,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   let updateNote: NookdStartupRuntime["updateNote"];
   let operatorCreateNote: NookdStartupRuntime["operatorCreateNote"];
   let operatorUpdateNote: NookdStartupRuntime["operatorUpdateNote"];
+  let localConflictResolve: NookdStartupRuntime["localConflictResolve"];
+  let localConflictInspector: NookdStartupRuntime["localConflictInspector"];
   let deleteNote: NookdStartupRuntime["deleteNote"];
   let resolveNotePath: NookdStartupRuntime["resolveNotePath"];
   let pathDiagnostic: NookdStartupRuntime["pathDiagnostic"];
@@ -456,6 +462,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     const capturedUpdateNote = runtime.updateNote;
     const capturedOperatorCreateNote = runtime.operatorCreateNote;
     const capturedOperatorUpdateNote = runtime.operatorUpdateNote;
+    const capturedLocalConflictResolve = runtime.localConflictResolve;
+    const capturedLocalConflictInspector = runtime.localConflictInspector;
     const capturedDeleteNote = runtime.deleteNote;
     const capturedResolveNotePath = runtime.resolveNotePath;
     const capturedPathDiagnostic = runtime.pathDiagnostic;
@@ -483,6 +491,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
         typeof capturedOperatorCreateNote !== "function") ||
       (capturedOperatorUpdateNote !== undefined &&
         typeof capturedOperatorUpdateNote !== "function") ||
+      (capturedLocalConflictResolve !== undefined &&
+        typeof capturedLocalConflictResolve !== "object") ||
+      (capturedLocalConflictInspector !== undefined &&
+        typeof capturedLocalConflictInspector.inspectConflict !== "function") ||
       (capturedDeleteNote !== undefined && typeof capturedDeleteNote !== "function") ||
       (capturedResolveNotePath !== undefined && typeof capturedResolveNotePath !== "function") ||
       (capturedPathDiagnostic !== undefined && typeof capturedPathDiagnostic !== "function") ||
@@ -512,6 +524,8 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     updateNote = capturedUpdateNote;
     operatorCreateNote = capturedOperatorCreateNote;
     operatorUpdateNote = capturedOperatorUpdateNote;
+    localConflictResolve = capturedLocalConflictResolve;
+    localConflictInspector = capturedLocalConflictInspector;
     deleteNote = capturedDeleteNote;
     resolveNotePath = capturedResolveNotePath;
     pathDiagnostic = capturedPathDiagnostic;
@@ -612,6 +626,7 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
   // daemon (the MCP surface must keep working).
   let operatorStore: Awaited<ReturnType<typeof createNotesUndoStore>> | undefined;
   let operatorWrite: ReturnType<typeof createOperatorWriteRuntime> | undefined;
+  let operatorConflictResolve: ReturnType<typeof createOperatorConflictResolveRuntime> | undefined;
   // The operator source is built from the operator-origin variants only; it
   // never falls back to the MCP `createNote` / `updateNote`.
   const operatorSource = createOperatorWriteSource({
@@ -633,12 +648,33 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           mintHandle: (noteId, peer) => operatorHandles.mint(noteId, peer),
           source: operatorSource,
         });
+        if (localConflictResolve !== undefined) {
+          operatorConflictResolve = createOperatorConflictResolveRuntime({
+            capability: localConflictResolve,
+            store: operatorStore,
+            resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
+          });
+        }
       }
     } catch {
       operatorStore = undefined;
       operatorWrite = undefined;
+      operatorConflictResolve = undefined;
     }
   }
+
+  // Read-only inspection needs no operation store, so it is built apart from the
+  // store's try block. It needs the inspector and the lock reader, and refuses
+  // without the lock reader rather than reading content unchecked.
+  const readNoteLockState = readOnly?.readNoteLockState;
+  const operatorConflictInspect =
+    localConflictInspector === undefined || readNoteLockState === undefined
+      ? undefined
+      : createOperatorConflictInspectRuntime({
+          inspector: localConflictInspector,
+          readNoteLockState,
+          resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
+        });
 
   const operator =
     readOnly === undefined
@@ -729,6 +765,12 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
             const { create: _untrackedCreate, ...discoveryMethods } = discoveryRuntime;
             return createOperatorDiscoveryHandler({
               ...discoveryMethods,
+              ...(operatorConflictResolve === undefined
+                ? {}
+                : { resolveConflict: operatorConflictResolve.resolveConflict }),
+              ...(operatorConflictInspect === undefined
+                ? {}
+                : { inspectConflict: operatorConflictInspect.inspectConflict }),
               ...(operatorWrite?.create === undefined ? {} : { create: operatorWrite.create }),
               ...(operatorWrite === undefined
                 ? {}

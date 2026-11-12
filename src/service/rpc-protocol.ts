@@ -372,7 +372,9 @@ export type RpcMethod =
   | "notes.approve-upload"
   | "notes.browse"
   | "notes.search-operator"
-  | "notes.edit-census";
+  | "notes.edit-census"
+  | "notes.resolve-conflict"
+  | "notes.inspect-conflict";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -492,6 +494,36 @@ export interface RpcNotesEditCensusRequest {
   readonly params: RpcOperatorEditCensusParams;
 }
 
+/**
+ * Operator-only keep-both conflict resolve. `id` is the opaque note handle and
+ * `binding` is the 64-hex token that pins the revision the operator reviewed.
+ * Neither the note id nor any body crosses the socket in either direction.
+ */
+export interface RpcOperatorConflictResolveParams {
+  readonly id: string;
+  readonly binding: string;
+}
+
+export interface RpcNotesConflictResolveRequest {
+  readonly id: string;
+  readonly method: "notes.resolve-conflict";
+  readonly params: RpcOperatorConflictResolveParams;
+}
+
+/**
+ * Operator-only conflict inspection, read-only. `id` is the opaque note handle
+ * and nothing else: no binding, body, or note id crosses the socket.
+ */
+export interface RpcOperatorConflictInspectParams {
+  readonly id: string;
+}
+
+export interface RpcNotesConflictInspectRequest {
+  readonly id: string;
+  readonly method: "notes.inspect-conflict";
+  readonly params: RpcOperatorConflictInspectParams;
+}
+
 export type RpcRequest =
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
@@ -514,7 +546,9 @@ export type RpcRequest =
   | RpcNotesApproveUploadRequest
   | RpcNotesBrowseRequest
   | RpcNotesSearchOperatorRequest
-  | RpcNotesEditCensusRequest;
+  | RpcNotesEditCensusRequest
+  | RpcNotesConflictResolveRequest
+  | RpcNotesConflictInspectRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -861,6 +895,88 @@ export interface RpcNotesEditCensusResult {
   readonly truncated: boolean;
 }
 
+/** The outcomes that carry no fields beyond their name. Closed; the serializer checks against it. */
+export const CONFLICT_RESOLVE_CLOSED_OUTCOMES: ReadonlyArray<string> = Object.freeze([
+  "not-conflicted",
+  "not-found",
+  "vault_locked",
+  "unsupported_content",
+  "read_failed",
+  "copy_failed",
+  "copy_unverified",
+  "relation_failed",
+  "content_write_failed",
+  "resolved_flag_pending",
+  "post_write_unverified",
+]);
+
+/**
+ * Closed categorical outcome of one keep-both resolve. No body, raw id, digest,
+ * or path. `resolved` carries the two titles; `stale_revision` says whether a
+ * copy was already created before the revision check failed; every other
+ * outcome carries only its name.
+ */
+export type RpcNotesConflictResolveResult =
+  | Readonly<{
+      kind: "conflict-resolve";
+      outcome: "resolved";
+      originalTitle: string;
+      copyTitle: string;
+    }>
+  | Readonly<{ kind: "conflict-resolve"; outcome: "stale_revision"; copyCreated: boolean }>
+  | Readonly<{
+      kind: "conflict-resolve";
+      outcome:
+        | "not-conflicted"
+        | "not-found"
+        | "vault_locked"
+        | "unsupported_content"
+        | "read_failed"
+        | "copy_failed"
+        | "copy_unverified"
+        | "relation_failed"
+        | "content_write_failed"
+        | "resolved_flag_pending"
+        | "post_write_unverified";
+    }>;
+
+/**
+ * Categorical facts about one side of a conflict. Never carries the body or
+ * any id. `byteSize` is `null` unless the side is present, unlocked, and text.
+ */
+export interface RpcConflictSideFacts {
+  readonly present: boolean;
+  readonly unlocked: boolean;
+  readonly tiptap: boolean;
+  readonly byteSize: number | null;
+}
+
+/**
+ * Closed result of `notes.inspect-conflict`. `binding` is the opaque 64-hex
+ * token that a later `notes.resolve-conflict` must present; it is derived from
+ * the sides and reveals no content.
+ */
+export type RpcNotesConflictInspectResult =
+  | Readonly<{
+      kind: "conflict-inspection";
+      outcome: "not-conflicted" | "not-found";
+    }>
+  | Readonly<{
+      kind: "conflict-inspection";
+      outcome: "unreadable";
+      local: RpcConflictSideFacts;
+      remote: RpcConflictSideFacts;
+    }>
+  | Readonly<{
+      kind: "conflict-inspection";
+      outcome: "inspected";
+      local: RpcConflictSideFacts;
+      remote: RpcConflictSideFacts;
+      sidesEqual: boolean;
+      remoteHasAttachments: boolean;
+      binding: string;
+    }>;
+
 export type RpcResult =
   | RpcSearchResult
   | RpcStatusResult
@@ -882,7 +998,9 @@ export type RpcResult =
   | RpcNotesOperationListResult
   | RpcNotesApproveUploadResponse
   | RpcOperatorDiscoveryPageResult
-  | RpcNotesEditCensusResult;
+  | RpcNotesEditCensusResult
+  | RpcNotesConflictResolveResult
+  | RpcNotesConflictInspectResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -1183,6 +1301,45 @@ export function fitsResponsePreflight(fields: ReadonlyArray<string>, structureBy
  * The guard never reads, copies, or echoes the field's contents into
  * the thrown error.
  */
+/**
+ * One conflict side's facts. The side is a closed object: exactly four fields,
+ * three booleans, and a size that is a non-negative integer or `null`.
+ */
+function conflictSideFacts(value: unknown): RpcConflictSideFacts {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: conflict-inspection side is invalid");
+  }
+  const side = value as Record<string, unknown>;
+  const sideKeys = validateClosedObject(
+    side,
+    ["present", "unlocked", "tiptap", "byteSize"],
+    "rpc protocol: conflict-inspection side has unexpected fields",
+  );
+  if (
+    sideKeys.length !== 4 ||
+    !keysAreExactly(sideKeys, ["present", "unlocked", "tiptap", "byteSize"])
+  ) {
+    throw rpcProtocolError("rpc protocol: conflict-inspection side has unexpected fields");
+  }
+  const { present, unlocked, tiptap, byteSize } = side;
+  if (
+    typeof present !== "boolean" ||
+    typeof unlocked !== "boolean" ||
+    typeof tiptap !== "boolean"
+  ) {
+    throw rpcProtocolError("rpc protocol: conflict-inspection side flags are invalid");
+  }
+  let size: number | null;
+  if (byteSize === null) {
+    size = null;
+  } else if (typeof byteSize === "number" && Number.isSafeInteger(byteSize) && byteSize >= 0) {
+    size = byteSize;
+  } else {
+    throw rpcProtocolError("rpc protocol: conflict-inspection side size is invalid");
+  }
+  return { present, unlocked, tiptap, byteSize: size };
+}
+
 function preflightResponseStringField(value: string, rawSum: PreflightSum): void {
   const bytes = jsonStringUtf8Bytes(value, STAGE5_RPC_LIMITS.maxResponseBytes);
   if (bytes > STAGE5_RPC_LIMITS.maxResponseBytes) {
@@ -1382,7 +1539,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.approve-upload" &&
     method !== "notes.browse" &&
     method !== "notes.search-operator" &&
-    method !== "notes.edit-census"
+    method !== "notes.edit-census" &&
+    method !== "notes.resolve-conflict" &&
+    method !== "notes.inspect-conflict"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -1982,6 +2141,40 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       throw rpcProtocolError("rpc protocol: operation-list params must be empty");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
+  } else if (method === "notes.resolve-conflict") {
+    // Closed params: exactly the opaque note handle and the 64-hex binding.
+    if (!keysAreExactly(paramKeys, ["id", "binding"]))
+      throw rpcProtocolError("rpc protocol: resolve-conflict params are invalid");
+    const noteId = paramsRecord.id;
+    const binding = paramsRecord.binding;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    )
+      throw rpcProtocolError("rpc protocol: resolve-conflict note handle is invalid");
+    if (typeof binding !== "string" || !/^[0-9a-f]{64}$/.test(binding))
+      throw rpcProtocolError("rpc protocol: resolve-conflict binding is invalid");
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
+    paramsObj.binding = binding;
+  } else if (method === "notes.inspect-conflict") {
+    // Closed params: exactly the opaque note handle.
+    if (!keysAreExactly(paramKeys, ["id"]))
+      throw rpcProtocolError("rpc protocol: inspect-conflict params are invalid");
+    const noteId = paramsRecord.id;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    )
+      throw rpcProtocolError("rpc protocol: inspect-conflict note handle is invalid");
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
   } else if (method === "notes.approve-upload") {
     paramsObj = objectCreate(null) as Record<string, unknown>;
     if (paramKeys.length === 0) {
@@ -3424,6 +3617,186 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       resultPayload.byOrigin = originValues;
       resultPayload.highestSequence = highestSequence as number | null;
       return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+
+    if (kind === "conflict-inspection") {
+      const outcome = resultRecord.outcome;
+      if (outcome === "not-conflicted" || outcome === "not-found") {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome"],
+          "rpc protocol: conflict-inspection result has unexpected fields",
+        );
+        if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "outcome"])) {
+          throw rpcProtocolError("rpc protocol: conflict-inspection result has unexpected fields");
+        }
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-inspection";
+          outcome: "not-conflicted" | "not-found";
+        };
+        resultPayload.kind = "conflict-inspection";
+        resultPayload.outcome = outcome;
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      if (outcome === "unreadable") {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome", "local", "remote"],
+          "rpc protocol: conflict-inspection result has unexpected fields",
+        );
+        if (
+          resultKeys.length !== 4 ||
+          !keysAreExactly(resultKeys, ["kind", "outcome", "local", "remote"])
+        ) {
+          throw rpcProtocolError("rpc protocol: conflict-inspection result has unexpected fields");
+        }
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-inspection";
+          outcome: "unreadable";
+          local: RpcConflictSideFacts;
+          remote: RpcConflictSideFacts;
+        };
+        resultPayload.kind = "conflict-inspection";
+        resultPayload.outcome = "unreadable";
+        resultPayload.local = conflictSideFacts(resultRecord.local);
+        resultPayload.remote = conflictSideFacts(resultRecord.remote);
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      if (outcome === "inspected") {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome", "local", "remote", "sidesEqual", "remoteHasAttachments", "binding"],
+          "rpc protocol: conflict-inspection result has unexpected fields",
+        );
+        if (
+          resultKeys.length !== 7 ||
+          !keysAreExactly(resultKeys, [
+            "kind",
+            "outcome",
+            "local",
+            "remote",
+            "sidesEqual",
+            "remoteHasAttachments",
+            "binding",
+          ])
+        ) {
+          throw rpcProtocolError("rpc protocol: conflict-inspection result has unexpected fields");
+        }
+        const sidesEqual = resultRecord.sidesEqual;
+        const remoteHasAttachments = resultRecord.remoteHasAttachments;
+        const binding = resultRecord.binding;
+        if (typeof sidesEqual !== "boolean" || typeof remoteHasAttachments !== "boolean") {
+          throw rpcProtocolError("rpc protocol: conflict-inspection flags are invalid");
+        }
+        if (typeof binding !== "string" || !/^[0-9a-f]{64}$/.test(binding)) {
+          throw rpcProtocolError("rpc protocol: conflict-inspection binding is invalid");
+        }
+        preflightResponseStringField(binding, rawSum);
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-inspection";
+          outcome: "inspected";
+          local: RpcConflictSideFacts;
+          remote: RpcConflictSideFacts;
+          sidesEqual: boolean;
+          remoteHasAttachments: boolean;
+          binding: string;
+        };
+        resultPayload.kind = "conflict-inspection";
+        resultPayload.outcome = "inspected";
+        resultPayload.local = conflictSideFacts(resultRecord.local);
+        resultPayload.remote = conflictSideFacts(resultRecord.remote);
+        resultPayload.sidesEqual = sidesEqual;
+        resultPayload.remoteHasAttachments = remoteHasAttachments;
+        resultPayload.binding = binding;
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      throw rpcProtocolError("rpc protocol: conflict-inspection outcome is invalid");
+    }
+
+    if (kind === "conflict-resolve") {
+      const outcome = resultRecord.outcome;
+      if (outcome === "resolved") {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome", "originalTitle", "copyTitle"],
+          "rpc protocol: conflict-resolve result has unexpected fields",
+        );
+        if (
+          resultKeys.length !== 4 ||
+          !keysAreExactly(resultKeys, ["kind", "outcome", "originalTitle", "copyTitle"])
+        ) {
+          throw rpcProtocolError("rpc protocol: conflict-resolve result has unexpected fields");
+        }
+        const originalTitle = resultRecord.originalTitle;
+        const copyTitle = resultRecord.copyTitle;
+        assertBoundedString(
+          originalTitle,
+          STAGE5_RPC_LIMITS.maxTitleBytes,
+          "conflict-resolve original title",
+        );
+        assertBoundedString(
+          copyTitle,
+          STAGE5_RPC_LIMITS.maxTitleBytes,
+          "conflict-resolve copy title",
+        );
+        preflightResponseStringField(originalTitle, rawSum);
+        preflightResponseStringField(copyTitle, rawSum);
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-resolve";
+          outcome: "resolved";
+          originalTitle: string;
+          copyTitle: string;
+        };
+        resultPayload.kind = "conflict-resolve";
+        resultPayload.outcome = "resolved";
+        resultPayload.originalTitle = originalTitle;
+        resultPayload.copyTitle = copyTitle;
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      if (outcome === "stale_revision") {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome", "copyCreated"],
+          "rpc protocol: conflict-resolve result has unexpected fields",
+        );
+        if (
+          resultKeys.length !== 3 ||
+          !keysAreExactly(resultKeys, ["kind", "outcome", "copyCreated"])
+        ) {
+          throw rpcProtocolError("rpc protocol: conflict-resolve result has unexpected fields");
+        }
+        const copyCreated = resultRecord.copyCreated;
+        if (typeof copyCreated !== "boolean") {
+          throw rpcProtocolError("rpc protocol: conflict-resolve copy flag is invalid");
+        }
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-resolve";
+          outcome: "stale_revision";
+          copyCreated: boolean;
+        };
+        resultPayload.kind = "conflict-resolve";
+        resultPayload.outcome = "stale_revision";
+        resultPayload.copyCreated = copyCreated;
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      if (typeof outcome === "string" && CONFLICT_RESOLVE_CLOSED_OUTCOMES.includes(outcome)) {
+        const resultKeys = validateClosedObject(
+          resultRecord,
+          ["kind", "outcome"],
+          "rpc protocol: conflict-resolve result has unexpected fields",
+        );
+        if (resultKeys.length !== 2 || !keysAreExactly(resultKeys, ["kind", "outcome"])) {
+          throw rpcProtocolError("rpc protocol: conflict-resolve result has unexpected fields");
+        }
+        const resultPayload = objectCreate(null) as {
+          kind: "conflict-resolve";
+          outcome: string;
+        };
+        resultPayload.kind = "conflict-resolve";
+        resultPayload.outcome = outcome;
+        return serializeSuccessFrame(id, resultPayload, rawSum);
+      }
+      throw rpcProtocolError("rpc protocol: conflict-resolve outcome is invalid");
     }
 
     if (kind === "approve-upload") {

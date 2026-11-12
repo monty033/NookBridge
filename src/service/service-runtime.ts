@@ -52,6 +52,8 @@ import type { Logger } from "../logging/logger.js";
 import type { NotesnookReadOnlyDatabase } from "../core/notesnook-readonly-adapter.js";
 import type { NotesnookRealCoreModule } from "../core/notesnook-core-adapter.js";
 import type { SyncUploadPolicy } from "../core/notesnook-sync-coordinator.js";
+import type { LiveConflictResolveCapability } from "../core/notesnook-conflict-resolve-live.js";
+import type { NotesnookLocalConflictInspector } from "../core/notesnook-local-conflict-projection.js";
 import {
   isNotesnookWriteContractError,
   type AppendNoteCommand,
@@ -198,6 +200,16 @@ export interface ServiceRuntime {
    */
   readonly operatorCreateNote?: (command: CreateNoteCommand) => Promise<CreateNoteResult>;
   readonly operatorUpdateNote?: (command: UpdateNoteCommand) => Promise<UpdateNoteResult>;
+  /**
+   * Operator-only keep-both conflict resolve. Consumed only by the operator
+   * discovery handler; never part of the MCP surface.
+   */
+  readonly localConflictResolve?: LiveConflictResolveCapability;
+  /**
+   * Operator-only, read-only conflict inspection. Consumed only by the operator
+   * discovery handler; never part of the MCP surface.
+   */
+  readonly localConflictInspector?: NotesnookLocalConflictInspector;
   /** Optional bounded local single-note delete capability. */
   readonly deleteNote?: (command: DeleteNoteCommand) => Promise<DeleteNoteResult>;
   /** Optional edit-authorized, upload-gated outbound synchronization capability. */
@@ -672,6 +684,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     operatorLocalWrite === undefined ? undefined : buildCreateNote(operatorLocalWrite);
   const operatorUpdateNote =
     operatorLocalWrite === undefined ? undefined : buildUpdateNote(operatorLocalWrite);
+  const localConflictResolve = core.handle.localConflictResolve;
+  const localConflictInspector = core.handle.localConflictInspector;
 
   const appendNote =
     localWrite === undefined
@@ -768,6 +782,8 @@ function buildServiceRuntime(core: ProductionRuntimeCore): ServiceRuntime {
     ...(updateNote === undefined ? {} : { updateNote }),
     ...(operatorCreateNote === undefined ? {} : { operatorCreateNote }),
     ...(operatorUpdateNote === undefined ? {} : { operatorUpdateNote }),
+    ...(localConflictResolve === undefined ? {} : { localConflictResolve }),
+    ...(localConflictInspector === undefined ? {} : { localConflictInspector }),
     ...(deleteNote === undefined ? {} : { deleteNote }),
     ...(requestSync === undefined ? {} : { requestSync }),
     cleanup: cleanupOnce,

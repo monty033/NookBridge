@@ -95,7 +95,7 @@ export function operatorPreMutationRefusal(error: unknown): OperatorPreMutationR
 /** The bounded subset of the encrypted operation store this runtime uses. */
 export interface OperatorOperationStore {
   readonly insert: (input: {
-    readonly kind: "create" | "edit" | "undo";
+    readonly kind: "create" | "edit" | "undo" | "resolve";
     readonly payload: string;
     readonly ttlMs: number;
   }) => Promise<OperationRecord>;
@@ -233,7 +233,7 @@ export class OperatorWriteError extends Error {
  * Owner key for a well-formed peer. Anything else is refused, so a peerless
  * caller can never share an owner with, or see the operations of, another.
  */
-function ownerKey(peer: OperatorPeer): string {
+export function ownerKey(peer: OperatorPeer): string {
   if (
     typeof peer !== "object" ||
     peer === null ||

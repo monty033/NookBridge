@@ -24,7 +24,7 @@ export type OperationState =
   | "aborted";
 export interface OperationRecord {
   readonly handle: string;
-  readonly kind: "create" | "edit" | "undo";
+  readonly kind: "create" | "edit" | "undo" | "resolve";
   readonly state: OperationState;
   /** Private daemon recovery envelope; never an RPC response. */
   readonly payload: string;
@@ -144,7 +144,7 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
         !r ||
         Object.keys(r).sort().join() !== "createdAt,expiresAt,handle,kind,payload,state" ||
         r.handle !== handle ||
-        !["create", "edit", "undo"].includes(r.kind) ||
+        !["create", "edit", "undo", "resolve"].includes(r.kind) ||
         !Object.hasOwn(transitions, r.state) ||
         typeof r.payload !== "string" ||
         !Number.isSafeInteger(r.createdAt) ||
@@ -254,7 +254,7 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
       return run(async () => {
         if (
           !input ||
-          !["create", "edit", "undo"].includes(input.kind) ||
+          !["create", "edit", "undo", "resolve"].includes(input.kind) ||
           typeof input.payload !== "string" ||
           !positive(input.ttlMs)
         )
