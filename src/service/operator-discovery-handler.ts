@@ -8,6 +8,8 @@ import type {
   RpcNotesOperationListResult,
   RpcNotesOperationStatusResult,
   RpcNotesEditCensusResult,
+  RpcNotesConflictResolveResult,
+  RpcNotesConflictInspectResult,
   RpcOperatorApproveUploadParams,
   RpcNotesApproveUploadResponse,
   RpcRequest,
@@ -84,6 +86,16 @@ export interface OperatorDiscoveryRuntime {
     }>,
     peer: OperatorPeer,
   ) => Promise<RpcCreatedNoteResult>;
+  /** Operator-only keep-both resolve; absent when the live capability is unavailable. */
+  readonly resolveConflict?: (
+    params: Readonly<{ id: string; binding: string }>,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesConflictResolveResult>;
+  /** Operator-only, read-only conflict inspection; absent when no inspector is wired. */
+  readonly inspectConflict?: (
+    params: Readonly<{ id: string }>,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesConflictInspectResult>;
 }
 
 /** Build the bounded discovery portion of the daemon operator handler. */
@@ -141,6 +153,16 @@ export function createOperatorDiscoveryHandler(
         if (runtime.create === undefined) return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.create(request.params, peer));
       }
+      if (request.method === "notes.resolve-conflict") {
+        if (runtime.resolveConflict === undefined)
+          return failure(request.id, "service_unavailable");
+        return mutationSuccess(request.id, await runtime.resolveConflict(request.params, peer));
+      }
+      if (request.method === "notes.inspect-conflict") {
+        if (runtime.inspectConflict === undefined)
+          return failure(request.id, "service_unavailable");
+        return mutationSuccess(request.id, await runtime.inspectConflict(request.params, peer));
+      }
       return failure(request.id, "invalid_request");
     } catch (error) {
       return failure(
@@ -182,6 +204,8 @@ function mutationSuccess(
     | RpcNotesOperationListResult
     | RpcNotesApproveUploadResponse
     | RpcNotesEditCensusResult
+    | RpcNotesConflictResolveResult
+    | RpcNotesConflictInspectResult
     | RpcCreatedNoteResult,
 ): RpcAnyResponseEnvelope {
   return { id, ok: true, result } as RpcAnyResponseEnvelope;

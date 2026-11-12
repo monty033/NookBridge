@@ -17,7 +17,14 @@ export type NotesnookRecoveryStage =
   | "append-date"
   | "update-metadata"
   | "update-content"
-  | "update-tags";
+  | "update-tags"
+  | "resolve-copy"
+  | "resolve-content"
+  | "resolve-note-flag";
+
+/** The three stages a keep-both conflict resolve journals, in write order. */
+export const NOTESNOOK_RESOLVE_RECOVERY_STAGES: ReadonlyArray<NotesnookRecoveryStage> =
+  Object.freeze(["resolve-copy", "resolve-content", "resolve-note-flag"]);
 
 export type NotesnookRecoveryMarker = Readonly<{
   readonly operation: SyncOperation;
@@ -25,12 +32,20 @@ export type NotesnookRecoveryMarker = Readonly<{
   readonly stage: NotesnookRecoveryStage;
 }>;
 
+/**
+ * `discard` removes the markers for one note at the given stages and returns
+ * how many it removed. It is optional so that existing implementations stay
+ * valid; the conflict resolver is only offered when it is present.
+ */
 export interface NotesnookRecoveryJournal {
   readonly record: (marker: NotesnookRecoveryMarker) => void;
   readonly snapshot: () => readonly NotesnookRecoveryMarker[];
+  readonly discard?: (noteId: string, stages: ReadonlyArray<NotesnookRecoveryStage>) => number;
 }
 
-const MAX_PENDING_MARKERS = 64;
+/** Total markers the journal holds across all writes. A full journal refuses new markers. */
+export const NOTESNOOK_RECOVERY_JOURNAL_MAX_MARKERS = 64;
+const MAX_PENDING_MARKERS = NOTESNOOK_RECOVERY_JOURNAL_MAX_MARKERS;
 const MAX_NOTE_ID_LENGTH = 128;
 const NOTE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -49,7 +64,10 @@ function isStage(value: unknown): value is NotesnookRecoveryStage {
     value === "append-date" ||
     value === "update-metadata" ||
     value === "update-content" ||
-    value === "update-tags"
+    value === "update-tags" ||
+    value === "resolve-copy" ||
+    value === "resolve-content" ||
+    value === "resolve-note-flag"
   );
 }
 
@@ -79,6 +97,14 @@ function normalizeMarkers(value: unknown): NotesnookRecoveryMarker[] {
   return value.map(normalizeMarker);
 }
 
+function isDiscarded(
+  marker: NotesnookRecoveryMarker,
+  noteId: string,
+  stages: ReadonlyArray<NotesnookRecoveryStage>,
+): boolean {
+  return marker.noteId === noteId && stages.includes(marker.stage);
+}
+
 /** In-memory journal used by tests and by callers that provide their own store. */
 export class MemoryNotesnookRecoveryJournal implements NotesnookRecoveryJournal {
   readonly #markers: NotesnookRecoveryMarker[] = [];
@@ -98,6 +124,13 @@ export class MemoryNotesnookRecoveryJournal implements NotesnookRecoveryJournal 
 
   snapshot(): readonly NotesnookRecoveryMarker[] {
     return Object.freeze(this.#markers.map((marker) => Object.freeze({ ...marker })));
+  }
+
+  discard(noteId: string, stages: ReadonlyArray<NotesnookRecoveryStage>): number {
+    const kept = this.#markers.filter((marker) => !isDiscarded(marker, noteId, stages));
+    const removed = this.#markers.length - kept.length;
+    this.#markers.splice(0, this.#markers.length, ...kept);
+    return removed;
   }
 }
 
@@ -155,6 +188,25 @@ export class PersistentNotesnookRecoveryJournal implements NotesnookRecoveryJour
     } catch {
       return Object.freeze([]);
     }
+  }
+
+  discard(noteId: string, stages: ReadonlyArray<NotesnookRecoveryStage>): number {
+    let current: NotesnookRecoveryMarker[];
+    try {
+      const encoded = this.#readSync<string>(NOTESNOOK_RECOVERY_JOURNAL_KEY);
+      current = encoded === undefined ? [] : normalizeMarkers(JSON.parse(encoded) as unknown);
+    } catch {
+      throw new Error("recovery journal unavailable");
+    }
+    const kept = current.filter((marker) => !isDiscarded(marker, noteId, stages));
+    const removed = current.length - kept.length;
+    if (removed === 0) return 0;
+    try {
+      this.#writeSync(NOTESNOOK_RECOVERY_JOURNAL_KEY, JSON.stringify(kept));
+    } catch {
+      throw new Error("recovery journal unavailable");
+    }
+    return removed;
   }
 }
 

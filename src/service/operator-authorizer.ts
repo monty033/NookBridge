@@ -99,6 +99,7 @@ export type OperatorAuthorizer = (
 export const OPERATOR_TARGET_READ_METHODS: ReadonlyArray<OperatorMethod> = Object.freeze([
   "notes.get-view",
   "notes.edit-preimage",
+  "notes.inspect-conflict",
 ]);
 
 export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): OperatorAuthorizer {

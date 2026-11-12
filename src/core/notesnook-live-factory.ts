@@ -84,6 +84,10 @@ import {
   type NotesnookLocalConflictObserver,
   type NotesnookLocalConflictSource,
 } from "./notesnook-local-conflict-projection.js";
+import {
+  buildOptionalLiveConflictResolveCapability,
+  type LiveConflictResolveCapability,
+} from "./notesnook-conflict-resolve-live.js";
 
 // ---------------------------------------------------------------------------
 // Options, narrow types, and cleanup hook.
@@ -218,6 +222,12 @@ export interface NotesnookLiveCoreHandle {
    * field means "not measured" and is never reported as zero.
    */
   readonly localConflictCounter?: NotesnookLocalConflictCounter;
+  /**
+   * Operator-only keep-both conflict resolve. Present only when the six-slot
+   * seam, the journal's `discard`, and the shared coordinator are all present.
+   * It is never handed to the MCP handler.
+   */
+  readonly localConflictResolve?: LiveConflictResolveCapability;
 }
 
 /**
@@ -424,6 +434,14 @@ export async function createNotesnookLiveCoreFactory(
       db as unknown as object,
       ensureOpen,
     );
+    // Operator-only keep-both resolve. Built over the same opened database and
+    // the shared coordinator, so its pending marker joins the one queue.
+    const localConflictResolve = buildOptionalLiveConflictResolveCapability({
+      database: db as unknown as object,
+      ensureOpen,
+      journal: normalized.recoveryJournal,
+      coordinator: sharedCoordinator,
+    });
 
     // Step 6 — assemble the frozen handle.  A cleanup attempt is published
     // before its first await; concurrent callers therefore await the exact
@@ -458,6 +476,7 @@ export async function createNotesnookLiveCoreFactory(
       ...(localConflictObserver === undefined ? {} : { localConflictObserver }),
       ...(localConflictInspector === undefined ? {} : { localConflictInspector }),
       ...(localConflictCounter === undefined ? {} : { localConflictCounter }),
+      ...(localConflictResolve === undefined ? {} : { localConflictResolve }),
     });
 
     return handle;
@@ -808,7 +827,7 @@ function buildLiveLocalConflictInspector(
   });
 }
 
-function buildOptionalLiveLocalConflictInspector(
+export function buildOptionalLiveLocalConflictInspector(
   database: object,
   ensureOpen: () => void,
 ): NotesnookLocalConflictInspector | undefined {

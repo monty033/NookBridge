@@ -4,8 +4,8 @@ import { OPERATOR_DISCOVERY_METHODS, OPERATOR_METHODS } from "../src/service/ope
 import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.js";
 
 describe("operator discovery handler", () => {
-  it("publishes the frozen ten-method vocabulary separately from discovery", () => {
-    expect(OPERATOR_METHODS).toHaveLength(10);
+  it("publishes the frozen operator vocabulary separately from discovery", () => {
+    expect(OPERATOR_METHODS).toHaveLength(12);
     expect([...OPERATOR_METHODS]).toEqual([
       "notes.get-view",
       "notes.edit-preimage",
@@ -17,6 +17,8 @@ describe("operator discovery handler", () => {
       "notes.approve-upload",
       "notes.path_diagnostic",
       "notes.edit-census",
+      "notes.resolve-conflict",
+      "notes.inspect-conflict",
     ]);
     expect([...OPERATOR_DISCOVERY_METHODS]).toEqual(["notes.browse", "notes.search-operator"]);
   });
