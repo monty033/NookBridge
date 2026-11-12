@@ -289,6 +289,7 @@ export function createOperatorConflictResolveRuntime(
       await readOrBlock(handle, () => seam.noteClearConflict(noteId));
       const after = await readOrBlock(handle, () => seam.noteMeta(noteId));
       if (
+        readField(after, "id") !== noteId ||
         readField(after, "conflicted") !== false ||
         readField(after, "contentId") !== payload.contentId
       ) {

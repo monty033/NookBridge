@@ -134,9 +134,14 @@ export function buildLiveConflictResolveSeam(
       if (get === undefined) throw new Error("conflict resolve relation reader is unavailable");
       const rows = await Reflect.apply(get, handle, []);
       const memberships = membershipsOf(rows, id);
-      // Prototype-linked, so a class-backed row keeps its getters; the
-      // memberships array is the one own field this seam adds.
+      // Prototype-linked, so a class-backed row keeps its getters. The
+      // inspector reads `id`, `conflicted` and `contentId` as OWN properties,
+      // so those are copied onto the wrapper explicitly; without them the live
+      // resolver fails closed at inspection and can never write.
       return Object.create(note, {
+        id: { value: Reflect.get(note, "id"), enumerable: true },
+        conflicted: { value: Reflect.get(note, "conflicted"), enumerable: true },
+        contentId: { value: Reflect.get(note, "contentId"), enumerable: true },
         memberships: { value: Object.freeze(memberships), enumerable: true },
       });
     },

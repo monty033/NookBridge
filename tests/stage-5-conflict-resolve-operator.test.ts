@@ -675,6 +675,40 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect((await operationsOf(store))[0]?.state).toBe("unresolved");
   });
 
+  it("refuses recovery when the note read after the flag clear carries a different id", async () => {
+    // First attempt fails at the flag clear, leaving the operation unresolved.
+    // The second attempt then runs recovery, which clears the flag and reads the
+    // note back. That read returns a different row id, so recovery must refuse
+    // rather than commit and report resolved.
+    const base = createFake();
+    base.failOnce.add("noteClearConflict");
+    const realClear = base.seam.noteClearConflict;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        noteClearConflict: async (id: string) => {
+          await realClear(id);
+          const note = base.notes.get(id);
+          if (note !== undefined) base.notes.set(id, { ...note, id: "note-other" });
+        },
+      },
+    };
+    const { runtime, store } = await harness(wrapped);
+    const binding = await bindingOf(base);
+
+    const first = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+    expect(first).toEqual({ kind: "conflict-resolve", outcome: "resolved_flag_pending" });
+
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    expect((await operationsOf(store))[0]?.state).not.toBe("committed");
+  });
+
   it("blocks a resolve while another owner has an unfinished one for the same note", async () => {
     const fake = createFake();
     fake.failOnce.add("noteClearConflict");
