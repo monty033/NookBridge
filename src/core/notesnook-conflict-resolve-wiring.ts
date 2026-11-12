@@ -518,9 +518,11 @@ async function readCopyText(
 ): Promise<string | undefined> {
   try {
     const note = await slots.noteMeta(copyId);
+    if (field(note, "id") !== copyId) return undefined;
     if (field(note, "title") !== copyTitle) return undefined;
     const contentId = readIdentifier(field(note, "contentId"));
     const row = await slots.contentWithConflicted(contentId);
+    if (field(row, "id") !== contentId) return undefined;
     if (field(row, "noteId") !== copyId) return undefined;
     return readText(field(row, "data"));
   } catch {
@@ -564,7 +566,11 @@ export function isClearedContentMarker(value: unknown): boolean {
 async function verifyOriginal(slots: CapturedSlots, plan: ResolvePlan): Promise<boolean> {
   try {
     const note = await slots.noteMeta(plan.noteId);
-    if (field(note, "conflicted") !== false || field(note, "contentId") !== plan.contentId) {
+    if (
+      field(note, "id") !== plan.noteId ||
+      field(note, "conflicted") !== false ||
+      field(note, "contentId") !== plan.contentId
+    ) {
       return false;
     }
     const row = await slots.contentWithConflicted(plan.contentId);

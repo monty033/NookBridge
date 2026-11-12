@@ -87,6 +87,14 @@ type StoreOptions = Readonly<{
   resolvedRow?: Row;
   /** A membership `noteRelate` reports as written but does not record. */
   dropMembership?: string;
+  /** The id the copy's own note row carries, when it is not the copy id. */
+  copyNoteIdOverride?: string;
+  /** The id the copy's content row carries, when it is not its content id. */
+  copyContentIdOverride?: string;
+  /** The id the original's note row carries, when it is not the original id. */
+  originalNoteIdOverride?: string;
+  /** Runs after the conflicted flag is cleared, just before the final read-back. */
+  afterClear?: (notes: Map<string, Row>) => void;
 }>;
 
 type Store = Readonly<{
@@ -170,7 +178,15 @@ function createStore(options: StoreOptions = {}): Store {
   const calls: Array<Readonly<{ slot: SlotName; arg: unknown }>> = [];
   const failing = new Set<SlotName>(options.throwOn ?? []);
 
-  if (options.noteAbsent !== true) notes.set("note-1", originalNote(options.note));
+  if (options.noteAbsent !== true) {
+    const note = originalNote(options.note);
+    notes.set("note-1", {
+      ...note,
+      ...(options.originalNoteIdOverride === undefined
+        ? {}
+        : { id: options.originalNoteIdOverride }),
+    });
+  }
   if (options.trashed === true) trashed.add("note-1");
   contents.set("content-1", originalContent(options.content));
   if (options.foreignNote === true) {
@@ -237,6 +253,18 @@ function createStore(options: StoreOptions = {}): Store {
         conflicted: false,
         memberships: [],
       });
+      if (options.copyNoteIdOverride !== undefined) {
+        const created = notes.get(copyId);
+        if (created !== undefined) {
+          notes.set(copyId, { ...created, id: options.copyNoteIdOverride });
+        }
+      }
+      if (options.copyContentIdOverride !== undefined) {
+        const created = contents.get(copyContentId);
+        if (created !== undefined) {
+          contents.set(copyContentId, { ...created, id: options.copyContentIdOverride });
+        }
+      }
       options.afterCopy?.(contents);
       return options.copyReturnsId ?? copyId;
     },
@@ -256,6 +284,7 @@ function createStore(options: StoreOptions = {}): Store {
       const note = notes.get(id);
       if (note === undefined) throw new Error("missing note");
       note.conflicted = false;
+      options.afterClear?.(notes);
     },
     noteRelate: async (input) => {
       record("noteRelate", input);
@@ -719,9 +748,48 @@ describe("Stage 5 keep-both copy identity", () => {
     expect(originalOf(store)).toEqual(before);
     expect(store.notes.get("note-other")).toEqual(foreignBefore);
   });
+
+  it("refuses when the copy's own note row carries a different id", async () => {
+    const store = createStore({ copyNoteIdOverride: "note-copy-other" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+  });
+
+  it("refuses when the copy's content row carries a different id", async () => {
+    const store = createStore({ copyContentIdOverride: "content-copy-other" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+  });
 });
 
 describe("Stage 5 keep-both original read-back identity", () => {
+  it("refuses to count the resolve when the original's own note row carries a different id", async () => {
+    const store = createStore({
+      afterClear: (notes) => {
+        const note = notes.get("note-1");
+        if (note !== undefined) notes.set("note-1", { ...note, id: "note-9" });
+      },
+    });
+    const binding = await bindingOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "post_write_unverified",
+    });
+    expect(writesOf(store)).toEqual([...COPY_WRITES, "contentResolve", "noteClearConflict"]);
+  });
+
   it.each<[string, Row]>([
     ["id", { id: "content-9" }],
     ["noteId", { noteId: "note-9" }],

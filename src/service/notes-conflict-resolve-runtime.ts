@@ -261,7 +261,11 @@ export function createOperatorConflictResolveRuntime(
     if (!reached) fail("service_unavailable", handle);
 
     const note = await readOrBlock(handle, () => seam.noteMeta(noteId));
-    if (note === undefined || readField(note, "contentId") !== payload.contentId) {
+    if (
+      note === undefined ||
+      readField(note, "id") !== noteId ||
+      readField(note, "contentId") !== payload.contentId
+    ) {
       fail("service_unavailable", handle);
     }
     const row = await readOrBlock(handle, () => seam.contentWithConflicted(payload.contentId));
@@ -269,6 +273,7 @@ export function createOperatorConflictResolveRuntime(
     const adopted =
       isClearedContentMarker(readField(row, "conflicted")) &&
       readField(row, "dateResolved") === payload.remoteDate &&
+      readField(row, "id") === payload.contentId &&
       readField(row, "noteId") === noteId &&
       typeof data === "string" &&
       sha256(data) === payload.remoteDigest;

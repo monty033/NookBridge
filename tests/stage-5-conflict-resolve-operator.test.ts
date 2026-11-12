@@ -648,6 +648,33 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(journal.snapshot()).toEqual([]);
   });
 
+  it("blocks the recovery when the content row's own id is not the expected one", async () => {
+    const fake = createFake();
+    fake.failOnce.add("noteClearConflict");
+    const { runtime, store } = await harness(fake);
+    const binding = await bindingOf(fake);
+
+    const first = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+    expect(first).toEqual({ kind: "conflict-resolve", outcome: "resolved_flag_pending" });
+
+    // The content row the recovery would read back now carries a different id.
+    const row = fake.contents.get("content-1");
+    expect(row).toBeDefined();
+    if (row === undefined) return;
+    fake.contents.set("content-1", { ...row, id: "content-other" });
+    const writesBefore = writesOf(fake).length;
+
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    expect(writesOf(fake)).toHaveLength(writesBefore);
+    expect(fake.notes.get("note-1")).toMatchObject({ conflicted: true });
+    expect((await operationsOf(store))[0]?.state).toBe("unresolved");
+  });
+
   it("blocks a resolve while another owner has an unfinished one for the same note", async () => {
     const fake = createFake();
     fake.failOnce.add("noteClearConflict");
