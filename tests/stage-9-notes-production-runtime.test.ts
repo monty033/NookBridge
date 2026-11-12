@@ -12,6 +12,19 @@ import {
 import type { OperatorSocketResult } from "../src/operator/operator-socket-client.js";
 import type { NotesCategoricalResult } from "../src/operator/notes-cli.js";
 
+// The production runtime dials a fixed operator socket path. Stub the client so
+// this test never reaches a live daemon on the host. The socket is treated as
+// unavailable, which is the categorical result the test pins.
+vi.mock("../src/operator/operator-socket-client.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  class UnreachableOperatorSocketClient {
+    async request(): Promise<OperatorSocketResult> {
+      return { ok: false, code: "service_unavailable" };
+    }
+  }
+  return { ...actual, OperatorSocketClient: UnreachableOperatorSocketClient };
+});
+
 function expectPage(result: NotesCategoricalResult) {
   if (result.kind !== "page") throw new Error(`expected page, got ${result.kind}`);
   return result;
