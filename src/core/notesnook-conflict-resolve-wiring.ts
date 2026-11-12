@@ -4,14 +4,15 @@
  * `createNotesnookConflictResolver` resolves one conflicted note in keep-both
  * mode. It runs these steps in order: re-run the inspection and check its
  * binding; create a copy that holds the bridge-local side; read the copy back
- * and require byte equality; re-create the original's notebook and tag
- * memberships on the copy as relations; re-check the binding; adopt the remote
- * side on the original through core's `content.add` with `dateResolved`; clear
- * the note's conflicted flag; read the original back and require every
- * resolved field.
+ * and require its title and byte-equal content; re-create the original's
+ * notebook and tag memberships on the copy as relations, then read them back
+ * and require every one; re-check the binding; adopt the remote side on the
+ * original through core's `content.add` with `dateResolved`; clear the note's
+ * conflicted flag; read the original back and require every resolved field,
+ * including the content row's own id and note id.
  *
  * Nothing is trashed, deleted, merged, or synced. The module reaches upstream
- * only through the six slots of `NotesnookConflictResolveSeam`, and it has no
+ * only through the seven slots of `NotesnookConflictResolveSeam`, and it has no
  * delete, trash, sync, or generic-write slot. The caller must hold the database
  * mutex for the whole `resolveKeepBoth` or `capture` call. The seam's
  * `contentWithConflicted` must be the pure by-id reader (`content.collection.get`).
@@ -100,10 +101,12 @@ export type NotesnookConflictContentResolveInput = Readonly<{
 }>;
 
 /**
- * The six injected slots, and nothing else. `contentWithConflicted` must be a
+ * The seven injected slots, and nothing else. `contentWithConflicted` must be a
  * pure by-id read. `notesAddVerbatim` and `contentResolve` are the only content
  * writes. `noteClearConflict` is the only flag write. `noteRelate` creates
- * copy-to-notebook and copy-to-tag relations and nothing more.
+ * copy-to-notebook and copy-to-tag relations and nothing more. `noteRelations`
+ * is read-only: it returns the notebook and tag memberships of one note id, and
+ * no other relation type is reachable through it.
  *
  * `noteMeta` returns the note row with a `memberships` array of
  * {@link NotesnookConflictMembership}. A row without that array fails closed.
@@ -115,6 +118,7 @@ export type NotesnookConflictResolveSeam = Readonly<{
   contentResolve(input: NotesnookConflictContentResolveInput): PromiseLike<unknown>;
   noteClearConflict(id: string): PromiseLike<unknown>;
   noteRelate(input: NotesnookConflictRelateInput): PromiseLike<unknown>;
+  noteRelations(noteId: string): PromiseLike<unknown>;
 }>;
 
 /**
@@ -228,6 +232,7 @@ type CapturedSlots = Readonly<{
   contentResolve(input: NotesnookConflictContentResolveInput): Promise<unknown>;
   noteClearConflict(id: string): Promise<unknown>;
   noteRelate(input: NotesnookConflictRelateInput): Promise<unknown>;
+  noteRelations(noteId: string): Promise<unknown>;
 }>;
 
 const SEAM_SLOT_NAMES: ReadonlyArray<string> = [
@@ -237,13 +242,14 @@ const SEAM_SLOT_NAMES: ReadonlyArray<string> = [
   "contentResolve",
   "noteClearConflict",
   "noteRelate",
+  "noteRelations",
 ];
 
 function captureSlots(seam: unknown): CapturedSlots {
   if (!isObjectLike(seam)) throw resolveError("conflict resolve seam is unavailable");
   const keys = Reflect.ownKeys(seam);
   if (keys.length !== SEAM_SLOT_NAMES.length || !SEAM_SLOT_NAMES.every((k) => keys.includes(k))) {
-    throw resolveError("conflict resolve seam must expose exactly the six resolve slots");
+    throw resolveError("conflict resolve seam must expose exactly the seven resolve slots");
   }
 
   const noteMeta = readSlot(seam, "noteMeta");
@@ -252,6 +258,7 @@ function captureSlots(seam: unknown): CapturedSlots {
   const contentResolve = readSlot(seam, "contentResolve");
   const noteClearConflict = readSlot(seam, "noteClearConflict");
   const noteRelate = readSlot(seam, "noteRelate");
+  const noteRelations = readSlot(seam, "noteRelations");
 
   return Object.freeze({
     noteMeta: (id: string) => invoke(seam, noteMeta, [id]),
@@ -262,6 +269,7 @@ function captureSlots(seam: unknown): CapturedSlots {
       invoke(seam, contentResolve, [input]),
     noteClearConflict: (id: string) => invoke(seam, noteClearConflict, [id]),
     noteRelate: (input: NotesnookConflictRelateInput) => invoke(seam, noteRelate, [input]),
+    noteRelations: (noteId: string) => invoke(seam, noteRelations, [noteId]),
   });
 }
 
@@ -346,7 +354,8 @@ async function resolveOnce(
   if ("refusal" in gated) return gated.refusal;
   const plan = gated.plan;
 
-  // Step 2: create the copy from the bridge-local side.
+  // Step 2: create the copy from the bridge-local side. An id that names the
+  // original is not a copy, and reading it back would read the original row.
   let created: unknown;
   try {
     created = await slots.notesAddVerbatim(plan.copyInput);
@@ -354,10 +363,10 @@ async function resolveOnce(
     return { outcome: "copy_failed" };
   }
   const copyId = optionalIdentifier(created);
-  if (copyId === undefined) return { outcome: "copy_unverified" };
+  if (copyId === undefined || copyId === plan.noteId) return { outcome: "copy_unverified" };
 
-  // Step 3: the copy must read back byte-for-byte equal to the local side.
-  if ((await readCopyText(slots, copyId)) !== plan.localText) {
+  // Step 3: the copy must read back as the derived title, byte-for-byte equal to the local side.
+  if ((await readCopyText(slots, copyId, plan.copyTitle)) !== plan.localText) {
     return { outcome: "copy_unverified" };
   }
 
@@ -368,6 +377,12 @@ async function resolveOnce(
     } catch {
       return { outcome: "relation_failed" };
     }
+  }
+
+  // Step 4b: read the copy's memberships back. A relation that did not land is
+  // refused here, before the content write, so the original is untouched.
+  if (!(await copyCarriesMemberships(slots, copyId, plan.memberships))) {
+    return { outcome: "relation_failed" };
   }
 
   // Step 5: re-check the binding before the original is touched.
@@ -491,16 +506,44 @@ export function copyTitleFor(title: string): string {
   return `${Array.from(base).slice(0, room).join("")}${COPY_TITLE_SUFFIX}`;
 }
 
-/** Read the copy back by its note id. Returns `undefined` on any mismatch or failure. */
-async function readCopyText(slots: CapturedSlots, copyId: string): Promise<string | undefined> {
+/**
+ * Read the copy back by its note id. The copy must carry the derived copy title,
+ * so a row that is not the copy this resolve asked for cannot satisfy the check.
+ * Returns `undefined` on any mismatch or failure.
+ */
+async function readCopyText(
+  slots: CapturedSlots,
+  copyId: string,
+  copyTitle: string,
+): Promise<string | undefined> {
   try {
     const note = await slots.noteMeta(copyId);
+    if (field(note, "title") !== copyTitle) return undefined;
     const contentId = readIdentifier(field(note, "contentId"));
     const row = await slots.contentWithConflicted(contentId);
     if (field(row, "noteId") !== copyId) return undefined;
     return readText(field(row, "data"));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Whether the copy's own memberships include every notebook and tag the original
+ * holds. A read that fails or returns a malformed list reads as missing.
+ */
+async function copyCarriesMemberships(
+  slots: CapturedSlots,
+  copyId: string,
+  wanted: readonly NotesnookConflictMembership[],
+): Promise<boolean> {
+  try {
+    const held = readMemberships(await slots.noteRelations(copyId));
+    return wanted.every((membership) =>
+      held.some((present) => present.type === membership.type && present.id === membership.id),
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -514,7 +557,10 @@ export function isClearedContentMarker(value: unknown): boolean {
   return value === undefined || value === null || value === false;
 }
 
-/** Read the original back. Every resolved field must match before the resolve counts. */
+/**
+ * Read the original back. Every resolved field must match before the resolve counts.
+ * The content row must also be the original's own row: its id and its note id are checked.
+ */
 async function verifyOriginal(slots: CapturedSlots, plan: ResolvePlan): Promise<boolean> {
   try {
     const note = await slots.noteMeta(plan.noteId);
@@ -523,6 +569,8 @@ async function verifyOriginal(slots: CapturedSlots, plan: ResolvePlan): Promise<
     }
     const row = await slots.contentWithConflicted(plan.contentId);
     return (
+      field(row, "id") === plan.contentId &&
+      field(row, "noteId") === plan.noteId &&
       isClearedContentMarker(field(row, "conflicted")) &&
       field(row, "dateResolved") === plan.remoteDate &&
       field(row, "data") === plan.remoteText

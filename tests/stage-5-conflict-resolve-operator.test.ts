@@ -42,6 +42,8 @@ const LOCAL_BODY = '<p data-block-id="l1">local edit</p>';
 const REMOTE_BODY = '<p data-block-id="r1">remote edit</p>';
 const REMOTE_DATE = 2_000;
 const ZERO_BINDING = "0".repeat(64);
+/** The exact phrase the daemon requires on every resolve request. */
+const CONFIRMATION = "KEEP BOTH";
 const HANDLE = "handle-note-1";
 const SECRET = "PRIVATE-OPERATOR-RESOLVE-SECRET-9c41";
 const MEMBERSHIPS = [
@@ -57,7 +59,8 @@ type Slot =
   | "notesAddVerbatim"
   | "contentResolve"
   | "noteClearConflict"
-  | "noteRelate";
+  | "noteRelate"
+  | "noteRelations";
 type Row = Record<string, unknown>;
 
 const WRITE_SLOTS: ReadonlyArray<Slot> = [
@@ -201,6 +204,11 @@ function createFake(
       const current = Array.isArray(note.memberships) ? note.memberships : [];
       note.memberships = [...current, { ...input.to }];
     },
+    noteRelations: async (noteId) => {
+      enter("noteRelations");
+      const note = notes.get(noteId);
+      return note === undefined ? undefined : (copy(note.memberships ?? []) as Row[]);
+    },
   };
 
   return { seam, calls, notes, contents, failOnce, failAlways };
@@ -323,22 +331,36 @@ describe("Stage 5 slice B — request and response protocol", () => {
       frameOf({
         id: "c-1",
         method: "notes.resolve-conflict",
-        params: { id: HANDLE, binding: "a".repeat(64) },
+        params: { id: HANDLE, binding: "a".repeat(64), confirmation: CONFIRMATION },
       }),
     );
 
     expect(request).toMatchObject({
       method: "notes.resolve-conflict",
-      params: { id: HANDLE, binding: "a".repeat(64) },
+      params: { id: HANDLE, binding: "a".repeat(64), confirmation: CONFIRMATION },
     });
   });
 
   it.each([
-    ["an extra field", { id: HANDLE, binding: "a".repeat(64), body: "x" }],
-    ["a missing binding", { id: HANDLE }],
-    ["an upper-case binding", { id: HANDLE, binding: "A".repeat(64) }],
-    ["a short binding", { id: HANDLE, binding: "a".repeat(63) }],
-    ["an empty handle", { id: "", binding: "a".repeat(64) }],
+    [
+      "an extra field",
+      { id: HANDLE, binding: "a".repeat(64), confirmation: CONFIRMATION, body: "x" },
+    ],
+    ["a missing binding", { id: HANDLE, confirmation: CONFIRMATION }],
+    ["an upper-case binding", { id: HANDLE, binding: "A".repeat(64), confirmation: CONFIRMATION }],
+    ["a short binding", { id: HANDLE, binding: "a".repeat(63), confirmation: CONFIRMATION }],
+    ["an empty handle", { id: "", binding: "a".repeat(64), confirmation: CONFIRMATION }],
+    ["a missing confirmation", { id: HANDLE, binding: "a".repeat(64) }],
+    ["an empty confirmation", { id: HANDLE, binding: "a".repeat(64), confirmation: "" }],
+    ["a wrong confirmation", { id: HANDLE, binding: "a".repeat(64), confirmation: "yes" }],
+    [
+      "a lower-case confirmation",
+      { id: HANDLE, binding: "a".repeat(64), confirmation: "keep both" },
+    ],
+    [
+      "a confirmation with a trailing space",
+      { id: HANDLE, binding: "a".repeat(64), confirmation: "KEEP BOTH " },
+    ],
   ])("rejects a request with %s", (_label, params) => {
     expect(() =>
       parseRpcFrame(frameOf({ id: "c-2", method: "notes.resolve-conflict", params })),
@@ -420,7 +442,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const { runtime, store, journal, pending } = await harness(fake);
     const binding = await bindingOf(fake);
 
-    const result = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(result).toEqual({
       kind: "conflict-resolve",
@@ -445,12 +470,37 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(journal.snapshot()).toEqual([]);
   });
 
+  it.each([
+    ["no confirmation", { id: HANDLE, binding: "" }],
+    ["a wrong confirmation", { id: HANDLE, binding: "", confirmation: "yes" }],
+    ["a lower-case confirmation", { id: HANDLE, binding: "", confirmation: "keep both" }],
+  ])(
+    "refuses a resolve with %s before any write, and records no operation",
+    async (_label, request) => {
+      const fake = createFake();
+      const { runtime, store, pending } = await harness(fake);
+      const binding = await bindingOf(fake);
+      const before = originalOf(fake);
+
+      await expect(
+        runtime.resolveConflict({ ...request, binding } as never, PEER_A),
+      ).rejects.toMatchObject({ code: "invalid_request" });
+      expect(fake.calls).toEqual([]);
+      expect(originalOf(fake)).toEqual(before);
+      expect(await operationsOf(store)).toEqual([]);
+      expect(pending).toEqual([]);
+    },
+  );
+
   it("commits a resolve whose content marker is absent, as cleared", async () => {
     const fake = createFake(MEMBERSHIPS, "absent");
     const { runtime, store, pending } = await harness(fake);
     const binding = await bindingOf(fake);
 
-    const result = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(result).toEqual({
       kind: "conflict-resolve",
@@ -475,7 +525,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
       const { runtime, store, pending } = await harness(fake);
       const binding = await bindingOf(fake);
 
-      const result = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+      const result = await runtime.resolveConflict(
+        { id: HANDLE, binding, confirmation: CONFIRMATION },
+        PEER_A,
+      );
 
       expect(result).toMatchObject({ kind: "conflict-resolve", outcome: "post_write_unverified" });
       expect(pending).toEqual([]);
@@ -489,7 +542,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const { runtime, store, pending } = await harness(fake);
     const before = originalOf(fake);
 
-    const result = await runtime.resolveConflict({ id: HANDLE, binding: ZERO_BINDING }, PEER_A);
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding: ZERO_BINDING, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(result).toEqual({
       kind: "conflict-resolve",
@@ -507,7 +563,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const { runtime } = await harness(fake);
 
     await expect(
-      runtime.resolveConflict({ id: "handle-unknown", binding: ZERO_BINDING }, PEER_A),
+      runtime.resolveConflict(
+        { id: "handle-unknown", binding: ZERO_BINDING, confirmation: CONFIRMATION },
+        PEER_A,
+      ),
     ).rejects.toMatchObject({ code: "not_found" });
     expect(fake.calls).toEqual([]);
   });
@@ -517,7 +576,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const { runtime, store } = await harness(fake);
     const binding = await bindingOf(fake);
 
-    const result = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(result).toEqual({ kind: "conflict-resolve", outcome: "read_failed" });
     expect(writesOf(fake)).toEqual([]);
@@ -531,7 +593,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const binding = await bindingOf(fake);
     const before = originalOf(fake);
 
-    const result = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(result).toEqual({ kind: "conflict-resolve", outcome: "relation_failed" });
     expect(JSON.stringify(result)).not.toContain(SECRET);
@@ -550,7 +615,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     const { runtime, store, journal, pending } = await harness(fake);
     const binding = await bindingOf(fake);
 
-    const first = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const first = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(first).toEqual({ kind: "conflict-resolve", outcome: "resolved_flag_pending" });
     expect(fake.contents.get("content-1")).toMatchObject({ data: REMOTE_BODY, conflicted: null });
@@ -559,7 +627,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect((await operationsOf(store))[0]?.state).toBe("unresolved");
     expect(journal.snapshot().map((marker) => marker.stage)).toContain("resolve-content");
 
-    const second = await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    const second = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
 
     expect(second).toEqual({
       kind: "conflict-resolve",
@@ -582,10 +653,12 @@ describe("Stage 5 slice B — the operator transaction", () => {
     fake.failOnce.add("noteClearConflict");
     const { runtime, pending } = await harness(fake);
     const binding = await bindingOf(fake);
-    await runtime.resolveConflict({ id: HANDLE, binding }, PEER_A);
+    await runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A);
     const writesBefore = writesOf(fake).length;
 
-    await expect(runtime.resolveConflict({ id: HANDLE, binding }, PEER_B)).rejects.toMatchObject({
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_B),
+    ).rejects.toMatchObject({
       code: "service_unavailable",
     });
     expect(writesOf(fake)).toHaveLength(writesBefore);
@@ -604,8 +677,12 @@ describe("Stage 5 slice B — the operator transaction", () => {
     }
     const roomyBinding = await bindingOf(roomy);
     expect(
-      (await roomyRun.runtime.resolveConflict({ id: HANDLE, binding: roomyBinding }, PEER_A))
-        .outcome,
+      (
+        await roomyRun.runtime.resolveConflict(
+          { id: HANDLE, binding: roomyBinding, confirmation: CONFIRMATION },
+          PEER_A,
+        )
+      ).outcome,
     ).toBe("resolved");
 
     const full = createFake();
@@ -617,7 +694,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     }
     const fullBinding = await bindingOf(full);
     await expect(
-      fullRun.runtime.resolveConflict({ id: HANDLE, binding: fullBinding }, PEER_A),
+      fullRun.runtime.resolveConflict(
+        { id: HANDLE, binding: fullBinding, confirmation: CONFIRMATION },
+        PEER_A,
+      ),
     ).rejects.toMatchObject({ code: "service_unavailable" });
     expect(writesOf(full)).toEqual([]);
     expect(await operationsOf(fullRun.store)).toEqual([]);
@@ -662,6 +742,16 @@ describe("Stage 5 slice B — live seam and capability builders", () => {
     expect((note as unknown as { memberships: unknown }).memberships).toEqual([
       { type: "notebook", id: "nb-work" },
     ]);
+  });
+
+  it("reads one note's notebook and tag memberships through noteRelations, read-only", async () => {
+    const { database, relationAdds } = liveDatabase();
+    const seam = buildLiveConflictResolveSeam(database, () => undefined);
+
+    await expect(seam!.noteRelations("note-1")).resolves.toEqual([
+      { type: "notebook", id: "nb-work" },
+    ]);
+    expect(relationAdds).toEqual([]);
   });
 
   it("refuses a relation to any type other than a notebook or tag, without calling relations.add", async () => {
@@ -713,7 +803,7 @@ describe("Stage 5 slice B — the operator discovery dispatch", () => {
   const request = {
     id: "d-1",
     method: "notes.resolve-conflict",
-    params: { id: HANDLE, binding: ZERO_BINDING },
+    params: { id: HANDLE, binding: ZERO_BINDING, confirmation: CONFIRMATION },
   } as unknown as RpcRequest;
 
   it("answers service_unavailable when the capability is absent", async () => {

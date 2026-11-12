@@ -26,10 +26,18 @@ import { TextEncoder } from "node:util";
 import { OperatorSocketClient } from "./operator-socket-client.js";
 import { isBoundedOpaqueValue } from "./notes-cli.js";
 import { isInteractiveTty, type NotesUndoPromptStreams } from "./notes-undo-prompt.js";
-import { CONFLICT_RESOLVE_CLOSED_OUTCOMES, STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+import {
+  CONFLICT_RESOLVE_CLOSED_OUTCOMES,
+  CONFLICT_RESOLVE_CONFIRMATION,
+  STAGE5_RPC_LIMITS,
+} from "../service/rpc-protocol.js";
 
-/** The exact phrase the operator must type.  Anything else cancels. */
-export const RESOLVE_CONFLICT_CONFIRMATION = "KEEP BOTH" as const;
+/**
+ * The exact phrase the operator must type.  Anything else cancels.  The daemon
+ * requires the same phrase on the request, so this is the CLI's own check and
+ * not the only one.
+ */
+export const RESOLVE_CONFLICT_CONFIRMATION = CONFLICT_RESOLVE_CONFIRMATION;
 
 export const RESOLVE_CONFLICT_PROMPT = `Type ${RESOLVE_CONFLICT_CONFIRMATION} to keep both, or press Enter to cancel: `;
 
@@ -69,6 +77,7 @@ export interface ResolveConflictWriter {
 export interface ResolveConflictParams {
   readonly id: string;
   readonly binding: string;
+  readonly confirmation: typeof RESOLVE_CONFLICT_CONFIRMATION;
 }
 
 /**
@@ -230,7 +239,11 @@ export async function runResolveConflict(
 
   let resolveRaw: unknown;
   try {
-    resolveRaw = await ports.resolve({ id: parsed.handle, binding: inspection.binding });
+    resolveRaw = await ports.resolve({
+      id: parsed.handle,
+      binding: inspection.binding,
+      confirmation: RESOLVE_CONFLICT_CONFIRMATION,
+    });
   } catch {
     writer.stdout("nookctl notes resolve-conflict: service_unavailable\n");
     return 3;
@@ -268,7 +281,11 @@ export function createProductionResolveConflictPorts(
     confirm: (prompt: string) => askLine(streams, prompt),
     inspect: (handle: string) => client.request("notes.inspect-conflict", { id: handle }),
     resolve: (params: ResolveConflictParams) =>
-      client.request("notes.resolve-conflict", { id: params.id, binding: params.binding }),
+      client.request("notes.resolve-conflict", {
+        id: params.id,
+        binding: params.binding,
+        confirmation: params.confirmation,
+      }),
   });
 }
 

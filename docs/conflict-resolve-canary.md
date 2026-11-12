@@ -64,6 +64,15 @@ differs from this, **stop** (see §6).
 
 Run `nookctl notes resolve-conflict --handle <h>` on the bridge-local device.
 
+The CLI prompts for the typed phrase and sends it to the daemon as `confirmation`. The
+daemon accepts only the exact phrase `KEEP BOTH`. It refuses anything else, including a
+missing phrase, a different case, or extra whitespace, before it looks up the handle or
+writes anything.
+
+This check is an **intent guard, not a security boundary**. It stops a mistyped or
+scripted invocation from resolving by accident. Anyone who can reach the operator socket
+can send the phrase directly. The operator socket remains the trust boundary.
+
 Expected output, in order:
 
 ```text
@@ -102,9 +111,11 @@ bytes. Byte-exact equality is established by the daemon's own read-back
 lists the read-back fields. Treat a byte mismatch that the daemon did not report as
 a stop.
 
-**Findable by notebook and tag: not verifiable yet.** The CLI does not show notebook
-or tag membership, and the copy is only local until the explicit upload. Membership
-is checked in step 7.2, after upload, on the remote client.
+**Findable by notebook and tag.** The CLI does not show notebook or tag membership.
+The daemon reads the copy's memberships back before it writes the copy's content. If
+any notebook or tag the original holds is missing from the copy, it refuses with
+`relation_failed` before the content write. The copy is still only local until the
+explicit upload, so confirm its notebook and tag on the remote client after upload.
 
 ## 5. Read-back assertions that could differ on real core
 
@@ -116,9 +127,11 @@ real core.
 | `conflicted` on the content row | content row, original | **absent, `null`, or `false`**. Each means cleared. | `src/core/notesnook-conflict-resolve-wiring.ts` (`verifyOriginal`, through `isClearedContentMarker`) |
 | `conflicted` on the note | note metadata, original | **`false`** after the flag clear | same file, the `field(note, "conflicted") !== false` check |
 | `dateResolved` on the content row | content row, original | equals the remote date | `verifyOriginal` |
+| `id` on the content row | content row, original | equals the content id the note metadata names | `verifyOriginal` |
 | `noteId` on the content row | content row, original | equals the note id | `verifyOriginal` |
-| copy text | content row, copy | equals the bridge-local text byte for byte | the copy read-back in the resolver |
-| relations | copy | one notebook relation and one tag relation, matching the original | `noteRelate` |
+| copy identity | copy note | the copy id is a valid id that differs from the original's, and the copy's title equals the derived copy title | the copy checks in `src/core/notesnook-conflict-resolve-wiring.ts` |
+| copy text | content row, copy | equals the bridge-local text byte for byte, and the row's `noteId` is the copy's id | the copy read-back in the resolver |
+| memberships | copy | every notebook and tag the original holds is present on the copy, read back before the content write | `copyCarriesMemberships`, through the read-only `noteRelations` seam. A miss is `relation_failed` |
 
 ### The `conflicted` null, absent, or false question
 
@@ -147,6 +160,11 @@ happen:
 - Any note other than the canary changes.
 - The process crashes or is killed mid-resolve (see Known gaps, item 1).
 - The command prints `service_unavailable`, `invalid_response`, or `unreadable`.
+- The daemon refuses with `invalid_request` after you typed `KEEP BOTH`. The CLI and
+  the daemon disagree about the phrase, so this is not a retry.
+- The daemon reports `relation_failed` or `copy_unverified`. The original is untouched
+  in both cases, but a copy note may already exist locally from this attempt. Do not
+  delete it and do not upload it. Stop and do not retry.
 
 On stop: **nothing is deleted, trashed, or uploaded.** Both notes stay where they are.
 Save the complete terminal output to the private file, and report to the owner.
@@ -251,13 +269,21 @@ The two options are:
 ### 7. The binding is printed to the operator
 
 The binding is a SHA-256 derivation over the note id, the content id, and each side's
-digest. The CLI prints it, as the brief specified. The operator-facing rule against
-printing digests is therefore read as covering content digests, not this binding.
+digest. The CLI prints it to the operator's terminal. The operator-facing rule against
+printing digests covers content digests, not this binding.
 
-- **Operator action**: none beyond checking that the printed binding matches the
-  inspection.
-- **Disposition: undecided, needs the owner**, who must confirm that printing the
-  binding is acceptable.
+The owner approved printing the binding, for these reasons:
+
+- It is an opaque, one-way digest over the ids and the side digests. It is not
+  reversible into note content.
+- It is the token that proves the operator acted on the state they inspected. The
+  daemon captures against it and refuses any mismatch before a write.
+
+- **Operator action**: check that the printed binding matches the inspection output.
+  Do not paste the binding into chat, tickets, or logs. The terminal is the only place
+  it appears.
+- **Disposition: decided.** The owner approved printing the binding to the operator's
+  terminal.
 
 ### 8. There is no undo for a resolve
 

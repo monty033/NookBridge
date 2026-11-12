@@ -88,7 +88,7 @@ export interface OperatorDiscoveryRuntime {
   ) => Promise<RpcCreatedNoteResult>;
   /** Operator-only keep-both resolve; absent when the live capability is unavailable. */
   readonly resolveConflict?: (
-    params: Readonly<{ id: string; binding: string }>,
+    params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ) => Promise<RpcNotesConflictResolveResult>;
   /** Operator-only, read-only conflict inspection; absent when no inspector is wired. */

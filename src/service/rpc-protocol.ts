@@ -495,13 +495,23 @@ export interface RpcNotesEditCensusRequest {
 }
 
 /**
- * Operator-only keep-both conflict resolve. `id` is the opaque note handle and
- * `binding` is the 64-hex token that pins the revision the operator reviewed.
- * Neither the note id nor any body crosses the socket in either direction.
+ * The exact phrase a `notes.resolve-conflict` request must carry. The daemon
+ * refuses any other value, so the guarantee does not rest on the CLI's prompt.
+ * It is a human-intent guard, not a security boundary: the operator socket is
+ * the trust boundary, and any client that can reach it can send this phrase.
+ */
+export const CONFLICT_RESOLVE_CONFIRMATION = "KEEP BOTH" as const;
+
+/**
+ * Operator-only keep-both conflict resolve. `id` is the opaque note handle,
+ * `binding` is the 64-hex token that pins the revision the operator reviewed,
+ * and `confirmation` is {@link CONFLICT_RESOLVE_CONFIRMATION}. Neither the note
+ * id nor any body crosses the socket in either direction.
  */
 export interface RpcOperatorConflictResolveParams {
   readonly id: string;
   readonly binding: string;
+  readonly confirmation: typeof CONFLICT_RESOLVE_CONFIRMATION;
 }
 
 export interface RpcNotesConflictResolveRequest {
@@ -2142,11 +2152,12 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
   } else if (method === "notes.resolve-conflict") {
-    // Closed params: exactly the opaque note handle and the 64-hex binding.
-    if (!keysAreExactly(paramKeys, ["id", "binding"]))
+    // Closed params: the opaque note handle, the 64-hex binding, and the exact phrase.
+    if (!keysAreExactly(paramKeys, ["id", "binding", "confirmation"]))
       throw rpcProtocolError("rpc protocol: resolve-conflict params are invalid");
     const noteId = paramsRecord.id;
     const binding = paramsRecord.binding;
+    const confirmation = paramsRecord.confirmation;
     if (
       typeof noteId !== "string" ||
       noteId.length === 0 ||
@@ -2157,9 +2168,12 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       throw rpcProtocolError("rpc protocol: resolve-conflict note handle is invalid");
     if (typeof binding !== "string" || !/^[0-9a-f]{64}$/.test(binding))
       throw rpcProtocolError("rpc protocol: resolve-conflict binding is invalid");
+    if (confirmation !== CONFLICT_RESOLVE_CONFIRMATION)
+      throw rpcProtocolError("rpc protocol: resolve-conflict confirmation is invalid");
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
     paramsObj.binding = binding;
+    paramsObj.confirmation = confirmation;
   } else if (method === "notes.inspect-conflict") {
     // Closed params: exactly the opaque note handle.
     if (!keysAreExactly(paramKeys, ["id"]))

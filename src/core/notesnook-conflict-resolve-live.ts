@@ -184,6 +184,16 @@ export function buildLiveConflictResolveSeam(
         { id: identifier(input.to.id), type },
       ]);
     },
+    noteRelations: async (noteId: string) => {
+      ensureOpen();
+      const handle = Reflect.apply(relationsFrom, relations, [
+        { id: identifier(noteId), type: "note" },
+      ]);
+      const get = methodOf(handle, "get");
+      if (get === undefined) throw new Error("conflict resolve relation reader is unavailable");
+      const rows = await Reflect.apply(get, handle, []);
+      return membershipsOf(rows, noteId);
+    },
   }) as NotesnookConflictResolveSeam;
 }
 

@@ -43,7 +43,10 @@ import {
   NOTESNOOK_RESOLVE_RECOVERY_STAGES,
   type NotesnookRecoveryStage,
 } from "../core/notesnook-recovery-journal.js";
-import type { RpcNotesConflictResolveResult } from "./rpc-protocol.js";
+import {
+  CONFLICT_RESOLVE_CONFIRMATION,
+  type RpcNotesConflictResolveResult,
+} from "./rpc-protocol.js";
 import type { OperatorPeer } from "./operator-server.js";
 import {
   OperatorWriteError,
@@ -84,7 +87,7 @@ export interface OperatorConflictResolveRuntimeOptions {
 
 export interface OperatorConflictResolveRuntime {
   readonly resolveConflict: (
-    params: Readonly<{ id: string; binding: string }>,
+    params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ) => Promise<RpcNotesConflictResolveResult>;
 }
@@ -96,10 +99,13 @@ export function createOperatorConflictResolveRuntime(
   const { seam, journal } = capability;
 
   async function resolveConflict(
-    params: Readonly<{ id: string; binding: string }>,
+    params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ): Promise<RpcNotesConflictResolveResult> {
     const owner = ownerKey(peer);
+    // Checked before the handle is looked up: without the exact phrase the daemon
+    // does nothing. The socket is still the trust boundary; this is an intent guard.
+    if (params?.confirmation !== CONFLICT_RESOLVE_CONFIRMATION) fail("invalid_request");
     const noteId = resolveNote(params?.id, peer, options.resolveHandle);
     const binding = params?.binding;
     if (typeof binding !== "string" || !BINDING_PATTERN.test(binding)) {
@@ -195,6 +201,7 @@ export function createOperatorConflictResolveRuntime(
         return seam.notesAddVerbatim(input);
       },
       noteRelate: seam.noteRelate,
+      noteRelations: seam.noteRelations,
       contentResolve: async (input) => {
         mark("resolve-content", "update");
         return seam.contentResolve(input);
