@@ -210,6 +210,17 @@ export interface NotesnookLocalWriteCompositionOptions {
    * is the legacy seam preserved for tests and injected fakes.
    */
   readonly database?: object;
+  /**
+   * Pull remote changes before every local mutation, inside the same mutex the
+   * mutation holds. The call must resolve `true`; anything else — `false`, a
+   * non-boolean, or a throw — refuses the write with `sync_required` before the
+   * adapter runs.
+   *
+   * Production supplies this from the live database. It is optional so the
+   * legacy test seams keep working unchanged; the live projection is the path
+   * that must always provide it.
+   */
+  readonly readBeforeWrite?: () => Promise<unknown>;
 }
 
 /** The union of bounded local results the composition can return. */
@@ -742,6 +753,11 @@ interface CompositionState {
   /** Fixed per instance; `undefined` means "send no origin". */
   readonly origin: NotesnookWriteOrigin | undefined;
   readonly database: object | undefined;
+  /**
+   * Pull remote changes before every local mutation. `undefined` on legacy
+   * seams, which keep the pre-Stage-2 behaviour of writing without a fetch.
+   */
+  readonly readBeforeWrite: UnknownFunction | undefined;
   localDepth: number;
 }
 
@@ -795,6 +811,13 @@ function buildState(options: unknown): CompositionState {
       : typeof databaseValue === "object" && databaseValue !== null
         ? databaseValue
         : (fail("invalid_input"), undefined);
+  const readBeforeWriteValue = readProperty(record, "readBeforeWrite");
+  const readBeforeWrite: UnknownFunction | undefined =
+    readBeforeWriteValue === undefined
+      ? undefined
+      : typeof readBeforeWriteValue === "function"
+        ? (readBeforeWriteValue as UnknownFunction)
+        : (fail("invalid_input"), undefined);
   return {
     adapterTarget: adapter.target,
     createNote: capturedMethod(adapter.methods, "createNote"),
@@ -814,6 +837,7 @@ function buildState(options: unknown): CompositionState {
     resolveCreateIntent,
     origin,
     database,
+    readBeforeWrite,
     localDepth: 0,
   };
 }
@@ -1385,6 +1409,26 @@ async function gate<T>(
   return withMutex(state.database, label, fn);
 }
 
+/**
+ * Pull remote changes before a local mutation.
+ *
+ * `undefined` keeps the legacy seam's behaviour: no pull, write as before.
+ * A configured pull must resolve exactly `true`. A refusal, a non-boolean, or
+ * a throw is `sync_required` — the same categorical answer this composition
+ * already gives for a full pending queue, so callers sync and retry.
+ */
+async function readRemoteChangesBeforeWrite(state: CompositionState): Promise<void> {
+  const read = state.readBeforeWrite;
+  if (read === undefined) return;
+  let confirmed: unknown;
+  try {
+    confirmed = await Reflect.apply(read, undefined, []);
+  } catch {
+    fail("sync_required");
+  }
+  if (confirmed !== true) fail("sync_required");
+}
+
 function checkMutationCapacity(state: CompositionState): void {
   if (state.checkCapacity === undefined) return;
   let raw: unknown;
@@ -1637,6 +1681,9 @@ async function runLocalOperation<T>(
 ): Promise<T> {
   state.localDepth += 1;
   try {
+    // Stage 2: pull before every local mutation, inside the mutex this
+    // operation holds, so a phone-side change cannot be overwritten blind.
+    await readRemoteChangesBeforeWrite(state);
     if (operation !== "create" && state.recordIntent !== undefined) {
       return await runWriteAheadOperation(state, operation, invoker, command, copy);
     }

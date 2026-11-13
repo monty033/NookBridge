@@ -144,6 +144,7 @@ export function createLiveLocalWriteComposition(
     coordinator,
     ...(options.database === undefined ? {} : { database: options.database }),
     ...(options.origin === undefined ? {} : { origin: options.origin }),
+    ...(options.readBeforeWrite === undefined ? {} : { readBeforeWrite: options.readBeforeWrite }),
   });
 }
 
@@ -165,6 +166,12 @@ export type LiveWriteCompositionOptions = Readonly<{
    * coordinator's `"unknown"` default applies.
    */
   readonly origin?: NotesnookWriteOrigin;
+  /**
+   * Pull remote changes before every local mutation (Stage 2 prevention).
+   * The live factory supplies this from the database; it is absent only on
+   * legacy seams.
+   */
+  readonly readBeforeWrite?: () => Promise<unknown>;
 }>;
 
 /**

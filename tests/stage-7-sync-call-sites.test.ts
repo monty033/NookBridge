@@ -59,6 +59,8 @@ export interface SyncCallSiteFindings {
 const SYNCER_ACCESS_ALLOWLIST = {
   "src/core/notesnook-core-adapter.ts": 1,
   "src/core/notesnook-live-factory.ts": 1,
+  // Stage 2: the pre-write pull owns the fetch call on the write path.
+  "src/core/notesnook-live-pre-write-read.ts": 5,
   "src/core/notesnook-live-remote-sync.ts": 7,
   "src/core/notesnook-readonly-projection.ts": 5,
 } as const;

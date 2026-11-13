@@ -379,6 +379,20 @@ function injectedRuntime(failure: Error): NookdServerRuntime {
   };
 }
 
+/**
+ * `syncer.start` calls that upload. Stage 2 adds a pre-write fetch to every
+ * local mutation, so a bare call count now includes that pull; these tests are
+ * about the upload gate, so they count only the `full` requests.
+ */
+function uploads(syncStart: ReturnType<typeof vi.fn>): unknown[] {
+  // Anything that is not a fetch is an upload: `full` performs a fetch and
+  // then a send, and a bare `send` is an upload too. Filtering on `full`
+  // alone would let a stray `send` slip past a zero-upload assertion.
+  return syncStart.mock.calls.filter(
+    (call) => (call[0] as { type?: unknown } | undefined)?.type !== "fetch",
+  );
+}
+
 describe("T1 — write-error codes injected at the service-runtime write seam", () => {
   for (const code of WRITE_CODES) {
     for (const method of WRITE_METHODS) {
@@ -946,7 +960,7 @@ describe("S7a-4b — unapproved_pending vocabulary", () => {
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("SECRET");
     expect(serialized).not.toContain("CANARY");
-    expect(syncStart).toHaveBeenCalledTimes(0);
+    expect(uploads(syncStart)).toHaveLength(0);
 
     const sent = records.filter((record) => record.event === "rpc.response.sent");
     expect(sent).toHaveLength(1);
