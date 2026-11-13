@@ -371,12 +371,16 @@ describe("runResolveConflict — happy path", () => {
     expect(io.text.stdout).toContain(`binding: ${BINDING}\n`);
   });
 
-  it("sends exactly the opaque handle and the reviewed binding to the resolve", async () => {
+  it("sends the opaque handle, the reviewed binding, and the exact phrase to the resolve", async () => {
     const resolve = vi.fn(async () => RESOLVED);
     const { ports } = harness({ resolve });
     await runResolveConflict(["--handle", HANDLE], ports, sink().writer);
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(resolve).toHaveBeenCalledWith({ id: HANDLE, binding: BINDING });
+    expect(resolve).toHaveBeenCalledWith({
+      id: HANDLE,
+      binding: BINDING,
+      confirmation: RESOLVE_CONFLICT_CONFIRMATION,
+    });
   });
 
   it("prints the categorical outcome and both titles, and states nothing was uploaded", async () => {
@@ -569,11 +573,16 @@ describe("production ports", () => {
     const request = vi.fn(async () => RESOLVED);
     const ports = createProductionResolveConflictPorts(streams, { request } as never);
     await ports.inspect?.(HANDLE);
-    await ports.resolve({ id: HANDLE, binding: BINDING });
+    await ports.resolve({
+      id: HANDLE,
+      binding: BINDING,
+      confirmation: RESOLVE_CONFLICT_CONFIRMATION,
+    });
     expect(request).toHaveBeenNthCalledWith(1, "notes.inspect-conflict", { id: HANDLE });
     expect(request).toHaveBeenNthCalledWith(2, "notes.resolve-conflict", {
       id: HANDLE,
       binding: BINDING,
+      confirmation: RESOLVE_CONFLICT_CONFIRMATION,
     });
   });
 
@@ -600,6 +609,7 @@ describe("production ports", () => {
     expect(request).toHaveBeenLastCalledWith("notes.resolve-conflict", {
       id: HANDLE,
       binding: BINDING,
+      confirmation: RESOLVE_CONFLICT_CONFIRMATION,
     });
     expect(io.text.stdout).not.toContain(LOCAL_BODY_MARKER);
     expect(io.text.stdout).not.toContain(REMOTE_BODY_MARKER);

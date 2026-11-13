@@ -34,6 +34,7 @@ import type { LiveConflictResolveCapability } from "../core/notesnook-conflict-r
 import {
   createNotesnookConflictResolver,
   isClearedContentMarker,
+  readCopyLocalText,
   type NotesnookConflictResolveResult,
   type NotesnookConflictResolveSeam,
 } from "../core/notesnook-conflict-resolve-wiring.js";
@@ -43,7 +44,10 @@ import {
   NOTESNOOK_RESOLVE_RECOVERY_STAGES,
   type NotesnookRecoveryStage,
 } from "../core/notesnook-recovery-journal.js";
-import type { RpcNotesConflictResolveResult } from "./rpc-protocol.js";
+import {
+  CONFLICT_RESOLVE_CONFIRMATION,
+  type RpcNotesConflictResolveResult,
+} from "./rpc-protocol.js";
 import type { OperatorPeer } from "./operator-server.js";
 import {
   OperatorWriteError,
@@ -73,18 +77,25 @@ type ResolvePayload = Readonly<{
   remoteDigest: string;
   originalTitle: string;
   copyTitle: string;
+  /** Recorded once the copy exists, before the original is touched. */
+  copyId?: string;
+  localDigest?: string;
 }>;
+
+/** The operation store plus `amend`, used only to record the copy's id mid-write. */
+type ConflictResolveStore = OperatorOperationStore &
+  Readonly<{ amend: (handle: string, payload: string, owner?: string) => Promise<unknown> }>;
 
 export interface OperatorConflictResolveRuntimeOptions {
   readonly capability: LiveConflictResolveCapability;
-  readonly store: OperatorOperationStore;
+  readonly store: ConflictResolveStore;
   /** Daemon-side opaque handle resolution; raw note ids never cross the socket. */
   readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
 }
 
 export interface OperatorConflictResolveRuntime {
   readonly resolveConflict: (
-    params: Readonly<{ id: string; binding: string }>,
+    params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ) => Promise<RpcNotesConflictResolveResult>;
 }
@@ -96,10 +107,13 @@ export function createOperatorConflictResolveRuntime(
   const { seam, journal } = capability;
 
   async function resolveConflict(
-    params: Readonly<{ id: string; binding: string }>,
+    params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ): Promise<RpcNotesConflictResolveResult> {
     const owner = ownerKey(peer);
+    // Checked before the handle is looked up: without the exact phrase the daemon
+    // does nothing. The socket is still the trust boundary; this is an intent guard.
+    if (params?.confirmation !== CONFLICT_RESOLVE_CONFIRMATION) fail("invalid_request");
     const noteId = resolveNote(params?.id, peer, options.resolveHandle);
     const binding = params?.binding;
     if (typeof binding !== "string" || !BINDING_PATTERN.test(binding)) {
@@ -186,16 +200,44 @@ export function createOperatorConflictResolveRuntime(
         throw new OperatorWriteError("service_unavailable", handle);
       }
     };
+    // The copy, once it reads back as the local side. Recorded in the operation
+    // before the original is touched, so recovery can check it.
+    let copied: CopyRecord | undefined;
+    const copyStillMatches = async (): Promise<boolean> =>
+      copied !== undefined && (await copyMatches(seam, copied));
     const journaled: NotesnookConflictResolveSeam = {
       noteMeta: seam.noteMeta,
       contentWithConflicted: seam.contentWithConflicted,
       notesAddVerbatim: async (input) => {
         mark("resolve-copy", "create");
         copyAttempted = true;
-        return seam.notesAddVerbatim(input);
+        const created = await seam.notesAddVerbatim(input);
+        const copyId = typeof created === "string" && created !== noteId ? created : undefined;
+        if (copyId === undefined) return created;
+        const record: CopyRecord = {
+          id: copyId,
+          title: input.title,
+          localDigest: sha256(input.content.data),
+        };
+        if (!(await copyMatches(seam, record))) return created;
+        try {
+          await store.amend(
+            handle,
+            JSON.stringify({ ...payload, copyId, localDigest: record.localDigest }),
+            owner,
+          );
+        } catch {
+          throw new OperatorWriteError("service_unavailable", handle);
+        }
+        copied = record;
+        return created;
       },
       noteRelate: seam.noteRelate,
+      noteRelations: seam.noteRelations,
       contentResolve: async (input) => {
+        // The original is touched only while the copy still holds the local side.
+        if (!(await copyStillMatches()))
+          throw new OperatorWriteError("service_unavailable", handle);
         mark("resolve-content", "update");
         return seam.contentResolve(input);
       },
@@ -219,6 +261,10 @@ export function createOperatorConflictResolveRuntime(
     if (outcome.outcome !== "resolved") {
       await settle(handle, copyAttempted ? "unresolved" : "aborted", owner);
       return project(outcome);
+    }
+    if (!(await copyStillMatches())) {
+      await settle(handle, "unresolved", owner);
+      fail("service_unavailable", handle);
     }
 
     try {
@@ -254,7 +300,11 @@ export function createOperatorConflictResolveRuntime(
     if (!reached) fail("service_unavailable", handle);
 
     const note = await readOrBlock(handle, () => seam.noteMeta(noteId));
-    if (note === undefined || readField(note, "contentId") !== payload.contentId) {
+    if (
+      note === undefined ||
+      readField(note, "id") !== noteId ||
+      readField(note, "contentId") !== payload.contentId
+    ) {
       fail("service_unavailable", handle);
     }
     const row = await readOrBlock(handle, () => seam.contentWithConflicted(payload.contentId));
@@ -262,10 +312,25 @@ export function createOperatorConflictResolveRuntime(
     const adopted =
       isClearedContentMarker(readField(row, "conflicted")) &&
       readField(row, "dateResolved") === payload.remoteDate &&
+      readField(row, "id") === payload.contentId &&
       readField(row, "noteId") === noteId &&
       typeof data === "string" &&
       sha256(data) === payload.remoteDigest;
     if (!adopted) fail("service_unavailable", handle);
+
+    // The copy must still hold the local side. A copy edited or deleted while
+    // the operation was unresolved must not let recovery report resolved.
+    if (
+      payload.copyId === undefined ||
+      payload.localDigest === undefined ||
+      !(await copyMatches(seam, {
+        id: payload.copyId,
+        title: payload.copyTitle,
+        localDigest: payload.localDigest,
+      }))
+    ) {
+      fail("service_unavailable", handle);
+    }
 
     const flag = readField(note, "conflicted");
     if (flag === true) {
@@ -277,6 +342,7 @@ export function createOperatorConflictResolveRuntime(
       await readOrBlock(handle, () => seam.noteClearConflict(noteId));
       const after = await readOrBlock(handle, () => seam.noteMeta(noteId));
       if (
+        readField(after, "id") !== noteId ||
         readField(after, "conflicted") !== false ||
         readField(after, "contentId") !== payload.contentId
       ) {
@@ -400,6 +466,17 @@ function parsePayload(text: string): ResolvePayload | undefined {
   ) {
     return undefined;
   }
+  // The copy fields are recorded together, once the copy exists, or not at all.
+  const { copyId, localDigest } = record;
+  const copyFields = copyId !== undefined || localDigest !== undefined;
+  if (
+    copyFields &&
+    (typeof copyId !== "string" ||
+      typeof localDigest !== "string" ||
+      !DIGEST_PATTERN.test(localDigest))
+  ) {
+    return undefined;
+  }
   return Object.freeze({
     kind: "resolve",
     owner,
@@ -409,6 +486,9 @@ function parsePayload(text: string): ResolvePayload | undefined {
     remoteDigest,
     originalTitle,
     copyTitle,
+    ...(typeof copyId === "string" && typeof localDigest === "string"
+      ? { copyId, localDigest }
+      : {}),
   });
 }
 
@@ -422,6 +502,19 @@ async function readOrBlock<T>(handle: string, read: () => T | PromiseLike<T>): P
     return await read();
   } catch {
     return fail("service_unavailable", handle);
+  }
+}
+
+/** The copy this resolve created: its note id, derived title, and local-side digest. */
+type CopyRecord = Readonly<{ id: string; title: string; localDigest: string }>;
+
+/** True when the copy still reads back as its own row with the local side intact. */
+async function copyMatches(seam: NotesnookConflictResolveSeam, copy: CopyRecord): Promise<boolean> {
+  try {
+    const text = await readCopyLocalText(seam, copy.id, copy.title);
+    return text !== undefined && sha256(text) === copy.localDigest;
+  } catch {
+    return false;
   }
 }
 

@@ -306,6 +306,16 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
         return persist({ ...r, state: next, payload: payload ?? r.payload });
       });
     },
+    /** Replace the payload of a `committing` record, for facts learned mid-write. */
+    amend(handle: string, payload: string, owner?: string) {
+      return run(async () => {
+        await expire();
+        const r = ownedLookup(handle, owner);
+        if (r.state !== "committing") fail("conflict");
+        if (typeof payload !== "string") fail("invalid-input");
+        return persist({ ...r, payload });
+      });
+    },
     acknowledge(handle: string) {
       return run(async () => {
         await expire();

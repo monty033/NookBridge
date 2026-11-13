@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { createNotesnookLocalConflictInspector } from "../src/core/notesnook-local-conflict-projection.js";
 import {
+  copyTitleFor,
   createNotesnookConflictResolver,
   NotesnookConflictResolveError,
   type NotesnookConflictResolveResult,
@@ -40,7 +41,11 @@ const SLOT_NAMES = [
   "contentResolve",
   "noteClearConflict",
   "noteRelate",
+  "noteRelations",
 ] as const;
+const COPY_SUFFIX = " (bridge copy)";
+/** A title that is already at the write limit and ends in the suffix, so its copy title equals it. */
+const COLLIDING_TITLE = `${"t".repeat(STAGE4_WRITE_LIMITS.maxTitleLength - COPY_SUFFIX.length)}${COPY_SUFFIX}`;
 
 type SlotName = keyof NotesnookConflictResolveSeam;
 type Row = Record<string, unknown>;
@@ -74,6 +79,22 @@ type StoreOptions = Readonly<{
   afterCopy?: (contents: Map<string, Row>) => void;
   dateShift?: number;
   resolvedMarker?: ResolvedMarker;
+  /** The id `notesAddVerbatim` reports for the copy. Defaults to `note-copy-1`. */
+  copyReturnsId?: string;
+  /** Seed an unrelated, valid note whose content holds the local side. */
+  foreignNote?: boolean;
+  /** Fields merged into the original's content row once the resolve writes it. */
+  resolvedRow?: Row;
+  /** A membership `noteRelate` reports as written but does not record. */
+  dropMembership?: string;
+  /** The id the copy's own note row carries, when it is not the copy id. */
+  copyNoteIdOverride?: string;
+  /** The id the copy's content row carries, when it is not its content id. */
+  copyContentIdOverride?: string;
+  /** The id the original's note row carries, when it is not the original id. */
+  originalNoteIdOverride?: string;
+  /** Runs after the conflicted flag is cleared, just before the final read-back. */
+  afterClear?: (notes: Map<string, Row>) => void;
 }>;
 
 type Store = Readonly<{
@@ -157,9 +178,36 @@ function createStore(options: StoreOptions = {}): Store {
   const calls: Array<Readonly<{ slot: SlotName; arg: unknown }>> = [];
   const failing = new Set<SlotName>(options.throwOn ?? []);
 
-  if (options.noteAbsent !== true) notes.set("note-1", originalNote(options.note));
+  if (options.noteAbsent !== true) {
+    const note = originalNote(options.note);
+    notes.set("note-1", {
+      ...note,
+      ...(options.originalNoteIdOverride === undefined
+        ? {}
+        : { id: options.originalNoteIdOverride }),
+    });
+  }
   if (options.trashed === true) trashed.add("note-1");
   contents.set("content-1", originalContent(options.content));
+  if (options.foreignNote === true) {
+    notes.set("note-other", {
+      id: "note-other",
+      title: "Unrelated",
+      contentId: "content-other",
+      conflicted: false,
+      memberships: [],
+    });
+    contents.set("content-other", {
+      id: "content-other",
+      noteId: "note-other",
+      type: "tiptap",
+      locked: false,
+      data: LOCAL_BODY,
+      dateModified: 1_000,
+      dateResolved: null,
+      conflicted: null,
+    });
+  }
 
   const record = (slot: SlotName, arg: unknown): void => {
     calls.push(Object.freeze({ slot, arg: copyRows(arg) }));
@@ -205,8 +253,20 @@ function createStore(options: StoreOptions = {}): Store {
         conflicted: false,
         memberships: [],
       });
+      if (options.copyNoteIdOverride !== undefined) {
+        const created = notes.get(copyId);
+        if (created !== undefined) {
+          notes.set(copyId, { ...created, id: options.copyNoteIdOverride });
+        }
+      }
+      if (options.copyContentIdOverride !== undefined) {
+        const created = contents.get(copyContentId);
+        if (created !== undefined) {
+          contents.set(copyContentId, { ...created, id: options.copyContentIdOverride });
+        }
+      }
       options.afterCopy?.(contents);
-      return copyId;
+      return options.copyReturnsId ?? copyId;
     },
     contentResolve: async (input) => {
       record("contentResolve", input);
@@ -216,6 +276,7 @@ function createStore(options: StoreOptions = {}): Store {
       row.data = input.data;
       applyResolvedMarker(row, options.resolvedMarker ?? "null");
       row.dateResolved = input.dateResolved + (options.dateShift ?? 0);
+      Object.assign(row, options.resolvedRow ?? {});
     },
     noteClearConflict: async (id) => {
       record("noteClearConflict", id);
@@ -223,14 +284,23 @@ function createStore(options: StoreOptions = {}): Store {
       const note = notes.get(id);
       if (note === undefined) throw new Error("missing note");
       note.conflicted = false;
+      options.afterClear?.(notes);
     },
     noteRelate: async (input) => {
       record("noteRelate", input);
       fail("noteRelate");
       const note = notes.get(input.noteId);
       if (note === undefined) throw new Error("missing note");
+      if (input.to.id === options.dropMembership) return;
       const current = Array.isArray(note.memberships) ? note.memberships : [];
       note.memberships = [...current, { ...input.to }];
+    },
+    noteRelations: async (noteId) => {
+      record("noteRelations", noteId);
+      fail("noteRelations");
+      const note = notes.get(noteId);
+      if (note === undefined) return undefined;
+      return copyRows(Array.isArray(note.memberships) ? note.memberships : []);
     },
   };
 
@@ -278,7 +348,7 @@ async function resolveOriginal(store: Store, expectedBinding: string) {
 }
 
 describe("Stage 5 conflict resolve seam", () => {
-  it("describes exactly the six injected slots", () => {
+  it("describes exactly the seven injected slots", () => {
     const expected: Record<keyof NotesnookConflictResolveSeam, true> = {
       noteMeta: true,
       contentWithConflicted: true,
@@ -286,6 +356,7 @@ describe("Stage 5 conflict resolve seam", () => {
       contentResolve: true,
       noteClearConflict: true,
       noteRelate: true,
+      noteRelations: true,
     };
 
     expect(Object.keys(expected).sort()).toEqual([...SLOT_NAMES].sort());
@@ -380,6 +451,7 @@ describe("Stage 5 keep-both resolve", () => {
       "noteRelate",
       "noteRelate",
       "noteRelate",
+      "noteRelations",
       "noteMeta",
       "contentWithConflicted",
       "contentResolve",
@@ -590,6 +662,24 @@ describe("Stage 5 keep-both failure modes", () => {
     expect(originalOf(store)).toEqual(before);
   });
 
+  it.each<[string, StoreOptions]>([
+    ["a membership relation that reports success but never lands", { dropMembership: "tag-b" }],
+    ["a membership read-back that fails", { throwOn: ["noteRelations"] }],
+  ])("reports relation_failed before the content write when %s", async (_label, options) => {
+    const store = createStore(options);
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    const result = await resolveOriginal(store, binding);
+
+    expect(result).toEqual({ outcome: "relation_failed" });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(writesOf(store)).toEqual([...COPY_WRITES]);
+    expect(slotsOf(store)).not.toContain("contentResolve");
+    expect(slotsOf(store)).not.toContain("noteClearConflict");
+    expect(originalOf(store)).toEqual(before);
+  });
+
   it("reports content_write_failed and leaves the note flag set when the content write fails", async () => {
     const store = createStore({ throwOn: ["contentResolve"] });
     const binding = await bindingOf(store);
@@ -629,6 +719,92 @@ describe("Stage 5 keep-both failure modes", () => {
     expect(writesOf(store)).toEqual([...COPY_WRITES, "contentResolve", "noteClearConflict"]);
     expect(store.contents.get("content-1")).toMatchObject({ dateResolved: REMOTE_DATE + 1 });
   });
+});
+
+describe("Stage 5 keep-both copy identity", () => {
+  it("refuses a copy id equal to the original's id, even when the copy title equals the original title", async () => {
+    expect(copyTitleFor(COLLIDING_TITLE)).toBe(COLLIDING_TITLE);
+    const store = createStore({ note: { title: COLLIDING_TITLE }, copyReturnsId: "note-1" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+  });
+
+  it("refuses a copy id that names a different note whose title is not the copy title", async () => {
+    const store = createStore({ foreignNote: true, copyReturnsId: "note-other" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+    const foreignBefore = copyRows(store.notes.get("note-other"));
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+    expect(store.notes.get("note-other")).toEqual(foreignBefore);
+  });
+
+  it("refuses when the copy's own note row carries a different id", async () => {
+    const store = createStore({ copyNoteIdOverride: "note-copy-other" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+  });
+
+  it("refuses when the copy's content row carries a different id", async () => {
+    const store = createStore({ copyContentIdOverride: "content-copy-other" });
+    const binding = await bindingOf(store);
+    const before = originalOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "copy_unverified",
+    });
+    expect(writesOf(store)).toEqual(["notesAddVerbatim"]);
+    expect(originalOf(store)).toEqual(before);
+  });
+});
+
+describe("Stage 5 keep-both original read-back identity", () => {
+  it("refuses to count the resolve when the original's own note row carries a different id", async () => {
+    const store = createStore({
+      afterClear: (notes) => {
+        const note = notes.get("note-1");
+        if (note !== undefined) notes.set("note-1", { ...note, id: "note-9" });
+      },
+    });
+    const binding = await bindingOf(store);
+
+    await expect(resolveOriginal(store, binding)).resolves.toEqual({
+      outcome: "post_write_unverified",
+    });
+    expect(writesOf(store)).toEqual([...COPY_WRITES, "contentResolve", "noteClearConflict"]);
+  });
+
+  it.each<[string, Row]>([
+    ["id", { id: "content-9" }],
+    ["noteId", { noteId: "note-9" }],
+  ])(
+    "refuses to count the resolve when the content row's %s is not the expected one",
+    async (_label, resolvedRow) => {
+      const store = createStore({ resolvedRow });
+      const binding = await bindingOf(store);
+
+      await expect(resolveOriginal(store, binding)).resolves.toEqual({
+        outcome: "post_write_unverified",
+      });
+      expect(writesOf(store)).toEqual([...COPY_WRITES, "contentResolve", "noteClearConflict"]);
+    },
+  );
 });
 
 describe("Stage 5 keep-both — the content marker after the resolve", () => {
