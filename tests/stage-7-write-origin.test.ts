@@ -269,6 +269,20 @@ function originsOf(state: SyncCoordinatorState | undefined): Array<[string, stri
 // 11 — one shared coordinator, two compositions, two origins.
 // ---------------------------------------------------------------------------
 
+/**
+ * `syncer.start` calls that upload. Stage 2 adds a pre-write fetch to every
+ * local mutation, so a bare call count now includes that pull; these tests are
+ * about the upload gate, so they count only the `full` requests.
+ */
+function uploads(syncStart: ReturnType<typeof vi.fn>): unknown[] {
+  // Anything that is not a fetch is an upload: `full` performs a fetch and
+  // then a send, and a bare `send` is an upload too. Filtering on `full`
+  // alone would let a stray `send` slip past a zero-upload assertion.
+  return syncStart.mock.calls.filter(
+    (call) => (call[0] as { type?: unknown } | undefined)?.type !== "fetch",
+  );
+}
+
 describe("S7a-5 — production runtime tags each write path with its own origin", () => {
   it("11. runtime.createNote is mcp and runtime.operatorUpdateNote is operator, in one snapshot", async () => {
     await withProductionRuntime(async ({ runtime, saves }) => {
@@ -339,7 +353,7 @@ describe("S7a-5 — production runtime tags each write path with its own origin"
       expect(originsOf(saves[saves.length - 1]).map(([, , origin]) => origin)).toContain(
         "operator",
       );
-      expect(syncStart).not.toHaveBeenCalled();
+      expect(uploads(syncStart)).toHaveLength(0);
 
       // S7a-4 replaced the interim lock: the operator marker refuses the
       // sync before `syncer.start` is reached.
@@ -347,7 +361,7 @@ describe("S7a-5 — production runtime tags each write path with its own origin"
         status: "failed",
         errorCode: "unapproved_pending",
       });
-      expect(syncStart).not.toHaveBeenCalled();
+      expect(uploads(syncStart)).toHaveLength(0);
     });
   });
 });

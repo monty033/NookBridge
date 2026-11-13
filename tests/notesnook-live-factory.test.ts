@@ -433,6 +433,23 @@ describe("Stage 2B-live — notesnook-live-factory", () => {
       expect(/import\s*\(/.test(factoryBody)).toBe(true);
       expect(factoryBody.includes("@notesnook/core")).toBe(true);
     });
+
+    it("wires the pre-write pull into every live write capability", () => {
+      // Stage 2 prevention: a live write must pull remote changes first, or a
+      // phone-side edit is overwritten blind and becomes a conflict the
+      // operator has to resolve by hand. The refusal behaviour is pinned by
+      // tests/stage-2-fetch-before-write.test.ts; this assertion pins that the
+      // production factory actually supplies it, so the seam cannot sit
+      // unused while every unit test stays green.
+      const source = loadFactorySource();
+      const factoryBody = source.slice(source.indexOf("createNotesnookLiveCoreFactory("));
+
+      expect(source).toContain("createLivePreWriteRead");
+      expect(factoryBody).toContain("readBeforeWrite: createLivePreWriteRead(");
+      // The pull must be fetch-only; `full` also uploads, which would put a
+      // send phase inside the mutation path.
+      expect(factoryBody).not.toContain('type: "full"');
+    });
   });
 
   describe("order of constructor → setup → init", () => {

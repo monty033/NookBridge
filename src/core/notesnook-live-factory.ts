@@ -68,6 +68,7 @@ import {
   createLiveRemoteSyncExecutor,
   type NotesnookLiveRemoteSyncCapability,
 } from "./notesnook-live-remote-sync.js";
+import { createLivePreWriteRead } from "./notesnook-live-pre-write-read.js";
 import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
 import type { NotesnookWriteOrigin } from "./notesnook-write-composition.js";
 import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
@@ -393,6 +394,11 @@ export async function createNotesnookLiveCoreFactory(
               projectLiveDatabaseToWriteCapability(db as unknown as object, ensureOpen, {
                 coordinator,
                 database: db as unknown as object,
+                // Stage 2: every live write pulls remote changes first, inside
+                // the mutation mutex, so a phone-side change is never
+                // overwritten blind. Fetch only — never the full sync, which
+                // also uploads.
+                readBeforeWrite: createLivePreWriteRead(db as unknown as object, ensureOpen),
                 ...(normalized.recoveryJournal === undefined
                   ? {}
                   : { recoveryJournal: normalized.recoveryJournal }),

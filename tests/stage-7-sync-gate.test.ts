@@ -260,6 +260,34 @@ async function rpcSync(runtime: ServiceRuntime) {
   );
 }
 
+/**
+ * `syncer.start` calls that upload. Stage 2 adds a pre-write fetch to every
+ * local mutation, so a bare call count now includes that pull; these tests are
+ * about the upload gate, so they count only the `full` requests.
+ */
+function uploads(syncStart: ReturnType<typeof vi.fn>): unknown[] {
+  // Anything that is not a fetch is an upload: `full` performs a fetch and
+  // then a send, and a bare `send` is an upload too. Filtering on `full`
+  // alone would let a stray `send` slip past a zero-upload assertion.
+  return syncStart.mock.calls.filter(
+    (call) => (call[0] as { type?: unknown } | undefined)?.type !== "fetch",
+  );
+}
+
+it("counts a send as an upload, so a stray send cannot pass a zero-upload check", () => {
+  const syncStart = vi.fn(async (_request?: { type?: string }) => true);
+  void syncStart({ type: "send" });
+  expect(uploads(syncStart)).toHaveLength(1);
+  expect(preWriteFetches(syncStart)).toHaveLength(0);
+});
+
+/** The Stage 2 pre-write pull, which is a fetch and never an upload. */
+function preWriteFetches(syncStart: ReturnType<typeof vi.fn>): unknown[] {
+  return syncStart.mock.calls.filter(
+    (call) => (call[0] as { type?: unknown } | undefined)?.type === "fetch",
+  );
+}
+
 describe("S7a-4 — explicit sync is gated on marker origin", () => {
   it("9. an operator write blocks the sync: failed/unapproved_pending, syncer.start never called", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
@@ -273,7 +301,11 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         pendingSync: true,
         attempts: 1,
       });
-      expect(syncStart).toHaveBeenCalledTimes(0);
+      expect(uploads(syncStart)).toHaveLength(0);
+      // Positive control: the write path pulled before writing, which is what
+      // Stage 2 adds. Without this the count above would also pass if the
+      // pre-write pull were never wired.
+      expect(preWriteFetches(syncStart)).toHaveLength(1);
     });
   });
 
@@ -283,7 +315,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
       await runtime.requestSync!();
       const second = await runtime.requestSync!();
       expect(second).toMatchObject({ status: "failed", errorCode: "unapproved_pending" });
-      expect(syncStart).toHaveBeenCalledTimes(0);
+      expect(uploads(syncStart)).toHaveLength(0);
     });
   });
 
@@ -298,7 +330,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         status: "failed",
         errorCode: "unapproved_pending",
       });
-      expect(syncStart).not.toHaveBeenCalled();
+      expect(uploads(syncStart)).toHaveLength(0);
     });
   });
 
@@ -312,7 +344,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         status: "synced",
         pendingSync: false,
       });
-      expect(syncStart).toHaveBeenCalledTimes(1);
+      expect(uploads(syncStart)).toHaveLength(1);
     });
   });
 
@@ -331,7 +363,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         status: "failed",
         errorCode: "unapproved_pending",
       });
-      expect(syncStart).toHaveBeenCalledTimes(0);
+      expect(uploads(syncStart)).toHaveLength(0);
     });
   });
 
@@ -342,8 +374,8 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
       const result = await runtime.requestSync!();
 
       expect(result).toMatchObject({ status: "synced", pendingSync: false });
-      expect(syncStart).toHaveBeenCalledTimes(1);
-      expect(syncStart).toHaveBeenCalledWith({ type: "full" });
+      expect(uploads(syncStart)).toHaveLength(1);
+      expect(uploads(syncStart)).toEqual([[{ type: "full" }]]);
     });
   });
 
@@ -355,8 +387,8 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
       const response = await rpcSync(runtime);
 
       expect(response.ok).toBe(true);
-      expect(syncStart).toHaveBeenCalledTimes(1);
-      expect(syncStart).toHaveBeenCalledWith({ type: "full" });
+      expect(uploads(syncStart)).toHaveLength(1);
+      expect(uploads(syncStart)).toEqual([[{ type: "full" }]]);
     });
   });
 
@@ -415,8 +447,8 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
           createReadWriteNoDeleteServicePolicy(),
         );
         expect(response.ok).toBe(true);
-        expect(syncStart).toHaveBeenCalledTimes(1);
-        expect(syncStart).toHaveBeenCalledWith({ type: "full" });
+        expect(uploads(syncStart)).toHaveLength(1);
+        expect(uploads(syncStart)).toEqual([[{ type: "full" }]]);
       } finally {
         await handle.shutdown();
       }
@@ -444,13 +476,17 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         "code",
         "message",
       ]);
-      expect(syncStart).toHaveBeenCalledTimes(0);
+      expect(uploads(syncStart)).toHaveLength(0);
     });
   });
 
   it("13. MCP-only markers with a failing upstream start stay sync_failed", async () => {
     await withProductionRuntime(async ({ runtime, syncStart }) => {
-      syncStart.mockResolvedValue(false);
+      // Stage 2: the write pulls first, so only the UPLOAD may fail here.
+      // A failing fetch would refuse the write itself with sync_required,
+      // which is a different behaviour and is pinned in
+      // tests/stage-2-fetch-before-write.test.ts.
+      syncStart.mockImplementation(async (request: { type?: unknown }) => request?.type !== "full");
       await runtime.createNote!({ title: "From MCP", content: "body" });
 
       const response = await rpcSync(runtime);
@@ -460,7 +496,7 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
         expect(response.error.code).toBe("sync_failed");
         expect(response.error.message).toBe(RPC_ERROR_MESSAGES.sync_failed);
       }
-      expect(syncStart).toHaveBeenCalledTimes(1);
+      expect(uploads(syncStart)).toHaveLength(1);
     });
   });
 });
@@ -526,7 +562,7 @@ describe("SR-7 production empty drain uses the read-only status projection", () 
       await expect(runtime.requestSync!()).resolves.toMatchObject(
         dirty ? { status: "failed", errorCode: "unapproved_pending" } : { status: "synced" },
       );
-      expect(syncStart).toHaveBeenCalledTimes(dirty ? 0 : 1);
+      expect(uploads(syncStart)).toHaveLength(dirty ? 0 : 1);
     }, dirty);
   });
 });
