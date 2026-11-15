@@ -44,6 +44,14 @@ import {
   type NotesnookRecoveryJournal,
 } from "../src/core/notesnook-recovery-journal.js";
 
+// Event handlers registered against the fixture's event manager.
+const syncHandlers = new Map<string, Set<() => void>>();
+
+// A completed sync advances this stamp; the write path confirms its pre-write
+// pull against it, so a fake that reports success without moving it would
+// model a sync that fetched nothing.
+let syncCompletionStamp = 0;
+
 const NOTE_ID = "0123456789abcdef0123456789abcdef";
 const OLD_BODY = "<p>old body</p>";
 const START = 1_700_000_000_000;
@@ -226,8 +234,24 @@ async function createWorld(options: { operator?: boolean } = {}): Promise<World>
       write: async () => undefined,
       delete: async () => undefined,
     }),
-    syncer: { start: async () => true },
-    lastSynced: async () => 0,
+    eventManager: {
+      // Real core publishes `sync:completed` from Sync.stop, in the same step
+      // that stamps `lastSynced`; the fixture mirrors that pairing.
+      subscribe: (name: string, handler: () => void) => {
+        const set = syncHandlers.get(name) ?? new Set<() => void>();
+        set.add(handler);
+        syncHandlers.set(name, set);
+        return { unsubscribe: () => set.delete(handler) };
+      },
+    },
+    syncer: {
+      start: async () => {
+        syncCompletionStamp += 1;
+        for (const handler of syncHandlers.get("sync:completed") ?? []) handler();
+        return true;
+      },
+    },
+    lastSynced: async () => syncCompletionStamp,
     hasUnsyncedChanges: async () => false,
     lookup: {
       notes: async () => ({ ids: async () => [] as string[] }),

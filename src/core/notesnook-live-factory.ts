@@ -68,7 +68,10 @@ import {
   createLiveRemoteSyncExecutor,
   type NotesnookLiveRemoteSyncCapability,
 } from "./notesnook-live-remote-sync.js";
-import { createLivePreWriteRead } from "./notesnook-live-pre-write-read.js";
+import {
+  assertLivePreWriteConfirmation,
+  createLivePreWriteRead,
+} from "./notesnook-live-pre-write-read.js";
 import type { NotesnookRecoveryJournal } from "./notesnook-recovery-journal.js";
 import type { NotesnookWriteOrigin } from "./notesnook-write-composition.js";
 import { SyncCoordinator } from "./notesnook-sync-coordinator.js";
@@ -398,7 +401,13 @@ export async function createNotesnookLiveCoreFactory(
                 // the mutation mutex, so a phone-side change is never
                 // overwritten blind. Fetch only — never the full sync, which
                 // also uploads.
-                readBeforeWrite: createLivePreWriteRead(db as unknown as object, ensureOpen),
+                readBeforeWrite: (() => {
+                  // A deployment whose database cannot confirm a completed pull
+                  // must not start: the write path would otherwise accept a
+                  // sync that resolved without fetching anything.
+                  assertLivePreWriteConfirmation(db as unknown as object);
+                  return createLivePreWriteRead(db as unknown as object, ensureOpen);
+                })(),
                 ...(normalized.recoveryJournal === undefined
                   ? {}
                   : { recoveryJournal: normalized.recoveryJournal }),
@@ -992,7 +1001,10 @@ function guardReadOnlyProjection(
     },
     sync: async (options: Parameters<NotesnookReadOnlyDatabase["sync"]>[0]) => {
       ensureOpen();
-      return readOnly.sync(options);
+      // Every bridge caller of the core sync entry point takes the per-database
+      // lock. This one kept itself out of it, which would let a sync proof run
+      // inside the window the pre-write pull relies on being exclusive.
+      return withSharedMutex(database, "remote:sync", async () => readOnly.sync(options));
     },
     listNotebooks: async () => {
       ensureOpen();

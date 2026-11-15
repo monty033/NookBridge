@@ -445,7 +445,14 @@ describe("Stage 2B-live — notesnook-live-factory", () => {
       const factoryBody = source.slice(source.indexOf("createNotesnookLiveCoreFactory("));
 
       expect(source).toContain("createLivePreWriteRead");
-      expect(factoryBody).toContain("readBeforeWrite: createLivePreWriteRead(");
+      expect(factoryBody).toMatch(
+        /readBeforeWrite: \(\(\) => \{[\s\S]*?return createLivePreWriteRead\(/,
+      );
+      // The pull only counts as confirmed when the database can report that a
+      // sync completed. Production asserts that capability while it builds the
+      // write path, so a deployment that cannot prove a pull refuses to start
+      // instead of accepting a sync call that fetched nothing.
+      expect(factoryBody).toContain("assertLivePreWriteConfirmation(");
       // The pull must be fetch-only; `full` also uploads, which would put a
       // send phase inside the mutation path.
       expect(factoryBody).not.toContain('type: "full"');

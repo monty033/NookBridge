@@ -10,6 +10,7 @@
  * Fully offline. No network, no live Notesnook state, no real daemon state.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,18 @@ import {
   type NotesnookRealCoreModule,
 } from "../src/core/notesnook-core-adapter.js";
 import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
+
+// A completed sync advances this stamp; the write path confirms its pre-write
+// pull against it, so a fake that reports success without moving it would
+// model a sync that fetched nothing.
+let syncCompletionStamp = 0;
+let syncCompletes = true;
+// Lets a test hold a sync in flight, so a concurrent write is observably queued.
+let syncHold: Promise<void> | undefined;
+// Event handlers registered against the fixture's event manager.
+const handlers = new Map<string, Set<() => void>>();
+// Every event name any bridge code has subscribed to on this database.
+const subscribedEventNames = new Set<string>();
 
 const EXISTING_NOTE_ID = "0123456789abcdef0123456789abcdef";
 const CREATED_NOTE_ID = "fedcba9876543210fedcba9876543210";
@@ -86,7 +99,8 @@ function createFakeDatabase(syncStart: ReturnType<typeof vi.fn>): Record<string,
       authenticateMultiFactorCode: async () => undefined,
       authenticatePassword: async () => undefined,
       _login: async () => undefined,
-      getUser: async () => undefined,
+      // A signed-in account, so the pre-write pull applies to this fixture.
+      getUser: async () => ({ id: "test-account" }),
       logout: async () => undefined,
     },
     tokenManager: {
@@ -98,8 +112,31 @@ function createFakeDatabase(syncStart: ReturnType<typeof vi.fn>): Record<string,
       write: async () => undefined,
       delete: async () => undefined,
     }),
-    syncer: { start: syncStart },
-    lastSynced: async () => 0,
+    eventManager: {
+      // Real core publishes `sync:completed` from Sync.stop, in the same step
+      // that stamps `lastSynced`; the fixture mirrors that pairing so a
+      // completion cannot be modelled as one signal without the other.
+      subscribe: (name: string, handler: () => void) => {
+        subscribedEventNames.add(name);
+        const set = handlers.get(name) ?? new Set<() => void>();
+        set.add(handler);
+        handlers.set(name, set);
+        return { unsubscribe: () => set.delete(handler) };
+      },
+    },
+    syncer: {
+      start: async (request?: { type?: string }) => {
+        const result = await syncStart(request);
+        // Completion is only modelled when the fixture says a sync completed,
+        // so a resolved `true` with nothing fetched stays representable.
+        if (result === true && syncCompletes) {
+          syncCompletionStamp += 1;
+          for (const handler of handlers.get("sync:completed") ?? []) handler();
+        }
+        return result;
+      },
+    },
+    lastSynced: async () => syncCompletionStamp,
     hasUnsyncedChanges: async () => false,
     notes: {
       note: async (id: string) => {
@@ -196,12 +233,18 @@ async function withProductionRuntime(
   body: (harness: Harness) => Promise<void>,
   dirty = false,
 ): Promise<void> {
+  // Cleared before the runtime is built, so a subscription registered during
+  // construction is observed as well as one made by the write itself.
+  subscribedEventNames.clear();
   const stateDir = mkdtempSync(join(tmpdir(), "nookbridge-sync-gate-"));
   const credentialsDir = mkdtempSync(join(tmpdir(), "nookbridge-sync-gate-creds-"));
   writeFileSync(join(credentialsDir, "nookbridge-db-key"), "sync-gate-wiring-key", {
     mode: 0o600,
   });
-  const syncStart = vi.fn(async () => true);
+  const syncStart = vi.fn(async () => {
+    if (syncHold !== undefined) await syncHold;
+    return true;
+  });
   const database = createFakeDatabase(syncStart);
   // Pinned core defines this method on Database.prototype. The factory must
   // supply its captured read-only projection to the executor's own-data gate.
@@ -306,6 +349,68 @@ describe("S7a-4 — explicit sync is gated on marker origin", () => {
       // Stage 2 adds. Without this the count above would also pass if the
       // pre-write pull were never wired.
       expect(preWriteFetches(syncStart)).toHaveLength(1);
+    });
+  });
+
+  it("9a. refuses the write when the pull resolves without completing", async () => {
+    // The live failure in one assertion: the sync call reports success, nothing
+    // is fetched, so the completion stamp never moves and the write must be
+    // refused rather than applied blind. This drives the production runtime,
+    // so it fails if the pre-write pull stops being wired.
+    await withProductionRuntime(async ({ runtime }) => {
+      syncCompletes = false;
+      try {
+        await expect(operatorWrite(runtime)).rejects.toMatchObject({ code: "sync_required" });
+      } finally {
+        syncCompletes = true;
+      }
+    });
+  });
+
+  it("9d. only sync:completed is registered, across construction and the exercised writes", async () => {
+    // The exclusivity argument assumes nothing subscribes to core's deferred
+    // sync request, which would start a sync outside the per-database lock.
+    // A source scan cannot prove that (a subscription can reuse an already
+    // captured method), so this observes the bus directly.
+    //
+    // Scope, stated honestly: construction plus two operator writes. The sync
+    // request is deliberately not called here — after a write it is refused as
+    // `unapproved_pending` before the remote executor runs, so it would add a
+    // route without exercising an accepted sync, and the earlier draft of this
+    // test wrongly implied otherwise. Nothing here speaks for a runtime path no
+    // test drives, which is why the roadmap claims observation "over the
+    // lifecycle it exercises".
+    await withProductionRuntime(async ({ runtime }) => {
+      await operatorWrite(runtime);
+      await operatorWrite(runtime);
+      expect([...subscribedEventNames]).toEqual(["sync:completed"]);
+    });
+  });
+
+  it("9c. a sync already in flight keeps the write's pull queued behind it", async () => {
+    // The round-4 overlap: an unrelated sync must not be able to be running
+    // while the pre-write pull runs, so its completion cannot satisfy ours.
+    // Serialization is what makes that true; this asserts the write waits.
+    await withProductionRuntime(async ({ runtime, syncStart }) => {
+      let release!: () => void;
+      syncHold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      try {
+        const sync = rpcSync(runtime);
+        await delay(0);
+        const write = operatorWrite(runtime);
+        await delay(25);
+        // Still only the background sync: the write has not fetched yet.
+        expect(preWriteFetches(syncStart)).toHaveLength(0);
+        release();
+        await sync;
+        await write;
+        expect(preWriteFetches(syncStart).length).toBeGreaterThan(0);
+      } finally {
+        syncHold = undefined;
+        release();
+      }
     });
   });
 
