@@ -39,6 +39,14 @@ import type { SyncCoordinatorState } from "../src/core/notesnook-sync-coordinato
 import { createRevisionToken } from "../src/core/notesnook-write-contract.js";
 import type { NookdServerHandle, StartNookdServerOptions } from "../src/service/nookd-server.js";
 
+// Event handlers registered against the fixture's event manager.
+const syncHandlers = new Map<string, Set<() => void>>();
+
+// A completed sync advances this stamp; the write path confirms its pre-write
+// pull against it, so a fake that reports success without moving it would
+// model a sync that fetched nothing.
+let syncCompletionStamp = 0;
+
 const EXISTING_NOTE_ID = "0123456789abcdef0123456789abcdef";
 const CREATED_NOTE_ID = "fedcba9876543210fedcba9876543210";
 const EXISTING_DATE_EDITED = 1_700_000_000_000;
@@ -103,8 +111,27 @@ function createFakeDatabase(syncStart: ReturnType<typeof vi.fn>): Record<string,
       write: async () => undefined,
       delete: async () => undefined,
     }),
-    syncer: { start: syncStart },
-    lastSynced: async () => 0,
+    eventManager: {
+      // Real core publishes `sync:completed` from Sync.stop, in the same step
+      // that stamps `lastSynced`; the fixture mirrors that pairing.
+      subscribe: (name: string, handler: () => void) => {
+        const set = syncHandlers.get(name) ?? new Set<() => void>();
+        set.add(handler);
+        syncHandlers.set(name, set);
+        return { unsubscribe: () => set.delete(handler) };
+      },
+    },
+    syncer: {
+      start: async (request?: { type?: string }) => {
+        const result = await syncStart(request);
+        if (result === true) {
+          syncCompletionStamp += 1;
+          for (const handler of syncHandlers.get("sync:completed") ?? []) handler();
+        }
+        return result;
+      },
+    },
+    lastSynced: async () => syncCompletionStamp,
     hasUnsyncedChanges: async () => false,
     notes: {
       note: async (id: string) => {

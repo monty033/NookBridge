@@ -42,7 +42,12 @@ export type FakeContent = { id: string; noteId: string; type: "tiptap"; data: st
 export type FakeCore = {
   readonly module: NotesnookRealCoreModule;
   readonly notes: Map<string, FakeNote>;
-  readonly state: { unsynced: boolean; fullRuns: number };
+  readonly state: {
+    unsynced: boolean;
+    fullRuns: number;
+    lastSyncedAt: number;
+    syncHandlers: Map<string, Set<() => void>>;
+  };
 };
 
 /**
@@ -59,7 +64,13 @@ export type SeedNote = {
 export function createFakeCore(seedNotes: number | readonly SeedNote[]): FakeCore {
   const notes = new Map<string, FakeNote>();
   const content = new Map<string, FakeContent>();
-  const state = { unsynced: false, fullRuns: 0 };
+  const state = {
+    unsynced: false,
+    fullRuns: 0,
+    lastSyncedAt: 0,
+    // Event handlers registered against this fixture's event manager.
+    syncHandlers: new Map<string, Set<() => void>>(),
+  };
   let nextId = 1;
   const mint = (prefix: string): string => `${prefix}-${nextId++}`;
 
@@ -107,12 +118,28 @@ export function createFakeCore(seedNotes: number | readonly SeedNote[]): FakeCor
         write: async () => undefined,
         delete: async () => undefined,
       }),
+      eventManager: {
+        // Real core publishes `sync:completed` from Sync.stop, in the same step
+        // that stamps `lastSynced`; the fixture mirrors that pairing.
+        subscribe: (name: string, handler: () => void) => {
+          const set = state.syncHandlers.get(name) ?? new Set<() => void>();
+          set.add(handler);
+          state.syncHandlers.set(name, set);
+          return { unsubscribe: () => set.delete(handler) };
+        },
+      },
       syncer: {
         start: async (request: { type?: string }) => {
           if (request.type === "full") {
             state.fullRuns += 1;
             state.unsynced = false;
           }
+          // A completed sync advances the completion stamp and publishes
+          // completion. The write path confirms a pre-write pull against both,
+          // so a fake that reports success without either would model a sync
+          // that fetched nothing.
+          state.lastSyncedAt += 1;
+          for (const handler of state.syncHandlers.get("sync:completed") ?? []) handler();
           return true;
         },
       },
@@ -202,7 +229,7 @@ export function createFakeCore(seedNotes: number | readonly SeedNote[]): FakeCor
         from: () => ({ get: async () => [] as unknown[] }),
       },
       lookup: { notes: async () => emptyIds, notebooks: async () => emptyIds },
-      lastSynced: async () => 0,
+      lastSynced: async () => state.lastSyncedAt,
       hasUnsyncedChanges: async () => state.unsynced,
     };
   });

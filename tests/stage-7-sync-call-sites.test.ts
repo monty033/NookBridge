@@ -59,8 +59,9 @@ export interface SyncCallSiteFindings {
 const SYNCER_ACCESS_ALLOWLIST = {
   "src/core/notesnook-core-adapter.ts": 1,
   "src/core/notesnook-live-factory.ts": 1,
-  // Stage 2: the pre-write pull owns the fetch call on the write path.
-  "src/core/notesnook-live-pre-write-read.ts": 5,
+  // Stage 2: the pre-write pull owns the fetch call on the write path, and
+  // takes core's sync lock so an overlapping auto-sync cannot satisfy it.
+  "src/core/notesnook-live-pre-write-read.ts": 7,
   "src/core/notesnook-live-remote-sync.ts": 7,
   "src/core/notesnook-readonly-projection.ts": 5,
 } as const;
@@ -441,5 +442,75 @@ export const documentationOnly = true;`,
     expect(argument).toBeTypeOf("object");
     expect(Reflect.ownKeys(argument as object)).toEqual(["type"]);
     expect(argument).toMatchObject({ type: "fetch" });
+  });
+});
+
+describe("pre-write pull exclusivity premise", () => {
+  // The pre-write pull treats a `sync:completed` seen during its call and a
+  // `lastSynced` advance as its own, because every bridge caller of the core
+  // sync entry point holds the same per-database lock. That holds only while
+  // nothing subscribes to core's deferred sync request: a handler would start a
+  // sync outside the lock and could complete during a pull.
+  //
+  // These two checks are tripwires, not proof: a subscription could reuse an
+  // already-captured subscribe method and add neither a bus reference nor the
+  // event name. There is no static proof of absence. The closest check is the
+  // runtime one in `stage-7-sync-gate.test.ts` ("only sync:completed is
+  // registered, across construction and the exercised writes"), which records
+  // the events actually registered on the database during that test and fails
+  // on anything else — it speaks for the lifecycle it exercises, not for paths
+  // no test drives. The scan below still earns its place by catching the
+  // ordinary case early, and by making a new bus reference a visible diff.
+  const EVENT_BUS_ALLOWLIST: Record<string, number> = {
+    // Owns the only event-bus use in the tree: the pre-write pull watches
+    // `sync:completed` for the duration of its own call, and startup checks the
+    // same slot is present. Two references, both in this module.
+    "src/core/notesnook-live-pre-write-read.ts": 2,
+  };
+
+  const EVENT_BUS_PATTERN = /eventManager|\.subscribe\(|\bEV\./g;
+
+  it("only the pre-write pull references the core event bus (tripwire)", () => {
+    const observed: Record<string, number> = {};
+
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!entry.name.endsWith(".ts")) continue;
+        const source = readFileSync(path, "utf8");
+        const hits = source.match(EVENT_BUS_PATTERN);
+        if (hits !== null && hits.length > 0) {
+          observed[relative(repositoryRoot, path).split(sep).join("/")] = hits.length;
+        }
+      }
+    };
+    walk(sourceRoot);
+
+    expect(observed).toEqual(EVENT_BUS_ALLOWLIST);
+  });
+
+  it("no source file names the deferred sync request at all (tripwire)", () => {
+    const offenders: string[] = [];
+
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!entry.name.endsWith(".ts")) continue;
+        if (readFileSync(path, "utf8").includes("syncRequested")) {
+          offenders.push(relative(repositoryRoot, path).split(sep).join("/"));
+        }
+      }
+    };
+    walk(sourceRoot);
+
+    expect(offenders).toEqual([]);
   });
 });
