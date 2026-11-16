@@ -679,6 +679,13 @@ function createWiringFakeDatabase(locked: boolean): {
     relations: {
       add: async () => undefined,
       unlink: async () => undefined,
+      to: () => ({
+        // No vault links: this note is not in a Vault, which the lock rule
+        // needs in order to call a note without content "unlocked".
+        count: async () => 0,
+        get: async () => [],
+        has: async () => false,
+      }),
       from: (reference: { id: string; type: string }) => ({
         get: async () => [],
         has: async (noteId: string) =>

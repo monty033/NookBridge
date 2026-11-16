@@ -262,6 +262,136 @@ export function flattenLiveDatabaseToReadOnly(
   );
   const contentFindByNoteIdFn = readOptionalContentFindByNoteId(source);
   const relationsFromFn = readOptionalRelationsFrom(source);
+  const relationsToFn = readOptionalRelationsTo(source);
+  /**
+   * Count the vault links on a note.  Metadata only; nothing is decrypted.
+   *
+   * `count()` does not filter on `relations.deleted`, but `unlink()` rewrites
+   * the row as `REPLACE INTO relations (id, dateModified, deleted, synced)`.
+   * `fromType`, `fromId`, `toType` and `toId` are nullable with no default, so
+   * a removed link ends up with every link column NULL and the lookup in
+   * `buildRelationsQuery()` cannot match it.  Removed links are therefore not
+   * counted, by the row's shape rather than by a filter.
+   *
+   * That is core's mechanism, not a documented promise.  If another client
+   * ever pushed a removal with its link columns still filled in, this would
+   * answer "linked", and the note would be withheld.  Wrong, but it fails
+   * closed.
+   *
+   * Anything other than a non-negative integer (including a missing or
+   * throwing probe) is an error, because an unknown count must never read as
+   * "no links".
+   */
+  const readVaultLinkCount = async (noteId: string): Promise<number> => {
+    if (relationsToFn === undefined) {
+      throw projectionError("Notesnook read-only projection: relations.to is unavailable");
+    }
+    const relationsArray = await callThrough(
+      relationsToFn,
+      [{ id: noteId, type: "note" }, "vault"],
+      "Notesnook read-only projection: relations.to rejected",
+    );
+    if (
+      relationsArray === undefined ||
+      relationsArray === null ||
+      typeof relationsArray !== "object"
+    ) {
+      throw projectionError(
+        "Notesnook read-only projection: relations.to returned an invalid RelationsArray",
+      );
+    }
+    let countFn: unknown;
+    try {
+      countFn = (relationsArray as { count?: unknown }).count;
+    } catch {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.count could not be read",
+      );
+    }
+    if (typeof countFn !== "function") {
+      throw projectionError(
+        "Notesnook read-only projection: relations.to did not return a RelationsArray",
+      );
+    }
+    let raw: unknown;
+    try {
+      raw = Reflect.apply(countFn, relationsArray, []);
+    } catch {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.count threw synchronously",
+      );
+    }
+    const resolved = await callThenable(
+      raw as PromiseLike<unknown>,
+      "relations.to(...).count",
+      (value) => value,
+    );
+    if (typeof resolved !== "number" || !Number.isInteger(resolved) || resolved < 0) {
+      throw projectionError(
+        "Notesnook read-only projection: relations RelationsArray.count did not return a non-negative integer",
+      );
+    }
+    return resolved;
+  };
+
+  /**
+   * The one lock rule every surface uses.  Metadata only; nothing is
+   * decrypted, and no title or body is read.
+   *
+   * `undecidable` is not a guess: callers that must answer either throw it
+   * (`readNoteLockState`) or withhold the flag (`noteMetadata`).
+   */
+  const classifyNoteLockState = async (
+    id: string,
+    note: unknown,
+  ): Promise<"locked" | "unlocked" | "undecidable"> => {
+    // A note record that is not an object cannot carry either signal, and
+    // reading `contentId` off it would silently look like "no content".  That
+    // is "cannot decide", the same verdict `readNoteBodyPresence` gives.
+    if (note === undefined || note === null || typeof note !== "object") return "undecidable";
+    const read = await readLockedStateDetailed(contentFindByNoteIdFn, id);
+    // Core marks `Note.locked` deprecated and never stores it (there is no such
+    // column), so a marker can only come from a fake or an old record shape.
+    // It may only make the answer stricter, never looser: `true` beats even a
+    // readable content record, so discovery, metadata and `notes.get` agree.
+    const metadataLocked = readOptionalNoteLockedMarker(note);
+    if (metadataLocked === true) return "locked";
+    if (read.record === "present") {
+      if (read.locked === true) return "locked";
+      // Legacy fallback: a record that says `locked: false` is unlocked; a
+      // record with no lock flag of its own falls back to the note's `false`
+      // marker.  A `true` marker never reaches here (it returned above).
+      if (read.locked === false || metadataLocked === false) return "unlocked";
+    }
+    // No content record, so there is no lock flag to read.  That alone also
+    // describes a locked note whose content has not arrived, so the Vault link
+    // decides first: a linked note is locked whether or not it names a content
+    // row.  Only then does the absence of a `contentId` make it genuinely
+    // empty; a named content row that is missing is content still to arrive.
+    if (read.record === "absent") {
+      let links: number;
+      try {
+        links = await readVaultLinkCount(id);
+      } catch {
+        // No usable Vault probe.  That is "cannot decide", not an error: the
+        // lock state refuses and metadata simply claims nothing.  A content
+        // probe that failed above still throws for both.
+        return "undecidable";
+      }
+      if (links > 0) return "locked";
+      if (!noteNamesContent(note)) return "unlocked";
+    }
+    return "undecidable";
+  };
+  /** Whether the note record names a content row (`contentId` set to anything). */
+  const noteNamesContent = (note: unknown): boolean => {
+    try {
+      const contentId = (note as Record<string, unknown>).contentId;
+      return contentId !== undefined && contentId !== null;
+    } catch {
+      throw projectionError("Notesnook read-only projection: note contentId getter threw");
+    }
+  };
   const notebookHasNoteViaRelations = async (
     notebookId: string,
     noteId: string,
@@ -649,8 +779,13 @@ export function flattenLiveDatabaseToReadOnly(
         if (note === undefined || note === null) continue;
         const noteMetadata = coerceUpstreamNoteToMetadata(note);
         if (noteMetadata === undefined) continue;
-        const locked = await readLockedState(contentFindByNoteIdFn, id);
-        metadata.push(locked === true ? { ...noteMetadata, locked: true } : noteMetadata);
+        // The same rule as the single-note path, so a batch caller cannot see a
+        // different lock answer than `notes.get` would act on.
+        metadata.push(
+          (await classifyNoteLockState(id, note)) === "locked"
+            ? { ...noteMetadata, locked: true }
+            : noteMetadata,
+        );
       }
       return metadata as never;
     },
@@ -785,26 +920,57 @@ export function flattenLiveDatabaseToReadOnly(
             : membership.absent
               ? { ...metadata, notebookAbsenceConfirmed: true }
               : { ...metadata, ...incomplete };
-      const locked = await readLockedState(contentFindByNoteIdFn, id);
-      return (locked === true ? { ...enrichedMetadata, locked: true } : enrichedMetadata) as never;
+      // The flag must agree with `readNoteLockState`, or a caller that trusts it
+      // will read a body for a note the lock state calls locked.  It is advisory
+      // and only ever asserts "locked": an unresolvable lock state carries no
+      // flag, as before, while `readNoteLockState` throws for the same note.
+      return (
+        (await classifyNoteLockState(id, note)) === "locked"
+          ? { ...enrichedMetadata, locked: true }
+          : enrichedMetadata
+      ) as never;
     },
 
     readNoteLockState: async (id: string): Promise<"locked" | "unlocked"> => {
       if (typeof id !== "string" || id.length === 0) {
         throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
       }
-      const locked = await readLockedState(contentFindByNoteIdFn, id);
-      if (locked === true) return "locked";
-      if (locked === false) return "unlocked";
       const note = await callThrough(
         noteFn,
         [id],
         "Notesnook read-only projection: notes.note rejected",
       );
-      const metadataLocked = readOptionalNoteLockedMarker(note);
-      if (metadataLocked === true) return "locked";
-      if (metadataLocked === false) return "unlocked";
-      throw projectionError("Notesnook read-only projection: note lock state is unavailable");
+      const lockState = await classifyNoteLockState(id, note);
+      if (lockState === "undecidable") {
+        throw projectionError("Notesnook read-only projection: note lock state is unavailable");
+      }
+      return lockState;
+    },
+
+    /**
+     * `"bodyless"` only for a note that provably has no body: no content
+     * record, no `contentId`, no vault link, and no `locked` marker on the note
+     * record (the same signals the lock-state rule uses, plus the marker).
+     * Everything else is `"content"`, so a caller that would serve an empty
+     * body never does so for a locked or pending note.  A probe that cannot
+     * answer throws, and an unread content record is never proof of emptiness.
+     */
+    readNoteBodyPresence: async (id: string): Promise<"content" | "bodyless"> => {
+      if (typeof id !== "string" || id.length === 0) {
+        throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
+      }
+      const read = await readLockedStateDetailed(contentFindByNoteIdFn, id);
+      if (read.record !== "absent") return "content";
+      const note = await callThrough(
+        noteFn,
+        [id],
+        "Notesnook read-only projection: notes.note rejected",
+      );
+      if (note === undefined || note === null || typeof note !== "object") return "content";
+      // A `locked` marker can only make the answer stricter, never looser.
+      if (readOptionalNoteLockedMarker(note) === true) return "content";
+      if (noteNamesContent(note)) return "content";
+      return (await readVaultLinkCount(id)) > 0 ? "content" : "bodyless";
     },
 
     noteContentDiagnostic: async (id: string): Promise<NotesnookReadOnlyContentDiagnostic> => {
@@ -1056,6 +1222,27 @@ function readOptionalRelationsFrom(
   if (relations === undefined || relations === null) return undefined;
   if (typeof relations !== "object") return undefined;
   return readOptionalManagerMethod(relations, "from");
+}
+
+/**
+ * Capture the optional `db.relations.to(reference, type)` method, the mirror of
+ * {@link readOptionalRelationsFrom}.  It backs the vault-link probe that tells
+ * a genuinely empty note from a locked note whose content has not arrived.
+ * Returns `undefined` when `db.relations` or its `to` method is unavailable;
+ * the bodyless rule then cannot be proven and fails closed.
+ */
+function readOptionalRelationsTo(
+  source: NotesnookReadOnlyProjectionSource,
+): ((...args: unknown[]) => unknown) | undefined {
+  let relations: unknown;
+  try {
+    relations = (source as unknown as Record<string, unknown>).relations;
+  } catch {
+    return undefined;
+  }
+  if (relations === undefined || relations === null) return undefined;
+  if (typeof relations !== "object") return undefined;
+  return readOptionalManagerMethod(relations, "to");
 }
 
 /**
@@ -1673,11 +1860,22 @@ function isCipherRecord(value: Record<string, unknown>): boolean {
   return value.cipher !== undefined && value.iv !== undefined && value.salt !== undefined;
 }
 
-async function readLockedState(
+/**
+ * What the content lookup said about one note.  `absent` is the only state
+ * that can make a note bodyless: the lookup ran and found no record.  A missing
+ * lookup is `unprobed`, which proves nothing.  `present.locked` is `undefined`
+ * for a content record that carries no lock flag.
+ */
+type LockedStateRead =
+  | { readonly record: "unprobed" }
+  | { readonly record: "absent" }
+  | { readonly record: "present"; readonly locked: boolean | undefined };
+
+async function readLockedStateDetailed(
   findByNoteId: ((...args: unknown[]) => unknown) | undefined,
   id: string,
-): Promise<boolean | undefined> {
-  if (findByNoteId === undefined) return undefined;
+): Promise<LockedStateRead> {
+  if (findByNoteId === undefined) return { record: "unprobed" };
   let content: unknown;
   try {
     content = await findByNoteId(id);
@@ -1685,10 +1883,10 @@ async function readLockedState(
     // Notesnook can refuse the content lookup for a locked note before it
     // returns the metadata marker.  That refusal is still useful metadata:
     // preserve the closed lock state without exposing the upstream error.
-    if (isVaultLockedRefusal(error)) return true;
+    if (isVaultLockedRefusal(error)) return { record: "present", locked: true };
     throw projectionError("Notesnook read-only projection: content.findByNoteId rejected");
   }
-  if (content === undefined || content === null) return undefined;
+  if (content === undefined || content === null) return { record: "absent" };
   if (typeof content !== "object") {
     throw projectionError("Notesnook read-only projection: content record is not an object");
   }
@@ -1714,12 +1912,12 @@ async function readLockedState(
   } catch {
     throw projectionError("Notesnook read-only projection: content cipher marker getter threw");
   }
-  if (dataIsCipher) return true;
-  if (locked === undefined) return undefined;
+  if (dataIsCipher) return { record: "present", locked: true };
+  if (locked === undefined) return { record: "present", locked: undefined };
   if (typeof locked !== "boolean") {
     throw projectionError("Notesnook read-only projection: content lock marker is invalid");
   }
-  return locked;
+  return { record: "present", locked };
 }
 
 function readOptionalNoteLockedMarker(value: unknown): boolean | undefined {

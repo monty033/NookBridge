@@ -933,6 +933,33 @@ function hasReadOnlyProjectionSurface(database: NotesnookLiveDatabase): boolean 
   }
 }
 
+/** Core's own empty note body: what a note created without content stores. */
+const EMPTY_NOTE_BODY = Object.freeze({ type: "tiptap" as const, data: "<p></p>" });
+
+async function isProvablyBodyless(
+  readPresence: NotesnookReadOnlyDatabase["readNoteBodyPresence"],
+  id: string,
+): Promise<boolean> {
+  if (readPresence === undefined) return false;
+  try {
+    return (await readPresence(id)) === "bodyless";
+  } catch {
+    return false;
+  }
+}
+
+async function isLockedByMetadata(
+  readLockState: NotesnookReadOnlyDatabase["readNoteLockState"],
+  id: string,
+): Promise<boolean> {
+  if (readLockState === undefined) return false;
+  try {
+    return (await readLockState(id)) === "locked";
+  } catch {
+    return false;
+  }
+}
+
 function guardReadOnlyProjection(
   readOnly: NotesnookReadOnlyDatabase,
   database: object,
@@ -946,6 +973,7 @@ function guardReadOnlyProjection(
   const readNoteLockState = readOnly.readNoteLockState;
   const noteContentDiagnostic = readOnly.noteContentDiagnostic;
   const readOperatorNoteContent = readOnly.readOperatorNoteContent;
+  const readNoteBodyPresence = readOnly.readNoteBodyPresence;
   // A note's metadata and content are two reads.  Taken separately they can
   // straddle a write that spans both (an append advances the note, then
   // replaces its content), so the pair is read under the shared database lock.
@@ -980,8 +1008,30 @@ function guardReadOnlyProjection(
               };
             } catch (error) {
               // Categorised here, inside the lock, so no cause leaves it.
+              //
+              // The strict reader reports a note with no content row as
+              // `unsupported_content`.  A note with a title and no body is
+              // exactly that, so serve core's own empty body for it rather than
+              // failing -- but only when metadata alone proves it is empty (no
+              // content record, no contentId, no vault link).  A probe that
+              // cannot answer is not proof.  The probe runs only on this
+              // failure path, so a note that has a body costs no extra read.
+              if (
+                isNotesnookReadOnlyProjectionError(error) &&
+                error.message === "unsupported_content" &&
+                (await isProvablyBodyless(readNoteBodyPresence, id))
+              ) {
+                return {
+                  metadata,
+                  ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),
+                  content: EMPTY_NOTE_BODY,
+                };
+              }
+              // A locked note that has no content row is also reported as
+              // unsupported; the metadata lock state still says it is locked.
               const locked =
-                isNotesnookReadOnlyProjectionError(error) && error.message === "vault_locked";
+                (isNotesnookReadOnlyProjectionError(error) && error.message === "vault_locked") ||
+                (await isLockedByMetadata(readNoteLockState, id));
               return {
                 metadata,
                 ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),

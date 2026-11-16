@@ -12,6 +12,13 @@
  *   notebook visible iff its path resolves AND the evaluator allows
  *            `read` for { notebookPath }.
  *
+ * An empty note (a title and no body) has no content record to carry a lock
+ * flag.  The projection's `readNoteLockState` reports it "unlocked" only when
+ * metadata proves it genuinely empty: no content record, no `contentId`, and no
+ * vault link.  A vault link reads "locked"; a `contentId` with no content, or
+ * any probe that cannot answer, throws.  This filter keeps its rule: a throw is
+ * undecided and the note is not admitted.
+ *
  * Every discovery request fetches ONE fresh, complete notebook hierarchy
  * snapshot from `listNotebooksForSettings` and derives from it, for that
  * request only, everything that needs notebooks: the id → titlePath index, the
