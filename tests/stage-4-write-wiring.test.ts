@@ -149,6 +149,12 @@ interface FakeRuntimeCollections {
     from: (reference: { id: string; type: string } | { type: string; ids: readonly string[] }) => {
       get(): Promise<FakeRelation[]>;
     };
+    to: (
+      reference: { id: string; type: string },
+      type?: string,
+    ) => {
+      get(): Promise<FakeRelation[]>;
+    };
   };
 }
 
@@ -349,6 +355,17 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
           calls.relationList.push(ids.join(","));
           return relations.filter((r) => ids.includes(r.fromId)).map((r) => ({ ...r }));
         },
+      }),
+      to: (reference: { id: string; type: string }, type?: string) => ({
+        get: async () =>
+          relations
+            .filter(
+              (r) =>
+                r.toId === reference.id &&
+                r.toType === reference.type &&
+                (type === undefined || r.fromType === type),
+            )
+            .map((r) => ({ ...r })),
       }),
     },
   };

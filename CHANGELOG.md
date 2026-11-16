@@ -7,6 +7,17 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- `notes.delete` now works on a note that has a title and no body. Core reads
+  rows with `select *`, so a note created without a body carries
+  `contentId: null`; the write projection rejected that as a malformed
+  identifier before the revision, lock and conflict guards ran, so a note that
+  `notes.get` served and `notes.search` listed could not be trashed. Metadata-only
+  edits (title, pin, favorite, notebook, tags) on such a note now work for the
+  same reason; content edits and appends still refuse. Before an absent body is
+  read as unlocked the write seam queries the note's incoming relations: a Vault
+  link, or an incoming-link query that cannot be answered, refuses with
+  `vault_locked`, and a note that names a content row this database has not
+  received refuses with `sync_required` instead of acting on a body it cannot see.
 - `notes.update` no longer fails with `sync_failed` when the patch carries
   `listKind` alongside `content`. The adapter treats `listKind` as codec intent,
   not a note attribute: it steers content encoding but is excluded from
