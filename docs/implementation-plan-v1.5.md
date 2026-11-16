@@ -479,6 +479,7 @@ MVP behavior:
 
 - Production discovery (`listNotes`, `searchNotes`, and operator `browse`/`search`) **must suppress locked-note titles**: a locked note is not returned by title or metadata, and no body snippet/content is returned. Titles governed by a read-denied notebook must be suppressed the same way.
 - Discovery must fail closed: if the lock state, notebook hierarchy, note membership, or policy decision for an item cannot be resolved, that item is withheld rather than surfaced.
+- A note with a title and no body has no content record, so it carries no lock flag. It is admitted — not withheld — only when three metadata signals agree it is genuinely empty: no content record, no `contentId` on the note, and no Vault link (an unlinked row loses its link columns, so it stops counting). A `contentId` with no content means content is expected but has not arrived and stays undecidable; any Vault link means locked; a probe that cannot answer stays undecidable. Reading such a note returns core's own empty body (`<p></p>`); editing it is still refused, and is tracked separately.
 - Known-ID lock protections are unchanged: `getNote`, `updateNote`, and `appendNote` on a locked note return a structured `vault_locked` error.
 - The bridge does not ask Hermes for a Vault password, store a Vault password, automatically unlock the Vault, or expose Vault creation/unlock/delete methods through RPC/MCP.
 - A future Vault feature requires its own security design, credential-lifecycle review, and red-team suite.

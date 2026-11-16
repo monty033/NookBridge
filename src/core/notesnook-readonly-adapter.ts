@@ -267,6 +267,12 @@ export interface NotesnookReadOnlyDatabase {
   readonly hasNoteInNotebook?: (notebookId: string, noteId: string) => Promise<boolean>;
   /** Internal categorical lock-state probe; never returns note content. */
   readonly readNoteLockState?: (id: string) => Promise<"locked" | "unlocked">;
+  /**
+   * `"bodyless"` only when a note provably has no body (no content record, no
+   * `contentId`, no vault link, no `locked` marker on the note record);
+   * `"content"` otherwise.  Metadata only.
+   */
+  readonly readNoteBodyPresence?: (id: string) => Promise<"content" | "bodyless">;
   /** Body-free classifier for one note's stored content representation. */
   readonly noteContentDiagnostic?: (id: string) => Promise<NotesnookReadOnlyContentDiagnostic>;
   readonly readOperatorNoteContent?: (id: string) => Promise<NotesnookReadOnlyNoteContent>;

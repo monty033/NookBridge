@@ -1472,6 +1472,7 @@ describe("Stage 3 production projection and sync gate", () => {
       "listNotes",
       "noteContentDiagnostic",
       "noteMetadata",
+      "readNoteBodyPresence",
       "readNoteLockState",
       "readOperatorNoteContent",
       "search",
