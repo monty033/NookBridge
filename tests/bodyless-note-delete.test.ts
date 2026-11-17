@@ -295,13 +295,93 @@ describe("deleting a note that has a title and no body", () => {
     expect(trashed).toEqual([]);
   });
 
-  it("does not run the Vault probe when the content row is present", async () => {
+  it("refuses a content-bearing note that reads locked:false but is Vault-linked", async () => {
+    // The exact case in the issue: a readable record that says it is unlocked.
+    const { runtime, trashed } = createRuntime({
+      note: bodylessNote({ contentId: "content-1" }),
+      findByNoteId: async () => ({
+        id: "content-1",
+        noteId: NOTE_ID,
+        data: "<p>x</p>",
+        locked: false,
+      }),
+      linksToNote: () => [link(VAULT_ID, "vault", NOTE_ID, "note")],
+    });
+
+    expect(await deleteNote(runtime)).toBe("vault_locked");
+    expect(trashed).toEqual([]);
+  });
+
+  it("refuses a content-bearing note when the Vault probe cannot answer", async () => {
+    // Same fail-closed rule the read side applies: no answer is not "unlocked".
+    const { runtime, trashed } = createRuntime({
+      note: bodylessNote({ contentId: "content-1" }),
+      findByNoteId: async () => ({
+        id: "content-1",
+        noteId: NOTE_ID,
+        data: "<p>x</p>",
+        locked: false,
+      }),
+      linksToNote: () => {
+        throw new Error("relations unavailable");
+      },
+    });
+
+    expect(await deleteNote(runtime)).toBe("vault_locked");
+    expect(trashed).toEqual([]);
+  });
+
+  it("lets a note-level locked marker beat an unlocked content record", async () => {
+    // The read side already treats the note marker as strictest, so the write
+    // side cannot call this note unlocked.
+    const { runtime, trashed } = createRuntime({
+      note: bodylessNote({ contentId: "content-1", locked: true }),
+      findByNoteId: async () => ({
+        id: "content-1",
+        noteId: NOTE_ID,
+        data: "<p>x</p>",
+        locked: false,
+      }),
+    });
+
+    expect(await deleteNote(runtime)).toBe("vault_locked");
+    expect(trashed).toEqual([]);
+  });
+
+  it("lets the note's legacy locked:false marker decide when the content record has none", async () => {
+    // The read side calls this unlocked, so the write seam must not refuse it.
+    const { runtime, trashed } = createRuntime({
+      note: bodylessNote({ contentId: "content-1", locked: false }),
+      findByNoteId: async () => ({ id: "content-1", noteId: NOTE_ID, data: "<p>x</p>" }),
+      linksToNote: () => [],
+    });
+
+    expect(await deleteNote(runtime)).toBe("ok");
+    expect(trashed).toEqual([NOTE_ID]);
+  });
+
+  it("refuses when neither record carries a lock marker and no Vault link answers", async () => {
+    // Undecidable on the read side; a mutation must not treat it as unlocked.
     const { runtime, trashed } = createRuntime({
       note: bodylessNote({ contentId: "content-1" }),
       findByNoteId: async () => ({ id: "content-1", noteId: NOTE_ID, data: "<p>x</p>" }),
-      linksToNote: () => {
-        throw new Error("probe must not run");
-      },
+      linksToNote: () => [],
+    });
+
+    expect(await deleteNote(runtime)).toBe("vault_locked");
+    expect(trashed).toEqual([]);
+  });
+
+  it("still deletes a note with a content row and no Vault link", async () => {
+    const { runtime, trashed } = createRuntime({
+      note: bodylessNote({ contentId: "content-1" }),
+      findByNoteId: async () => ({
+        id: "content-1",
+        noteId: NOTE_ID,
+        data: "<p>x</p>",
+        locked: false,
+      }),
+      linksToNote: () => [],
     });
 
     expect(await deleteNote(runtime)).toBe("ok");
@@ -311,7 +391,12 @@ describe("deleting a note that has a title and no body", () => {
   it("deletes a note whose contentId is null although a content row exists", async () => {
     const { runtime, trashed } = createRuntime({
       note: bodylessNote(),
-      findByNoteId: async () => ({ id: "content-1", noteId: NOTE_ID, data: "<p>x</p>" }),
+      findByNoteId: async () => ({
+        id: "content-1",
+        noteId: NOTE_ID,
+        data: "<p>x</p>",
+        locked: false,
+      }),
     });
 
     expect(await deleteNote(runtime)).toBe("ok");

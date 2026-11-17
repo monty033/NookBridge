@@ -220,12 +220,33 @@ describe("bodyless note lock state — three-signal rule", () => {
     await expect(projection.readNoteBodyPresence!("n1")).resolves.toBe("content");
   });
 
-  describe("5. content-present behaviour is unchanged", () => {
-    it("a content record with locked:false is unlocked, whatever the other signals say", async () => {
-      await expect(lockState({ content: LIVE_CONTENT })).resolves.toBe("unlocked");
+  describe("5. a content record does not settle the lock on its own", () => {
+    it("a Vault-linked note with a readable content record is locked", async () => {
+      // Core stores the lock as a vault → note link, so the content record's
+      // own marker cannot be the only evidence.
       await expect(
         lockState({ content: LIVE_CONTENT, contentId: "content-1", vaultLinks: 3 }),
-      ).resolves.toBe("unlocked");
+      ).resolves.toBe("locked");
+    });
+
+    it("a content record carrying no lock flag is still locked by a Vault link", async () => {
+      await expect(
+        lockState({ content: { type: "tiptap", data: "x" }, vaultLinks: 2 }),
+      ).resolves.toBe("locked");
+    });
+
+    it("a readable content record with no Vault link is unlocked", async () => {
+      await expect(lockState({ content: LIVE_CONTENT })).resolves.toBe("unlocked");
+    });
+
+    it("throws when the Vault probe cannot answer, even with a readable content record", async () => {
+      const core = makeFakeCore({
+        notes: [{ id: "n1", title: "With body", content: LIVE_CONTENT }],
+        omitRelations: true,
+      });
+      await expect(
+        flattenLiveDatabaseToReadOnly(core as never).readNoteLockState!("n1"),
+      ).rejects.toThrow(/relations|lock state/i);
     });
 
     it("a content record with locked:true is locked", async () => {
@@ -254,7 +275,9 @@ describe("bodyless note lock state — three-signal rule", () => {
       expect(isNotesnookReadOnlyProjectionError(error)).toBe(true);
     });
 
-    it("never consults the vault probe when a content record exists", async () => {
+    it("consults the vault probe even when a content record exists", async () => {
+      // The lock lives in the relation table, so the content record cannot be
+      // the only evidence consulted.
       let probed = 0;
       const core = makeFakeCore({
         notes: [{ id: "n1", title: "Full", content: LIVE_CONTENT }],
@@ -263,8 +286,10 @@ describe("bodyless note lock state — three-signal rule", () => {
           return { count: async () => 0 };
         },
       });
-      await flattenLiveDatabaseToReadOnly(core as never).readNoteLockState!("n1");
-      expect(probed).toBe(0);
+      await expect(
+        flattenLiveDatabaseToReadOnly(core as never).readNoteLockState!("n1"),
+      ).resolves.toBe("unlocked");
+      expect(probed).toBeGreaterThan(0);
     });
   });
 });

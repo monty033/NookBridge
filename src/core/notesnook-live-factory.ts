@@ -960,6 +960,29 @@ async function isLockedByMetadata(
   }
 }
 
+/**
+ * The authoritative lock answer for a body read.  Only a decided "unlocked"
+ * lets the read proceed: the metadata flag is advisory and claims nothing when
+ * the state is undecidable, so reading the body on that basis would serve the
+ * content of a note whose lock could not be established.
+ */
+async function readDecidedLockState(
+  readLockState: NotesnookReadOnlyDatabase["readNoteLockState"],
+  id: string,
+): Promise<"locked" | "unlocked" | "undecidable"> {
+  if (readLockState === undefined) return "undecidable";
+  try {
+    const state: unknown = await readLockState(id);
+    // Only the two decided answers are answers.  Anything else is treated like
+    // a probe that could not run, so it can never open a body read.
+    if (state === "locked") return "locked";
+    if (state === "unlocked") return "unlocked";
+    return "undecidable";
+  } catch {
+    return "undecidable";
+  }
+}
+
 function guardReadOnlyProjection(
   readOnly: NotesnookReadOnlyDatabase,
   database: object,
@@ -992,11 +1015,16 @@ function guardReadOnlyProjection(
               readOnly,
               metadata,
             );
-            if (metadata.locked === true) {
+            // Ask the lock rule, not the advisory metadata flag: a note whose
+            // lock cannot be decided must not have its body served.
+            const lockState = await readDecidedLockState(readNoteLockState, id);
+            if (lockState !== "unlocked") {
               return {
                 metadata,
                 ...(notebookPathSnapshot === undefined ? {} : { notebookPathSnapshot }),
-                contentRefusal: "locked" as const,
+                contentRefusal: (lockState === "locked" ? "locked" : "read_failed") as
+                  | "locked"
+                  | "read_failed",
               };
             }
             try {
@@ -1027,8 +1055,10 @@ function guardReadOnlyProjection(
                   content: EMPTY_NOTE_BODY,
                 };
               }
-              // A locked note that has no content row is also reported as
-              // unsupported; the metadata lock state still says it is locked.
+              // A locked note no longer reaches the reader — the decided lock
+              // state refused it above — so this only re-reads the lock for a
+              // note whose answer changed between those two reads, and keeps a
+              // `vault_locked` refusal reported as locked.
               const locked =
                 (isNotesnookReadOnlyProjectionError(error) && error.message === "vault_locked") ||
                 (await isLockedByMetadata(readNoteLockState, id));

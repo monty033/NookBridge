@@ -227,6 +227,9 @@ export function createFakeCore(seedNotes: number | readonly SeedNote[]): FakeCor
         add: async () => undefined,
         unlink: async () => undefined,
         from: () => ({ get: async () => [] as unknown[] }),
+        // Incoming links, which is where a vault lock lives.  The synthetic
+        // corpus has no locked notes, so every count is zero.
+        to: () => ({ count: async () => 0, get: async () => [] as unknown[] }),
       },
       lookup: { notes: async () => emptyIds, notebooks: async () => emptyIds },
       lastSynced: async () => state.lastSyncedAt,

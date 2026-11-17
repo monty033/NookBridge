@@ -82,6 +82,18 @@ describe("bodyless notes in discovery", () => {
     await expect(visibility.isNoteVisible("vaulted")).resolves.toBe(false);
   });
 
+  it("7b. a note with content and a vault link stays hidden everywhere", async () => {
+    const visibility = visibilityOver([
+      { id: "linked", title: "Locked with body", content: LIVE_CONTENT, vaultLinks: 1 },
+      { id: "open", title: "Open with body", content: LIVE_CONTENT },
+    ]);
+
+    expect((await visibility.searchHits("x")).map((hit) => hit.id)).toEqual(["open"]);
+    expect((await visibility.listNotes()).map((note) => note.id)).toEqual(["open"]);
+    await expect(visibility.isNoteVisible("linked")).resolves.toBe(false);
+    await expect(visibility.isNoteVisible("open")).resolves.toBe(true);
+  });
+
   it("8. a bodyless note whose contentId is set but has no content is undecided, never visible", async () => {
     const visibility = visibilityOver([
       { id: "pending", title: "Content not arrived", contentId: "content-1" },
@@ -245,6 +257,30 @@ describe("bodyless notes through notes.get", () => {
     expect(response.ok && response.result.kind === "note" && "markdown" in response.result).toBe(
       false,
     );
+  });
+
+  it("11a. a note with a readable body that a vault links to is not served", async () => {
+    const notes = [{ id: "linked", title: "Linked", content: LIVE_CONTENT, vaultLinks: 1 }];
+    const readOnly = await handleOver(notes);
+    const snapshot = await readOnly.readNoteSnapshot!("linked");
+    expect(snapshot).toMatchObject({ contentRefusal: "locked" });
+    expect(snapshot).not.toHaveProperty("content");
+
+    const response = await getNote(notes, "linked");
+    expect(response).toMatchObject({ ok: true, result: { contentStatus: "locked" } });
+    expect(response.ok && response.result.kind === "note" && "markdown" in response.result).toBe(
+      false,
+    );
+  });
+
+  it("11c. a readable body is not served when the vault probe cannot answer", async () => {
+    const readOnly = await handleOver(
+      [{ id: "unprobed-body", title: "Unprobed", content: LIVE_CONTENT }],
+      { omitRelations: true },
+    );
+    const snapshot = await readOnly.readNoteSnapshot!("unprobed-body");
+    expect(snapshot).toMatchObject({ contentRefusal: "read_failed" });
+    expect(snapshot).not.toHaveProperty("content");
   });
 
   it("11b. a bodyless note whose content has not arrived is not served as empty", async () => {

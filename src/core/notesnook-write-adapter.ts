@@ -173,12 +173,13 @@ export interface NotesnookWriteNoteMetadata {
  * The narrow stored-content shape a Stage 4 append / update reads.
  * Body content stays in the seam; the adapter never widens it.
  *
- * `locked` is the authoritative Notesnook Vault marker carried on the
- * stored content record (Astra finding P1-2).  When the upstream
- * `notes.note(id)` projection omits the deprecated `note.locked`
- * flag, the seam consults `content.findByNoteId(id).locked` and
- * surfaces it here so the adapter's `vault_locked` gate can refuse
- * the write without a follow-up fetch.
+ * `locked` carries the stored content record's own lock evidence and
+ * nothing else.  It is one lock signal, not the authority: core stores a Vault
+ * lock as a `vault → note` relation, so the decision lives on the note
+ * projection (`NotesnookWriteNoteMetadata.locked`), which folds in the
+ * note marker, this record's marker and the incoming link.  Gating a
+ * write on this field alone would let an unlocked content record sit on
+ * a note the vault has linked.
  */
 export interface NotesnookWriteStoredContent {
   readonly id: string;
