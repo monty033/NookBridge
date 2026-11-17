@@ -330,6 +330,15 @@ export function bindNotesnookWriteRuntime(
         contentLocked = (await noteIsVaultLinked(safeId)) ? true : undefined;
       } else if (typeof contentResult === "object") {
         contentLocked = readOptionalLockedMarker(contentResult);
+        // A readable content record does not settle the lock: core stores the
+        // lock as a vault → note link, so a record that reads unlocked can
+        // still belong to a note the vault has locked.  The probe fails closed.
+        if (contentLocked !== true && (await noteIsVaultLinked(safeId))) contentLocked = true;
+        // With no marker on either record and no Vault link the state is not
+        // decided, which the read side reports as undecidable.  Refuse rather
+        // than call it unlocked.  Core derives `locked` from the record being
+        // encrypted, so a real content row always carries a boolean here.
+        if (contentLocked === undefined && explicitLocked === undefined) contentLocked = true;
       } else {
         // Indeterminate lock state fails closed.
         contentLocked = true;
@@ -339,13 +348,10 @@ export function bindNotesnookWriteRuntime(
       // cannot be shown to be unlocked, so report locked.
       contentLocked = true;
     }
-    return mapNote(
-      noteResult,
-      safeId,
-      contentLocked ?? explicitLocked,
-      contentUnavailable,
-      contentIdProperty,
-    );
+    // A `true` marker on the note is the strictest answer and beats a readable
+    // content record, matching `classifyNoteLockState`.
+    const locked = explicitLocked === true ? true : (contentLocked ?? explicitLocked);
+    return mapNote(noteResult, safeId, locked, contentUnavailable, contentIdProperty);
   };
 
   const notesAdd = async (input: {
@@ -1017,9 +1023,14 @@ function mapNote(
 }
 
 /**
- * Resolve the authoritative locked marker for a note.  The content
- * record is canonical when it supplies a marker; the upstream note
- * field is only a fallback for older records without content state.
+ * Resolve the locked marker for a note.  The only caller has already combined
+ * the content record's marker, the note's own boolean marker and the incoming
+ * Vault link into `contentLocked`, so this answers only the case where that is
+ * undefined: no local content row, no Vault link, and no boolean marker of the
+ * note's own.  The answer is `false`, or `invalid_input` when the note's
+ * `locked` is present but not a boolean.  That includes a note naming a content
+ * row this database has not fetched; the adapter refuses that one afterwards as
+ * `sync_required`, once the lock check has passed.
  */
 function resolveLockedState(record: object, contentLocked: boolean | undefined): boolean {
   if (contentLocked !== undefined) return contentLocked;

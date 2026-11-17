@@ -7,6 +7,15 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- A Vault link now locks a note even when the note has a readable content row.
+  Core stores the lock as a `vault → note` relation, so a content record that
+  reads `locked: false`, or carries no marker, was taken as proof the note was
+  unlocked. Metadata reads, discovery, `notes.get` and every write now consult
+  that link for any note whose content marker is not itself `locked: true`. A
+  linked note is hidden from discovery, `notes.get` answers
+  `contentStatus: "locked"`, and every mutation refuses with `vault_locked`; a
+  probe that cannot answer stays undecidable, so discovery withholds the note
+  and `notes.get` refuses to serve the body at all.
 - `notes.delete` now works on a note that has a title and no body. Core reads
   rows with `select *`, so a note created without a body carries
   `contentId: null`; the write projection rejected that as a malformed

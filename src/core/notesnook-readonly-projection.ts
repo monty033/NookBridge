@@ -180,8 +180,9 @@ export type NotesnookReadOnlyProjectionSource = NotesnookLiveDatabase;
  * `noteHistory` / `legacyTags` / `legacyColors` / `legacyNotes` /
  * `legacySettings` / `subscriptions` / `offers` / `debug` / `pricing`
  * collections is reachable through the projection. The projection
- * internally reads only `content.findByNoteId(id).locked` to enforce
- * Vault refusal; it never returns the content record or its data.
+ * internally reads `content.findByNoteId(id).locked` and
+ * `relations.to(note, "vault")` to decide Vault refusal; it never
+ * returns the content record or its data.
  */
 export function flattenLiveDatabaseToReadOnly(
   source: NotesnookReadOnlyProjectionSource,
@@ -356,11 +357,31 @@ export function flattenLiveDatabaseToReadOnly(
     // readable content record, so discovery, metadata and `notes.get` agree.
     const metadataLocked = readOptionalNoteLockedMarker(note);
     if (metadataLocked === true) return "locked";
+    // A Vault lock is a `vault → note` link, not a column on the note or its
+    // content, so neither record can settle the question alone.  Anything that
+    // would otherwise be reported unlocked is checked against that link first,
+    // and a probe that cannot answer stays undecidable rather than guessing.
+    const vaultLinks = async (): Promise<number | undefined> => {
+      try {
+        return await readVaultLinkCount(id);
+      } catch {
+        // No usable Vault probe.  That is "cannot decide", not an error: the
+        // lock state refuses and metadata simply claims nothing.  A content
+        // probe that failed above still throws for both.
+        return undefined;
+      }
+    };
     if (read.record === "present") {
       if (read.locked === true) return "locked";
-      // Legacy fallback: a record that says `locked: false` is unlocked; a
-      // record with no lock flag of its own falls back to the note's `false`
-      // marker.  A `true` marker never reaches here (it returned above).
+      // A readable content record does not settle the lock: a note the vault has
+      // locked carries a `vault → note` link, and a record that reads
+      // `locked: false` (or carries no flag) can still belong to such a note.
+      const links = await vaultLinks();
+      if (links === undefined) return "undecidable";
+      if (links > 0) return "locked";
+      // Legacy fallback: a record that says `locked: false` is unlocked, and a
+      // record with no flag of its own falls back to the note's `false` marker.
+      // A `true` marker never reaches here (it returned above).
       if (read.locked === false || metadataLocked === false) return "unlocked";
     }
     // No content record, so there is no lock flag to read.  That alone also
@@ -369,15 +390,8 @@ export function flattenLiveDatabaseToReadOnly(
     // row.  Only then does the absence of a `contentId` make it genuinely
     // empty; a named content row that is missing is content still to arrive.
     if (read.record === "absent") {
-      let links: number;
-      try {
-        links = await readVaultLinkCount(id);
-      } catch {
-        // No usable Vault probe.  That is "cannot decide", not an error: the
-        // lock state refuses and metadata simply claims nothing.  A content
-        // probe that failed above still throws for both.
-        return "undecidable";
-      }
+      const links = await vaultLinks();
+      if (links === undefined) return "undecidable";
       if (links > 0) return "locked";
       if (!noteNamesContent(note)) return "unlocked";
     }

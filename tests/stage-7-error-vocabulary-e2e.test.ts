@@ -542,6 +542,9 @@ function createFakeDatabase(
       },
     },
     relations: {
+      // Incoming links: where a vault lock lives.  These fixtures hold no
+      // locked notes, so the probe always answers zero.
+      to: () => ({ get: async () => [], count: async () => 0 }),
       add: async () => undefined,
       unlink: async () => undefined,
       from: (reference: { id: string; type: string }) => ({
