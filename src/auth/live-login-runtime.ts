@@ -53,10 +53,26 @@ import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.
 import type { LiveLoginRuntime } from "./admin-command.js";
 
 /**
- * Mirrors `PRODUCTION_STATE_DIR` in `operator/production-runtime.ts`.  Kept as
- * a literal here because that module imports this one.
+ * The production state directory.  `operator/production-runtime.ts` re-exports
+ * this as `PRODUCTION_STATE_DIR`, so there is one source of truth.
  */
 export const PRODUCTION_STATE_DIR_FOR_KEYS = "/var/lib/nookbridge" as const;
+
+/**
+ * Refuse to create a development key file inside the production state
+ * directory.  Production state holds its key only in the systemd credential
+ * slot; a development key minted there would be a second, unrelated key next
+ * to production data (issue #288).
+ *
+ * Pure: it inspects the path and the presence of a caller key store and writes
+ * nothing, so tests can exercise it without touching the real directory.
+ */
+export function assertNoDevelopmentKeyForProduction(stateDir: string, keysSupplied: boolean): void {
+  if (keysSupplied) return;
+  if (stateDir === PRODUCTION_STATE_DIR_FOR_KEYS) {
+    throw new Error("production state requires the systemd credential key");
+  }
+}
 
 /**
  * Select the systemd credential key store from `CREDENTIALS_DIRECTORY`.
@@ -80,8 +96,9 @@ export function liveLoginKeysFromEnvironment(
 
 /**
  * Add the systemd credential key to live-login runtime options when the
- * environment supplies one.  Every production call site goes through this so
- * no command mints a development key for the production state directory.
+ * environment supplies one.  Used by `auth live-login`.  Without a credential
+ * directory the options are returned unchanged, and production state then
+ * refuses to start (see `assertNoDevelopmentKeyForProduction`).
  */
 export function withLiveLoginKeys<T extends { stateDir: string }>(
   options: T,
@@ -95,9 +112,11 @@ export type CreateLiveLoginRuntimeOptions = Readonly<{
   stateDir: string;
   logger?: Logger;
   /**
-   * Optional caller-selected key backend.  The ordinary CLI path omits this
-   * and retains its development-file behavior.  Production provisioning
-   * supplies the systemd-credential backend explicitly.
+   * Optional caller-selected key backend.  When omitted, a non-production
+   * state directory keeps its development key file.  The production state
+   * directory refuses to run without a caller key, so no development key is
+   * ever created there.  The `auth live-login` path supplies the systemd key
+   * through `withLiveLoginKeys`.
    */
   keys?: SecureKeyStore;
   /** Offline test seam; never pass this from the CLI. */
@@ -115,12 +134,7 @@ export async function createProductionLiveLoginRuntime(
 ): Promise<LiveLoginRuntime> {
   const normalized = normalizeRuntimeOptions(options);
   const stateDir = normaliseStateDir(normalized.stateDir);
-  if (normalized.keys === undefined && stateDir === PRODUCTION_STATE_DIR_FOR_KEYS) {
-    // Production state holds its key only in the systemd credential slot.
-    // A development key minted here would be a second, unrelated key next to
-    // production data (issue #288).  Refuse instead of generating one.
-    throw new Error("production state requires the systemd credential key");
-  }
+  assertNoDevelopmentKeyForProduction(stateDir, normalized.keys !== undefined);
   const keys =
     normalized.keys ??
     createDevelopmentFileKeyStore({

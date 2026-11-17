@@ -12,8 +12,11 @@ release entries describe the supported boundary at the time of the release.
   root-owned inside a service-owned root, and the daemon could not start on
   them (issue #288).
 - `auth live-login` reads the production key from the systemd credential slot
-  when `CREDENTIALS_DIRECTORY` is set. It no longer falls back to a development
-  key file, and it refuses to mint one for the production state directory.
+  when `CREDENTIALS_DIRECTORY` is set. Production state now refuses to open
+  without a caller-supplied key, so no development key is ever created inside
+  the production state directory. Conflict, sync and write commands keep their
+  call shape; on production state they now refuse at runtime construction
+  instead of minting that development key (issue #288).
 - The operator path diagnostic no longer describes a locked note's body.
   `notes.path_diagnostic` reports content type and structure markers worked out
   from the body, and it trusted the content record's own `locked` flag. A Vault

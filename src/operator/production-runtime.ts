@@ -7,7 +7,10 @@
  * development CLI continues to use its explicitly marked file backend.
  */
 
-import { createProductionLiveLoginRuntime } from "../auth/live-login-runtime.js";
+import {
+  createProductionLiveLoginRuntime,
+  PRODUCTION_STATE_DIR_FOR_KEYS,
+} from "../auth/live-login-runtime.js";
 import type { LiveLoginRuntime } from "../auth/admin-command.js";
 import {
   createSystemdCredentialKeyStore,
@@ -15,7 +18,7 @@ import {
 } from "../keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 
-export const PRODUCTION_STATE_DIR = "/var/lib/nookbridge" as const;
+export const PRODUCTION_STATE_DIR = PRODUCTION_STATE_DIR_FOR_KEYS;
 export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
 
 const OPERATOR_ENV_NAMES = [
