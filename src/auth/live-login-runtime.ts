@@ -28,6 +28,10 @@ import { SqliteDialect } from "@streetwriters/kysely";
 
 import { normaliseStateDir, ensureStateDir } from "../config/state-dir.js";
 import { createDevelopmentFileKeyStore } from "../keystore/file-keystore.js";
+import {
+  createSystemdCredentialKeyStore,
+  NOOKBRIDGE_DB_KEY_LABEL,
+} from "../keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import { createPersistentStorage } from "../storage/persistent-storage.js";
@@ -47,6 +51,45 @@ import { PersistentSyncMetadataStateStore } from "../core/notesnook-sync-state-s
 import { PersistentNotesnookRecoveryJournal } from "../core/notesnook-recovery-journal.js";
 import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.js";
 import type { LiveLoginRuntime } from "./admin-command.js";
+
+/**
+ * Mirrors `PRODUCTION_STATE_DIR` in `operator/production-runtime.ts`.  Kept as
+ * a literal here because that module imports this one.
+ */
+export const PRODUCTION_STATE_DIR_FOR_KEYS = "/var/lib/nookbridge" as const;
+
+/**
+ * Select the systemd credential key store from `CREDENTIALS_DIRECTORY`.
+ *
+ * Returns `undefined` when the variable is unset or empty, so the caller keeps
+ * its default.  A relative directory yields a store whose key is undefined,
+ * which fails closed inside the store, so it never falls back to a dev key.
+ */
+export function liveLoginKeysFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): SecureKeyStore | undefined {
+  const credentialsDirectory = environment["CREDENTIALS_DIRECTORY"];
+  if (typeof credentialsDirectory !== "string" || credentialsDirectory.length === 0) {
+    return undefined;
+  }
+  return createSystemdCredentialKeyStore({
+    credentialsDirectory,
+    credentialName: NOOKBRIDGE_DB_KEY_LABEL,
+  });
+}
+
+/**
+ * Add the systemd credential key to live-login runtime options when the
+ * environment supplies one.  Every production call site goes through this so
+ * no command mints a development key for the production state directory.
+ */
+export function withLiveLoginKeys<T extends { stateDir: string }>(
+  options: T,
+  environment: Readonly<Record<string, string | undefined>>,
+): T & { keys?: SecureKeyStore } {
+  const keys = liveLoginKeysFromEnvironment(environment);
+  return keys === undefined ? options : { ...options, keys };
+}
 
 export type CreateLiveLoginRuntimeOptions = Readonly<{
   stateDir: string;
@@ -72,6 +115,12 @@ export async function createProductionLiveLoginRuntime(
 ): Promise<LiveLoginRuntime> {
   const normalized = normalizeRuntimeOptions(options);
   const stateDir = normaliseStateDir(normalized.stateDir);
+  if (normalized.keys === undefined && stateDir === PRODUCTION_STATE_DIR_FOR_KEYS) {
+    // Production state holds its key only in the systemd credential slot.
+    // A development key minted here would be a second, unrelated key next to
+    // production data (issue #288).  Refuse instead of generating one.
+    throw new Error("production state requires the systemd credential key");
+  }
   const keys =
     normalized.keys ??
     createDevelopmentFileKeyStore({

@@ -48,6 +48,7 @@ import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  chownSync,
   closeSync,
   constants,
   existsSync,
@@ -824,6 +825,29 @@ export function reinitializeProductionBundle(
   }
 }
 
+/**
+ * Give each fresh required member the state root's owner and mode 0600.
+ *
+ * Exported for focused tests; production callers reach it only through
+ * `reinitializeProductionBundle`.
+ */
+export function alignFreshMemberOwnership(
+  stateDir: string,
+  chown: (path: string, uid: number, gid: number) => void = chownSync,
+): boolean {
+  try {
+    const owner = lstatSync(stateDir);
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      const path = join(stateDir, member);
+      chown(path, owner.uid, owner.gid);
+      chmodSync(path, 0o600);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function quarantineAndReinitialize(
   stateDir: string,
   key: string,
@@ -933,6 +957,14 @@ function quarantineAndReinitialize(
     }
   } catch {
     return error(3, "failed to initialize fresh state");
+  }
+
+  // Fresh members are created by the operator's own process, which runs as
+  // root under sudo.  Left alone they would be root-owned inside a state root
+  // the service user owns, and the daemon could not open them (issue #288).
+  // Align them to the state root's owner and keep them private.
+  if (!alignFreshMemberOwnership(stateDir)) {
+    return error(3, "state ownership is not usable by the service user");
   }
 
   manifest = { ...manifest, status: "complete" };
