@@ -7,6 +7,12 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- The operator path diagnostic no longer describes a locked note's body.
+  `notes.path_diagnostic` reports content type and structure markers worked out
+  from the body, and it trusted the content record's own `locked` flag. A Vault
+  lock is a `vault -> note` relation, so a locked note — and a note whose lock
+  cannot be decided — is now refused instead of described, and the report shows
+  those values as unavailable.
 - A Vault link now locks a note even when the note has a readable content row.
   Core stores the lock as a `vault → note` relation, so a content record that
   reads `locked: false`, or carries no marker, was taken as proof the note was

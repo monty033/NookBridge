@@ -578,6 +578,9 @@ function createFakeLiveDatabase(
     },
     content: { findByNoteId: async (id: string) => contents.get(id) },
     relations: {
+      // Incoming links: where a vault lock lives.  No fixture in this file is
+      // vault-linked, so the probe always answers zero.
+      to: vi.fn(() => ({ count: async () => 0, get: async () => [] })),
       from: vi.fn((reference: { id: string; type: string }, type: string) => ({
         marker: "relation-array",
         has(this: { marker: string }, id: string) {
@@ -880,6 +883,7 @@ describe("Stage 3 production projection and sync gate", () => {
     const htmlSource = flattenLiveDatabaseToReadOnly(
       createFakeLiveDatabase({
         contentRecord: {
+          locked: false,
           type: "tiptap",
           data: '<div data-type="document"><h2>Title</h2><ul class="simple-checklist"><li class="simple-checklist--item"><p>task</p></li></ul></div>',
         },
@@ -896,6 +900,7 @@ describe("Stage 3 production projection and sync gate", () => {
     const taskListSource = flattenLiveDatabaseToReadOnly(
       createFakeLiveDatabase({
         contentRecord: {
+          locked: false,
           type: "tiptap",
           data: '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>task</p></li></ul></div>',
         },
@@ -912,6 +917,7 @@ describe("Stage 3 production projection and sync gate", () => {
     const markdownSource = flattenLiveDatabaseToReadOnly(
       createFakeLiveDatabase({
         contentRecord: {
+          locked: false,
           type: "tiptap",
           data: "## Title\\n- [ ] task",
         },

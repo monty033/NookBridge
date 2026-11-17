@@ -84,6 +84,7 @@ function createFakeRealCoreModule(
   options: Readonly<{
     notebookLookupFailure?: boolean;
     pathDiagnosticMembershipFailure?: boolean;
+    vaultLinkedTaskNote?: boolean;
     noteMetadataFailureId?: string;
     /**
      * Mirror a modern Notesnook record: the note carries NO deprecated
@@ -189,6 +190,9 @@ function createFakeRealCoreModule(
         findByNoteId: async (id: string) => {
           if (options.pathDiagnosticMembershipFailure && id === "task-note") {
             return {
+              // A real content row carries its lock state, derived from whether
+              // the record is encrypted.
+              locked: false,
               type: "tiptap",
               data: '<div data-type="document"><ul class="checklist"><li class="checklist--item"><p>item</p></li></ul></div>',
             };
@@ -201,9 +205,17 @@ function createFakeRealCoreModule(
           options.pathDiagnosticMembershipFailure ? titleSearchResults : emptySearchResults,
         notebooks: async () => emptySearchResults,
       },
-      ...(relationOnly
-        ? {
-            relations: {
+      // Core always exposes the relation manager, and the incoming-link probe is
+      // where a vault lock lives.  A link is reported only when a test asks for
+      // one by setting `vaultLinkedTaskNote`.
+      relations: {
+        to: (reference: { id: string; type: string }, _type: string) => ({
+          count: async () =>
+            options.vaultLinkedTaskNote === true && reference.id === "task-note" ? 1 : 0,
+          get: async () => [],
+        }),
+        ...(relationOnly
+          ? {
               from: (reference: { id: string; type: string }, type: string) => ({
                 has: async (noteId: string) =>
                   reference.type === "notebook" &&
@@ -211,9 +223,9 @@ function createFakeRealCoreModule(
                   type === "note" &&
                   noteId === "task-note",
               }),
-            },
-          }
-        : {}),
+            }
+          : {}),
+      },
       lastSynced: async () => 0,
       hasUnsyncedChanges: async () => false,
     };
@@ -756,6 +768,48 @@ describe("Stage 5 Task 3 — service-runtime constructor", () => {
           simpleChecklist: "absent",
           taskList: "present",
           literalMarkdown: "absent",
+        });
+      } finally {
+        if (runtime) await runtime.cleanup();
+      }
+    });
+
+    it("reports no body markers when the note is Vault-linked", async () => {
+      // This pins the production runtime path: a refusal from the projection
+      // reaches the operator as the all-unavailable report, not as markers.  The
+      // search-backed diagnostic has its own catch and is not exercised here.
+      const state = newState();
+      const tempCredentialsDir = mkdtempSync(
+        join(tmpdir(), "nookbridge-stage-5-vault-diagnostic-"),
+      );
+      writeFileSync(join(tempCredentialsDir, "nookbridge-db-key"), "stage-5-service-runtime-key", {
+        mode: 0o600,
+      });
+      const keys = createSystemdCredentialKeyStore({
+        credentialsDirectory: tempCredentialsDir,
+      });
+
+      let runtime: ServiceRuntime | undefined;
+      try {
+        runtime = await createProductionServiceRuntime({
+          stateDir: state.stateDir,
+          keys,
+          injectedModule: createFakeRealCoreModule({
+            pathDiagnosticMembershipFailure: true,
+            vaultLinkedTaskNote: true,
+          }),
+        });
+
+        await expect(
+          runtime.pathDiagnostic?.("General/Task list for Bernie"),
+        ).resolves.toMatchObject({
+          kind: "path_diagnostic",
+          title: "one",
+          contentType: "unavailable",
+          htmlPrefix: "unavailable",
+          simpleChecklist: "unavailable",
+          taskList: "unavailable",
+          literalMarkdown: "unavailable",
         });
       } finally {
         if (runtime) await runtime.cleanup();
