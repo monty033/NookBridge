@@ -991,6 +991,21 @@ export function flattenLiveDatabaseToReadOnly(
       if (typeof id !== "string" || id.length === 0) {
         throw projectionError("Notesnook read-only projection: note id must be a non-empty string");
       }
+      // This diagnostic describes the body, so the lock decides first.  The
+      // content record's own flag cannot: core stores a Vault lock as a
+      // `vault -> note` relation, so a record reading `locked: false` can still
+      // belong to a locked note, and a probe that cannot answer proves nothing.
+      const note = await callThrough(
+        noteFn,
+        [id],
+        "Notesnook read-only projection: notes.note rejected",
+      );
+      if (note === undefined || note === null) return unavailableContentDiagnostic();
+      const lockState = await classifyNoteLockState(id, note);
+      if (lockState === "locked") throw projectionError("vault_locked");
+      if (lockState === "undecidable") throw projectionError("lock_state_unavailable");
+      // Unreachable once the gate above refuses an unprobed lock; kept because
+      // the content lookup is optional and the narrowing has to hold here.
       if (contentFindByNoteIdFn === undefined) return unavailableContentDiagnostic();
       const content = await callThrough(
         contentFindByNoteIdFn,
