@@ -159,6 +159,12 @@ export interface NotesnookWriteNoteMetadata {
   readonly favorite: boolean;
   readonly conflicted: boolean;
   readonly locked: boolean;
+  /**
+   * True when the note names a content row this database does not hold yet, so
+   * the local copy is incomplete.  Writes refuse rather than act on a note whose
+   * body has not synced.
+   */
+  readonly contentUnavailable?: boolean;
   readonly dateEdited: number;
   readonly tags?: readonly string[];
 }
@@ -1411,6 +1417,12 @@ export class NotesnookWriteAdapter {
     }
     if (observed.locked === true) {
       throw adapterError("vault_locked", "Notesnook write adapter: note is locked in the vault");
+    }
+    if (observed.contentUnavailable === true) {
+      throw adapterError(
+        "sync_required",
+        "Notesnook write adapter: note content has not been fetched to this database",
+      );
     }
     const state: NotesnookRevisionState = {
       id: observed.id,

@@ -99,6 +99,25 @@ export interface NotesnookWriteRuntimeRelations {
       }>
     >;
   };
+  /**
+   * Relations pointing *at* the reference.  Core stores a Vault lock as a
+   * vault→note link, so this is the only direction that can see one.  Optional
+   * so a runtime that predates the probe still binds; the probe then fails
+   * closed instead of assuming the note is unlocked.
+   */
+  readonly to?: (
+    reference: { readonly id: string; readonly type: string },
+    type?: string,
+  ) => {
+    readonly get: () => Promise<
+      ReadonlyArray<{
+        readonly fromId: string;
+        readonly fromType: string;
+        readonly toId: string;
+        readonly toType: string;
+      }>
+    >;
+  };
 }
 
 export interface NotesnookWriteRuntime {
@@ -175,7 +194,7 @@ const RUNTIME_SLOTS = {
   content: ["add", "findByNoteId", "updateByNoteId"],
   notebooks: ["exists", "notes"],
   tags: ["tag", "add"],
-  relations: ["add", "unlink", "from"],
+  relations: ["add", "unlink", "from", "to"],
 } as const;
 
 /**
@@ -219,6 +238,7 @@ interface RuntimeSnapshot {
     readonly add: NotesnookWriteRuntimeRelations["add"];
     readonly unlink: NotesnookWriteRuntimeRelations["unlink"];
     readonly from: NotesnookWriteRuntimeRelations["from"];
+    readonly to: NotesnookWriteRuntimeRelations["to"] | undefined;
   };
 }
 
@@ -226,6 +246,56 @@ export function bindNotesnookWriteRuntime(
   source: NotesnookWriteRuntimeSource,
 ): NotesnookWriteDatabase {
   const snapshot = validateRuntime(resolveRuntime(source));
+
+  /**
+   * Does a Vault link point at this note?  Core stores the lock as a link from
+   * the vault *to* the note (`lockNote` calls `relations.add(vault, note)`), so
+   * only `relations.to(...)` can see it; an outgoing-link query never can.  The
+   * probe reads metadata only and fails closed — if the relation seam cannot
+   * answer, the note is reported as Vault-linked.
+   */
+  const noteIsVaultLinked = async (noteId: string): Promise<boolean> => {
+    const toRelations = snapshot.relations.to;
+    // A runtime without the incoming-link query cannot prove the note unlocked.
+    if (toRelations === undefined) return true;
+    try {
+      const handle = safeSyncCall(() => toRelations({ id: noteId, type: "note" }, "vault"));
+      const handleRecord = requireObject(handle, "sync_failed");
+      const getValue = readPropertyGuarded(handleRecord, "get", "sync_failed");
+      if (typeof getValue !== "function") throw wiringError("sync_failed");
+      const get = bindMethod(getValue, handleRecord, "sync_failed");
+      const rows = await safeCall(() => get());
+      let isArray = false;
+      try {
+        isArray = Array.isArray(rows);
+      } catch {
+        throw wiringError("sync_failed");
+      }
+      if (!isArray) throw wiringError("sync_failed");
+      const lengthValue = readPropertyGuarded(rows, "length", "sync_failed");
+      if (
+        typeof lengthValue !== "number" ||
+        !Number.isSafeInteger(lengthValue) ||
+        lengthValue < 0 ||
+        lengthValue > MAX_RUNTIME_ARRAY_ITEMS
+      ) {
+        throw wiringError("sync_failed");
+      }
+      for (let index = 0; index < lengthValue; index += 1) {
+        const row = requireObject(readArrayEntry(rows, index, "sync_failed"), "sync_failed");
+        const fromType = requireOwnProperty(row, "fromType", "sync_failed");
+        const toId = requireOwnProperty(row, "toId", "sync_failed");
+        const toType = requireOwnProperty(row, "toType", "sync_failed");
+        // An unfiltered or misdirected query must not be read as "no lock": the
+        // row has to be a link that actually terminates at this note.
+        if (toId !== noteId || toType !== "note") throw wiringError("sync_failed");
+        if (fromType === "vault") return true;
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  };
 
   const note = async (id: string): Promise<NotesnookWriteNoteMetadata | undefined> => {
     const safeId = requireIdentifier(id);
@@ -240,11 +310,24 @@ export function bindNotesnookWriteRuntime(
       const value = noteRecord.locked;
       if (typeof value === "boolean") explicitLocked = value;
     }
+    const contentIdProperty =
+      noteRecord === undefined
+        ? { present: false, value: undefined }
+        : readOwnProperty(noteRecord, "contentId", "invalid_input");
     let contentLocked: boolean | undefined;
+    let contentUnavailable = false;
     try {
       const contentResult = await safeCall(() => snapshot.content.findByNoteId(safeId));
       if (contentResult === undefined || contentResult === null) {
-        contentLocked = undefined;
+        // No content row locally, which is normal for a title-only note.  A note
+        // that still names a content row is waiting for content this database
+        // has not received, so its local copy is incomplete.  A Vault link locks
+        // it even when the content never arrived.
+        contentUnavailable =
+          contentIdProperty.present &&
+          typeof contentIdProperty.value === "string" &&
+          contentIdProperty.value.length > 0;
+        contentLocked = (await noteIsVaultLinked(safeId)) ? true : undefined;
       } else if (typeof contentResult === "object") {
         contentLocked = readOptionalLockedMarker(contentResult);
       } else {
@@ -256,7 +339,13 @@ export function bindNotesnookWriteRuntime(
       // cannot be shown to be unlocked, so report locked.
       contentLocked = true;
     }
-    return mapNote(noteResult, safeId, contentLocked ?? explicitLocked);
+    return mapNote(
+      noteResult,
+      safeId,
+      contentLocked ?? explicitLocked,
+      contentUnavailable,
+      contentIdProperty,
+    );
   };
 
   const notesAdd = async (input: {
@@ -561,6 +650,10 @@ function validateRuntime(value: unknown): RuntimeSnapshot {
       readPropertyGuarded(relationsOwner, RUNTIME_SLOTS.relations[2]),
       relationsOwner,
     ),
+    to: (() => {
+      const candidate = readPropertyGuarded(relationsOwner, RUNTIME_SLOTS.relations[3]);
+      return typeof candidate === "function" ? bindMethod(candidate, relationsOwner) : undefined;
+    })(),
   }) as RuntimeSnapshot["relations"];
 
   return frozenRecord({ notes, content, notebooks, tags, relations }) as RuntimeSnapshot;
@@ -870,6 +963,8 @@ function mapNote(
   value: unknown,
   requestedId: string,
   contentLocked: boolean | undefined,
+  contentUnavailable: boolean,
+  observedContentId: { readonly present: boolean; readonly value: unknown },
 ): NotesnookWriteNoteMetadata {
   const record = requireObject(value, "invalid_input");
   const id = requireIdentifier(requireOwnProperty(record, "id", "invalid_input"));
@@ -890,7 +985,7 @@ function mapNote(
     throw wiringError("invalid_input");
   }
   if (id !== requestedId) throw wiringError("invalid_input");
-  const contentId = readOwnProperty(record, "contentId", "invalid_input");
+  const contentId = observedContentId;
   const notebookId = readOwnProperty(record, "notebookId", "invalid_input");
   const tags = readOwnProperty(record, "tags", "invalid_input");
   const result: {
@@ -904,8 +999,12 @@ function mapNote(
     contentId?: string;
     notebookId?: string;
     tags?: readonly string[];
+    contentUnavailable?: boolean;
   } = { id, title, pinned, favorite, conflicted, locked, dateEdited };
-  if (contentId.present && contentId.value !== undefined) {
+  if (contentUnavailable) result.contentUnavailable = true;
+  // Core reads rows with `select *`, so a note created without a body carries
+  // `contentId: null`.  That means "no content row", the same as an absent key.
+  if (contentId.present && contentId.value !== undefined && contentId.value !== null) {
     result.contentId = requireIdentifier(contentId.value);
   }
   if (notebookId.present && notebookId.value !== undefined) {

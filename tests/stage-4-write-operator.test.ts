@@ -248,6 +248,20 @@ function createFakeDatabase(
           relations.filter((relation) => relation.fromId === reference.id).map((r) => ({ ...r })),
       };
     },
+    to: (reference: { id?: string; type: string }, type?: string) => {
+      calls.push("relations.to");
+      return {
+        get: async (): Promise<readonly FakeRelation[]> =>
+          relations
+            .filter(
+              (relation) =>
+                relation.toId === reference.id &&
+                relation.toType === reference.type &&
+                (type === undefined || relation.fromType === type),
+            )
+            .map((r) => ({ ...r })),
+      };
+    },
   };
 
   // The fake carries extra slots (`user`, `kv`, `syncer`) precisely so the
