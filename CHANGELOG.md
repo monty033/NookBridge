@@ -12,7 +12,9 @@ release entries describe the supported boundary at the time of the release.
   root-owned inside a service-owned root, and the daemon could not start on
   them (issue #288).
 - The `auth` commands (live-login, status and logout) read the production key from
-  the systemd credential slot when `CREDENTIALS_DIRECTORY` is set. Production state now refuses to open
+  the systemd credential slot when `CREDENTIALS_DIRECTORY` is set. They also refuse to
+  open a state root owned by another user, so running them as root against the
+  service-owned production directory cannot leave the daemon unusable state. Production state now refuses to open
   without a caller-supplied key, so no development key is ever created inside
   the production state directory. Conflict, sync and write commands keep their
   call shape; on production state they now refuse at runtime construction

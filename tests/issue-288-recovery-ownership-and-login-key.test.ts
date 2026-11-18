@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertCallerOwnsStateRoot,
   assertNoDevelopmentKeyForProduction,
   liveLoginKeysFromEnvironment,
   PRODUCTION_STATE_DIR_FOR_KEYS,
@@ -241,6 +242,33 @@ describe("issue #288 — the auth commands read the systemd credential key", () 
     expect(block).toMatch(/return createAuthLiveLoginRuntime\(\{/);
     expect(block).toMatch(/environment,/);
     expect(block).not.toContain("createProductionLiveLoginRuntime");
+  });
+});
+
+describe("issue #288 — the caller must own the state root", () => {
+  it("refuses when the state root belongs to another user", () => {
+    const stateDir = tempDir("nb288-owner-");
+    const root = statSync(stateDir);
+    expect(() => assertCallerOwnsStateRoot(stateDir, root.uid + 1)).toThrow(
+      "state directory is owned by another user",
+    );
+  });
+
+  it("allows the owner of the state root", () => {
+    const stateDir = tempDir("nb288-owner-ok-");
+    const root = statSync(stateDir);
+    expect(() => assertCallerOwnsStateRoot(stateDir, root.uid)).not.toThrow();
+  });
+
+  it("allows a state root that does not exist yet", () => {
+    expect(() =>
+      assertCallerOwnsStateRoot(join(tempDir("nb288-absent-"), "not-created"), 0),
+    ).not.toThrow();
+  });
+
+  it("skips the check where the platform cannot report a uid", () => {
+    const stateDir = tempDir("nb288-no-uid-");
+    expect(() => assertCallerOwnsStateRoot(stateDir, undefined)).not.toThrow();
   });
 });
 

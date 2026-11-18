@@ -23,6 +23,7 @@
 
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
+import process from "node:process";
 import Database from "better-sqlite3-multiple-ciphers";
 import { SqliteDialect } from "@streetwriters/kysely";
 
@@ -74,6 +75,36 @@ export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
  * Pure: it inspects the path and the presence of a caller key store and writes
  * nothing, so tests can exercise it without touching the real directory.
  */
+/**
+ * Refuse to open state as a user that does not own the state root.
+ *
+ * This runtime creates database members as the invoking user.  Run as root
+ * against a service-owned state root it would leave root-owned members the
+ * daemon cannot open, which is the same failure issue #288 fixes on the
+ * recovery path.  Running as the owner is the supported shape, and that
+ * includes the documented recovery login run as the service user.
+ *
+ * A state root that does not exist yet is not refused: nothing production
+ * shaped exists to damage, and the caller is about to create it as itself.
+ */
+export function assertCallerOwnsStateRoot(
+  stateDir: string,
+  callerUid: number | undefined = typeof process.getuid === "function"
+    ? process.getuid()
+    : undefined,
+): void {
+  if (callerUid === undefined) return;
+  let ownerUid: number;
+  try {
+    ownerUid = statSync(stateDir).uid;
+  } catch {
+    return;
+  }
+  if (ownerUid !== callerUid) {
+    throw new Error("state directory is owned by another user");
+  }
+}
+
 export function assertNoDevelopmentKeyForProduction(
   stateDir: string,
   keysSupplied: boolean,
@@ -186,6 +217,7 @@ export async function createProductionLiveLoginRuntime(
   const normalized = normalizeRuntimeOptions(options);
   const stateDir = normaliseStateDir(normalized.stateDir);
   assertNoDevelopmentKeyForProduction(stateDir, normalized.keys !== undefined);
+  assertCallerOwnsStateRoot(stateDir);
   const keys =
     normalized.keys ??
     createDevelopmentFileKeyStore({
