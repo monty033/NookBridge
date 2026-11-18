@@ -980,8 +980,12 @@ async function runAuth(args: Args, logger: ReturnType<typeof createLogger>): Pro
       stateDir,
       createPrompt: () => createStdioPrompt(),
       createRuntime: async ({ stateDir: runtimeStateDir }) => {
-        const { createProductionLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
-        return createProductionLiveLoginRuntime({ stateDir: runtimeStateDir, logger });
+        const { createAuthLiveLoginRuntime } = await import("./auth/live-login-runtime.js");
+        return createAuthLiveLoginRuntime({
+          stateDir: runtimeStateDir,
+          environment,
+          logger,
+        });
       },
     },
   });

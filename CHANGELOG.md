@@ -7,6 +7,19 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- Recovery reinitialize leaves state the service user can open. Fresh required
+  members take the state root's owner and mode `0600`; before, they were
+  root-owned inside a service-owned root, and the daemon could not start on
+  them (issue #288).
+- The `auth` commands (live-login, status and logout) read the production key from
+  the systemd credential slot when `CREDENTIALS_DIRECTORY` is set, and refuse to
+  open a state root owned by another user, so running them as root against the
+  service-owned production directory cannot leave the daemon unusable state.
+  Without a caller-supplied key the runtime does not create a development key at
+  or below the production state directory, subdirectories included. Conflict,
+  sync and write commands keep their call shape; on production state they now
+  refuse at runtime construction instead of minting that development key
+  (issue #288).
 - The operator path diagnostic no longer describes a locked note's body.
   `notes.path_diagnostic` reports content type and structure markers worked out
   from the body, and it trusted the content record's own `locked` flag. A Vault

@@ -22,12 +22,18 @@
  */
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import process from "node:process";
 import Database from "better-sqlite3-multiple-ciphers";
 import { SqliteDialect } from "@streetwriters/kysely";
 
 import { normaliseStateDir, ensureStateDir } from "../config/state-dir.js";
 import { createDevelopmentFileKeyStore } from "../keystore/file-keystore.js";
+import {
+  createSystemdCredentialKeyStore,
+  NOOKBRIDGE_DB_KEY_LABEL,
+} from "../keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 import type { Logger } from "../logging/logger.js";
 import { createPersistentStorage } from "../storage/persistent-storage.js";
@@ -48,13 +54,162 @@ import { PersistentNotesnookRecoveryJournal } from "../core/notesnook-recovery-j
 import { createLiveNotesnookAuthProvider } from "./live-notesnook-auth-provider.js";
 import type { LiveLoginRuntime } from "./admin-command.js";
 
+/**
+ * The production state directory.  `operator/production-runtime.ts` re-exports
+ * this as `PRODUCTION_STATE_DIR`, so there is one source of truth.
+ */
+export const PRODUCTION_STATE_DIR_FOR_KEYS = "/var/lib/nookbridge" as const;
+
+/**
+ * Name of the environment variable that carries the systemd credentials
+ * directory.  Defined here because this module reads it; `operator/
+ * production-runtime.ts` re-exports it.
+ */
+export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
+
+/**
+ * Refuse to create a development key file inside the production state
+ * directory.  Production state holds its key only in the systemd credential
+ * slot; a development key minted there would be a second, unrelated key next
+ * to production data (issue #288).
+ *
+ * Pure: it inspects the path and the presence of a caller key store and writes
+ * nothing, so tests can exercise it without touching the real directory.
+ */
+/**
+ * Refuse to open state as a user that does not own the state root.
+ *
+ * This runtime creates database members as the invoking user.  Run as root
+ * against a service-owned state root it would leave root-owned members the
+ * daemon cannot open, which is the same failure issue #288 fixes on the
+ * recovery path.  Running as the owner is the supported shape, and that
+ * includes the documented recovery login run as the service user.
+ *
+ * A state root that does not exist yet is not refused: nothing production
+ * shaped exists to damage, and the caller is about to create it as itself.
+ */
+export function assertCallerOwnsStateRoot(
+  stateDir: string,
+  callerUid: number | undefined = typeof process.getuid === "function"
+    ? process.getuid()
+    : undefined,
+): void {
+  if (callerUid === undefined) return;
+  let ownerUid: number;
+  try {
+    ownerUid = statSync(stateDir).uid;
+  } catch {
+    return;
+  }
+  if (ownerUid !== callerUid) {
+    throw new Error("state directory is owned by another user");
+  }
+}
+
+export function assertNoDevelopmentKeyForProduction(
+  stateDir: string,
+  keysSupplied: boolean,
+  productionDir: string = PRODUCTION_STATE_DIR_FOR_KEYS,
+): void {
+  if (keysSupplied) return;
+  if (isAtOrBelowDirectory(stateDir, productionDir)) {
+    throw new Error("production state requires the systemd credential key");
+  }
+}
+
+/**
+ * True when `a` names the production directory, or any directory inside it, by
+ * resolved path or by device and inode.  A symlink or bind mount that reaches
+ * the production directory is caught, not only the literal string, and so is a
+ * subdirectory: the daemon accepts `/var/lib/nookbridge/...` as production
+ * state, so a key written below it is a second key next to production data.
+ * An absent side is simply not a match.
+ */
+function isAtOrBelowDirectory(a: string, b: string): boolean {
+  if (a === b) return true;
+  const resolvedA = resolveOrSelf(a);
+  const resolvedB = resolveOrSelf(b);
+  if (resolvedA === resolvedB || resolvedA.startsWith(`${resolvedB}${sep}`)) return true;
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve a path, falling back to the caller's literal text when it is absent. */
+function resolveOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Select the systemd credential key store from `CREDENTIALS_DIRECTORY`.
+ *
+ * Returns `undefined` when the variable is unset or empty, so the caller keeps
+ * its default.  A relative directory yields a store whose key is undefined,
+ * which fails closed inside the store, so it never falls back to a dev key.
+ */
+export function liveLoginKeysFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): SecureKeyStore | undefined {
+  const credentialsDirectory = environment[CREDENTIALS_DIRECTORY_ENV];
+  if (typeof credentialsDirectory !== "string" || credentialsDirectory.length === 0) {
+    return undefined;
+  }
+  return createSystemdCredentialKeyStore({
+    credentialsDirectory,
+    credentialName: NOOKBRIDGE_DB_KEY_LABEL,
+  });
+}
+
+/**
+ * Add the systemd credential key to live-login runtime options when the
+ * environment supplies one.  Used by the `auth` commands.  Without a credential
+ * directory the options are returned unchanged, and production state then
+ * refuses to start (see `assertNoDevelopmentKeyForProduction`).
+ */
+export function withLiveLoginKeys<T extends { stateDir: string }>(
+  options: T,
+  environment: Readonly<Record<string, string | undefined>>,
+): T & { keys?: SecureKeyStore } {
+  const keys = liveLoginKeysFromEnvironment(environment);
+  return keys === undefined ? options : { ...options, keys };
+}
+
+/**
+ * Build the live-login runtime for the `auth` commands (live-login, status and
+ * logout).  They share one factory, so the systemd credential key reaches all
+ * three from `CREDENTIALS_DIRECTORY`.
+ */
+export async function createAuthLiveLoginRuntime(
+  input: Readonly<{
+    stateDir: string;
+    environment: Readonly<Record<string, string | undefined>>;
+    logger?: Logger;
+  }>,
+): Promise<LiveLoginRuntime> {
+  const base: CreateLiveLoginRuntimeOptions =
+    input.logger === undefined
+      ? { stateDir: input.stateDir }
+      : { stateDir: input.stateDir, logger: input.logger };
+  return createProductionLiveLoginRuntime(withLiveLoginKeys(base, input.environment));
+}
+
 export type CreateLiveLoginRuntimeOptions = Readonly<{
   stateDir: string;
   logger?: Logger;
   /**
-   * Optional caller-selected key backend.  The ordinary CLI path omits this
-   * and retains its development-file behavior.  Production provisioning
-   * supplies the systemd-credential backend explicitly.
+   * Optional caller-selected key backend.  When omitted, a non-production
+   * state directory keeps its development key file.  The production state
+   * directory refuses to run without a caller key, so no development key is
+   * ever created there.  The `auth live-login` path supplies the systemd key
+   * through `withLiveLoginKeys`.
    */
   keys?: SecureKeyStore;
   /** Offline test seam; never pass this from the CLI. */
@@ -72,6 +227,8 @@ export async function createProductionLiveLoginRuntime(
 ): Promise<LiveLoginRuntime> {
   const normalized = normalizeRuntimeOptions(options);
   const stateDir = normaliseStateDir(normalized.stateDir);
+  assertNoDevelopmentKeyForProduction(stateDir, normalized.keys !== undefined);
+  assertCallerOwnsStateRoot(stateDir);
   const keys =
     normalized.keys ??
     createDevelopmentFileKeyStore({

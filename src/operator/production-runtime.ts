@@ -7,16 +7,17 @@
  * development CLI continues to use its explicitly marked file backend.
  */
 
-import { createProductionLiveLoginRuntime } from "../auth/live-login-runtime.js";
-import type { LiveLoginRuntime } from "../auth/admin-command.js";
 import {
-  createSystemdCredentialKeyStore,
-  NOOKBRIDGE_DB_KEY_LABEL,
-} from "../keystore/systemd-credential-keystore.js";
+  CREDENTIALS_DIRECTORY_ENV,
+  createProductionLiveLoginRuntime,
+  liveLoginKeysFromEnvironment,
+  PRODUCTION_STATE_DIR_FOR_KEYS,
+} from "../auth/live-login-runtime.js";
+import type { LiveLoginRuntime } from "../auth/admin-command.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 
-export const PRODUCTION_STATE_DIR = "/var/lib/nookbridge" as const;
-export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
+export const PRODUCTION_STATE_DIR = PRODUCTION_STATE_DIR_FOR_KEYS;
+export { CREDENTIALS_DIRECTORY_ENV };
 
 const OPERATOR_ENV_NAMES = [
   CREDENTIALS_DIRECTORY_ENV,
@@ -70,14 +71,9 @@ export function readSafeOperatorEnvironment(
 export function createProductionOperatorKeyStore(
   environment: Readonly<Record<string, string | undefined>>,
 ): SecureKeyStore {
-  const credentialsDirectory = environment[CREDENTIALS_DIRECTORY_ENV];
-  if (typeof credentialsDirectory !== "string" || credentialsDirectory.length === 0) {
-    throw new Error("operator credential runtime unavailable");
-  }
-  return createSystemdCredentialKeyStore({
-    credentialsDirectory,
-    credentialName: NOOKBRIDGE_DB_KEY_LABEL,
-  });
+  const keys = liveLoginKeysFromEnvironment(environment);
+  if (keys === undefined) throw new Error("operator credential runtime unavailable");
+  return keys;
 }
 
 /**

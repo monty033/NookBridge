@@ -52,6 +52,7 @@ import {
   constants,
   existsSync,
   fchmodSync,
+  fchownSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -160,6 +161,15 @@ export type BundleRollbackResult =
   | Readonly<{ kind: "rolled-back"; quarantineId: string }>
   | Readonly<{ kind: "error"; exitCode: 2 | 3; message: string }>;
 
+/** Descriptor-level ownership operations; production uses the real calls. */
+export type AlignOwnershipSeam = Readonly<{
+  fchown: (fd: number, uid: number, gid: number) => void;
+  fchmod: (fd: number, mode: number) => void;
+}>;
+
+/** Device and inode of a fresh member, recorded right after it is created. */
+export type FreshMemberIdentity = Readonly<{ dev: number; ino: number }>;
+
 export type ReinitializeBundleOptions = Readonly<{
   stateDir: string;
   /**
@@ -167,6 +177,8 @@ export type ReinitializeBundleOptions = Readonly<{
    * `nookbridge-db-key` from.  The value is a directory, never the key.
    */
   credentialsDirectory?: string;
+  /** Test seam only; production callers never set this. */
+  ownership?: AlignOwnershipSeam;
 }>;
 
 export type RollbackBundleOptions = Readonly<{
@@ -814,7 +826,7 @@ export function reinitializeProductionBundle(
         }
       }
     }
-    return quarantineAndReinitialize(stateDir, key, scan);
+    return quarantineAndReinitialize(stateDir, key, scan, options.ownership);
   } finally {
     try {
       release();
@@ -824,10 +836,80 @@ export function reinitializeProductionBundle(
   }
 }
 
+/**
+ * Give each fresh required member the state root's owner and mode 0600.
+ *
+ * Runs as root, and the service user owns the state root, so it can replace a
+ * member with a symlink or hard link.  Every member is therefore opened with
+ * `O_NOFOLLOW`, must be a regular file with exactly one link, and is changed
+ * through its open descriptor only.  A path-based chown here would follow a
+ * symlink and hand root's ownership change to an arbitrary file.
+ *
+ * `ownership` is an injection seam for focused tests; production uses the
+ * default.  Returns false on any refusal so the caller fails closed.
+ */
+export function alignFreshMemberOwnership(
+  stateDir: string,
+  ownership: AlignOwnershipSeam = { fchown: fchownSync, fchmod: fchmodSync },
+  expected?: ReadonlyMap<string, FreshMemberIdentity>,
+): boolean {
+  let owner: { uid: number; gid: number };
+  try {
+    const root = lstatSync(stateDir);
+    if (!root.isDirectory()) return false;
+    owner = { uid: root.uid, gid: root.gid };
+  } catch {
+    return false;
+  }
+
+  // Phase 1: open and validate every member before changing any of them, so a
+  // refusal on a later member leaves earlier members untouched.  Each
+  // descriptor is held until the end so the changes land on the same inodes
+  // that were checked.
+  const fds: number[] = [];
+  const closeAll = (): void => {
+    for (const fd of fds) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* descriptor already unusable */
+      }
+    }
+  };
+  try {
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      const fd = openSync(
+        join(stateDir, member),
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      fds.push(fd);
+      const st = fstatSync(fd);
+      if (!st.isFile() || st.nlink !== 1) return false;
+      // Prove this is the inode the reinitialize step created, not a file
+      // swapped in afterwards by a service user who owns the state root.
+      if (expected !== undefined) {
+        const want = expected.get(member);
+        if (want === undefined || st.dev !== want.dev || st.ino !== want.ino) return false;
+      }
+    }
+    // Phase 2: change only the validated descriptors.
+    for (const fd of fds) {
+      ownership.fchown(fd, owner.uid, owner.gid);
+      ownership.fchmod(fd, 0o600);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    closeAll();
+  }
+}
+
 function quarantineAndReinitialize(
   stateDir: string,
   key: string,
   scan: ResolvedQuarantineScan,
+  ownership: AlignOwnershipSeam | undefined,
 ): BundleReinitializeResult {
   const quarantineDir = join(stateDir, QUARANTINE_RELATIVE_DIR);
   try {
@@ -922,6 +1004,7 @@ function quarantineAndReinitialize(
   // While holding the lock, this check narrows (but cannot eliminate) the race.
   // Initialize fresh encrypted members so the service can start and resync.
   if (hasUnsafeBundleEntry(stateDir)) return error(2, "refusing unsafe production database bundle");
+  const freshIdentities = new Map<string, FreshMemberIdentity>();
   try {
     for (const member of REQUIRED_BUNDLE_MEMBERS) {
       const fresh = new SqliteStorage({
@@ -930,9 +1013,22 @@ function quarantineAndReinitialize(
         withExtensions: false,
       });
       fresh.close();
+      // Record the identity immediately, while no other member is being
+      // created: the later pass compares against this, so the gap in which a
+      // file could be substituted must be as short as possible.
+      const st = lstatSync(join(stateDir, member));
+      freshIdentities.set(member, { dev: st.dev, ino: st.ino });
     }
   } catch {
     return error(3, "failed to initialize fresh state");
+  }
+
+  // Fresh members are created by the operator's own process, which runs as
+  // root under sudo.  Left alone they would be root-owned inside a state root
+  // the service user owns, and the daemon could not open them (issue #288).
+  // Align them to the state root's owner and keep them private.
+  if (!alignFreshMemberOwnership(stateDir, ownership, freshIdentities)) {
+    return error(3, "state ownership is not usable by the service user");
   }
 
   manifest = { ...manifest, status: "complete" };
