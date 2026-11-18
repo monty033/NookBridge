@@ -8,19 +8,16 @@
  */
 
 import {
+  CREDENTIALS_DIRECTORY_ENV,
   createProductionLiveLoginRuntime,
   liveLoginKeysFromEnvironment,
   PRODUCTION_STATE_DIR_FOR_KEYS,
 } from "../auth/live-login-runtime.js";
 import type { LiveLoginRuntime } from "../auth/admin-command.js";
-import {
-  createSystemdCredentialKeyStore,
-  NOOKBRIDGE_DB_KEY_LABEL,
-} from "../keystore/systemd-credential-keystore.js";
 import type { SecureKeyStore } from "../keystore/keystore.js";
 
 export const PRODUCTION_STATE_DIR = PRODUCTION_STATE_DIR_FOR_KEYS;
-export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
+export { CREDENTIALS_DIRECTORY_ENV };
 
 const OPERATOR_ENV_NAMES = [
   CREDENTIALS_DIRECTORY_ENV,

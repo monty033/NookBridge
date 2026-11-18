@@ -59,6 +59,13 @@ import type { LiveLoginRuntime } from "./admin-command.js";
 export const PRODUCTION_STATE_DIR_FOR_KEYS = "/var/lib/nookbridge" as const;
 
 /**
+ * Name of the environment variable that carries the systemd credentials
+ * directory.  Defined here because this module reads it; `operator/
+ * production-runtime.ts` re-exports it.
+ */
+export const CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY" as const;
+
+/**
  * Refuse to create a development key file inside the production state
  * directory.  Production state holds its key only in the systemd credential
  * slot; a development key minted there would be a second, unrelated key next
@@ -109,7 +116,7 @@ function isSameDirectory(a: string, b: string): boolean {
 export function liveLoginKeysFromEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
 ): SecureKeyStore | undefined {
-  const credentialsDirectory = environment["CREDENTIALS_DIRECTORY"];
+  const credentialsDirectory = environment[CREDENTIALS_DIRECTORY_ENV];
   if (typeof credentialsDirectory !== "string" || credentialsDirectory.length === 0) {
     return undefined;
   }
