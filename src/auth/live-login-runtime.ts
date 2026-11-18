@@ -22,7 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import Database from "better-sqlite3-multiple-ciphers";
 import { SqliteDialect } from "@streetwriters/kysely";
 
@@ -67,10 +67,35 @@ export const PRODUCTION_STATE_DIR_FOR_KEYS = "/var/lib/nookbridge" as const;
  * Pure: it inspects the path and the presence of a caller key store and writes
  * nothing, so tests can exercise it without touching the real directory.
  */
-export function assertNoDevelopmentKeyForProduction(stateDir: string, keysSupplied: boolean): void {
+export function assertNoDevelopmentKeyForProduction(
+  stateDir: string,
+  keysSupplied: boolean,
+  productionDir: string = PRODUCTION_STATE_DIR_FOR_KEYS,
+): void {
   if (keysSupplied) return;
-  if (stateDir === PRODUCTION_STATE_DIR_FOR_KEYS) {
+  if (isSameDirectory(stateDir, productionDir)) {
     throw new Error("production state requires the systemd credential key");
+  }
+}
+
+/**
+ * True when both paths name the same directory, by resolved path or by device
+ * and inode.  A symlink or bind mount that reaches the production directory is
+ * caught, not only the literal string.  An absent side is simply not a match.
+ */
+function isSameDirectory(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    if (realpathSync(a) === realpathSync(b)) return true;
+  } catch {
+    /* an absent side cannot be resolved; try the inode comparison */
+  }
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -96,7 +121,7 @@ export function liveLoginKeysFromEnvironment(
 
 /**
  * Add the systemd credential key to live-login runtime options when the
- * environment supplies one.  Used by `auth live-login`.  Without a credential
+ * environment supplies one.  Used by the `auth` commands.  Without a credential
  * directory the options are returned unchanged, and production state then
  * refuses to start (see `assertNoDevelopmentKeyForProduction`).
  */
@@ -106,6 +131,25 @@ export function withLiveLoginKeys<T extends { stateDir: string }>(
 ): T & { keys?: SecureKeyStore } {
   const keys = liveLoginKeysFromEnvironment(environment);
   return keys === undefined ? options : { ...options, keys };
+}
+
+/**
+ * Build the live-login runtime for the `auth` commands (live-login, status and
+ * logout).  They share one factory, so the systemd credential key reaches all
+ * three from `CREDENTIALS_DIRECTORY`.
+ */
+export async function createAuthLiveLoginRuntime(
+  input: Readonly<{
+    stateDir: string;
+    environment: Readonly<Record<string, string | undefined>>;
+    logger?: Logger;
+  }>,
+): Promise<LiveLoginRuntime> {
+  const base: CreateLiveLoginRuntimeOptions =
+    input.logger === undefined
+      ? { stateDir: input.stateDir }
+      : { stateDir: input.stateDir, logger: input.logger };
+  return createProductionLiveLoginRuntime(withLiveLoginKeys(base, input.environment));
 }
 
 export type CreateLiveLoginRuntimeOptions = Readonly<{

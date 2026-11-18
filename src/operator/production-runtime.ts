@@ -9,6 +9,7 @@
 
 import {
   createProductionLiveLoginRuntime,
+  liveLoginKeysFromEnvironment,
   PRODUCTION_STATE_DIR_FOR_KEYS,
 } from "../auth/live-login-runtime.js";
 import type { LiveLoginRuntime } from "../auth/admin-command.js";
@@ -73,14 +74,9 @@ export function readSafeOperatorEnvironment(
 export function createProductionOperatorKeyStore(
   environment: Readonly<Record<string, string | undefined>>,
 ): SecureKeyStore {
-  const credentialsDirectory = environment[CREDENTIALS_DIRECTORY_ENV];
-  if (typeof credentialsDirectory !== "string" || credentialsDirectory.length === 0) {
-    throw new Error("operator credential runtime unavailable");
-  }
-  return createSystemdCredentialKeyStore({
-    credentialsDirectory,
-    credentialName: NOOKBRIDGE_DB_KEY_LABEL,
-  });
+  const keys = liveLoginKeysFromEnvironment(environment);
+  if (keys === undefined) throw new Error("operator credential runtime unavailable");
+  return keys;
 }
 
 /**

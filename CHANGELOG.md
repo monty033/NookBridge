@@ -11,8 +11,8 @@ release entries describe the supported boundary at the time of the release.
   members take the state root's owner and mode `0600`; before, they were
   root-owned inside a service-owned root, and the daemon could not start on
   them (issue #288).
-- `auth live-login` reads the production key from the systemd credential slot
-  when `CREDENTIALS_DIRECTORY` is set. Production state now refuses to open
+- The `auth` commands (live-login, status and logout) read the production key from
+  the systemd credential slot when `CREDENTIALS_DIRECTORY` is set. Production state now refuses to open
   without a caller-supplied key, so no development key is ever created inside
   the production state directory. Conflict, sync and write commands keep their
   call shape; on production state they now refuse at runtime construction

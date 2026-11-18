@@ -161,6 +161,15 @@ export type BundleRollbackResult =
   | Readonly<{ kind: "rolled-back"; quarantineId: string }>
   | Readonly<{ kind: "error"; exitCode: 2 | 3; message: string }>;
 
+/** Descriptor-level ownership operations; production uses the real calls. */
+export type AlignOwnershipSeam = Readonly<{
+  fchown: (fd: number, uid: number, gid: number) => void;
+  fchmod: (fd: number, mode: number) => void;
+}>;
+
+/** Device and inode of a fresh member, recorded right after it is created. */
+export type FreshMemberIdentity = Readonly<{ dev: number; ino: number }>;
+
 export type ReinitializeBundleOptions = Readonly<{
   stateDir: string;
   /**
@@ -168,6 +177,8 @@ export type ReinitializeBundleOptions = Readonly<{
    * `nookbridge-db-key` from.  The value is a directory, never the key.
    */
   credentialsDirectory?: string;
+  /** Test seam only; production callers never set this. */
+  ownership?: AlignOwnershipSeam;
 }>;
 
 export type RollbackBundleOptions = Readonly<{
@@ -815,7 +826,7 @@ export function reinitializeProductionBundle(
         }
       }
     }
-    return quarantineAndReinitialize(stateDir, key, scan);
+    return quarantineAndReinitialize(stateDir, key, scan, options.ownership);
   } finally {
     try {
       release();
@@ -839,10 +850,8 @@ export function reinitializeProductionBundle(
  */
 export function alignFreshMemberOwnership(
   stateDir: string,
-  ownership: Readonly<{
-    fchown: (fd: number, uid: number, gid: number) => void;
-    fchmod: (fd: number, mode: number) => void;
-  }> = { fchown: fchownSync, fchmod: fchmodSync },
+  ownership: AlignOwnershipSeam = { fchown: fchownSync, fchmod: fchmodSync },
+  expected?: ReadonlyMap<string, FreshMemberIdentity>,
 ): boolean {
   let owner: { uid: number; gid: number };
   try {
@@ -876,6 +885,12 @@ export function alignFreshMemberOwnership(
       fds.push(fd);
       const st = fstatSync(fd);
       if (!st.isFile() || st.nlink !== 1) return false;
+      // Prove this is the inode the reinitialize step created, not a file
+      // swapped in afterwards by a service user who owns the state root.
+      if (expected !== undefined) {
+        const want = expected.get(member);
+        if (want === undefined || st.dev !== want.dev || st.ino !== want.ino) return false;
+      }
     }
     // Phase 2: change only the validated descriptors.
     for (const fd of fds) {
@@ -894,6 +909,7 @@ function quarantineAndReinitialize(
   stateDir: string,
   key: string,
   scan: ResolvedQuarantineScan,
+  ownership: AlignOwnershipSeam | undefined,
 ): BundleReinitializeResult {
   const quarantineDir = join(stateDir, QUARANTINE_RELATIVE_DIR);
   try {
@@ -988,6 +1004,7 @@ function quarantineAndReinitialize(
   // While holding the lock, this check narrows (but cannot eliminate) the race.
   // Initialize fresh encrypted members so the service can start and resync.
   if (hasUnsafeBundleEntry(stateDir)) return error(2, "refusing unsafe production database bundle");
+  const freshIdentities = new Map<string, FreshMemberIdentity>();
   try {
     for (const member of REQUIRED_BUNDLE_MEMBERS) {
       const fresh = new SqliteStorage({
@@ -997,6 +1014,10 @@ function quarantineAndReinitialize(
       });
       fresh.close();
     }
+    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      const st = lstatSync(join(stateDir, member));
+      freshIdentities.set(member, { dev: st.dev, ino: st.ino });
+    }
   } catch {
     return error(3, "failed to initialize fresh state");
   }
@@ -1005,7 +1026,7 @@ function quarantineAndReinitialize(
   // root under sudo.  Left alone they would be root-owned inside a state root
   // the service user owns, and the daemon could not open them (issue #288).
   // Align them to the state root's owner and keep them private.
-  if (!alignFreshMemberOwnership(stateDir)) {
+  if (!alignFreshMemberOwnership(stateDir, ownership, freshIdentities)) {
     return error(3, "state ownership is not usable by the service user");
   }
 
