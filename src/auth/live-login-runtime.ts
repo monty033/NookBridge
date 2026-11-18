@@ -23,6 +23,7 @@
 
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import process from "node:process";
 import Database from "better-sqlite3-multiple-ciphers";
 import { SqliteDialect } from "@streetwriters/kysely";
@@ -111,29 +112,39 @@ export function assertNoDevelopmentKeyForProduction(
   productionDir: string = PRODUCTION_STATE_DIR_FOR_KEYS,
 ): void {
   if (keysSupplied) return;
-  if (isSameDirectory(stateDir, productionDir)) {
+  if (isAtOrBelowDirectory(stateDir, productionDir)) {
     throw new Error("production state requires the systemd credential key");
   }
 }
 
 /**
- * True when both paths name the same directory, by resolved path or by device
- * and inode.  A symlink or bind mount that reaches the production directory is
- * caught, not only the literal string.  An absent side is simply not a match.
+ * True when `a` names the production directory, or any directory inside it, by
+ * resolved path or by device and inode.  A symlink or bind mount that reaches
+ * the production directory is caught, not only the literal string, and so is a
+ * subdirectory: the daemon accepts `/var/lib/nookbridge/...` as production
+ * state, so a key written below it is a second key next to production data.
+ * An absent side is simply not a match.
  */
-function isSameDirectory(a: string, b: string): boolean {
+function isAtOrBelowDirectory(a: string, b: string): boolean {
   if (a === b) return true;
-  try {
-    if (realpathSync(a) === realpathSync(b)) return true;
-  } catch {
-    /* an absent side cannot be resolved; try the inode comparison */
-  }
+  const resolvedA = resolveOrSelf(a);
+  const resolvedB = resolveOrSelf(b);
+  if (resolvedA === resolvedB || resolvedA.startsWith(`${resolvedB}${sep}`)) return true;
   try {
     const sa = statSync(a);
     const sb = statSync(b);
     return sa.dev === sb.dev && sa.ino === sb.ino;
   } catch {
     return false;
+  }
+}
+
+/** Resolve a path, falling back to the caller's literal text when it is absent. */
+function resolveOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
   }
 }
 

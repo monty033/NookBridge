@@ -1013,8 +1013,9 @@ function quarantineAndReinitialize(
         withExtensions: false,
       });
       fresh.close();
-    }
-    for (const member of REQUIRED_BUNDLE_MEMBERS) {
+      // Record the identity immediately, while no other member is being
+      // created: the later pass compares against this, so the gap in which a
+      // file could be substituted must be as short as possible.
       const st = lstatSync(join(stateDir, member));
       freshIdentities.set(member, { dev: st.dev, ino: st.ino });
     }

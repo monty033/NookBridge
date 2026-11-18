@@ -245,6 +245,29 @@ describe("issue #288 — the auth commands read the systemd credential key", () 
   });
 });
 
+describe("issue #288 — production state includes its subdirectories", () => {
+  it("refuses a directory inside the production directory", () => {
+    const productionDir = tempDir("nb288-prod-");
+    expect(() =>
+      assertNoDevelopmentKeyForProduction(join(productionDir, "nested"), false, productionDir),
+    ).toThrow("production state requires the systemd credential key");
+  });
+
+  it("allows a sibling whose name only shares the prefix", () => {
+    const productionDir = tempDir("nb288-prod-");
+    expect(() =>
+      assertNoDevelopmentKeyForProduction(`${productionDir}-other`, false, productionDir),
+    ).not.toThrow();
+  });
+
+  it("still allows a caller-supplied key below the production directory", () => {
+    const productionDir = tempDir("nb288-prod-");
+    expect(() =>
+      assertNoDevelopmentKeyForProduction(join(productionDir, "nested"), true, productionDir),
+    ).not.toThrow();
+  });
+});
+
 describe("issue #288 — the caller must own the state root", () => {
   it("refuses when the state root belongs to another user", () => {
     const stateDir = tempDir("nb288-owner-");
