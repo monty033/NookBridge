@@ -81,6 +81,7 @@ describe("operator policy — closed method vocabulary", () => {
       "notes.edit-census",
       "notes.resolve-conflict",
       "notes.inspect-conflict",
+      "notes.abandon-resolve",
     ]);
   });
 

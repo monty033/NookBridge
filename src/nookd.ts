@@ -767,7 +767,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               ...discoveryMethods,
               ...(operatorConflictResolve === undefined
                 ? {}
-                : { resolveConflict: operatorConflictResolve.resolveConflict }),
+                : {
+                    resolveConflict: operatorConflictResolve.resolveConflict,
+                    abandonConflict: operatorConflictResolve.abandonConflict,
+                  }),
               ...(operatorConflictInspect === undefined
                 ? {}
                 : { inspectConflict: operatorConflictInspect.inspectConflict }),

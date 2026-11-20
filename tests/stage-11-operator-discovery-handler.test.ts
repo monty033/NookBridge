@@ -5,7 +5,7 @@ import { OperatorWriteError } from "../src/service/notes-operator-write-runtime.
 
 describe("operator discovery handler", () => {
   it("publishes the frozen operator vocabulary separately from discovery", () => {
-    expect(OPERATOR_METHODS).toHaveLength(12);
+    expect(OPERATOR_METHODS).toHaveLength(13);
     expect([...OPERATOR_METHODS]).toEqual([
       "notes.get-view",
       "notes.edit-preimage",
@@ -19,6 +19,7 @@ describe("operator discovery handler", () => {
       "notes.edit-census",
       "notes.resolve-conflict",
       "notes.inspect-conflict",
+      "notes.abandon-resolve",
     ]);
     expect([...OPERATOR_DISCOVERY_METHODS]).toEqual(["notes.browse", "notes.search-operator"]);
   });

@@ -309,6 +309,15 @@ unqueued. This covers `copy_changed`, `stale_revision`, `read_failed`,
 `resolved_flag_pending`, and `post_write_unverified`. Outcomes that stop before the
 content write mark nothing. The outcome carries no body, id, digest, or path.
 
+An unresolved attempt blocks every later resolve for its note, because the copy no longer
+matches what was recorded. The way out is `notes.abandon-resolve` with the exact phrase
+`ABANDON`. It writes nothing to the note, deletes nothing, and leaves the flag as it is.
+It marks the original pending for upload approval when the content write may have run,
+and returns the two titles so the owner can find the copy. Afterwards, inspect both
+notes before approving the upload: if the flag was already cleared, the note looks
+resolved in the app even though the bridge never verified it. A second abandon returns
+`not_found`. An attempt still in `committing` is refused.
+
 A window remains between the last copy read-back and the content write. The copy row is
 not locked, so a change inside that window is not caught.
 

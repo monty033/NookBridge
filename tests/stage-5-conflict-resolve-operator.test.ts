@@ -28,6 +28,7 @@ import {
   NOTESNOOK_RECOVERY_JOURNAL_MAX_MARKERS,
 } from "../src/core/notesnook-recovery-journal.js";
 import { createOperatorConflictResolveRuntime } from "../src/service/notes-conflict-resolve-runtime.js";
+import { ownerKey } from "../src/service/notes-operator-write-runtime.js";
 import { createNotesUndoStore, type OperationStoreFs } from "../src/service/notes-undo-store.js";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
 import { OPERATOR_METHODS } from "../src/service/operator-methods.js";
@@ -873,6 +874,129 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(base.notes.has("note-copy-1")).toBe(true);
     const ops = await operationsOf(store);
     expect(ops[0]?.state).toBe("unresolved");
+  });
+
+  it("abandons a copy_changed attempt: writes nothing, aborts the record, marks the original pending", async () => {
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+          return result;
+        },
+      },
+    };
+    const { runtime, pending, store, journal } = await harness(wrapped);
+    const binding = await bindingOf(base);
+
+    const first = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+    expect(first).toMatchObject({ outcome: "copy_changed" });
+    // A retry is refused until the attempt is closed.
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+
+    // Clear the pending list so the assertion below sees only the abandon's mark.
+    pending.length = 0;
+    const writesBefore = writesOf(base).length;
+    const abandoned = await runtime.abandonConflict(
+      { id: HANDLE, confirmation: "ABANDON" },
+      PEER_A,
+    );
+
+    expect(abandoned).toMatchObject({ kind: "conflict-abandon", outcome: "abandoned" });
+    expect(abandoned).toEqual({
+      kind: "conflict-abandon",
+      outcome: "abandoned",
+      originalTitle: expect.any(String),
+      copyTitle: expect.any(String),
+    });
+    expect(writesOf(base).length).toBe(writesBefore);
+    expect(pending).toEqual(["note-1"]);
+    expect((await operationsOf(store))[0]?.state).toBe("aborted");
+    expect(journal.snapshot()).toEqual([]);
+    expect(base.contents.get("content-1")).toMatchObject({ data: REMOTE_BODY });
+    expect(base.contents.get("content-copy-1")).toMatchObject({ data: "TAMPERED" });
+    expect(base.notes.get("note-1")).toMatchObject({ conflicted: true });
+    expect(base.notes.has("note-copy-1")).toBe(true);
+  });
+
+  it("refuses a second abandon once the attempt is closed, with no writes and no pending mark", async () => {
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+          return result;
+        },
+      },
+    };
+    const { runtime, pending } = await harness(wrapped);
+    const binding = await bindingOf(base);
+    await runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A);
+    await runtime.abandonConflict({ id: HANDLE, confirmation: "ABANDON" }, PEER_A);
+
+    pending.length = 0;
+    const writesBefore = writesOf(base).length;
+    await expect(
+      runtime.abandonConflict({ id: HANDLE, confirmation: "ABANDON" }, PEER_A),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(writesOf(base).length).toBe(writesBefore);
+    expect(pending).toEqual([]);
+  });
+
+  it("refuses to abandon a committing attempt, since its run is still in progress", async () => {
+    const base = createFake();
+    const { runtime, store, pending, journal } = await harness(base);
+    // The content stage is journaled, so the only thing stopping the abandon is
+    // the record's state. Without that check, markPending would run before the refusal.
+    journal.record(createNotesnookRecoveryMarker("update", "note-1", "resolve-content"));
+    const owner = ownerKey(PEER_A);
+    const payload = JSON.stringify({
+      kind: "resolve",
+      owner,
+      noteId: "note-1",
+      contentId: "content-1",
+      remoteDate: 1,
+      remoteDigest: "a".repeat(64),
+      originalTitle: "Original",
+      copyTitle: "Copy",
+    });
+    const record = await store.insert({ kind: "resolve", payload, ttlMs: 60_000 });
+    await store.transition(record.handle, "prepared", "committing", undefined, owner);
+    const writesBefore = writesOf(base).length;
+
+    await expect(
+      runtime.abandonConflict({ id: HANDLE, confirmation: "ABANDON" }, PEER_A),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+    expect(writesOf(base).length).toBe(writesBefore);
+    expect(pending).toEqual([]);
+    expect((await operationsOf(store))[0]?.state).toBe("committing");
+  });
+
+  it("refuses the abandon when the exact phrase is missing, before any lookup or write", async () => {
+    const base = createFake();
+    const { runtime, pending } = await harness(base);
+    const writesBefore = writesOf(base).length;
+
+    await expect(
+      runtime.abandonConflict({ id: HANDLE, confirmation: "abandon" }, PEER_A),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(writesOf(base).length).toBe(writesBefore);
+    expect(pending).toEqual([]);
   });
 
   it("does not mark pending when the copy changes before the overwrite", async () => {

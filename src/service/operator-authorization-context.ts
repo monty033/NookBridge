@@ -33,6 +33,7 @@ export const OPERATOR_MUTATING_METHODS: ReadonlyArray<OperatorMethod> = Object.f
   "notes.create",
   "notes.approve-upload",
   "notes.resolve-conflict",
+  "notes.abandon-resolve",
 ] satisfies OperatorMethod[]);
 
 /** The published operation-handle shape; matches the write runtime's own token. */
@@ -130,6 +131,7 @@ export function settingsOperationForMethod(method: OperatorMethod): SettingsOper
     case "notes.apply-edit":
     case "notes.apply-undo":
     case "notes.resolve-conflict":
+    case "notes.abandon-resolve":
       return "edit";
     case "notes.create":
       return "create";

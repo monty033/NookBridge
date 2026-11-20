@@ -1008,6 +1008,7 @@ async function runAuthorizedRpcMethod(
     case "notes.edit-census":
     case "notes.resolve-conflict":
     case "notes.inspect-conflict":
+    case "notes.abandon-resolve":
       return buildErrorEnvelope(id, "permission_denied");
   }
 }
