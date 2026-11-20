@@ -24,6 +24,7 @@ import {
 import {
   createNotesnookRecoveryMarker,
   MemoryNotesnookRecoveryJournal,
+  type NotesnookRecoveryJournal,
   NOTESNOOK_RECOVERY_JOURNAL_MAX_MARKERS,
 } from "../src/core/notesnook-recovery-journal.js";
 import { createOperatorConflictResolveRuntime } from "../src/service/notes-conflict-resolve-runtime.js";
@@ -776,6 +777,65 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(base.notes.has("note-copy-1")).toBe(true);
     const ops = await operationsOf(store);
     expect(ops[0]?.state).toBe("unresolved");
+  });
+
+  it("still marks the original pending when the journal read fails after the content write", async () => {
+    // The persistent journal returns an empty list on a read error. The pending
+    // decision must not depend on that read, or a failed read silently skips the mark.
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+          return result;
+        },
+      },
+    };
+    const journal = new MemoryNotesnookRecoveryJournal();
+    // Explicit delegation: the real journal keeps private state, so a prototype
+    // wrapper cannot reach it. Only snapshot() is made to fail.
+    const readFailingJournal: NotesnookRecoveryJournal & {
+      readonly discard: NonNullable<NotesnookRecoveryJournal["discard"]>;
+    } = {
+      record: (marker) => journal.record(marker),
+      snapshot: () => [],
+      discard: (noteId, stages) => journal.discard(noteId, stages),
+    };
+    const pending: string[] = [];
+    const capability: LiveConflictResolveCapability = {
+      seam: wrapped.seam,
+      journal: readFailingJournal,
+      runExclusive: async <T>(_label: string, fn: () => T | PromiseLike<T>): Promise<T> =>
+        await fn(),
+      markPending: (noteId: string) => {
+        pending.push(noteId);
+      },
+    };
+    const store = await createNotesUndoStore({
+      fs: new MemoryFs(),
+      daemonKey: new Uint8Array(32).fill(7),
+      now: () => 1_000,
+    });
+    const runtime = createOperatorConflictResolveRuntime({
+      capability,
+      store,
+      resolveHandle: (handle: string) => (handle === HANDLE ? "note-1" : undefined),
+    });
+    const binding = await bindingOf(base);
+
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+
+    expect(result).toMatchObject({ outcome: "copy_changed" });
+    expect(pending).toEqual(["note-1"]);
+    expect(base.notes.has("note-copy-1")).toBe(true);
   });
 
   it("does not mark pending when the copy changes before the overwrite", async () => {
