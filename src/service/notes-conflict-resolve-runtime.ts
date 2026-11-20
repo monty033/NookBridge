@@ -192,6 +192,7 @@ export function createOperatorConflictResolveRuntime(
     // stops the write and is reported after the resolver returns.
     let copyAttempted = false;
     let journalFailed = false;
+    let contentAttempted = false;
     const mark = (stage: NotesnookRecoveryStage, operation: "create" | "update"): void => {
       try {
         journal.record(createNotesnookRecoveryMarker(operation, noteId, stage));
@@ -239,6 +240,9 @@ export function createOperatorConflictResolveRuntime(
         if (!(await copyStillMatches()))
           throw new OperatorWriteError("service_unavailable", handle);
         mark("resolve-content", "update");
+        // Set before the write is attempted, so a failed or partial write is treated
+        // as possibly applied. Local to this run: no journal read can change it.
+        contentAttempted = true;
         return seam.contentResolve(input);
       },
       noteClearConflict: async (id) => {
@@ -263,12 +267,7 @@ export function createOperatorConflictResolveRuntime(
       // original's new content unqueued. Mark it pending so the bridge and the
       // operator can see it, but only when the content write actually ran.
       if (outcome.outcome === "copy_changed") {
-        const reachedContent = journal
-          .snapshot()
-          .some(
-            (marker) => marker.noteId === noteId && CONTENT_OR_FLAG_STAGES.includes(marker.stage),
-          );
-        if (reachedContent) {
+        if (contentAttempted) {
           try {
             capability.markPending(noteId);
           } catch {
