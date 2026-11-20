@@ -9,6 +9,7 @@ import type {
   RpcNotesOperationStatusResult,
   RpcNotesEditCensusResult,
   RpcNotesConflictResolveResult,
+  RpcNotesConflictAbandonResult,
   RpcNotesConflictInspectResult,
   RpcOperatorApproveUploadParams,
   RpcNotesApproveUploadResponse,
@@ -91,6 +92,11 @@ export interface OperatorDiscoveryRuntime {
     params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ) => Promise<RpcNotesConflictResolveResult>;
+  /** Operator-only abandon of one unresolved keep-both attempt; absent when unwired. */
+  readonly abandonConflict?: (
+    params: Readonly<{ id: string; confirmation: string }>,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesConflictAbandonResult>;
   /** Operator-only, read-only conflict inspection; absent when no inspector is wired. */
   readonly inspectConflict?: (
     params: Readonly<{ id: string }>,
@@ -158,6 +164,11 @@ export function createOperatorDiscoveryHandler(
           return failure(request.id, "service_unavailable");
         return mutationSuccess(request.id, await runtime.resolveConflict(request.params, peer));
       }
+      if (request.method === "notes.abandon-resolve") {
+        if (runtime.abandonConflict === undefined)
+          return failure(request.id, "service_unavailable");
+        return mutationSuccess(request.id, await runtime.abandonConflict(request.params, peer));
+      }
       if (request.method === "notes.inspect-conflict") {
         if (runtime.inspectConflict === undefined)
           return failure(request.id, "service_unavailable");
@@ -206,6 +217,7 @@ function mutationSuccess(
     | RpcNotesEditCensusResult
     | RpcNotesConflictResolveResult
     | RpcNotesConflictInspectResult
+    | RpcNotesConflictAbandonResult
     | RpcCreatedNoteResult,
 ): RpcAnyResponseEnvelope {
   return { id, ok: true, result } as RpcAnyResponseEnvelope;

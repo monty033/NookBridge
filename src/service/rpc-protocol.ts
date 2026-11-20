@@ -374,7 +374,8 @@ export type RpcMethod =
   | "notes.search-operator"
   | "notes.edit-census"
   | "notes.resolve-conflict"
-  | "notes.inspect-conflict";
+  | "notes.inspect-conflict"
+  | "notes.abandon-resolve";
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -521,6 +522,24 @@ export interface RpcNotesConflictResolveRequest {
 }
 
 /**
+ * The exact phrase a `notes.abandon-resolve` request must carry. Abandon closes
+ * one unresolved keep-both attempt without writing to the note. The daemon
+ * refuses any other value.
+ */
+export const CONFLICT_ABANDON_CONFIRMATION = "ABANDON" as const;
+
+export interface RpcOperatorConflictAbandonParams {
+  readonly id: string;
+  readonly confirmation: typeof CONFLICT_ABANDON_CONFIRMATION;
+}
+
+export interface RpcNotesAbandonResolveRequest {
+  readonly id: string;
+  readonly method: "notes.abandon-resolve";
+  readonly params: RpcOperatorConflictAbandonParams;
+}
+
+/**
  * Operator-only conflict inspection, read-only. `id` is the opaque note handle
  * and nothing else: no binding, body, or note id crosses the socket.
  */
@@ -558,7 +577,8 @@ export type RpcRequest =
   | RpcNotesSearchOperatorRequest
   | RpcNotesEditCensusRequest
   | RpcNotesConflictResolveRequest
-  | RpcNotesConflictInspectRequest;
+  | RpcNotesConflictInspectRequest
+  | RpcNotesAbandonResolveRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -953,6 +973,17 @@ export type RpcNotesConflictResolveResult =
     }>;
 
 /**
+ * Result of `notes.abandon-resolve`. It carries the two titles so the owner can
+ * find the copy. It never carries a body, id, digest, or path.
+ */
+export type RpcNotesConflictAbandonResult = Readonly<{
+  kind: "conflict-abandon";
+  outcome: "abandoned";
+  originalTitle: string;
+  copyTitle: string;
+}>;
+
+/**
  * Categorical facts about one side of a conflict. Never carries the body or
  * any id. `byteSize` is `null` unless the side is present, unlocked, and text.
  */
@@ -1012,7 +1043,8 @@ export type RpcResult =
   | RpcOperatorDiscoveryPageResult
   | RpcNotesEditCensusResult
   | RpcNotesConflictResolveResult
-  | RpcNotesConflictInspectResult;
+  | RpcNotesConflictInspectResult
+  | RpcNotesConflictAbandonResult;
 
 export interface RpcSuccessEnvelope {
   readonly id: string;
@@ -1553,7 +1585,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     method !== "notes.search-operator" &&
     method !== "notes.edit-census" &&
     method !== "notes.resolve-conflict" &&
-    method !== "notes.inspect-conflict"
+    method !== "notes.inspect-conflict" &&
+    method !== "notes.abandon-resolve"
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
@@ -2175,6 +2208,25 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
     paramsObj.binding = binding;
+    paramsObj.confirmation = confirmation;
+  } else if (method === "notes.abandon-resolve") {
+    // Closed params: exactly the opaque note handle and the exact abandon phrase.
+    if (!keysAreExactly(paramKeys, ["id", "confirmation"]))
+      throw rpcProtocolError("rpc protocol: abandon-resolve params are invalid");
+    const noteId = paramsRecord.id;
+    const confirmation = paramsRecord.confirmation;
+    if (
+      typeof noteId !== "string" ||
+      noteId.length === 0 ||
+      utf8ByteLength(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes) >
+        STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      hasControlCharacter(noteId)
+    )
+      throw rpcProtocolError("rpc protocol: abandon-resolve note handle is invalid");
+    if (confirmation !== CONFLICT_ABANDON_CONFIRMATION)
+      throw rpcProtocolError("rpc protocol: abandon-resolve confirmation is invalid");
+    paramsObj = objectCreate(null) as Record<string, unknown>;
+    paramsObj.id = noteId;
     paramsObj.confirmation = confirmation;
   } else if (method === "notes.inspect-conflict") {
     // Closed params: exactly the opaque note handle.
@@ -3813,6 +3865,46 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         return serializeSuccessFrame(id, resultPayload, rawSum);
       }
       throw rpcProtocolError("rpc protocol: conflict-resolve outcome is invalid");
+    }
+
+    if (kind === "conflict-abandon") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "outcome", "originalTitle", "copyTitle"],
+        "rpc protocol: conflict-abandon result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 4 ||
+        !keysAreExactly(resultKeys, ["kind", "outcome", "originalTitle", "copyTitle"]) ||
+        resultRecord.outcome !== "abandoned"
+      ) {
+        throw rpcProtocolError("rpc protocol: conflict-abandon result has unexpected fields");
+      }
+      const originalTitle = resultRecord.originalTitle;
+      const copyTitle = resultRecord.copyTitle;
+      assertBoundedString(
+        originalTitle,
+        STAGE5_RPC_LIMITS.maxTitleBytes,
+        "conflict-abandon original title",
+      );
+      assertBoundedString(
+        copyTitle,
+        STAGE5_RPC_LIMITS.maxTitleBytes,
+        "conflict-abandon copy title",
+      );
+      preflightResponseStringField(originalTitle, rawSum);
+      preflightResponseStringField(copyTitle, rawSum);
+      const resultPayload = objectCreate(null) as {
+        kind: "conflict-abandon";
+        outcome: "abandoned";
+        originalTitle: string;
+        copyTitle: string;
+      };
+      resultPayload.kind = "conflict-abandon";
+      resultPayload.outcome = "abandoned";
+      resultPayload.originalTitle = originalTitle;
+      resultPayload.copyTitle = copyTitle;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
     }
 
     if (kind === "approve-upload") {

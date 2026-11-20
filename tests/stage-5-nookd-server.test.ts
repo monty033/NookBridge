@@ -244,6 +244,7 @@ describe("nookd Unix socket server", () => {
       "notes.edit-census": {},
       "notes.resolve-conflict": { id: "n1", binding: "0".repeat(64), confirmation: "KEEP BOTH" },
       "notes.inspect-conflict": { id: "n1" },
+      "notes.abandon-resolve": { id: "n1", confirmation: "ABANDON" },
       "notes.browse": {},
       "notes.search-operator": { query: "q" },
     };

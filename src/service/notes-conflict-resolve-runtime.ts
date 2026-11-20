@@ -45,7 +45,9 @@ import {
   type NotesnookRecoveryStage,
 } from "../core/notesnook-recovery-journal.js";
 import {
+  CONFLICT_ABANDON_CONFIRMATION,
   CONFLICT_RESOLVE_CONFIRMATION,
+  type RpcNotesConflictAbandonResult,
   type RpcNotesConflictResolveResult,
 } from "./rpc-protocol.js";
 import type { OperatorPeer } from "./operator-server.js";
@@ -98,6 +100,10 @@ export interface OperatorConflictResolveRuntime {
     params: Readonly<{ id: string; binding: string; confirmation: string }>,
     peer: OperatorPeer,
   ) => Promise<RpcNotesConflictResolveResult>;
+  readonly abandonConflict: (
+    params: Readonly<{ id: string; confirmation: string }>,
+    peer: OperatorPeer,
+  ) => Promise<RpcNotesConflictAbandonResult>;
 }
 
 export function createOperatorConflictResolveRuntime(
@@ -423,7 +429,75 @@ export function createOperatorConflictResolveRuntime(
     }
   }
 
-  return Object.freeze({ resolveConflict });
+  async function abandonConflict(
+    params: Readonly<{ id: string; confirmation: string }>,
+    peer: OperatorPeer,
+  ): Promise<RpcNotesConflictAbandonResult> {
+    const owner = ownerKey(peer);
+    // The exact phrase is checked before the handle is looked up, as for resolve.
+    if (params?.confirmation !== CONFLICT_ABANDON_CONFIRMATION) fail("invalid_request");
+    const noteId = resolveNote(params?.id, peer, options.resolveHandle);
+    return capability.runExclusive("notes:abandon-resolve", () => abandon(owner, noteId));
+  }
+
+  /**
+   * Closes the one unresolved keep-both attempt for a note. It writes nothing to
+   * the database: the original, the copy and the conflict flag are left exactly
+   * as they are. When the content write may have run, the original is marked
+   * pending so its remote side is queued for upload approval.
+   */
+  async function abandon(owner: string, noteId: string): Promise<RpcNotesConflictAbandonResult> {
+    const active = await activeResolves();
+    const forNote: Array<Readonly<{ record: OperationRecord; payload: ResolvePayload }>> = [];
+    for (const record of active) {
+      const payload = parsePayload(record.payload);
+      if (payload === undefined) fail("service_unavailable");
+      if (payload.noteId === noteId) forNote.push({ record, payload });
+    }
+    if (forNote.length === 0) fail("not_found");
+    if (forNote.length > 1) fail("service_unavailable");
+    const [only] = forNote;
+    if (only === undefined) fail("not_found");
+    const { record, payload } = only;
+    // A committing record belongs to a run still in progress, and another owner's
+    // record is not ours to close. Both block, as they do for resolve.
+    if (record.state !== "unresolved" || payload.owner !== owner) {
+      fail("service_unavailable", record.handle);
+    }
+    // The decision comes from the journal. A read failure blocks; it never reads
+    // as "the content write did not run" (issue #318).
+    let contentMayHaveRun: boolean;
+    try {
+      contentMayHaveRun = journal
+        .snapshot()
+        .some(
+          (marker) => marker.noteId === noteId && CONTENT_OR_FLAG_STAGES.includes(marker.stage),
+        );
+    } catch {
+      fail("service_unavailable", record.handle);
+    }
+    if (contentMayHaveRun) {
+      try {
+        capability.markPending(noteId);
+      } catch {
+        fail("service_unavailable", record.handle);
+      }
+    }
+    try {
+      await store.transition(record.handle, "unresolved", "aborted", undefined, owner);
+    } catch {
+      fail("service_unavailable", record.handle);
+    }
+    discardQuietly(noteId);
+    return Object.freeze({
+      kind: "conflict-abandon",
+      outcome: "abandoned",
+      originalTitle: payload.originalTitle,
+      copyTitle: payload.copyTitle,
+    });
+  }
+
+  return Object.freeze({ resolveConflict, abandonConflict });
 }
 
 function project(result: NotesnookConflictResolveResult): RpcNotesConflictResolveResult {
