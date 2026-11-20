@@ -259,6 +259,24 @@ export function createOperatorConflictResolveRuntime(
       fail("service_unavailable", copyAttempted ? handle : undefined);
     }
     if (outcome.outcome !== "resolved") {
+      // A copy that changed after the original was overwritten leaves the
+      // original's new content unqueued. Mark it pending so the bridge and the
+      // operator can see it, but only when the content write actually ran.
+      if (outcome.outcome === "copy_changed") {
+        const reachedContent = journal
+          .snapshot()
+          .some(
+            (marker) => marker.noteId === noteId && CONTENT_OR_FLAG_STAGES.includes(marker.stage),
+          );
+        if (reachedContent) {
+          try {
+            capability.markPending(noteId);
+          } catch {
+            await settle(handle, "unresolved", owner);
+            fail("service_unavailable", handle);
+          }
+        }
+      }
       await settle(handle, copyAttempted ? "unresolved" : "aborted", owner);
       return project(outcome);
     }

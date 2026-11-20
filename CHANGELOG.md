@@ -69,6 +69,14 @@ release entries describe the supported boundary at the time of the release.
   accept up to 4096 UTF-8 bytes (previously 512). The RPC boundary gains a
   dedicated `maxContentBytes` limit; query, path, title, and identifier caps
   are unchanged.
+- The keep-both conflict resolver re-reads the bridge-local copy before
+  overwriting the original, before clearing the conflict flag, and before
+  reporting `resolved`. A copy that changes in that window is reported as the
+  new closed outcome `copy_changed` instead of `resolved`, with nothing deleted
+  (issue #305). The flag stays set for the first two re-checks; the third runs
+  after the flag is cleared, so a change there returns `copy_changed` with the
+  flag already cleared. When the change lands after the original's content write,
+  the original is marked pending for upload approval.
 - `notes.append` now merges a checklist fragment into the document's trailing
   list when it is the same kind (`simple-checklist` or `task-list`) instead of
   starting a second list. Nested, mixed, or non-trailing lists keep the

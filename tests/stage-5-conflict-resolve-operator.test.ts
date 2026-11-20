@@ -737,9 +737,119 @@ describe("Stage 5 slice B — the operator transaction", () => {
 
     await expect(
       runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
-    ).resolves.toMatchObject({ outcome: "content_write_failed" });
+    ).resolves.toMatchObject({ outcome: "copy_changed" });
     expect(writesOf(base)).not.toContain("contentResolve");
     expect(base.contents.get("content-1")).toEqual(originalBefore);
+  });
+
+  it("marks the original pending when the copy changes after the overwrite", async () => {
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+          return result;
+        },
+      },
+    };
+    const { runtime, pending, store } = await harness(wrapped);
+    const binding = await bindingOf(base);
+    // Copy the row: the fake mutates rows in place, so a reference would track the change.
+    const originalBefore = { ...base.contents.get("content-1") };
+
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+
+    expect(result).toMatchObject({ outcome: "copy_changed" });
+    expect(pending).toEqual(["note-1"]);
+    expect(writesOf(base)).toContain("contentResolve");
+    expect(writesOf(base)).not.toContain("noteClearConflict");
+    expect(base.contents.get("content-1")).not.toEqual(originalBefore);
+    expect(base.notes.has("note-1")).toBe(true);
+    expect(base.notes.has("note-copy-1")).toBe(true);
+    const ops = await operationsOf(store);
+    expect(ops[0]?.state).toBe("unresolved");
+  });
+
+  it("does not mark pending when the copy changes before the overwrite", async () => {
+    const base = createFake();
+    const realRelate = base.seam.noteRelate;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        noteRelate: async (input) => {
+          await realRelate(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+        },
+      },
+    };
+    const { runtime, pending } = await harness(wrapped);
+    const binding = await bindingOf(base);
+
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+
+    expect(result).toMatchObject({ outcome: "copy_changed" });
+    expect(pending).toEqual([]);
+    expect(writesOf(base)).not.toContain("contentResolve");
+  });
+
+  it("fails with service_unavailable when markPending throws after the overwrite", async () => {
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          const row = base.contents.get("content-copy-1");
+          if (row !== undefined) base.contents.set("content-copy-1", { ...row, data: "TAMPERED" });
+          return result;
+        },
+      },
+    };
+    const journal = new MemoryNotesnookRecoveryJournal();
+    const capability: LiveConflictResolveCapability = {
+      seam: wrapped.seam,
+      journal,
+      runExclusive: async <T>(_label: string, fn: () => T | PromiseLike<T>): Promise<T> =>
+        await fn(),
+      markPending: () => {
+        throw new Error("boom");
+      },
+    };
+    const store = await createNotesUndoStore({
+      fs: new MemoryFs(),
+      daemonKey: new Uint8Array(32).fill(7),
+      now: () => 1_000,
+    });
+    const runtime = createOperatorConflictResolveRuntime({
+      capability,
+      store,
+      resolveHandle: (handle: string) => (handle === HANDLE ? "note-1" : undefined),
+    });
+    const binding = await bindingOf(base);
+
+    await expect(
+      runtime.resolveConflict({ id: HANDLE, binding, confirmation: CONFIRMATION }, PEER_A),
+    ).rejects.toMatchObject({ code: "service_unavailable" });
+
+    const ops = await operationsOf(store);
+    expect(ops[0]?.state).toBe("unresolved");
+    expect(base.notes.has("note-1")).toBe(true);
+    expect(base.notes.has("note-copy-1")).toBe(true);
   });
 
   it.each<[string, (fake: Fake) => void]>([

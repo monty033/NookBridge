@@ -479,6 +479,7 @@ describe("runResolveConflict — daemon refusals", () => {
     "read_failed",
     "copy_failed",
     "copy_unverified",
+    "copy_changed",
     "relation_failed",
     "content_write_failed",
     "resolved_flag_pending",
