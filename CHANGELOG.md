@@ -75,8 +75,8 @@ release entries describe the supported boundary at the time of the release.
   new closed outcome `copy_changed` instead of `resolved`, with nothing deleted
   (issue #305). The flag stays set for the first two re-checks; the third runs
   after the flag is cleared, so a change there returns `copy_changed` with the
-  flag already cleared. When the change lands after the original's content write,
-  the original is marked pending for upload approval.
+  flag already cleared. Any non-resolved outcome after the original's content write
+  marks the original pending for upload approval (issues #305, #317).
 - `notes.append` now merges a checklist fragment into the document's trailing
   list when it is the same kind (`simple-checklist` or `task-list`) instead of
   starting a second list. Nested, mixed, or non-trailing lists keep the
