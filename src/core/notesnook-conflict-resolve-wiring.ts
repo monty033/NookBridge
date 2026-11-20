@@ -122,8 +122,9 @@ export type NotesnookConflictResolveSeam = Readonly<{
 }>;
 
 /**
- * Closed failure set. Every failure leaves the original untouched except where
- * the variant says otherwise. Titles name the notes, so no ids leave the module.
+ * Closed failure set. Some failures occur after the original's content write and
+ * may leave it adopted; `copy_changed`, `read_failed`, and `stale_revision`
+ * are among them. Titles name the notes, so no ids leave the module.
  */
 export type NotesnookConflictResolveFailure =
   /** The note is not conflicted. Nothing was written. */
@@ -136,7 +137,7 @@ export type NotesnookConflictResolveFailure =
   | Readonly<{ outcome: "unsupported_content" }>
   /** The binding moved. `copyCreated` says whether a copy was already made. */
   | Readonly<{ outcome: "stale_revision"; copyCreated: boolean }>
-  /** A read failed before any write. */
+  /** A read failed. May occur before or after the content write. */
   | Readonly<{ outcome: "read_failed" }>
   /** Creating the copy threw. The original is untouched. */
   | Readonly<{ outcome: "copy_failed" }>
@@ -149,7 +150,9 @@ export type NotesnookConflictResolveFailure =
   /** The content is resolved but the flag clear failed. The note still refuses writes. */
   | Readonly<{ outcome: "resolved_flag_pending" }>
   /** The writes ran, but the original did not read back as resolved. */
-  | Readonly<{ outcome: "post_write_unverified" }>;
+  | Readonly<{ outcome: "post_write_unverified" }>
+  /** The copy changed between the re-checks. The original is not reported as resolved. */
+  | Readonly<{ outcome: "copy_changed" }>;
 
 export type NotesnookConflictResolveResult =
   | Readonly<{ outcome: "resolved"; originalTitle: string; copyTitle: string }>
@@ -366,9 +369,11 @@ async function resolveOnce(
   if (copyId === undefined || copyId === plan.noteId) return { outcome: "copy_unverified" };
 
   // Step 3: the copy must read back as the derived title, byte-for-byte equal to the local side.
-  if ((await readCopyText(slots, copyId, plan.copyTitle)) !== plan.localText) {
+  const initialCore = await readCopyCore(slots, copyId, plan.copyTitle);
+  if (initialCore === undefined || initialCore.text !== plan.localText) {
     return { outcome: "copy_unverified" };
   }
+  let copyBaseline: CopyBaseline = { core: initialCore, memberships: [] };
 
   // Step 4: the copy takes the original's notebook and tag memberships, as relations.
   for (const membership of plan.memberships) {
@@ -381,9 +386,20 @@ async function resolveOnce(
 
   // Step 4b: read the copy's memberships back. A relation that did not land is
   // refused here, before the content write, so the original is untouched.
-  if (!(await copyCarriesMemberships(slots, copyId, plan.memberships))) {
+  const heldMemberships = await readCopyMemberships(slots, copyId);
+  if (heldMemberships === undefined) {
     return { outcome: "relation_failed" };
   }
+  if (
+    !plan.memberships.every((membership) =>
+      heldMemberships.some(
+        (present) => present.type === membership.type && present.id === membership.id,
+      ),
+    )
+  ) {
+    return { outcome: "relation_failed" };
+  }
+  copyBaseline = Object.freeze({ core: copyBaseline.core, memberships: heldMemberships });
 
   // Step 5: re-check the binding before the original is touched.
   const recheck = await observe(slots, plan.noteId);
@@ -393,6 +409,11 @@ async function resolveOnce(
     recheck.inspection.binding !== expectedBinding
   ) {
     return { outcome: "stale_revision", copyCreated: true };
+  }
+  // Re-check the copy before the original is touched: it must still match what was
+  // recorded at steps 3 and 4b.
+  if (!(await copyStillMatches(slots, copyId, plan.copyTitle, copyBaseline))) {
+    return { outcome: "copy_changed" };
   }
 
   // Step 6: the original adopts the remote side, through core's resolution protocol.
@@ -407,6 +428,23 @@ async function resolveOnce(
     return { outcome: "content_write_failed" };
   }
 
+  // Re-check the copy before the conflict flag is cleared. The note-level conflict
+  // flag must still be set (the original has not been cleared by another path).
+  let noteAfterResolve: unknown;
+  try {
+    noteAfterResolve = await slots.noteMeta(plan.noteId);
+  } catch {
+    return { outcome: "read_failed" };
+  }
+  const stillConflicted = field(noteAfterResolve, "conflicted") === true;
+  const copyOk2 = await copyStillMatches(slots, copyId, plan.copyTitle, copyBaseline);
+  if (!copyOk2) {
+    return { outcome: "copy_changed" };
+  }
+  if (!stillConflicted) {
+    return { outcome: "stale_revision", copyCreated: true };
+  }
+
   // Step 7: clear the conflicted flag. A failure here leaves the content resolved.
   try {
     await slots.noteClearConflict(plan.noteId);
@@ -416,6 +454,10 @@ async function resolveOnce(
 
   // Step 8: the original must read back with every resolved field.
   if (!(await verifyOriginal(slots, plan))) return { outcome: "post_write_unverified" };
+  // Final re-check of the copy before reporting resolved.
+  if (!(await copyStillMatches(slots, copyId, plan.copyTitle, copyBaseline))) {
+    return { outcome: "copy_changed" };
+  }
   return { outcome: "resolved", originalTitle: plan.originalTitle, copyTitle: plan.copyTitle };
 }
 
@@ -544,22 +586,97 @@ async function readCopyText(
 }
 
 /**
- * Whether the copy's own memberships include every notebook and tag the original
- * holds. A read that fails or returns a malformed list reads as missing.
+ * Read the copy's own memberships. Returns `undefined` on any read or shape
+ * failure, so a malformed list reads as missing.
  */
-async function copyCarriesMemberships(
+async function readCopyMemberships(
   slots: CapturedSlots,
   copyId: string,
-  wanted: readonly NotesnookConflictMembership[],
-): Promise<boolean> {
+): Promise<readonly NotesnookConflictMembership[] | undefined> {
   try {
-    const held = readMemberships(await slots.noteRelations(copyId));
-    return wanted.every((membership) =>
-      held.some((present) => present.type === membership.type && present.id === membership.id),
-    );
+    return readMemberships(await slots.noteRelations(copyId));
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+type CopyCore = Readonly<{
+  text: string;
+  title: string;
+  contentDateEdited: unknown;
+  contentDateModified: unknown;
+  contentDateResolved: unknown;
+  noteDateEdited: unknown;
+  noteDateModified: unknown;
+}>;
+
+type CopyBaseline = Readonly<{
+  core: CopyCore;
+  memberships: readonly NotesnookConflictMembership[];
+}>;
+
+/**
+ * Read the copy's identity-bearing core (title, text, available date fields)
+ * without reading its memberships. Returns `undefined` on any identity, shape,
+ * or read failure.
+ *
+ * `dateEdited` is read when the seam exposes it on the copy's content row (and
+ * on the note row); where it is absent, `dateModified` and the other available
+ * date fields are read instead. No field is invented: only fields the row
+ * already carries are compared.
+ */
+async function readCopyCore(
+  slots: CapturedSlots,
+  copyId: string,
+  copyTitle: string,
+): Promise<CopyCore | undefined> {
+  try {
+    const note = await slots.noteMeta(copyId);
+    if (field(note, "id") !== copyId) return undefined;
+    if (field(note, "title") !== copyTitle) return undefined;
+    const contentId = readIdentifier(field(note, "contentId"));
+    const row = await slots.contentWithConflicted(contentId);
+    if (field(row, "id") !== contentId) return undefined;
+    if (field(row, "noteId") !== copyId) return undefined;
+    const text = readText(field(row, "data"));
+    return Object.freeze({
+      text,
+      title: copyTitle,
+      contentDateEdited: field(row, "dateEdited"),
+      contentDateModified: field(row, "dateModified"),
+      contentDateResolved: field(row, "dateResolved"),
+      noteDateEdited: field(note, "dateEdited"),
+      noteDateModified: field(note, "dateModified"),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the copy still matches the snapshot recorded earlier. A read failure
+ * or any field difference counts as a change.
+ */
+async function copyStillMatches(
+  slots: CapturedSlots,
+  copyId: string,
+  copyTitle: string,
+  baseline: CopyBaseline,
+): Promise<boolean> {
+  const nowCore = await readCopyCore(slots, copyId, copyTitle);
+  if (nowCore === undefined) return false;
+  const nowMemberships = await readCopyMemberships(slots, copyId);
+  if (nowMemberships === undefined) return false;
+  return (
+    nowCore.text === baseline.core.text &&
+    nowCore.title === baseline.core.title &&
+    nowCore.contentDateEdited === baseline.core.contentDateEdited &&
+    nowCore.contentDateModified === baseline.core.contentDateModified &&
+    nowCore.contentDateResolved === baseline.core.contentDateResolved &&
+    nowCore.noteDateEdited === baseline.core.noteDateEdited &&
+    nowCore.noteDateModified === baseline.core.noteDateModified &&
+    JSON.stringify(nowMemberships) === JSON.stringify(baseline.memberships)
+  );
 }
 
 /**

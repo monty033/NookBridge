@@ -914,6 +914,7 @@ export const CONFLICT_RESOLVE_CLOSED_OUTCOMES: ReadonlyArray<string> = Object.fr
   "read_failed",
   "copy_failed",
   "copy_unverified",
+  "copy_changed",
   "relation_failed",
   "content_write_failed",
   "resolved_flag_pending",
@@ -944,6 +945,7 @@ export type RpcNotesConflictResolveResult =
         | "read_failed"
         | "copy_failed"
         | "copy_unverified"
+        | "copy_changed"
         | "relation_failed"
         | "content_write_failed"
         | "resolved_flag_pending"
