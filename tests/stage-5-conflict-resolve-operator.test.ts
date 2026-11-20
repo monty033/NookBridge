@@ -520,7 +520,7 @@ describe("Stage 5 slice B — the operator transaction", () => {
     ["true", "true"],
     ["a text value", "text"],
   ] as const)(
-    "does not commit or mark pending when the content marker still reads %s",
+    "does not commit but marks pending when the content marker still reads %s",
     async (_label, marker) => {
       const fake = createFake(MEMBERSHIPS, marker);
       const { runtime, store, pending } = await harness(fake);
@@ -532,7 +532,7 @@ describe("Stage 5 slice B — the operator transaction", () => {
       );
 
       expect(result).toMatchObject({ kind: "conflict-resolve", outcome: "post_write_unverified" });
-      expect(pending).toEqual([]);
+      expect(pending).toEqual(["note-1"]);
       const [operation] = await operationsOf(store);
       expect(operation?.state).not.toBe("committed");
     },
@@ -624,7 +624,7 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(first).toEqual({ kind: "conflict-resolve", outcome: "resolved_flag_pending" });
     expect(fake.contents.get("content-1")).toMatchObject({ data: REMOTE_BODY, conflicted: null });
     expect(fake.notes.get("note-1")).toMatchObject({ conflicted: true });
-    expect(pending).toEqual([]);
+    expect(pending).toEqual(["note-1"]);
     expect((await operationsOf(store))[0]?.state).toBe("unresolved");
     expect(journal.snapshot().map((marker) => marker.stage)).toContain("resolve-content");
 
@@ -644,7 +644,10 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(writesOf(fake).filter((slot) => slot === "contentResolve")).toHaveLength(1);
     expect(writesOf(fake).filter((slot) => slot === "noteClearConflict")).toHaveLength(2);
     expect(fake.notes.get("note-1")).toMatchObject({ conflicted: false });
-    expect(pending).toEqual(["note-1"]);
+    // The first run marks the original pending (content written, flag left set); the
+    // recovery re-run marks it again. The live mark only records a pending upload, so
+    // the repeat is harmless and is pinned here rather than hidden.
+    expect(pending).toEqual(["note-1", "note-1"]);
     expect((await operationsOf(store))[0]?.state).toBe("committed");
     expect(journal.snapshot()).toEqual([]);
   });
@@ -838,6 +841,40 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect(base.notes.has("note-copy-1")).toBe(true);
   });
 
+  it("marks the original pending when another actor clears the flag after the content write", async () => {
+    const base = createFake();
+    const realResolve = base.seam.contentResolve;
+    const wrapped: Fake = {
+      ...base,
+      seam: {
+        ...base.seam,
+        contentResolve: async (input) => {
+          const result = await realResolve(input);
+          // Another actor clears the note's conflict flag between the content write
+          // and the re-check, so the resolver must stop without touching the flag.
+          const note = base.notes.get("note-1");
+          if (note !== undefined) base.notes.set("note-1", { ...note, conflicted: false });
+          return result;
+        },
+      },
+    };
+    const { runtime, pending, store } = await harness(wrapped);
+    const binding = await bindingOf(base);
+
+    const result = await runtime.resolveConflict(
+      { id: HANDLE, binding, confirmation: CONFIRMATION },
+      PEER_A,
+    );
+
+    expect(result).toMatchObject({ outcome: "stale_revision", copyCreated: true });
+    expect(pending).toEqual(["note-1"]);
+    expect(writesOf(base)).toContain("contentResolve");
+    expect(writesOf(base)).not.toContain("noteClearConflict");
+    expect(base.notes.has("note-copy-1")).toBe(true);
+    const ops = await operationsOf(store);
+    expect(ops[0]?.state).toBe("unresolved");
+  });
+
   it("does not mark pending when the copy changes before the overwrite", async () => {
     const base = createFake();
     const realRelate = base.seam.noteRelate;
@@ -975,7 +1012,7 @@ describe("Stage 5 slice B — the operator transaction", () => {
     expect((await operationsOf(store))[0]?.state).not.toBe("committed");
   });
 
-  it("blocks a resolve while another owner has an unfinished one for the same note", async () => {
+  it("blocks a resolve while another owner has an unfinished one, and the first run marks pending", async () => {
     const fake = createFake();
     fake.failOnce.add("noteClearConflict");
     const { runtime, pending } = await harness(fake);
@@ -989,7 +1026,7 @@ describe("Stage 5 slice B — the operator transaction", () => {
       code: "service_unavailable",
     });
     expect(writesOf(fake)).toHaveLength(writesBefore);
-    expect(pending).toEqual([]);
+    expect(pending).toEqual(["note-1"]);
   });
 
   it("admits a fresh run when the journal has 61 markers, and refuses it at 62", async () => {

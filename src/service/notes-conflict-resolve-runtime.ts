@@ -263,17 +263,16 @@ export function createOperatorConflictResolveRuntime(
       fail("service_unavailable", copyAttempted ? handle : undefined);
     }
     if (outcome.outcome !== "resolved") {
-      // A copy that changed after the original was overwritten leaves the
-      // original's new content unqueued. Mark it pending so the bridge and the
-      // operator can see it, but only when the content write actually ran.
-      if (outcome.outcome === "copy_changed") {
-        if (contentAttempted) {
-          try {
-            capability.markPending(noteId);
-          } catch {
-            await settle(handle, "unresolved", owner);
-            fail("service_unavailable", handle);
-          }
+      // Any outcome after the content write may have left the original holding the
+      // remote side. Mark it pending so the bridge and the operator can see it. The
+      // content write is the only thing that changes the original, so the flag
+      // alone decides; outcomes that stop before the write mark nothing.
+      if (contentAttempted) {
+        try {
+          capability.markPending(noteId);
+        } catch {
+          await settle(handle, "unresolved", owner);
+          fail("service_unavailable", handle);
         }
       }
       await settle(handle, copyAttempted ? "unresolved" : "aborted", owner);

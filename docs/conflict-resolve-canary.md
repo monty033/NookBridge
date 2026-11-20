@@ -303,10 +303,11 @@ copy that was edited or deleted while the operation was unresolved is refused wi
 new closed outcome `copy_changed`, not reported as resolved. For the first two
 re-checks the conflict flag is still set and stays set; the third re-check runs after
 the flag is cleared, so a change in that window returns `copy_changed` with the flag
-already cleared. If the copy changes after the original's content write has run, the
-original is marked pending for upload approval, so the new remote-side content is not
-left unqueued. If the change lands before that write, nothing is marked. The outcome
-carries no body, id, digest, or path.
+already cleared. Any non-resolved outcome that comes after the original's content write marks the
+original pending for upload approval, so the new remote-side content is not left
+unqueued. This covers `copy_changed`, `stale_revision`, `read_failed`,
+`resolved_flag_pending`, and `post_write_unverified`. Outcomes that stop before the
+content write mark nothing. The outcome carries no body, id, digest, or path.
 
 A window remains between the last copy read-back and the content write. The copy row is
 not locked, so a change inside that window is not caught.
