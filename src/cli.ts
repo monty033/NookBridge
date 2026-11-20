@@ -462,6 +462,13 @@ async function runNotes(args: Args): Promise<number> {
     );
     return runResolveConflictFromTerminal(argv.slice(1));
   }
+  // #316 — confirmation-gated close of one unresolved keep-both attempt.
+  if (argv[0] === "abandon-conflict") {
+    const { runAbandonConflictFromTerminal } = await import(
+      "./operator/notes-abandon-conflict-cli.js"
+    );
+    return runAbandonConflictFromTerminal(argv.slice(1));
+  }
   const parsed = parseNotesCommand(argv, environment);
   if (parsed.kind === "error") {
     process.stderr.write(`nookctl: ${parsed.message}\n`);

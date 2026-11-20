@@ -289,7 +289,7 @@ export function createProductionResolveConflictPorts(
   });
 }
 
-async function askLine(
+export async function askLine(
   streams: NotesUndoPromptStreams,
   prompt: string,
 ): Promise<string | undefined> {
