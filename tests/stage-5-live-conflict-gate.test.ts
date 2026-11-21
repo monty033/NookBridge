@@ -11,7 +11,12 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { gateLiveConflictResolve, productionStartupOptions, startNookd } from "../src/nookd.js";
+import {
+  gateLiveConflictResolve,
+  productionStartupOptions,
+  startupCapabilityRecord,
+  startNookd,
+} from "../src/nookd.js";
 import type { NookdStartupFactories, NookdStartupRuntime } from "../src/nookd.js";
 import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/service-config.js";
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
@@ -202,6 +207,39 @@ describe("gateLiveConflictResolve", () => {
 
   it("passes an absent capability through as absent", () => {
     expect(gateLiveConflictResolve(true, undefined)).toBeUndefined();
+  });
+});
+
+describe("startupCapabilityRecord", () => {
+  const snapshot = {
+    liveConflictResolveRequested: true,
+    serviceConflictResolve: false,
+    operatorStore: true,
+    operatorWrite: true,
+    operatorConflictResolve: false,
+    conflictInspect: true,
+    uploadApproval: false,
+  } as const;
+
+  it("carries exactly the named booleans plus the event", () => {
+    expect(startupCapabilityRecord(snapshot)).toEqual({
+      event: "startup.capabilities",
+      ...snapshot,
+    });
+  });
+
+  it("carries nothing but booleans, so it cannot leak a note", () => {
+    for (const [key, value] of Object.entries(startupCapabilityRecord(snapshot))) {
+      expect(key, key).toMatch(/^event$|Requested$|Resolve$|Store$|Write$|Inspect$|Approval$/);
+      expect(typeof value, key).toBe(key === "event" ? "string" : "boolean");
+    }
+  });
+
+  it("is frozen and reports the failure it exists to explain", () => {
+    const record = startupCapabilityRecord(snapshot);
+    expect(Object.isFrozen(record)).toBe(true);
+    expect(record.serviceConflictResolve).toBe(false);
+    expect(record.conflictInspect).toBe(true);
   });
 });
 
