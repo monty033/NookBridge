@@ -248,9 +248,9 @@ export type NookdStartupOptions = Readonly<{
   /** Explicit settings path is a test-only seam; production uses systemd credentials. */
   settingsPath?: string;
   /**
-   * Live keep-both resolve and abandon stay off unless this is exactly true. The real
-   * entry point never sets it, so the daemon refuses both methods with
-   * service_unavailable until live use is separately authorized.
+   * Live keep-both resolve and abandon stay off unless this is exactly true. The shipped
+   * entry point sets it; a daemon started without it refuses both methods with
+   * service_unavailable, so the gate can close the surface again without removing code.
    */
   liveConflictResolve?: boolean;
 }>;
@@ -1279,8 +1279,8 @@ export async function runNookdCliAsync(
 
 /**
  * The options the real entry point starts the daemon with. Live conflict resolve is
- * deliberately absent: it stays off until a change adds it here on purpose, and the
- * startup test pins that absence.
+ * enabled here on purpose, and the startup test pins that it stays enabled: removing the
+ * option turns both operator methods off for every deployed daemon.
  */
 export function productionStartupOptions(
   configPath: string,
@@ -1290,6 +1290,9 @@ export function productionStartupOptions(
   return {
     configPath,
     configOptions,
+    // Live keep-both resolve is authorized. The gate stays in the daemon so the
+    // option can be withdrawn here without removing the code or the tests.
+    liveConflictResolve: true,
     ...(startupFactories === undefined ? {} : { factories: startupFactories }),
   };
 }
