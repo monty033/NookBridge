@@ -1290,6 +1290,9 @@ export function productionStartupOptions(
   return {
     configPath,
     configOptions,
+    // Live keep-both resolve is authorized. The gate stays in the daemon so the
+    // option can be withdrawn here without removing the code or the tests.
+    liveConflictResolve: true,
     ...(startupFactories === undefined ? {} : { factories: startupFactories }),
   };
 }

@@ -1,10 +1,12 @@
 /**
- * Live keep-both resolve and abandon stay off unless explicitly enabled.
+ * Live keep-both resolve is enabled through the shipped entry point, and the gate behind
+ * it is still real: a daemon started without the option refuses both operator conflict
+ * methods.
  *
- * The helper test below is not enough on its own: it would still pass if the daemon
- * stopped calling it. The startup tests drive the real `startNookd` path and read the
- * operator handler the daemon actually built, so removing the gate from the wiring fails
- * here rather than silently deploying a reachable conflict runtime.
+ * The helper test alone is not enough — it would pass if the daemon stopped calling it.
+ * The startup tests drive the real `startNookd` path and read the operator handler the
+ * daemon actually built, so removing the gate from the wiring, or dropping the option
+ * from the production startup, fails here rather than silently changing what ships.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -150,13 +152,14 @@ function factories(): NookdStartupFactories {
 async function conflictReplyAtStartup(
   method: "notes.abandon-resolve" | "notes.resolve-conflict",
   startup: { liveConflictResolve?: boolean } = {},
+  useProductionOptions = false,
 ): Promise<{ ok: boolean; code?: string }> {
   const underTest = factories();
-  const handle = await startNookd({
-    configPath: CONFIG_PATH,
-    factories: underTest,
-    ...startup,
-  });
+  const handle = await startNookd(
+    useProductionOptions
+      ? productionStartupOptions(CONFIG_PATH, {} as never, underTest)
+      : { configPath: CONFIG_PATH, factories: underTest, ...startup },
+  );
   try {
     const operator = vi.mocked(underTest.startServer).mock.calls[0]?.[0]?.operator;
     expect(operator).toBeDefined();
@@ -203,11 +206,12 @@ describe("gateLiveConflictResolve", () => {
 });
 
 describe("production entry point", () => {
-  it("never enables live conflict resolve", () => {
-    // If a later change adds liveConflictResolve here, the daemon ships the operator
-    // conflict runtime and the suite would otherwise stay green. This pins the absence.
+  it("enables live conflict resolve", () => {
+    // Live keep-both resolve is authorized. This pins the authorization: removing the
+    // option here turns the feature off for every deployed daemon, so the change that
+    // does it has to say so deliberately.
     const options = productionStartupOptions(CONFIG_PATH, { environment: {} } as never, undefined);
-    expect(options).not.toHaveProperty("liveConflictResolve");
+    expect(options.liveConflictResolve).toBe(true);
   });
 });
 
@@ -225,6 +229,16 @@ describe("daemon startup honours the gate", () => {
     expect(await conflictReplyAtStartup("notes.resolve-conflict")).toEqual({
       ok: false,
       code: "service_unavailable",
+    });
+  });
+
+  it("serves the conflict runtime when started from the production options", async () => {
+    // End to end: not just that the options object says true, but that a daemon started
+    // from them builds the runtime. invalid_request means the runtime exists and reached
+    // the phrase check; service_unavailable would mean it was never wired.
+    expect(await conflictReplyAtStartup("notes.abandon-resolve", {}, true)).toEqual({
+      ok: false,
+      code: "invalid_request",
     });
   });
 

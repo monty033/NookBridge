@@ -323,9 +323,13 @@ not locked, so a change inside that window is not caught.
 
 - **Operator action**: after any `resolved` result, check the copy's title and text
   match the local side you inspected. Do not rely on the copy surviving untouched.
-- **Disposition: undecided, needs the owner.** Closing the window needs a store-level
-  copy lock or a second confirmation read, which is a design choice.
-- Live conflict resolve stays disabled; this change does not enable it.
+- **Disposition: accepted.** Closing the window needs a store-level copy lock or a
+  second confirmation read, which the storage layer does not offer. The window is
+  bounded by the three re-reads, and a change inside it produces a pending mark plus a
+  copy the operator can inspect rather than a silent loss.
+- Live conflict resolve is enabled: the daemon's shipped entry point sets the startup
+  option. Removing that line turns both operator methods off again without touching the
+  implementation.
 
 ### 9. Titles cross the operator socket and print to the terminal
 
