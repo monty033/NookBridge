@@ -70,6 +70,7 @@ import {
 import { createOperatorConflictResolveRuntime } from "./service/notes-conflict-resolve-runtime.js";
 import { createOperatorConflictInspectRuntime } from "./service/notes-conflict-inspect-runtime.js";
 import { createNotesUndoStore } from "./service/notes-undo-store.js";
+import type { OperationStoreFs } from "./service/notes-undo-store.js";
 import {
   createOperationStoreFs,
   deriveOperationStoreKey,
@@ -231,6 +232,12 @@ export type NookdStartupFactories = Readonly<{
   createRuntime: (options: CreateProductionServiceRuntimeOptions) => Promise<NookdStartupRuntime>;
   readSettingsFile: (path: string) => string;
   startServer: (options: StartNookdServerOptions) => Promise<NookdServerHandle>;
+  /**
+   * Offline test seam for the operator store's filesystem. Production omits it, so the
+   * store keeps using the real state directory. A test that must reach the operator
+   * wiring without touching live state supplies an in-memory implementation.
+   */
+  createOperationStoreFs?: (directory: string) => OperationStoreFs;
 }>;
 
 export type NookdStartupOptions = Readonly<{
@@ -241,7 +248,24 @@ export type NookdStartupOptions = Readonly<{
   factories?: NookdStartupFactories;
   /** Explicit settings path is a test-only seam; production uses systemd credentials. */
   settingsPath?: string;
+  /**
+   * Live keep-both resolve and abandon stay off unless this is exactly true. The real
+   * entry point never sets it, so the daemon refuses both methods with
+   * service_unavailable until live use is separately authorized.
+   */
+  liveConflictResolve?: boolean;
 }>;
+
+/**
+ * The gate for live conflict resolve and abandon. Returns the capability only when the
+ * caller opted in, so a default daemon never builds the operator conflict runtime.
+ */
+export function gateLiveConflictResolve<T>(
+  options: Pick<NookdStartupOptions, "liveConflictResolve">,
+  capability: T | undefined,
+): T | undefined {
+  return options.liveConflictResolve === true ? capability : undefined;
+}
 
 export const NOOKD_STARTUP_ERROR_CATEGORIES = freeze([
   "invalid_arguments",
@@ -638,8 +662,12 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     try {
       const databaseKey = keys.getDatabaseKey();
       if (typeof databaseKey === "string" && databaseKey.length > 0) {
+        const operationsDirectory = resolve(config.stateDir, "operations");
+        const operationsFs =
+          factories.createOperationStoreFs?.(operationsDirectory) ??
+          createOperationStoreFs(operationsDirectory);
         operatorStore = await createNotesUndoStore({
-          fs: createOperationStoreFs(resolve(config.stateDir, "operations")),
+          fs: operationsFs,
           daemonKey: deriveOperationStoreKey(databaseKey),
         });
         operatorWrite = createOperatorWriteRuntime({
@@ -648,9 +676,10 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           mintHandle: (noteId, peer) => operatorHandles.mint(noteId, peer),
           source: operatorSource,
         });
-        if (localConflictResolve !== undefined) {
+        const gatedConflictResolve = gateLiveConflictResolve(options, localConflictResolve);
+        if (gatedConflictResolve !== undefined) {
           operatorConflictResolve = createOperatorConflictResolveRuntime({
-            capability: localConflictResolve,
+            capability: gatedConflictResolve,
             store: operatorStore,
             resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
           });
