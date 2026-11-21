@@ -266,6 +266,40 @@ export function gateLiveConflictResolve<T>(
   return enabled === true ? capability : undefined;
 }
 
+/** Which optional capabilities the daemon built, and never anything else. */
+export type StartupCapabilityInput = Readonly<{
+  liveConflictResolveRequested: boolean;
+  serviceConflictResolve: boolean;
+  operatorStore: boolean;
+  operatorWrite: boolean;
+  operatorConflictResolve: boolean;
+  conflictInspect: boolean;
+  uploadApproval: boolean;
+}>;
+
+/**
+ * The startup capability record.
+ *
+ * A refusal reply cannot distinguish "this daemon did not build that surface"
+ * from "this surface refused you", and both look like `service_unavailable` from
+ * outside. This record answers that at startup. It carries booleans and one
+ * event name: no ids, handles, titles, paths or content, so it is safe to log.
+ */
+export function startupCapabilityRecord(
+  input: StartupCapabilityInput,
+): Readonly<Record<string, string | boolean>> {
+  return freeze({
+    event: "startup.capabilities",
+    liveConflictResolveRequested: input.liveConflictResolveRequested,
+    serviceConflictResolve: input.serviceConflictResolve,
+    operatorStore: input.operatorStore,
+    operatorWrite: input.operatorWrite,
+    operatorConflictResolve: input.operatorConflictResolve,
+    conflictInspect: input.conflictInspect,
+    uploadApproval: input.uploadApproval,
+  });
+}
+
 export const NOOKD_STARTUP_ERROR_CATEGORIES = freeze([
   "invalid_arguments",
   "configuration",
@@ -712,6 +746,23 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           readNoteLockState,
           resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
         });
+
+  // One categorical line naming the optional capabilities this daemon actually
+  // built. It is booleans only — no ids, titles, paths or content — and it is
+  // the difference between "the surface refused you" and "the surface is not
+  // there", which the reply codes alone cannot distinguish.
+  createLogger({ bindings: { component: "nookd" } }).info(
+    "startup capabilities",
+    startupCapabilityRecord({
+      liveConflictResolveRequested: liveConflictResolveOption,
+      serviceConflictResolve: localConflictResolve !== undefined,
+      operatorStore: operatorStore !== undefined,
+      operatorWrite: operatorWrite !== undefined,
+      operatorConflictResolve: operatorConflictResolve !== undefined,
+      conflictInspect: operatorConflictInspect !== undefined,
+      uploadApproval: operatorUploadApproval !== undefined,
+    }),
+  );
 
   const operator =
     readOnly === undefined

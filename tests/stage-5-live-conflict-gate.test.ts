@@ -10,8 +10,14 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import process from "node:process";
 
-import { gateLiveConflictResolve, productionStartupOptions, startNookd } from "../src/nookd.js";
+import {
+  gateLiveConflictResolve,
+  productionStartupOptions,
+  startupCapabilityRecord,
+  startNookd,
+} from "../src/nookd.js";
 import type { NookdStartupFactories, NookdStartupRuntime } from "../src/nookd.js";
 import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/service-config.js";
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
@@ -145,6 +151,71 @@ function factories(): NookdStartupFactories {
 }
 
 /**
+ * Start the daemon, capture what it writes, and return the startup capability
+ * record. Reading it back from the sink is the point: a helper-only test would
+ * pass with the call site deleted, and the call site is the whole change.
+ */
+async function startupCapabilityLine(
+  startup: { liveConflictResolve?: boolean } = {},
+  useProductionOptions = false,
+): Promise<Record<string, string | boolean>> {
+  const underTest = factories();
+  const written: string[] = [];
+  const sink = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+    written.push(String(chunk));
+    return true;
+  });
+  let handle: Awaited<ReturnType<typeof startNookd>> | undefined;
+  try {
+    handle = await startNookd(
+      useProductionOptions
+        ? productionStartupOptions(CONFIG_PATH, { environment: {} } as never, underTest)
+        : { configPath: CONFIG_PATH, factories: underTest, ...startup },
+    );
+  } finally {
+    sink.mockRestore();
+    await handle?.shutdown();
+  }
+  const record = written
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return undefined;
+      }
+    })
+    .find((parsed) => parsed?.event === "startup.capabilities");
+  expect(record, "the daemon logs one startup capabilities record").toBeDefined();
+  return record as Record<string, string | boolean>;
+}
+
+describe("startup capability record at the daemon call site", () => {
+  it("reports the runtime capability as present but the handler as absent when the gate is shut", async () => {
+    // The service runtime always carries the capability in this fixture; only the gate
+    // decides whether the operator handler is built. If the record read the wrong
+    // variable, these two would agree and the line would say nothing.
+    const record = await startupCapabilityLine();
+    expect(record.liveConflictResolveRequested).toBe(false);
+    expect(record.serviceConflictResolve).toBe(true);
+    expect(record.operatorConflictResolve).toBe(false);
+  });
+
+  it("reports the handler as built when the production options enable it", async () => {
+    const record = await startupCapabilityLine({}, true);
+    expect(record.liveConflictResolveRequested).toBe(true);
+    expect(record.serviceConflictResolve).toBe(true);
+    expect(record.operatorConflictResolve).toBe(true);
+  });
+
+  it("carries the other optional capabilities, so a missing one is attributable", async () => {
+    const record = await startupCapabilityLine({}, true);
+    for (const key of ["operatorStore", "operatorWrite", "conflictInspect", "uploadApproval"]) {
+      expect(typeof record[key], key).toBe("boolean");
+    }
+  });
+});
+
+/**
  * Runs the real startup path and exercises one conflict method with a phrase that is not
  * its confirmation word. That refusal is decided before the handle lookup and before the
  * transaction, so this reads and writes no note and no operation record.
@@ -202,6 +273,39 @@ describe("gateLiveConflictResolve", () => {
 
   it("passes an absent capability through as absent", () => {
     expect(gateLiveConflictResolve(true, undefined)).toBeUndefined();
+  });
+});
+
+describe("startupCapabilityRecord", () => {
+  const snapshot = {
+    liveConflictResolveRequested: true,
+    serviceConflictResolve: false,
+    operatorStore: true,
+    operatorWrite: true,
+    operatorConflictResolve: false,
+    conflictInspect: true,
+    uploadApproval: false,
+  } as const;
+
+  it("carries exactly the named booleans plus the event", () => {
+    expect(startupCapabilityRecord(snapshot)).toEqual({
+      event: "startup.capabilities",
+      ...snapshot,
+    });
+  });
+
+  it("carries nothing but booleans, so it cannot leak a note", () => {
+    for (const [key, value] of Object.entries(startupCapabilityRecord(snapshot))) {
+      expect(key, key).toMatch(/^event$|Requested$|Resolve$|Store$|Write$|Inspect$|Approval$/);
+      expect(typeof value, key).toBe(key === "event" ? "string" : "boolean");
+    }
+  });
+
+  it("is frozen and reports the failure it exists to explain", () => {
+    const record = startupCapabilityRecord(snapshot);
+    expect(Object.isFrozen(record)).toBe(true);
+    expect(record.serviceConflictResolve).toBe(false);
+    expect(record.conflictInspect).toBe(true);
   });
 });
 
