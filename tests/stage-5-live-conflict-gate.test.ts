@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { gateLiveConflictResolve, startNookd } from "../src/nookd.js";
+import { gateLiveConflictResolve, productionStartupOptions, startNookd } from "../src/nookd.js";
 import type { NookdStartupFactories, NookdStartupRuntime } from "../src/nookd.js";
 import type { LoadServiceConfigResult, ServiceConfig } from "../src/config/service-config.js";
 import type { SecureKeyStore } from "../src/keystore/keystore.js";
@@ -143,11 +143,12 @@ function factories(): NookdStartupFactories {
 }
 
 /**
- * Runs the real startup path and exercises `notes.abandon-resolve` with a phrase that is
- * not the confirmation word. That refusal is decided before the handle lookup and before
- * the transaction, so this reads and writes no note and no operation record.
+ * Runs the real startup path and exercises one conflict method with a phrase that is not
+ * its confirmation word. That refusal is decided before the handle lookup and before the
+ * transaction, so this reads and writes no note and no operation record.
  */
-async function abandonReplyAtStartup(
+async function conflictReplyAtStartup(
+  method: "notes.abandon-resolve" | "notes.resolve-conflict",
   startup: { liveConflictResolve?: boolean } = {},
 ): Promise<{ ok: boolean; code?: string }> {
   const underTest = factories();
@@ -161,9 +162,13 @@ async function abandonReplyAtStartup(
     expect(operator).toBeDefined();
     const reply = await operator!.handle(
       {
-        id: "abandon-1",
-        method: "notes.abandon-resolve",
-        params: { id: "note-probe", confirmation: "not-the-phrase" },
+        id: "conflict-1",
+        method,
+        params: {
+          id: "note-probe",
+          confirmation: "not-the-phrase",
+          ...(method === "notes.resolve-conflict" ? { binding: "0".repeat(64) } : {}),
+        },
       } as never,
       OPERATOR,
     );
@@ -179,37 +184,53 @@ async function abandonReplyAtStartup(
 
 describe("gateLiveConflictResolve", () => {
   it("returns no capability when the option is omitted, so the daemon stays off", () => {
-    expect(gateLiveConflictResolve({}, CAPABILITY)).toBeUndefined();
+    expect(gateLiveConflictResolve(undefined, CAPABILITY)).toBeUndefined();
   });
 
   it("returns no capability for any value other than exactly true", () => {
     for (const value of [false, "true", 1, null, undefined]) {
-      expect(
-        gateLiveConflictResolve({ liveConflictResolve: value as unknown as boolean }, CAPABILITY),
-      ).toBeUndefined();
+      expect(gateLiveConflictResolve(value as unknown as boolean, CAPABILITY)).toBeUndefined();
     }
   });
 
   it("returns the capability only when explicitly enabled", () => {
-    expect(gateLiveConflictResolve({ liveConflictResolve: true }, CAPABILITY)).toBe(CAPABILITY);
+    expect(gateLiveConflictResolve(true, CAPABILITY)).toBe(CAPABILITY);
   });
 
   it("passes an absent capability through as absent", () => {
-    expect(gateLiveConflictResolve({ liveConflictResolve: true }, undefined)).toBeUndefined();
+    expect(gateLiveConflictResolve(true, undefined)).toBeUndefined();
+  });
+});
+
+describe("production entry point", () => {
+  it("never enables live conflict resolve", () => {
+    // If a later change adds liveConflictResolve here, the daemon ships the operator
+    // conflict runtime and the suite would otherwise stay green. This pins the absence.
+    const options = productionStartupOptions(CONFIG_PATH, { environment: {} } as never, undefined);
+    expect(options).not.toHaveProperty("liveConflictResolve");
   });
 });
 
 describe("daemon startup honours the gate", () => {
-  it("refuses the live method when the option is omitted", async () => {
+  it("refuses abandon when the option is omitted", async () => {
     // service_unavailable is what the handler returns when no conflict runtime was
     // wired. invalid_request would mean the runtime exists and reached the phrase check.
-    expect(await abandonReplyAtStartup()).toEqual({ ok: false, code: "service_unavailable" });
+    expect(await conflictReplyAtStartup("notes.abandon-resolve")).toEqual({
+      ok: false,
+      code: "service_unavailable",
+    });
+  });
+
+  it("refuses resolve when the option is omitted", async () => {
+    expect(await conflictReplyAtStartup("notes.resolve-conflict")).toEqual({
+      ok: false,
+      code: "service_unavailable",
+    });
   });
 
   it("wires the conflict runtime when the option is explicitly enabled", async () => {
-    expect(await abandonReplyAtStartup({ liveConflictResolve: true })).toEqual({
-      ok: false,
-      code: "invalid_request",
-    });
+    expect(
+      await conflictReplyAtStartup("notes.abandon-resolve", { liveConflictResolve: true }),
+    ).toEqual({ ok: false, code: "invalid_request" });
   });
 });
