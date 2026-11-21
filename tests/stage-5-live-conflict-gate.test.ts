@@ -157,7 +157,7 @@ async function conflictReplyAtStartup(
   const underTest = factories();
   const handle = await startNookd(
     useProductionOptions
-      ? productionStartupOptions(CONFIG_PATH, {} as never, underTest)
+      ? productionStartupOptions(CONFIG_PATH, { environment: {} } as never, underTest)
       : { configPath: CONFIG_PATH, factories: underTest, ...startup },
   );
   try {
@@ -232,14 +232,16 @@ describe("daemon startup honours the gate", () => {
     });
   });
 
-  it("serves the conflict runtime when started from the production options", async () => {
+  it("serves both conflict methods when started from the production options", async () => {
     // End to end: not just that the options object says true, but that a daemon started
     // from them builds the runtime. invalid_request means the runtime exists and reached
     // the phrase check; service_unavailable would mean it was never wired.
-    expect(await conflictReplyAtStartup("notes.abandon-resolve", {}, true)).toEqual({
-      ok: false,
-      code: "invalid_request",
-    });
+    for (const method of ["notes.abandon-resolve", "notes.resolve-conflict"] as const) {
+      expect(await conflictReplyAtStartup(method, {}, true), method).toEqual({
+        ok: false,
+        code: "invalid_request",
+      });
+    }
   });
 
   it("wires the conflict runtime when the option is explicitly enabled", async () => {

@@ -326,7 +326,9 @@ not locked, so a change inside that window is not caught.
 - **Disposition: accepted.** Closing the window needs a store-level copy lock or a
   second confirmation read, which the storage layer does not offer. The window is
   bounded by the three re-reads, and a change inside it produces a pending mark plus a
-  copy the operator can inspect rather than a silent loss.
+  copy the operator can inspect rather than a silent loss. The pending mark appears in
+  the upload approval queue, which the operator reviews with `nookctl notes
+  approve-upload` before anything is sent.
 - Live conflict resolve is enabled: the daemon's shipped entry point sets the startup
   option. Removing that line turns both operator methods off again without touching the
   implementation.
