@@ -14,6 +14,8 @@ import {
 } from "./rpc-protocol.js";
 import { isOperatorTransportMethod, type OperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
+import type { OperatorRefusalSink } from "./operator-refusal.js";
+import { classifyOperatorError } from "./operator-refusal.js";
 import type { OperatorPolicyDecision } from "./operator-policy.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 
@@ -58,6 +60,11 @@ export type StartOperatorSocketServerOptions = Readonly<{
   peerCredentialHelperPath?: string;
   authorize: OperatorSocketAuthorization;
   handle: OperatorSocketHandler;
+  /**
+   * Records why a refusal happened. Optional: without it the endpoint behaves
+   * exactly as before, so an embedder that does not want the log keeps it off.
+   */
+  refusalLog?: OperatorRefusalSink;
   socketMode?: number;
   maxConnections?: number;
   idleTimeoutMs?: number;
@@ -147,6 +154,7 @@ export async function startOperatorSocketServer(
         inFlight.add(work);
         void work.finally(() => inFlight.delete(work));
       },
+      options.refusalLog,
     );
   });
 
@@ -188,6 +196,7 @@ function serveOneRequest(
   handle: OperatorSocketHandler,
   onRequestTaken: () => void,
   trackWork: (work: Promise<void>) => void,
+  refusalLog?: OperatorRefusalSink,
 ): void {
   let pending = Buffer.alloc(0);
   // Set when the first frame is taken, not when its dispatch ends: the
@@ -222,7 +231,7 @@ function serveOneRequest(
       peerLookup
         .then(async (peer) => {
           if (peer === undefined) return;
-          await dispatchFrame(socket, frame, peer, authorize, handle);
+          await dispatchFrame(socket, frame, peer, authorize, handle, refusalLog);
         })
         .finally(() => socket.end()),
     );
@@ -236,6 +245,7 @@ async function dispatchFrame(
   peer: OperatorPeer,
   authorize: OperatorSocketAuthorization,
   handle: OperatorSocketHandler,
+  refusalLog?: OperatorRefusalSink,
 ): Promise<void> {
   let request: RpcRequest;
   try {
@@ -248,10 +258,25 @@ async function dispatchFrame(
     socket.destroy();
     return;
   }
+  const recordRefusal = (refusal: Parameters<OperatorRefusalSink>[0]): void => {
+    try {
+      refusalLog?.(refusal);
+    } catch {
+      // A diagnostic must not change what the caller receives.
+    }
+  };
   let decision: OperatorPolicyDecision;
   try {
     decision = await authorize(request.method, peer, request);
-  } catch {
+  } catch (error) {
+    // The socket dies without a reply, so without this line the only trace of
+    // an authorization failure is a client that saw the connection close.
+    recordRefusal({
+      method: request.method,
+      source: "authorize_threw",
+      code: "no_reply",
+      errorClass: classifyOperatorError(error).errorClass,
+    });
     socket.destroy();
     return;
   }
@@ -259,30 +284,61 @@ async function dispatchFrame(
     // The policy's categorical reason is the code the operator receives, so a
     // lock refusal stays distinguishable from a permission problem.
     const message = decision.reason === "vault_locked" ? "Vault locked" : "Permission denied";
-    await writeResponse(socket, {
-      id: request.id,
-      ok: false,
-      error: { code: decision.reason, message },
-    });
+    await writeResponse(
+      socket,
+      { id: request.id, ok: false, error: { code: decision.reason, message } },
+      refusalLog,
+      request.method,
+    );
     return;
   }
   try {
     const response = await handle(request, peer);
-    await writeResponse(socket, response);
-  } catch {
-    await writeResponse(socket, {
-      id: request.id,
-      ok: false,
-      error: { code: "service_unavailable", message: "Service unavailable" },
+    await writeResponse(socket, response, refusalLog, request.method);
+  } catch (error) {
+    // The handler is not supposed to throw — it returns envelopes — so a throw
+    // here is a defect being hidden behind the same code as a missing runtime.
+    recordRefusal({
+      method: request.method,
+      code: "service_unavailable",
+      source: "uncaught_throw",
+      errorClass: classifyOperatorError(error).errorClass,
     });
+    await writeResponse(
+      socket,
+      {
+        id: request.id,
+        ok: false,
+        error: { code: "service_unavailable", message: "Service unavailable" },
+      },
+      refusalLog,
+      request.method,
+    );
   }
 }
 
-async function writeResponse(socket: net.Socket, response: RpcAnyResponseEnvelope): Promise<void> {
+async function writeResponse(
+  socket: net.Socket,
+  response: RpcAnyResponseEnvelope,
+  refusalLog?: OperatorRefusalSink,
+  method?: string,
+): Promise<void> {
   let frame: Uint8Array;
   try {
     frame = serializeRpcResponse(response);
-  } catch {
+  } catch (error) {
+    if (method !== undefined) {
+      try {
+        refusalLog?.({
+          method,
+          code: "no_reply",
+          source: "serialize_failed",
+          errorClass: classifyOperatorError(error).errorClass,
+        });
+      } catch {
+        // A diagnostic must not change what the caller receives.
+      }
+    }
     socket.destroy();
     return;
   }

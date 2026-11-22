@@ -56,6 +56,7 @@ import {
   type NotebookRecord,
 } from "./settings/notebook-index.js";
 import { createOperatorDiscoveryHandler } from "./service/operator-discovery-handler.js";
+import { createOperatorRefusalLog } from "./service/operator-refusal.js";
 import { runOperatorPathDiagnostic } from "./service/rpc-handler.js";
 import {
   createOperatorDiscoveryRuntime,
@@ -764,11 +765,22 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     }),
   );
 
+  // One bounded record per refusal, saying whether the daemon never built the
+  // runtime or built it and the call threw. The reply code cannot say that.
+  const refusalLogger = createLogger({ bindings: { component: "nookd" } });
+  const operatorRefusalLog = createOperatorRefusalLog({
+    emit: (record) =>
+      record.method === "operator.request.refused.suppressed"
+        ? refusalLogger.info("operator refusals suppressed", record)
+        : refusalLogger.info("operator request refused", record),
+  });
+
   const operator =
     readOnly === undefined
       ? undefined
       : {
           socketPath: resolve(dirname(config.socketPath), "operator.sock"),
+          refusalLog: operatorRefusalLog,
           // The production authorizer: admission, the operator capability for
           // mutations, the lock context, and the notebook policy.
           authorize: createOperatorAuthorizer({
@@ -851,40 +863,43 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
               discoveryVisibility,
             );
             const { create: _untrackedCreate, ...discoveryMethods } = discoveryRuntime;
-            return createOperatorDiscoveryHandler({
-              ...discoveryMethods,
-              ...(operatorConflictResolve === undefined
-                ? {}
-                : {
-                    resolveConflict: operatorConflictResolve.resolveConflict,
-                    abandonConflict: operatorConflictResolve.abandonConflict,
-                  }),
-              ...(operatorConflictInspect === undefined
-                ? {}
-                : { inspectConflict: operatorConflictInspect.inspectConflict }),
-              ...(operatorWrite?.create === undefined ? {} : { create: operatorWrite.create }),
-              ...(operatorWrite === undefined
-                ? {}
-                : {
-                    editPreimage: operatorWrite.editPreimage,
-                    applyEdit: operatorWrite.applyEdit,
-                    applyUndo: operatorWrite.applyUndo,
-                    operationStatus: operatorWrite.operationStatus,
-                    operationList: operatorWrite.operationList,
-                  }),
-              ...(pathDiagnostic === undefined
-                ? {}
-                : {
-                    pathDiagnostic: (request) =>
-                      runOperatorPathDiagnostic(request as never, serverRuntime),
-                  }),
-              ...(operatorUploadApproval === undefined
-                ? {}
-                : {
-                    approveUpload:
-                      createOperatorUploadApprovalRuntime(operatorUploadApproval).approveUpload,
-                  }),
-            });
+            return createOperatorDiscoveryHandler(
+              {
+                ...discoveryMethods,
+                ...(operatorConflictResolve === undefined
+                  ? {}
+                  : {
+                      resolveConflict: operatorConflictResolve.resolveConflict,
+                      abandonConflict: operatorConflictResolve.abandonConflict,
+                    }),
+                ...(operatorConflictInspect === undefined
+                  ? {}
+                  : { inspectConflict: operatorConflictInspect.inspectConflict }),
+                ...(operatorWrite?.create === undefined ? {} : { create: operatorWrite.create }),
+                ...(operatorWrite === undefined
+                  ? {}
+                  : {
+                      editPreimage: operatorWrite.editPreimage,
+                      applyEdit: operatorWrite.applyEdit,
+                      applyUndo: operatorWrite.applyUndo,
+                      operationStatus: operatorWrite.operationStatus,
+                      operationList: operatorWrite.operationList,
+                    }),
+                ...(pathDiagnostic === undefined
+                  ? {}
+                  : {
+                      pathDiagnostic: (request) =>
+                        runOperatorPathDiagnostic(request as never, serverRuntime),
+                    }),
+                ...(operatorUploadApproval === undefined
+                  ? {}
+                  : {
+                      approveUpload:
+                        createOperatorUploadApprovalRuntime(operatorUploadApproval).approveUpload,
+                    }),
+              },
+              { onRefusal: operatorRefusalLog },
+            );
           })(),
         };
 
@@ -937,6 +952,9 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
         failed = true;
       }
     }
+    // A window that dropped records has not flushed yet; without this the
+    // count of what was suppressed is lost when traffic stops.
+    operatorRefusalLog.flush();
     try {
       await cleanup();
     } catch {
