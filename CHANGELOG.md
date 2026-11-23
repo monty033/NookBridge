@@ -7,6 +7,18 @@ release entries describe the supported boundary at the time of the release.
 
 ### Fixed
 
+- An operator request refused after the caller is admitted is now attributable
+  in the daemon log. The reply code alone could not distinguish "the daemon
+  never built that capability" from "it built it and the call failed" — both
+  answer `service_unavailable` — so an unwired runtime, a categorized runtime
+  refusal, an uncaught throw, a failing authorization step and a reply that
+  cannot be serialized each record their method, the reply code (or `no_reply`
+  when nothing was sent), why the refusal happened and a fixed class for the
+  error. The record holds no message, parameters, handle, title, path or
+  request identifier.
+- The operator socket no longer swallows an authorization failure or an
+  unreadable reply: both closed the connection leaving no trace, and are now
+  recorded like any other refusal.
 - Recovery reinitialize leaves state the service user can open. Fresh required
   members take the state root's owner and mode `0600`; before, they were
   root-owned inside a service-owned root, and the daemon could not start on

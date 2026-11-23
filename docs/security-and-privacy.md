@@ -78,6 +78,25 @@ Inside the daemon, the discovery runtime's `browse`, `search`, `view` and `creat
 
 Note handles, browse and search cursors, and recorded operations belong to the caller that created them and do not resolve for any other caller.
 
+An operator request that the daemon refuses after admitting the caller is
+recorded in the daemon log when the refusal is an unwired runtime, a runtime
+refusal that throws with a category, an uncaught throw, a failing authorization
+step, or a reply that cannot be serialized. A policy denial and a request
+rejected before dispatch are not recorded. The record exists because the reply
+code cannot say whether the daemon never built that capability or built it and
+the call failed — both answer `service_unavailable`. Each record carries the
+method (already a closed literal), the reply code — or `no_reply` when the
+connection closed without an envelope — one of a fixed set of reasons
+(`not_wired`, `categorized`, `uncaught_throw`, `authorize_threw`,
+`serialize_failed`), and one of a fixed set of error classes. It carries no
+message, stack, cause, parameters, handle, title, path, or request identifier,
+so neither the caller nor the upstream library can put text into the daemon
+log. Records are capped per minute for each reason separately, so a client
+cannot flood the journal and a flood of one kind cannot crowd out the
+`not_wired` line an operator is looking for. Nothing is sampled: a window that
+had to drop records reports the count on the next record for that reason, and
+at clean shutdown. A crash or a kill loses that count.
+
 The locked-note proof reports, for one exact note path, only `pathBytes` and one result each for `read`, `update` and `delete`. Each result is one of exactly five codes: `vault_locked`, `ok`, `not_found`, `permission_denied`, `service_unavailable`. The report never includes note text, titles, identifiers, revisions, paths, or error messages.
 
 The proof never modifies an unlocked note: for an unlocked target it reports `read: ok` and `permission_denied` for `update` and `delete` without attempting either.
