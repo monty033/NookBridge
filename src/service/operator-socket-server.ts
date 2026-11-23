@@ -15,7 +15,7 @@ import {
 import { isOperatorTransportMethod, type OperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import type { OperatorRefusalSink } from "./operator-refusal.js";
-import { classifyOperatorError } from "./operator-refusal.js";
+import { UNATTRIBUTED_METHOD, classifyOperatorError } from "./operator-refusal.js";
 import type { OperatorPolicyDecision } from "./operator-policy.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 
@@ -142,7 +142,20 @@ export async function startOperatorSocketServer(
     const peerLookup = lookup.catch(() => undefined);
     // An unresolved peer is dropped as soon as that is known, as before.
     void peerLookup.then((peer) => {
-      if (peer === undefined) socket.destroy();
+      if (peer === undefined) {
+        // The connection closes either way; the record is written only when the
+        // caller is still there to have been refused. A client that already
+        // left, and the idle sockets shutdown drops, are not refusals.
+        if (socket.readyState === "open") {
+          recordRefusal(options.refusalLog, {
+            method: UNATTRIBUTED_METHOD,
+            code: "no_reply",
+            source: "peer_unresolved",
+            errorClass: "other",
+          });
+        }
+        socket.destroy();
+      }
     });
     serveOneRequest(
       socket,
@@ -207,6 +220,12 @@ function serveOneRequest(
     // still answered.
     if (completed) return;
     if (pending.length + chunk.length > MAX_FRAME_BYTES) {
+      recordRefusal(refusalLog, {
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "unparseable",
+        errorClass: "other",
+      });
       socket.destroy();
       return;
     }
@@ -214,6 +233,12 @@ function serveOneRequest(
     if (pending.length < FRAME_PREFIX_BYTES) return;
     const declared = pending.readUInt32BE(0);
     if (declared === 0 || declared > MAX_FRAME_BYTES - FRAME_PREFIX_BYTES) {
+      recordRefusal(refusalLog, {
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "unparseable",
+        errorClass: "other",
+      });
       socket.destroy();
       return;
     }
@@ -239,6 +264,18 @@ function serveOneRequest(
   socket.on("error", () => undefined);
 }
 
+/** Write one refusal record, where a broken logger cannot change the reply. */
+function recordRefusal(
+  refusalLog: OperatorRefusalSink | undefined,
+  refusal: Parameters<OperatorRefusalSink>[0],
+): void {
+  try {
+    refusalLog?.(refusal);
+  } catch {
+    // A diagnostic must not change what the caller receives.
+  }
+}
+
 async function dispatchFrame(
   socket: net.Socket,
   frame: Buffer,
@@ -250,28 +287,36 @@ async function dispatchFrame(
   let request: RpcRequest;
   try {
     request = parseRpcFrame(frame);
-  } catch {
+  } catch (error) {
+    // The connection dies with no reply, so a malformed frame used to look from
+    // the client side exactly like a daemon that had stopped answering. The
+    // method and params are the caller's text and are not recorded.
+    recordRefusal(refusalLog, {
+      method: UNATTRIBUTED_METHOD,
+      code: "no_reply",
+      source: "unparseable",
+      errorClass: classifyOperatorError(error).errorClass,
+    });
     socket.destroy();
     return;
   }
   if (!isOperatorTransportMethod(request.method)) {
+    recordRefusal(refusalLog, {
+      method: UNATTRIBUTED_METHOD,
+      code: "no_reply",
+      source: "not_operator_method",
+      errorClass: "other",
+    });
     socket.destroy();
     return;
   }
-  const recordRefusal = (refusal: Parameters<OperatorRefusalSink>[0]): void => {
-    try {
-      refusalLog?.(refusal);
-    } catch {
-      // A diagnostic must not change what the caller receives.
-    }
-  };
   let decision: OperatorPolicyDecision;
   try {
     decision = await authorize(request.method, peer, request);
   } catch (error) {
     // The socket dies without a reply, so without this line the only trace of
     // an authorization failure is a client that saw the connection close.
-    recordRefusal({
+    recordRefusal(refusalLog, {
       method: request.method,
       source: "authorize_threw",
       code: "no_reply",
@@ -298,7 +343,7 @@ async function dispatchFrame(
   } catch (error) {
     // The handler is not supposed to throw — it returns envelopes — so a throw
     // here is a defect being hidden behind the same code as a missing runtime.
-    recordRefusal({
+    recordRefusal(refusalLog, {
       method: request.method,
       code: "service_unavailable",
       source: "uncaught_throw",
