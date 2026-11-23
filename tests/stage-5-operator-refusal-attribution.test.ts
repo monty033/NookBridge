@@ -1,10 +1,12 @@
 import { Buffer } from "node:buffer";
 import process from "node:process";
 import net from "node:net";
+import { setTimeout } from "node:timers";
 import { describe, expect, it } from "vitest";
 import { createOperatorDiscoveryHandler } from "../src/service/operator-discovery-handler.js";
 import type { OperatorDiscoveryRuntime } from "../src/service/operator-discovery-handler.js";
 import {
+  UNATTRIBUTED_METHOD,
   classifyOperatorError,
   createOperatorRefusalLog,
   notWiredRefusal,
@@ -60,6 +62,33 @@ function requestFrame(method: string, params: Record<string, unknown> = {}): Buf
   frame.writeUInt32BE(payload.length, 0);
   payload.copy(frame, 4);
   return frame;
+}
+
+/** Connect, send a frame, and resolve once the daemon closes without replying. */
+async function expectClosure(path: string, frame: Buffer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let bytes = 0;
+    socket.on("connect", () => socket.write(frame));
+    socket.on("data", (chunk) => {
+      bytes += chunk.length;
+    });
+    socket.on("close", () => {
+      if (bytes === 0) resolve();
+      else reject(new Error(`expected a silent close, received ${bytes} bytes`));
+    });
+    // A reset is how a refused over-size frame ends; only a reply is a failure.
+    socket.on("error", () => undefined);
+  });
+}
+
+/** Wait until a predicate holds, so a record written after the close is seen. */
+async function until(check: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const started = Date.now();
+  while (!check()) {
+    if (Date.now() - started > timeoutMs) throw new Error("condition never became true");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 async function roundTrip(path: string, frame: Buffer): Promise<unknown> {
@@ -444,6 +473,189 @@ describe("operator socket refusals", () => {
     try {
       const response = await roundTrip(path, requestFrame("notes.operation-list"));
       expect(response).toMatchObject({ ok: false, error: { code: "service_unavailable" } });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records an unparseable frame without repeating a byte of it", async () => {
+    // A frame the daemon cannot parse is closed without a reply, which from the
+    // client side is indistinguishable from a dead daemon. The record names the
+    // event and nothing the caller sent.
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      const canary = "CANARY-9f1c-not-a-handle";
+      // `notes.resolve-conflict` requires `id`, `binding` and `confirmation`.
+      await expectClosure(path, requestFrame("notes.resolve-conflict", { handle: canary }));
+      expect(refusals()).toHaveLength(1);
+      expect(refusals()[0]).toMatchObject({
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "unparseable",
+      });
+      expect(JSON.stringify(refusals())).not.toContain(canary);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records a method the operator socket does not carry", async () => {
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      // `notes.sync` is a bridge method: it parses, but this socket does not
+      // carry it, so the frame is dropped before dispatch.
+      await expectClosure(path, requestFrame("notes.sync"));
+      expect(refusals()).toHaveLength(1);
+      expect(refusals()[0]).toMatchObject({
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "not_operator_method",
+      });
+      // The caller chose this method name, so it must not be copied into the log.
+      expect(JSON.stringify(refusals())).not.toContain("notes.sync");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records a frame whose declared length is unusable", async () => {
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      const zeroLength = Buffer.alloc(4);
+      zeroLength.writeUInt32BE(0, 0);
+      await expectClosure(path, zeroLength);
+      await until(() => refusals().length >= 1);
+      expect(refusals()).toHaveLength(1);
+      expect(refusals()[0]).toMatchObject({
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "unparseable",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records a peer the daemon cannot identify while the caller waits", async () => {
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: () => undefined,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      await expectClosure(path, requestFrame("notes.browse", { limit: 1 }));
+      await until(() => refusals().length === 1);
+      expect(refusals()[0]).toMatchObject({
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "peer_unresolved",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not record a client that leaves before it is identified", async () => {
+    // A probe that connects and hangs up is not an unidentifiable peer:
+    // recording it would make the peer line mean nothing.
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    let release: ((peer: undefined) => void) | undefined;
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: () =>
+        new Promise<undefined>((resolve) => {
+          release = () => resolve(undefined);
+        }),
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      await new Promise<void>((resolve) => {
+        const socket = net.createConnection(path);
+        socket.on("connect", () => {
+          socket.destroy();
+          resolve();
+        });
+      });
+      // Let the daemon see the client go before the lookup finishes.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      release?.(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(refusals()).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records an over-size frame", async () => {
+    const path = socketPath();
+    const { refusals, sink } = collect();
+    const server = await startOperatorSocketServer({
+      socketPath: path,
+      socketPathRoot: "/tmp",
+      resolvePeer: allowPeer,
+      authorize: (method) => ({ allowed: true, method }),
+      handle: async () => ({ id: "request-1", ok: true, result: {} }) as never,
+      refusalLog: sink,
+    });
+    try {
+      // A legal declared length, then more bytes than the cap allows to
+      // accumulate: only the overflow site can refuse this.
+      const prefix = Buffer.alloc(4);
+      prefix.writeUInt32BE(65_532, 0);
+      await new Promise<void>((resolve) => {
+        const socket = net.createConnection(path);
+        socket.on("connect", () => {
+          socket.write(prefix);
+          setTimeout(() => {
+            socket.write(Buffer.alloc(65_533, 0x41));
+            resolve();
+          }, 25);
+        });
+        socket.on("error", () => undefined);
+      });
+      await until(() => refusals().length >= 1);
+      expect(refusals()).toHaveLength(1);
+      expect(refusals()[0]).toMatchObject({
+        method: UNATTRIBUTED_METHOD,
+        code: "no_reply",
+        source: "unparseable",
+      });
     } finally {
       await server.close();
     }

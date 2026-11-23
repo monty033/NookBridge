@@ -11,6 +11,7 @@
  * path. The error class is reduced to a fixed allow-list so a log line cannot
  * become a channel for upstream internals.
  */
+import { performance } from "node:perf_hooks";
 import type { RpcErrorCode } from "./rpc-protocol.js";
 import { RPC_ERROR_MESSAGES } from "./rpc-protocol.js";
 import { isNotesnookReadOnlyProjectionError } from "../core/notesnook-readonly-projection.js";
@@ -22,7 +23,17 @@ export type OperatorRefusalSource =
   | "categorized"
   | "uncaught_throw"
   | "authorize_threw"
-  | "serialize_failed";
+  | "serialize_failed"
+  | "unparseable"
+  | "not_operator_method"
+  | "peer_unresolved";
+
+/**
+ * The method recorded when the daemon has no method to record. A frame that
+ * does not parse, or one naming a method this socket does not carry, can only
+ * report the caller's own text — so it reports this fixed literal instead.
+ */
+export const UNATTRIBUTED_METHOD = "(unattributed)";
 
 /**
  * A fixed allow-list of error classes. An unlisted constructor reports as

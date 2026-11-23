@@ -19,6 +19,20 @@ release entries describe the supported boundary at the time of the release.
 - The operator socket no longer swallows an authorization failure or an
   unreadable reply: both closed the connection leaving no trace, and are now
   recorded like any other refusal.
+- Requests the socket drops before dispatch are now recorded too. A frame that
+  does not parse, one whose declared length is unusable, one that overflows the
+  frame limit, a method this socket does not carry, and a peer that cannot be
+  identified each closed the connection with no reply and no trace; from a
+  client that reports a dead connection as `service_unavailable`, that was
+  indistinguishable from a daemon that had stopped answering. Each now records
+  `no_reply` with the fixed method `(unattributed)`, because the method and
+  parameters in such a frame are the caller's own text. These records are
+  written before any policy decision, and the length checks before the caller
+  is identified. Five
+  cases stay unrecorded because nothing was refused: the idle and lifetime
+  timeouts, a client that leaves before or part-way through its frame, one that
+  finishes its frame and leaves before it is identified, and the drops made at
+  the connection cap or when idle sockets are closed at shutdown.
 - Recovery reinitialize leaves state the service user can open. Fresh required
   members take the state root's owner and mode `0600`; before, they were
   root-owned inside a service-owned root, and the daemon could not start on

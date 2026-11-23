@@ -78,24 +78,43 @@ Inside the daemon, the discovery runtime's `browse`, `search`, `view` and `creat
 
 Note handles, browse and search cursors, and recorded operations belong to the caller that created them and do not resolve for any other caller.
 
-An operator request that the daemon refuses after admitting the caller is
-recorded in the daemon log when the refusal is an unwired runtime, a runtime
-refusal that throws with a category, an uncaught throw, a failing authorization
-step, or a reply that cannot be serialized. A policy denial and a request
-rejected before dispatch are not recorded. The record exists because the reply
-code cannot say whether the daemon never built that capability or built it and
-the call failed — both answer `service_unavailable`. Each record carries the
-method (already a closed literal), the reply code — or `no_reply` when the
-connection closed without an envelope — one of a fixed set of reasons
-(`not_wired`, `categorized`, `uncaught_throw`, `authorize_threw`,
-`serialize_failed`), and one of a fixed set of error classes. It carries no
-message, stack, cause, parameters, handle, title, path, or request identifier,
-so neither the caller nor the upstream library can put text into the daemon
-log. Records are capped per minute for each reason separately, so a client
-cannot flood the journal and a flood of one kind cannot crowd out the
-`not_wired` line an operator is looking for. Nothing is sampled: a window that
-had to drop records reports the count on the next record for that reason, and
-at clean shutdown. A crash or a kill loses that count.
+The daemon records an operator request it cannot answer when the runtime was
+never wired, a categorized runtime refusal threw, an uncaught throw escaped, an
+authorization step threw, a reply could not be serialized, a frame could not be
+read, the method is not one this socket carries, or the peer could not be
+identified. The frame case covers three causes that share one reason: the frame
+did not parse, its declared length was zero or over the limit, or it overflowed
+the frame limit while being read. Every record is written before any policy
+decision, so a caller that is about to be denied can still produce one. The two
+length checks run even earlier, before the caller is identified; the parse and
+method records run after identification, because dispatch begins only once the
+peer is known. A connection whose peer cannot be identified therefore records
+`peer_unresolved` — unless the length checks already refused its frame, which
+is recorded as `unparseable` instead, because that happens first.
+
+A policy denial is not recorded: the caller already receives its categorical
+reason. Five cases stay unrecorded because nothing was refused — the idle and
+connection-lifetime timeouts, a client that leaves before or part-way through
+its frame, one that finishes its frame and leaves before the daemon identifies
+it, the drop made at the connection cap, and the idle sockets closed at
+shutdown.
+
+The record exists because the reply code cannot say which of these happened:
+an unwired runtime and a throwing one both answer `service_unavailable`. Each
+record carries the reply code — or `no_reply` when the connection closed
+without an envelope — one of the fixed reasons above, and one of a fixed set of
+error classes, plus a method only when the daemon could vouch for it. A frame
+the daemon could not read, or one naming a method this socket does not carry,
+has no method it can vouch for, and an unidentified peer was never asked for
+one, so those record the fixed literal `(unattributed)` instead of any text
+from the caller. No message, stack, cause,
+parameter, handle, title, path, or request identifier reaches the log, so
+neither the caller nor the upstream library can put text into it. Records are
+capped per minute for each reason separately, so a client cannot flood the
+journal and a flood of one kind cannot crowd out the `not_wired` line an
+operator is looking for. Nothing is sampled: a window that had to drop records
+reports the count on the next record for that reason, and at clean shutdown. A
+crash or a kill loses that count.
 
 The locked-note proof reports, for one exact note path, only `pathBytes` and one result each for `read`, `update` and `delete`. Each result is one of exactly five codes: `vault_locked`, `ok`, `not_found`, `permission_denied`, `service_unavailable`. The report never includes note text, titles, identifiers, revisions, paths, or error messages.
 
