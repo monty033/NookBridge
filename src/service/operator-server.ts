@@ -41,6 +41,10 @@ import {
   type OperatorTransportMethod,
 } from "./operator-methods.js";
 import type { OperatorPolicyEvaluator } from "./operator-policy.js";
+import {
+  ACCEPTED_OPERATOR_SOCKET_MODES,
+  DEFAULT_OPERATOR_SOCKET_MODE,
+} from "./operator-socket-server.js";
 
 const objectCreate = Object.create;
 const objectFreeze = Object.freeze;
@@ -260,8 +264,6 @@ export interface CreateOperatorListenerOptions {
   readonly evaluator: OperatorPolicyEvaluator;
 }
 
-const DEFAULT_OPERATOR_SOCKET_MODE = 0o660;
-const RESTRICTIVE_OPERATOR_SOCKET_MODES: ReadonlyArray<number> = [0o660, 0o770];
 const OPERATOR_SOCKET_ROOT = "/run/nookbridge";
 
 /**
@@ -297,8 +299,8 @@ function validateOperatorSocketMode(socketMode: number): number {
   if (!Number.isInteger(socketMode) || socketMode < 0 || socketMode > 0o777) {
     throw new Error("operator socket mode must be a valid 0o000–0o777 octal");
   }
-  for (let index = 0; index < RESTRICTIVE_OPERATOR_SOCKET_MODES.length; index += 1) {
-    if (RESTRICTIVE_OPERATOR_SOCKET_MODES[index] === socketMode) return socketMode;
+  for (let index = 0; index < ACCEPTED_OPERATOR_SOCKET_MODES.length; index += 1) {
+    if (ACCEPTED_OPERATOR_SOCKET_MODES[index] === socketMode) return socketMode;
   }
   throw new Error("operator socket mode must be 0o660 or 0o770");
 }

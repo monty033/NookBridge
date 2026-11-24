@@ -21,7 +21,12 @@ import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-creden
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES = 65_536;
-const DEFAULT_SOCKET_MODE = 0o660;
+/** The mode the operator socket is created with unless a caller asks for 0o770. */
+export const DEFAULT_OPERATOR_SOCKET_MODE = 0o660;
+export const ACCEPTED_OPERATOR_SOCKET_MODES: ReadonlyArray<number> = [
+  DEFAULT_OPERATOR_SOCKET_MODE,
+  0o770,
+];
 const DEFAULT_MAX_CONNECTIONS = 64;
 const DEFAULT_IDLE_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_CONNECTION_LIFETIME_MS = 60_000;
@@ -85,7 +90,7 @@ export async function startOperatorSocketServer(
   options: StartOperatorSocketServerOptions,
 ): Promise<OperatorSocketServerHandle> {
   const socketPath = validateSocketPath(options.socketPath, options.socketPathRoot);
-  const socketMode = validateSocketMode(options.socketMode ?? DEFAULT_SOCKET_MODE);
+  const socketMode = validateSocketMode(options.socketMode ?? DEFAULT_OPERATOR_SOCKET_MODE);
   const maxConnections = validateConnectionLimit(
     options.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
     1_024,
@@ -410,8 +415,9 @@ function validateSocketPath(value: string, testRoot?: string): string {
   return value;
 }
 
-function validateSocketMode(value: number): number {
-  if (value !== 0o660 && value !== 0o770) throw new Error("operator socket mode is invalid");
+/** Returns `value` when the operator socket accepts it, and throws otherwise. */
+export function validateSocketMode(value: number): number {
+  if (!ACCEPTED_OPERATOR_SOCKET_MODES.includes(value)) throw new Error("operator socket mode is invalid");
   return value;
 }
 

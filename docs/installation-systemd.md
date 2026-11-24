@@ -122,9 +122,18 @@ A peer may be in both groups. The groups govern different surfaces.
 `nookbridge-clients` governs the daemon socket: the service readPolicy decides
 which of the ten admitted methods that peer may call there. It grants no access
 to the operator listener - a peer without `nookbridge-operators` is refused
-there, reads included. The operator group is all-or-nothing: an admitted peer
-may both read and mutate, and there is no read-only operator tier. A locked
-note refuses mutation outright (`vault_locked`), and an operation the note's
+there, reads included.
+
+By default the operator group is all-or-nothing: an admitted peer may both read
+and mutate, and there is no read-only operator tier. The service configuration
+can replace that default with an optional `operatorAccess` block that maps
+groups or users to the capability families `discover`, `read`, `write`,
+`conflict` and `admin`, so a delegated identity can be given reads or conflicts
+without mutations; see "Operator capability delegation" in
+`docs/security-and-privacy.md`. Without the block the behaviour above is
+unchanged.
+
+A locked note refuses mutation outright (`vault_locked`), and an operation the note's
 notebook policy forbids is refused (`permission_denied`); per-notebook overrides
 live in the settings file.
 

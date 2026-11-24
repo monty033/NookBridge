@@ -5,6 +5,21 @@ release entries describe the supported boundary at the time of the release.
 
 ## Unreleased
 
+### Added
+
+- Optional `operatorAccess` service-configuration block. It maps groups or users
+  to the capability families `discover`, `read`, `write`, `conflict` and
+  `admin`, is deny-by-default and has no deny entries, and is evaluated by the
+  operator authorizer before any handle, lock or notebook read. `admin` stays
+  with `nookbridge-operators`. Without the block, the base group keeps every
+  family and its gid is resolved at startup, so an account whose effective gid
+  is that group is admitted where it was previously refused everything; a failed
+  lookup falls back to name matching, which is the old behaviour exactly. An
+  invalid block refuses startup with a closed code that never repeats the
+  offending value, including a principal that does not resolve, is privileged or
+  cannot reach the operator socket. Each decision records one audit line with the
+  matching entry index and the family only.
+
 ### Fixed
 
 - An operator request refused after the caller is admitted is now attributable
