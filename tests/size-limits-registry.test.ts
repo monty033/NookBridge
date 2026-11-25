@@ -91,6 +91,7 @@ describe("size limit registry", () => {
       RPC_CONTENT_BYTES: 27_000,
       RPC_QUERY_BYTES: 512,
       RPC_TITLE_BYTES: 256,
+      DOCUMENT_TASK_TITLE_BYTES: 256,
       RPC_IDENTIFIER_BYTES: 256,
       RPC_REVISION_BYTES: 64,
       MCP_MESSAGE_BYTES: 65_536,
@@ -193,11 +194,11 @@ describe("size limit registry", () => {
   });
 
   it("defines named byte caps by import, not by literal", () => {
-    // The risk this guards is a cap written as a literal in a module far from
-    // the note-size work, so that a later change leaves it behind. Numbers
-    // alone cannot tell a cap from a clone buffer, so the check is on
-    // declarations named for bytes whose value is a literal; a definition that
-    // reads from the registry evaluates to no number and is not a hit.
+    // The risk this guards is a cap defined away from the registry, so that a
+    // later change leaves it behind. The rule is the inverse of "must not be a
+    // literal": a cap must BE an imported binding. A literal, a product, a
+    // property read off another constants table, a call or a local alias is
+    // reported, because each is a second definition site.
     //
     // Fixed-size primitives are not caps and are excluded by name: key, nonce,
     // tag, salt, hash and frame-prefix lengths are properties of a format.

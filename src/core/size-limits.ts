@@ -53,7 +53,9 @@ export const OPERATOR_FRAME_BYTES = 65_536;
 export const RPC_FRAME_BYTES = 65_536;
 
 /**
- * Largest response the daemon will build for one request.
+ * Largest response the daemon will build for one request, and therefore the
+ * frame every client of it has to accept — the MCP client bounds its own
+ * response frame from this value.
  *
  * This is the read budget: it bounds the JSON a caller can pull out in one
  * reply, and therefore also bounds the projection a note is turned into.
@@ -91,8 +93,18 @@ export const RPC_CONTENT_BYTES = 27_000;
  */
 export const RPC_QUERY_BYTES = 512;
 
-/** Largest note title on the RPC surface, in bytes. */
+/**
+ * Largest note title on the RPC surface, in bytes.
+ *
+ * Also the bound the MCP layer applies to the same title, on both the server
+ * and the client — the client has to accept what the daemon may send. It is
+ * not the bound on a title inside a note's own body: that is
+ * `DOCUMENT_TASK_TITLE_BYTES`.
+ */
 export const RPC_TITLE_BYTES = 256;
+
+/** Largest title on a task-list block inside a note body, in bytes. */
+export const DOCUMENT_TASK_TITLE_BYTES = 256;
 
 /**
  * Largest id or handle on the RPC surface, in bytes.
@@ -294,6 +306,7 @@ export const SIZE_LIMITS = Object.freeze({
   RPC_CONTENT_BYTES,
   RPC_QUERY_BYTES,
   RPC_TITLE_BYTES,
+  DOCUMENT_TASK_TITLE_BYTES,
   RPC_IDENTIFIER_BYTES,
   RPC_REVISION_BYTES,
   MCP_MESSAGE_BYTES,

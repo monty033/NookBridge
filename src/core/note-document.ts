@@ -47,7 +47,7 @@ import {
 import {
   DOCUMENT_BLOCK_BYTES,
   DOCUMENT_INLINE_BYTES,
-  RPC_TITLE_BYTES,
+  DOCUMENT_TASK_TITLE_BYTES,
   DOCUMENT_OPAQUE_SENTINEL_BYTES,
   DOCUMENT_OPAQUE_TEXT_BYTES,
   DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
@@ -784,7 +784,7 @@ function validateTaskList(value: Record<string, unknown>, depth: number): void {
     if (value.kind !== "task-list") fail("invalid_shape");
     if (typeof value.title !== "string") fail("invalid_shape");
     if (value.title.length > 0 && depth !== 1) fail("invalid_shape");
-    if (Buffer.byteLength(value.title, "utf8") > RPC_TITLE_BYTES) fail("oversize_inline");
+    if (Buffer.byteLength(value.title, "utf8") > DOCUMENT_TASK_TITLE_BYTES) fail("oversize_inline");
     if (
       [...value.title].some((character) => {
         const code = character.codePointAt(0)!;
