@@ -138,6 +138,87 @@ given), not against a non-interactive caller. Membership of
 the dedicated operator identity, which is the deployment invariant described in
 the implementation plan under SR-9.
 
+### Operator capability delegation
+
+The service configuration may carry an optional `operatorAccess` block. It maps
+principals (a group or a user, never both in one entry) to capability families:
+
+```json
+{
+  "operatorAccess": {
+    "version": 1,
+    "principals": [
+      { "group": "nookbridge-operators", "families": ["discover", "read", "write", "conflict", "admin"] },
+      { "user": "<delegate-user>", "families": ["discover"] }
+    ]
+  }
+}
+```
+
+The families are a closed table, and every operator method belongs to exactly
+one of them; a method with no family cannot compile:
+
+| Family | Methods |
+| --- | --- |
+| `discover` | `browse`, `search-operator`, `operation-status`, `operation-list` |
+| `read` | `get-view`, `edit-preimage`, `inspect-conflict` |
+| `write` | `create`, `apply-edit`, `apply-undo` |
+| `conflict` | `resolve-conflict`, `abandon-resolve` |
+| `admin` | `approve-upload`, `path_diagnostic`, `edit-census` |
+
+- A peer's rights are the union of every entry that matches it. There are no
+  deny entries.
+- `admin` can be granted only to the base group `nookbridge-operators`.
+- With no block, there is one implicit entry: the base group, holding all five
+  families, with its gid resolved at startup where the user database can supply
+  it. Every decision is then what it was before this change, except that an
+  account whose effective gid is that group is now admitted — previously such a
+  peer was refused everything, because its group list never names the group. A
+  failed lookup falls back to matching by name alone, which is the old behaviour
+  exactly. A block that is present replaces that implicit entry, so it must list
+  the base group itself if the base group is to keep any family.
+- The principal check runs first. A peer holding no grant for the method's
+  family receives `permission_denied` before any handle is decoded, any lock
+  state is read or any notebook policy is consulted. A grant then passes through
+  the same target gates as before; it never bypasses them.
+- For the mutating families (`write` and `conflict`), a delegated principal on a
+  locked note gets `permission_denied`, while a peer granted through the base
+  group gets `vault_locked`, so a delegate cannot probe which notes are locked by
+  trying to change them. For `read` the authorizer does not consult lock state,
+  so a delegate is admitted to a read wherever its own grant allows it, which is
+  what a base-group peer sees when the base entry also holds `read`; the content layer
+  still refuses a locked note's body to every peer and answers `vault_locked` to
+  every peer, which means the read family has no lock-probe collapse. That
+  asymmetry predates this change and is unchanged by it.
+- A grant matches a peer by supplementary group name or by effective gid, so an
+  account whose effective group is the granted group is still matched even though
+  the peer's group list never names it. A `user` principal is enforced by the uid
+  resolved at startup, so recycling a deleted account's uid would inherit the
+  grant without a config change; a resolved gid has the same property, so
+  reassigning that gid to another group would match the stale entry, including
+  for the implicit policy.
+- Each decision writes one audit line holding only the index of the matching
+  entry and the family. It holds no principal name, handle, title or path.
+
+Validation refuses to start the daemon, with a distinct closed code per
+condition, and never repeats the offending value. Structural problems (unknown
+keys, wrong types, empty lists, a principal naming both or neither of user and
+group, an unsafe name, a repeated principal or family, an unknown family, `admin`
+for a non-base principal) are caught when the configuration is loaded, including
+by `nookd --check-config`. Three further checks run at startup against the
+host's user and group database: a principal that does not resolve, a principal
+that is privileged (uid or gid 0, or the daemon's own service uid, which is
+refused with the same code), and a principal that cannot reach the operator
+socket. A grant that no peer could ever use is refused rather than accepted
+silently. The startup log records the closed code and the position of the
+offending entry in `principals`, never its name. When the block is present, list
+the base operator group's entry and ensure at least one member of that group is
+in the socket group, otherwise startup refuses.
+
+A delegated write principal still sees "allowed" versus `permission_denied` for a
+target the notebook policy refuses; delegation narrows what the lock state
+reveals, not the existence of the policy.
+
 The empty-parameter form is a read-only preview: it returns those counts and
 the highest sequence without changing markers or saving state.
 

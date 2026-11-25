@@ -78,6 +78,20 @@ import {
 import { configureOpaquePlaceholderKey } from "./core/note-document-native.js";
 import { createOperatorAuthorizer } from "./service/operator-authorizer.js";
 import {
+  DEFAULT_OPERATOR_SOCKET_MODE,
+  validateSocketMode,
+} from "./service/operator-socket-server.js";
+import {
+  createImplicitOperatorAccessPolicy,
+  createSystemPrincipalDirectory,
+  describeOperatorAccessFailure,
+  parseOperatorAccessConfig,
+  resolveOperatorAccess,
+  type OperatorAccessConfig,
+  type OperatorAccessPolicy,
+  type PrincipalDirectory,
+} from "./service/operator-capabilities.js";
+import {
   createOperatorUploadApprovalRuntime,
   type OperatorUploadApprovalCoordinator,
 } from "./service/operator-upload-approval-runtime.js";
@@ -238,7 +252,20 @@ export type NookdStartupFactories = Readonly<{
    * wiring without touching live state supplies an in-memory implementation.
    */
   createOperationStoreFs?: (directory: string) => OperationStoreFs;
+  /**
+   * Offline test seam for the user/group lookup that validates `operatorAccess`.
+   * Production omits it and reads the system passwd and group files.
+   */
+  createPrincipalDirectory?: () => PrincipalDirectory;
 }>;
+
+/**
+ * The operator socket's permission bits.  `operator-socket-server` creates it with its
+ * own default and nookd does not override it; the access validator needs the value to
+ * decide whether a grant can be reached at all.  Imported, not restated, so the two
+ * cannot drift.
+ */
+const OPERATOR_SOCKET_MODE = validateSocketMode(DEFAULT_OPERATOR_SOCKET_MODE);
 
 export type NookdStartupOptions = Readonly<{
   configPath: string;
@@ -442,6 +469,37 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
     // and trusted notebook index have both been built below.
   } catch {
     throw startupError("configuration", "nookd configuration startup failed");
+  }
+
+  // Per-principal operator access.  A present block must resolve through the
+  // system user/group database; a principal that does not, is privileged, or
+  // could never reach the socket refuses startup.  Only the closed code and the
+  // entry index are logged - never the principal or the config.  An absent block
+  // builds the implicit policy, resolving the base group's gid where the
+  // directory can supply it, so an effective-group operator still matches.
+  const accessDirectory = (factories.createPrincipalDirectory ?? createSystemPrincipalDirectory)();
+  let operatorAccess: OperatorAccessPolicy | undefined;
+  if (config.operatorAccess !== undefined) {
+    try {
+      operatorAccess = await resolveOperatorAccess({
+        config: config.operatorAccess,
+        socketGroup: config.socketGroup,
+        socketMode: OPERATOR_SOCKET_MODE,
+        serviceUid: process.geteuid?.(),
+        directory: accessDirectory,
+      });
+    } catch (error) {
+      // Code and entry index only: an index locates the entry in the config
+      // without naming the principal.
+      const failure = describeOperatorAccessFailure(error);
+      createLogger({ bindings: { component: "nookd" } }).error("operator access refused", {
+        code: failure.code,
+        entryIndex: failure.entryIndex,
+      });
+      throw startupError("configuration", "nookd configuration startup failed");
+    }
+  } else {
+    operatorAccess = await createImplicitOperatorAccessPolicy({ directory: accessDirectory });
   }
 
   let credentialsDirectory: string | undefined;
@@ -784,6 +842,14 @@ async function startNookdInternal(options: NookdStartupOptions): Promise<NookdSe
           // The production authorizer: admission, the operator capability for
           // mutations, the lock context, and the notebook policy.
           authorize: createOperatorAuthorizer({
+            access: operatorAccess,
+            // One line per principal-gate decision: the matched principal's index
+            // and the family, nothing about the request.
+            audit: (record) =>
+              refusalLogger.info("operator access decision", {
+                principalIndex: record.principalIndex,
+                family: record.family,
+              }),
             resolveHandle: (handle, peer) => operatorHandles.resolve(handle, peer),
             // A bare apply-undo names only an operation handle, so the note it
             // targets is resolved from the daemon's own committed record -
@@ -1037,7 +1103,17 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
   // `Object.keys` is itself hostile-getter-safe via Reflect.ownKeys below
   // (covers symbol keys too).
   const ownKeys = reflectOwnKeys(configRecord);
-  if (ownKeys.length !== 6 && ownKeys.length !== 7) throw new Error("invalid service config");
+  if (ownKeys.length < 6 || ownKeys.length > 8) throw new Error("invalid service config");
+  // Re-validated, not trusted: the loader seam is callable by hostile tests/scripts.
+  // The parse returns a fresh frozen copy, so a later getter cannot answer differently.
+  let operatorAccess: OperatorAccessConfig | undefined;
+  if (ownKeys.some((key) => key === "operatorAccess")) {
+    try {
+      operatorAccess = parseOperatorAccessConfig(safeGet(configRecord, "operatorAccess"));
+    } catch {
+      throw new Error("invalid service config");
+    }
+  }
   const hasSettingsBackend = ownKeys.some((key) => key === "settingsBackend");
   let settingsBackend: ServiceConfigSettingsBackend | undefined;
   if (hasSettingsBackend) {
@@ -1058,7 +1134,8 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
       key !== "backend" &&
       key !== "credentialName" &&
       key !== "readPolicy" &&
-      key !== "settingsBackend"
+      key !== "settingsBackend" &&
+      key !== "operatorAccess"
     ) {
       throw new Error("invalid service config");
     }
@@ -1100,6 +1177,7 @@ function narrowLoadedServiceConfig(loaded: unknown): ServiceConfig {
     credentialName: SERVICE_CONFIG_CREDENTIAL_NAME,
     ...(settingsBackend === undefined ? {} : { settingsBackend }),
     readPolicy,
+    ...(operatorAccess === undefined ? {} : { operatorAccess }),
   });
 }
 

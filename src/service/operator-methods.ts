@@ -6,6 +6,11 @@
  * every daemon policy. The browse/search methods
  * are a separate discovery transport vocabulary: they are not D2 methods and
  * are kept distinct so the frozen contract cannot silently widen.
+ *
+ * Every method here must also be assigned a capability family in
+ * `OPERATOR_METHOD_FAMILY` (`./operator-capabilities.ts`).  That table is typed
+ * `Record<OperatorMethod, ...>`, so adding a method without classifying it
+ * fails the build rather than leaving it ungated.
  */
 
 import type { RpcMethod } from "./rpc-protocol.js";

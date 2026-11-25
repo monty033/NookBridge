@@ -55,6 +55,13 @@ import {
   readSync,
 } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import {
+  OPERATOR_ACCESS_CONFIG_ERROR_CODES,
+  isOperatorAccessConfigErrorCode,
+  isOperatorAccessError,
+  parseOperatorAccessConfig,
+  type OperatorAccessConfig,
+} from "../service/operator-capabilities.js";
 import type { RpcMethod } from "../service/rpc-protocol.js";
 
 /**
@@ -129,6 +136,10 @@ export const SERVICE_CONFIG_ERROR_CATEGORIES = Object.freeze([
   "unsafe_config_ancestor",
   "config_unreadable",
   "config_malformed_json",
+  // One closed code per structural `operatorAccess` refusal; see
+  // `parseOperatorAccessConfig`.  Refusals that need the host's user database
+  // happen at daemon startup, not here, so `--check-config` stays host-independent.
+  ...OPERATOR_ACCESS_CONFIG_ERROR_CODES,
 ] as const);
 
 export type ServiceConfigErrorCategory = (typeof SERVICE_CONFIG_ERROR_CATEGORIES)[number];
@@ -170,6 +181,11 @@ export interface ServiceConfig {
   readonly settingsBackend?: ServiceConfigSettingsBackend;
   /** A non-empty, duplicate-free subset of the closed RpcMethod universe. */
   readonly readPolicy: ReadonlyArray<RpcMethod>;
+  /**
+   * Optional per-principal operator capabilities.  Absent means one implicit
+   * principal, the base operator group, holding every family.
+   */
+  readonly operatorAccess?: OperatorAccessConfig;
 }
 
 /**
@@ -326,6 +342,7 @@ function validateFields(parsed: Record<string, unknown>): LoadServiceConfigResul
     "credentialName",
     "settingsBackend",
     "readPolicy",
+    "operatorAccess",
   ]);
 
   for (const key of Object.keys(parsed)) {
@@ -493,6 +510,21 @@ function validateFields(parsed: Record<string, unknown>): LoadServiceConfigResul
     };
   }
 
+  let operatorAccess: OperatorAccessConfig | undefined;
+  if (Object.hasOwn(parsed, "operatorAccess")) {
+    try {
+      operatorAccess = parseOperatorAccessConfig(parsed.operatorAccess);
+    } catch (error) {
+      if (isOperatorAccessError(error) && isOperatorAccessConfigErrorCode(error.code)) {
+        return { ok: false, error: new ServiceConfigError(error.code, error.message) };
+      }
+      return {
+        ok: false,
+        error: new ServiceConfigError("invalid_type", "service config operatorAccess is invalid"),
+      };
+    }
+  }
+
   const configReadPolicy =
     readPolicy.length === SERVICE_CONFIG_READ_POLICY.length &&
     readPolicy.every((value, index) => value === SERVICE_CONFIG_READ_POLICY[index])
@@ -506,6 +538,7 @@ function validateFields(parsed: Record<string, unknown>): LoadServiceConfigResul
     credentialName,
     ...(settingsBackend === undefined ? {} : { settingsBackend }),
     readPolicy: configReadPolicy,
+    ...(operatorAccess === undefined ? {} : { operatorAccess }),
   });
   return { ok: true, config };
 }

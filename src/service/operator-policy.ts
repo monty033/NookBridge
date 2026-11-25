@@ -47,6 +47,14 @@
  *     parser's `invalid_request` rejection of unknown methods on
  *     the wire.  The parser is the first line of defence; this seam
  *     is the second line.
+ *
+ * Note on admission: the production evaluator
+ * (`operator-authorizer.ts`) no longer decides group admission.  A
+ * per-principal capability gate (`operator-capabilities.ts`) runs
+ * before this seam and before any target is resolved; the evaluator
+ * only refines that grant (lock state, notebook policy) and can only
+ * deny.  `operatorGroupMembership` stays in the context as identity
+ * evidence for evaluators, but is not an admission input.
  */
 
 import { isOperatorMethod, OPERATOR_METHODS, type OperatorMethod } from "./operator-methods.js";

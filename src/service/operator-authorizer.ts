@@ -7,16 +7,17 @@
  *
  * Two gates, in order:
  *
- *   1. Admission — the peer must be in an admitted group.  Admission and the
- *      mutation capability are the same group (`nookbridge-operators`), so
- *      operator access is all-or-nothing: there is no read-only operator tier,
- *      and an admitted peer may also call `apply-edit`.  Admitting a read-only
- *      group later means reintroducing a capability split here, not merely
- *      widening `OPERATOR_ADMITTED_GROUPS`.
+ *   1. Principal — the method's capability family must be granted to the peer
+ *      by the `operatorAccess` policy (see `operator-capabilities.ts`).  With no
+ *      `operatorAccess` block the policy is one implicit principal, the base
+ *      group `nookbridge-operators`, holding every family, which is the old
+ *      all-or-nothing behaviour.  An ungranted peer is refused before any
+ *      handle is resolved and before lock state or notebook policy is read.
  *   2. Target — a locked note refuses mutation categorically, and a notebook
  *      whose policy forbids the operation refuses it.  A target-addressed
  *      mutation whose target does not resolve for the calling peer is refused.
  *
+ * Step 2 can only deny: a grant never overrides a lock or a notebook refusal.
  * Resolution happens before the synchronous policy seam runs, so the evaluator
  * sees the target it is judging.
  */
@@ -35,29 +36,46 @@ import {
   type OperatorPolicyDecision,
   type OperatorAuthorizationContext,
 } from "./operator-policy.js";
+import {
+  OPERATOR_BASE_GROUP,
+  createDefaultOperatorAccessPolicy,
+  operatorMethodFamily,
+  type OperatorAccessAuditRecord,
+  type OperatorAccessGrant,
+  type OperatorAccessPolicy,
+} from "./operator-capabilities.js";
 import { peerToAuthorizationContext, type OperatorPeer } from "./operator-server.js";
 import type { OperatorMethod } from "./operator-methods.js";
 import type { RpcRequest } from "./rpc-protocol.js";
 import type { SettingsOperation } from "../settings/settings-types.js";
 
 /**
- * Groups admitted to the operator socket at all.  `nookbridge-clients` is
- * deliberately absent, so a peer holding only that group cannot reach the
+ * The group the implicit (no `operatorAccess`) policy admits.  `nookbridge-clients`
+ * is deliberately absent, so a peer holding only that group cannot reach the
  * operator listener.
+ *
+ * Kept as the documented default.  The evaluator no longer reads it: the
+ * principal gate is the single source of truth for admission.
  *
  * This is not an MCP boundary.  The MCP server is launched by the MCP client
  * and runs as the same identity used for operator CLI work, which holds
  * `nookbridge-operators`, so an MCP-launched process is still admitted.  A
  * dedicated non-operator identity for the MCP server is tracked as SR-9.
  */
-export const OPERATOR_ADMITTED_GROUPS: ReadonlyArray<string> = Object.freeze([
-  "nookbridge-operators",
-]);
+export const OPERATOR_ADMITTED_GROUPS: ReadonlyArray<string> = Object.freeze([OPERATOR_BASE_GROUP]);
 
-/** The capability group required for any mutating operator method. */
-export const OPERATOR_MUTATION_GROUP = "nookbridge-operators";
+/** The base operator group; the only principal that may hold `admin`. */
+export const OPERATOR_MUTATION_GROUP = OPERATOR_BASE_GROUP;
 
 export interface OperatorAuthorizerDependencies {
+  /**
+   * The compiled `operatorAccess` policy.  Omitted means the implicit default:
+   * the base group holding every family, which is the pre-`operatorAccess`
+   * behaviour exactly.
+   */
+  readonly access?: OperatorAccessPolicy | undefined;
+  /** One record per principal-gate decision: the matched index and the family. */
+  readonly audit?: ((record: OperatorAccessAuditRecord) => void) | undefined;
   /** Resolve a note handle to a note id, per peer. */
   readonly resolveHandle: (handle: string, peer: OperatorPeer) => string | undefined;
   /** Resolve an operation handle to its note, scoped to its owner. */
@@ -103,7 +121,20 @@ export const OPERATOR_TARGET_READ_METHODS: ReadonlyArray<OperatorMethod> = Objec
 ]);
 
 export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): OperatorAuthorizer {
+  const access = deps.access ?? createDefaultOperatorAccessPolicy();
   const decide: OperatorAuthorizer = async (method, peer, request) => {
+    // Principal gate.  It runs before anything below touches the request: no
+    // handle is resolved and no lock state or notebook policy is read for a peer
+    // that holds no grant, so a refusal here does no work an unauthorised caller
+    // could time or probe.
+    const family = operatorMethodFamily(method);
+    const grant: OperatorAccessGrant =
+      family === undefined
+        ? { granted: false, principalIndex: undefined, viaBaseGroup: false }
+        : access.evaluate(peer, family);
+    emitAudit(deps.audit, grant, family);
+    if (!grant.granted) return { allowed: false, reason: "permission_denied" };
+
     const context = peerToAuthorizationContext(peer) as OperatorAuthorizationContext & {
       noteLockState?: OperatorNoteLockState;
       notebookPolicy?: OperatorNotebookPolicy;
@@ -154,7 +185,13 @@ export function createOperatorAuthorizer(deps: OperatorAuthorizerDependencies): 
         return { allowed: false, reason: "permission_denied" };
       }
     }
-    return authorizeOperatorMethod(createOperatorPolicy(evaluateOperatorRequest), method, context);
+    return authorizeOperatorMethod(
+      createOperatorPolicy((candidate, evaluated) =>
+        evaluateOperatorRequest(candidate, evaluated, grant),
+      ),
+      method,
+      context,
+    );
   };
   return async (method, peer, request) => {
     try {
@@ -188,25 +225,39 @@ async function requestTargetKnown(
   return noteId !== undefined;
 }
 
+/** Record the principal-gate decision.  A broken sink never changes the decision. */
+function emitAudit(
+  audit: OperatorAuthorizerDependencies["audit"],
+  grant: OperatorAccessGrant,
+  family: OperatorAccessAuditRecord["family"] | undefined,
+): void {
+  if (audit === undefined) return;
+  try {
+    audit({ principalIndex: grant.principalIndex ?? null, family: family ?? null });
+  } catch {
+    // Auditing must not turn an authorization decision into a failure.
+  }
+}
+
 /**
  * The evaluator.  Denials are categorical and carry no target detail: the
  * operator learns that it was refused, not what exists.
+ *
+ * Admission is not decided here: the principal gate already granted the family,
+ * and `grant` is that result.  This step can only deny.
  */
 function evaluateOperatorRequest(
   candidate: OperatorMethod,
   context: OperatorAuthorizationContext,
+  grant: OperatorAccessGrant,
 ): OperatorPolicyDecision {
-  const groups = context.operatorGroupMembership ?? [];
-  const isAdmitted = groups.some((group) => OPERATOR_ADMITTED_GROUPS.includes(group));
-  if (!isAdmitted) return { allowed: false, reason: "permission_denied" };
-
-  // Admission is the capability check as well: both resolve to the same group,
-  // so a separate "mutating requires the operator group" test would be dead
-  // code here.  Reinstate one if a read-only group is ever admitted.
   const mutating = OPERATOR_MUTATING_METHODS.includes(candidate);
 
   if (mutating && context.noteLockState?.locked === true) {
-    return { allowed: false, reason: "vault_locked" };
+    // `vault_locked` tells the caller the target is a locked note.  Only a peer
+    // granted through the base operator group is told; a delegated principal
+    // gets the same refusal as an unknown handle, so it cannot probe lock state.
+    return { allowed: false, reason: grant.viaBaseGroup ? "vault_locked" : "permission_denied" };
   }
 
   // Only an explicit refusal denies: an absent policy means the daemon is not
