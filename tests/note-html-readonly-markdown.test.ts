@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { noteHtmlReadonlyMarkdown } from "../src/core/note-html-readonly-markdown.js";
+import { noteHtmlReadonlyMarkdown, scanHtmlForTest } from "../src/core/note-html-readonly-markdown.js";
 
 describe("read-only Notesnook HTML Markdown projection", () => {
   it("drops decoration and renders headings", () => {
@@ -183,5 +183,69 @@ describe("read-only Notesnook HTML Markdown projection", () => {
     expect(
       noteHtmlReadonlyMarkdown('<pre><code class="language-ts onmouseover=bad">x</code></pre>'),
     ).toBe("```ts\nx\n```");
+  });
+
+  // The scanner must stay linear on input that never terminates a token. Each
+  // opener in the old regex form rescanned to end-of-input, so cost was
+  // tokens x length. These cases put a large opener count in front of a long
+  // tail, which makes that product huge while leaving the linear scan trivial.
+  // The token budget is raised deliberately: under the production caps the
+  // quadratic form is still cheap enough to pass, so the caps would hide the
+  // regression this guards against when issue #327 raises them.
+  const MB = 1024 * 1024;
+  const roomy = { maxBytes: 16 * MB, maxTokens: 4_000_000 };
+  // Asserting the node count matters: a scanner that bailed out early and
+  // returned `[]` would satisfy a pure timing assertion instantly.
+  const scanTime = (html: string, expectedNodes: number): number => {
+    const started = Date.now();
+    const nodes = scanHtmlForTest(html, roomy);
+    const elapsed = Date.now() - started;
+    expect(nodes.length).toBe(expectedNodes);
+    return elapsed;
+  };
+
+  it("scans unterminated tag openers in linear time", () => {
+    const html = "<a".repeat(100_000) + "x".repeat(8 * MB - 200_000);
+    // Each `<` is one literal node and the character after it another, so
+    // 100,000 openers plus the tail produce 200,000 nodes. Asserting the count
+    // is what stops an early-return regression from satisfying the timing.
+    expect(scanTime(html, 200_000)).toBeLessThan(3_000);
+  });
+
+  it("scans unterminated comments in linear time", () => {
+    const html = "<!--".repeat(100_000) + "x".repeat(8 * MB - 400_000);
+    expect(scanTime(html, 200_000)).toBeLessThan(3_000);
+  });
+
+  // The same property inside today's production caps, so a regression fails
+  // fast instead of burning minutes of CI on an uninterruptible scan.
+  it("stays fast at the production caps", () => {
+    const started = Date.now();
+    expect(() => scanHtmlForTest("<!--".repeat(30_000))).toThrow("bounded HTML projection failed");
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  // An unterminated comment was not a comment to the old alternation: it fell
+  // through to the declaration form and was swallowed up to the next `>`. The
+  // scanner reproduces that, and only degrades to literal text when no `>`
+  // remains at all.
+  it.each([
+    ["unterminated comment swallows to the next >", "<!-- x >", ""],
+    ["unterminated comment with only >", "<!-->", ""],
+    ["empty comment", "<!---->", ""],
+    ["declaration is dropped", "<![CDATA[x]]>", ""],
+    ["comment followed by text keeps the text", "<!--a-->b", "b"],
+    ["empty close tag is literal", "</>", "\\<\n\n/\\>"],
+    ["close tag with a space is literal", "</ a>", "\\<\n\n/ a\\>"],
+  ])("%s", (_name, html, expected) => {
+    expect(noteHtmlReadonlyMarkdown(html)).toBe(expected);
+  });
+
+  it("keeps unterminated openers as literal text below the token budget", () => {
+    const markdown = noteHtmlReadonlyMarkdown("<a".repeat(1_000));
+    // An opener with no `>` is not a tag: the `<` survives as escaped literal
+    // text and the rest is ordinary text, exactly as the regex form produced.
+    expect(markdown.startsWith("\\<")).toBe(true);
+    expect(markdown).toContain("a");
   });
 });

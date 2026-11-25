@@ -50,21 +50,104 @@ const decode = (text: string): string =>
     }),
     true,
   );
-function parse(html: string): Array<Node | string> {
-  if (Buffer.byteLength(html) > MAX_BYTES) throw new Error("bounded HTML projection failed");
+/**
+ * Tokenise and build the element tree.
+ *
+ * Test-only entry point: it takes injectable limits so the linearity cases can
+ * run at the sizes issue #327 is heading for, because under the production caps
+ * the quadratic form is cheap enough to pass and a test written only at those
+ * sizes would not discriminate. Production always calls `parse`, which applies
+ * the module constants, and this symbol is deliberately not part of the package
+ * surface — do not re-export it from an index.
+ *
+ * The walk is sound only because the index never moves backwards: every branch
+ * either advances it past a terminator it found or advances it by one. That is
+ * what makes a latch (a terminator that `indexOf` reported absent) still true
+ * for the rest of the document.
+ */
+export function scanHtmlForTest(
+  html: string,
+  limits: { maxBytes: number; maxTokens: number } = { maxBytes: MAX_BYTES, maxTokens: MAX_TOKENS },
+): Array<Node | string> {
+  if (typeof html !== "string") throw new Error("bounded HTML projection failed");
+  if (Buffer.byteLength(html) > limits.maxBytes) throw new Error("bounded HTML projection failed");
   const root: Node = { tag: "root", attrs: {}, children: [] };
   const stack: Node[] = [root];
-  const re = /<!--[\s\S]*?-->|<![^>]*>|<\/?[A-Za-z][^>]*>|[^<]+|</g;
-  let match: RegExpExecArray | null,
-    count = 0,
-    dropping: { tag: string; depth: number } | undefined;
-  while ((match = re.exec(html))) {
-    if (++count > MAX_TOKENS) throw new Error("bounded HTML projection failed");
-    const token = match[0];
-    if (token.startsWith("<!--") || token.startsWith("<!")) continue;
-    const close = /^<\/\s*([\w-]+)/.exec(token);
-    if (close) {
-      const tag = close[1]!.toLowerCase();
+  const length = html.length;
+  let count = 0,
+    dropping: { tag: string; depth: number } | undefined,
+    index = 0,
+    // Once a terminator is known to be absent from the remaining input, no
+    // later token can find one either. These latches keep a hostile document
+    // made of unterminated openers (`<a<a<a…`, `<!--<!--…`) linear instead of
+    // rescanning to end-of-input for every opener.
+    noMoreTagClose = false,
+    noMoreCommentClose = false;
+  const pushText = (value: string): void => {
+    if (!dropping) stack.at(-1)!.children.push(decode(value));
+  };
+  while (index < length) {
+    if (++count > limits.maxTokens) throw new Error("bounded HTML projection failed");
+    if (html.charCodeAt(index) !== 0x3c /* < */) {
+      const next = html.indexOf("<", index);
+      const end = next === -1 ? length : next;
+      pushText(html.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (!noMoreCommentClose && html.startsWith("<!--", index)) {
+      const close = html.indexOf("-->", index + 4);
+      if (close !== -1) {
+        index = close + 3;
+        continue;
+      }
+      // An unterminated comment is not a comment to the old alternation: it
+      // fell through to the declaration form, which swallows everything up to
+      // the next `>`. Reproduce that exactly; only when no `>` remains does the
+      // opener degrade to literal text. Each successful scan jumps past the
+      // `>` it found, so the document is still walked once.
+      //
+      // This is why `<!-->` is swallowed: it has no `-->`, so it is consumed
+      // here as a declaration. Do not "simplify" this into the comment branch.
+      noMoreCommentClose = true;
+      const declaration = noMoreTagClose ? -1 : html.indexOf(">", index + 2);
+      if (declaration !== -1) {
+        index = declaration + 1;
+        continue;
+      }
+      noMoreTagClose = true;
+      pushText("<");
+      index += 1;
+      continue;
+    }
+    if (html.startsWith("<!", index)) {
+      // Shares the tag latch: once no `>` remains, no declaration can close.
+      const close = noMoreTagClose ? -1 : html.indexOf(">", index + 2);
+      if (close === -1) {
+        noMoreTagClose = true;
+        pushText("<");
+        index += 1;
+        continue;
+      }
+      index = close + 1;
+      continue;
+    }
+    let name = index + 1;
+    if (html.charCodeAt(name) === 0x2f /* / */) name += 1;
+    const code = html.charCodeAt(name);
+    const startsName = (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
+    const close = startsName && !noMoreTagClose ? html.indexOf(">", name) : -1;
+    if (close === -1) {
+      if (startsName) noMoreTagClose = true;
+      pushText("<");
+      index += 1;
+      continue;
+    }
+    const token = html.slice(index, close + 1);
+    index = close + 1;
+    const closing = /^<\/\s*([\w-]+)/.exec(token);
+    if (closing) {
+      const tag = closing[1]!.toLowerCase();
       if (dropping) {
         if (tag === dropping.tag) {
           dropping.depth -= 1;
@@ -80,7 +163,7 @@ function parse(html: string): Array<Node | string> {
     }
     const open = /^<([\w-]+)/.exec(token);
     if (!open) {
-      if (!dropping) stack.at(-1)!.children.push(decode(token));
+      pushText(decode(token));
       continue;
     }
     const tag = open[1]!.toLowerCase();
@@ -299,6 +382,7 @@ function renderList(n: Node, depth: number): string {
     })
     .join("\n");
 }
+const parse = (html: string): Array<Node | string> => scanHtmlForTest(html);
 export function noteHtmlReadonlyMarkdown(html: string): string {
   if (typeof html !== "string") throw new Error("bounded HTML projection failed");
   return blocks(parse(html))
