@@ -45,6 +45,14 @@ import {
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
 import { DOCUMENT_BLOCK_BYTES } from "./size-limits.js";
+import {
+  DOCUMENT_INLINE_BYTES,
+  DOCUMENT_OPAQUE_SENTINEL_BYTES,
+  DOCUMENT_OPAQUE_TEXT_BYTES,
+  DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+  DOCUMENT_REFERENCE_LABEL_BYTES,
+  DOCUMENT_REFERENCE_URL_BYTES,
+} from "./size-limits.js";
 
 // ---------------------------------------------------------------------------
 // Version + closed error vocabulary.
@@ -282,14 +290,14 @@ export function normaliseNoteDocumentListKind(value: unknown): NoteListKind {
  */
 export const MAX_NOTE_DOCUMENT_BLOCKS = 4096;
 export const MAX_NOTE_DOCUMENT_BLOCK_BYTES = DOCUMENT_BLOCK_BYTES;
-export const MAX_NOTE_DOCUMENT_INLINE_BYTES = 8192;
+export const MAX_NOTE_DOCUMENT_INLINE_BYTES = DOCUMENT_INLINE_BYTES;
 export const MAX_NOTE_DOCUMENT_INLINES_PER_BLOCK = 1024;
 export const MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST = 2048;
 export const MAX_NOTE_DOCUMENT_TASK_CHILDREN = 1024;
 export const MAX_NOTE_DOCUMENT_DEPTH = 16;
-export const MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES = 128;
+export const MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES = DOCUMENT_OPAQUE_SENTINEL_BYTES;
 /** Derived readable Markdown is capped at 8192 UTF-8 bytes per preserved block. */
-export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES = 8192;
+export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES = DOCUMENT_OPAQUE_TEXT_BYTES;
 
 /**
  * Total derived readable Markdown a single decoded document may carry.
@@ -305,7 +313,7 @@ export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES = 8192;
  * refusing it there would turn an upgrade into a refusal. The per-block cap
  * above is the one the schema checks.
  */
-export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES = 16_384;
+export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES = DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES;
 export const MAX_NOTE_DOCUMENT_OPAQUE_PAYLOAD_BYTES = 0;
 export const MAX_NOTE_DOCUMENT_TEXT_BYTES = MAX_NOTE_DOCUMENT_INLINE_BYTES;
 
@@ -316,8 +324,8 @@ export const MAX_NOTE_DOCUMENT_TEXT_BYTES = MAX_NOTE_DOCUMENT_INLINE_BYTES;
  * never a body, so a generous cap only invites abuse (URL-smuggled
  * payloads, oversized data: URLs disguised as long strings, etc.).
  */
-export const MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES = 2048;
-export const MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES = 256;
+export const MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES = DOCUMENT_REFERENCE_URL_BYTES;
+export const MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES = DOCUMENT_REFERENCE_LABEL_BYTES;
 
 // ---------------------------------------------------------------------------
 // AST type definitions.

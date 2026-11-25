@@ -6,11 +6,12 @@ import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EDITOR_MARKDOWN_BYTES } from "../core/size-limits.js";
 
 /** Shape of a failed `spawn`: Node attaches the errno as `code`. */
 type ErrnoException = Error & { readonly code?: string | undefined };
 
-export const MAX_EDITOR_MARKDOWN_BYTES = 4 * 1024 * 1024;
+export const MAX_EDITOR_MARKDOWN_BYTES = EDITOR_MARKDOWN_BYTES;
 export const DEFAULT_EDITOR_TIMEOUT_MS = 60_000;
 
 export type NotesEditorErrorCode =

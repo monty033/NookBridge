@@ -39,6 +39,7 @@ import {
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
 import { RPC_CONTENT_BYTES, RPC_FRAME_BYTES, RPC_RESPONSE_BYTES } from "../core/size-limits.js";
+import { RPC_IDENTIFIER_BYTES, RPC_QUERY_BYTES, RPC_TITLE_BYTES } from "../core/size-limits.js";
 
 // Capture every mutable intrinsic used by this closed boundary before any
 // caller can pollute a shared prototype or static method.
@@ -118,29 +119,15 @@ const stage5RpcLimits = objectCreate(null) as {
   maxIdentifierBytes: number;
 };
 stage5RpcLimits.maxFrameBytes = RPC_FRAME_BYTES;
-stage5RpcLimits.maxQueryBytes = 512;
-/**
- * Content cap for `notes.create` / `notes.update` / `notes.append`.
- *
- * It must stay well below `maxFrameBytes`, but it must also be large enough
- * to rewrite a note a caller can read.  The read budget is 65,536 bytes, so
- * the previous 4,096 left ordinary notes readable and permanently
- * unrewritable through the tool surface.
- *
- * The worst case for text content is JSON escaping of newlines, quotes and
- * backslashes, which doubles the byte count: 27,000 x 2 = 54,000.  The
- * remaining request envelope is bounded by the schema -- id, revision,
- * title and notebook id at 256 bytes each plus sixteen tags at 256 bytes
- * -- so it is under 5,200 bytes and every shape stays under the
- * 65,536-byte frame.  A body made entirely of C0 control characters would
- * encode at six bytes each and is refused by the frame preflight rather
- * than truncated -- the frame check, not this cap, is the allocation bound.
- */
+stage5RpcLimits.maxQueryBytes = RPC_QUERY_BYTES;
+// The content cap's derivation — why it sits below the frame, and the
+// escaping arithmetic that makes that safe — lives with the value in
+// `src/core/size-limits.ts`, so there is one place to edit when it moves.
 stage5RpcLimits.maxContentBytes = RPC_CONTENT_BYTES;
 stage5RpcLimits.maxResponseBytes = RPC_RESPONSE_BYTES;
 stage5RpcLimits.maxSearchHits = 64;
-stage5RpcLimits.maxTitleBytes = 256;
-stage5RpcLimits.maxIdentifierBytes = 256;
+stage5RpcLimits.maxTitleBytes = RPC_TITLE_BYTES;
+stage5RpcLimits.maxIdentifierBytes = RPC_IDENTIFIER_BYTES;
 export const STAGE5_RPC_LIMITS: Stage5RpcLimits = objectFreeze(stage5RpcLimits);
 
 // ---------------------------------------------------------------------------

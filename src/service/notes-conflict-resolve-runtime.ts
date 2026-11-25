@@ -57,11 +57,12 @@ import {
   type OperatorOperationStore,
 } from "./notes-operator-write-runtime.js";
 import type { OperationRecord } from "./notes-undo-store.js";
+import { CONFLICT_RESOLVE_PAYLOAD_BYTES } from "../core/size-limits.js";
 
 const RESOLVE_TTL_MS = 24 * 60 * 60 * 1000;
 const BINDING_PATTERN = /^[0-9a-f]{64}$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-const MAX_PAYLOAD_BYTES = 64 * 1024;
+const MAX_PAYLOAD_BYTES = CONFLICT_RESOLVE_PAYLOAD_BYTES;
 /** Markers one fresh resolve may need: copy, content, and flag. */
 const MARKERS_PER_RESOLVE = 3;
 const CONTENT_OR_FLAG_STAGES: ReadonlyArray<NotesnookRecoveryStage> = [

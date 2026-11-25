@@ -2,27 +2,29 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-import {
-  DOCUMENT_BLOCK_BYTES,
-  MCP_MESSAGE_BYTES,
-  NATIVE_DOCUMENT_BYTES,
-  NOTES_VIEW_MARKDOWN_BYTES,
-  OPERATOR_FRAME_BYTES,
-  PROJECTION_HTML_BYTES,
-  RPC_CONTENT_BYTES,
-  RPC_FRAME_BYTES,
-  RPC_RESPONSE_BYTES,
-  SIZE_LIMITS,
-  STORED_CONTENT_BYTES,
-  UNDO_RECORD_BYTES,
-  UNDO_TOTAL_BYTES,
-} from "../src/core/size-limits.js";
+import { SIZE_LIMITS } from "../src/core/size-limits.js";
+import { MAX_NOTE_DOCUMENT_MARKDOWN_BYTES } from "../src/core/note-document-markdown.js";
 import { MAX_NOTE_DOCUMENT_NATIVE_BYTES } from "../src/core/note-document-native.js";
-import { MAX_NOTE_DOCUMENT_BLOCK_BYTES } from "../src/core/note-document.js";
+import {
+  MAX_NOTE_DOCUMENT_BLOCK_BYTES,
+  MAX_NOTE_DOCUMENT_INLINE_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES,
+  MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+  MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES,
+  MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES,
+} from "../src/core/note-document.js";
 import { STAGE4_WRITE_LIMITS } from "../src/core/notesnook-write-contract.js";
-import { MAX_NOTES_VIEW_MARKDOWN_BYTES } from "../src/operator/notes-cli.js";
+import {
+  MAX_NOTES_QUERY_BYTES,
+  MAX_NOTES_VIEW_MARKDOWN_BYTES,
+} from "../src/operator/notes-cli.js";
+import { MAX_EDITOR_MARKDOWN_BYTES } from "../src/operator/notes-editor-runner.js";
+import { MAX_NOTES_READ_QUERY_BYTES } from "../src/operator/notes-read-runtime.js";
+import { NOTES_UNDO_CONTENT_MAX_BYTES } from "../src/operator/notes-undo-journal.js";
 import { STAGE5_RPC_LIMITS } from "../src/service/rpc-protocol.js";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src");
@@ -35,9 +37,42 @@ function walk(dir: string): string[] {
   });
 }
 
-/** Remove comments so a limit explained in prose is not read as a definition. */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+/**
+ * The value of a numeric constant expression, or null when it is not one.
+ *
+ * Evaluating the expression rather than matching spellings is the point:
+ * `65_536`, `65536`, `64 * 1024` and `1 << 16` are the same number, and all of
+ * them are found. A definition that reads from the registry is an identifier,
+ * so it evaluates to null and is not a hit — which is exactly the distinction
+ * this test is built on.
+ */
+function constantValue(node: ts.Node): number | null {
+  if (ts.isNumericLiteral(node)) return Number(node.text.replace(/_/g, ""));
+  if (ts.isParenthesizedExpression(node)) return constantValue(node.expression);
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
+    const inner = constantValue(node.operand);
+    return inner === null ? null : -inner;
+  }
+  if (ts.isBinaryExpression(node)) {
+    const left = constantValue(node.left);
+    const right = constantValue(node.right);
+    if (left === null || right === null) return null;
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.AsteriskToken:
+        return left * right;
+      case ts.SyntaxKind.PlusToken:
+        return left + right;
+      case ts.SyntaxKind.MinusToken:
+        return left - right;
+      case ts.SyntaxKind.LessThanLessThanToken:
+        return left << right;
+      case ts.SyntaxKind.AsteriskAsteriskToken:
+        return left ** right;
+      default:
+        return null;
+    }
+  }
+  return null;
 }
 
 describe("size limit registry", () => {
@@ -49,60 +84,123 @@ describe("size limit registry", () => {
       RPC_FRAME_BYTES: 65_536,
       RPC_RESPONSE_BYTES: 65_536,
       RPC_CONTENT_BYTES: 27_000,
+      RPC_QUERY_BYTES: 512,
+      RPC_TITLE_BYTES: 256,
+      RPC_IDENTIFIER_BYTES: 256,
       MCP_MESSAGE_BYTES: 65_536,
+      MCP_QUERY_BYTES: 512,
       STORED_CONTENT_BYTES: 262_144,
       STORED_CONTENT_READ_BYTES: 262_144,
       NATIVE_DOCUMENT_BYTES: 262_144,
+      FRAGMENT_BYTES: 32_768,
+      CONFLICT_RESOLVE_PAYLOAD_BYTES: 65_536,
       DOCUMENT_BLOCK_BYTES: 65_536,
+      DOCUMENT_INLINE_BYTES: 8_192,
+      DOCUMENT_OPAQUE_SENTINEL_BYTES: 128,
+      DOCUMENT_OPAQUE_TEXT_BYTES: 8_192,
+      DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES: 16_384,
+      DOCUMENT_REFERENCE_URL_BYTES: 2_048,
+      DOCUMENT_REFERENCE_LABEL_BYTES: 256,
       PROJECTION_HTML_BYTES: 262_144,
       NOTES_VIEW_MARKDOWN_BYTES: 262_144,
+      NOTES_QUERY_BYTES: 4_194_304,
+      DOCUMENT_MARKDOWN_BYTES: 4_194_304,
+      EDITOR_MARKDOWN_BYTES: 4_194_304,
+      NOTES_READ_QUERY_BYTES: 4_194_304,
+      NOTES_UNDO_CONTENT_BYTES: 4_194_304,
       UNDO_RECORD_BYTES: 65_536,
       UNDO_TOTAL_BYTES: 8_388_608,
     });
   });
 
   it("is what the enforcing modules actually use", () => {
-    expect(STAGE5_RPC_LIMITS.maxFrameBytes).toBe(RPC_FRAME_BYTES);
-    expect(STAGE5_RPC_LIMITS.maxResponseBytes).toBe(RPC_RESPONSE_BYTES);
-    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(RPC_CONTENT_BYTES);
-    expect(STAGE4_WRITE_LIMITS.maxContentBytes).toBe(STORED_CONTENT_BYTES);
-    expect(MAX_NOTE_DOCUMENT_NATIVE_BYTES).toBe(NATIVE_DOCUMENT_BYTES);
-    expect(MAX_NOTE_DOCUMENT_BLOCK_BYTES).toBe(DOCUMENT_BLOCK_BYTES);
-    expect(MAX_NOTES_VIEW_MARKDOWN_BYTES).toBe(NOTES_VIEW_MARKDOWN_BYTES);
-    // These three are consumed deep inside the transport and journal rather
-    // than re-exported, so pin the registry entry itself.
-    expect(SIZE_LIMITS.OPERATOR_FRAME_BYTES).toBe(OPERATOR_FRAME_BYTES);
-    expect(SIZE_LIMITS.MCP_MESSAGE_BYTES).toBe(MCP_MESSAGE_BYTES);
-    expect(SIZE_LIMITS.UNDO_RECORD_BYTES).toBe(UNDO_RECORD_BYTES);
-    expect(SIZE_LIMITS.UNDO_TOTAL_BYTES).toBe(UNDO_TOTAL_BYTES);
+    // Every assertion below reads a value exported by a module that enforces
+    // the cap, so it fails if that module stops taking the value from the
+    // registry. Comparing `SIZE_LIMITS.X` against `X` would assert nothing.
+    expect(STAGE5_RPC_LIMITS.maxFrameBytes).toBe(SIZE_LIMITS.RPC_FRAME_BYTES);
+    expect(STAGE5_RPC_LIMITS.maxResponseBytes).toBe(SIZE_LIMITS.RPC_RESPONSE_BYTES);
+    expect(STAGE5_RPC_LIMITS.maxContentBytes).toBe(SIZE_LIMITS.RPC_CONTENT_BYTES);
+    expect(STAGE5_RPC_LIMITS.maxQueryBytes).toBe(SIZE_LIMITS.RPC_QUERY_BYTES);
+    expect(STAGE5_RPC_LIMITS.maxTitleBytes).toBe(SIZE_LIMITS.RPC_TITLE_BYTES);
+    expect(STAGE5_RPC_LIMITS.maxIdentifierBytes).toBe(SIZE_LIMITS.RPC_IDENTIFIER_BYTES);
+    expect(STAGE4_WRITE_LIMITS.maxContentBytes).toBe(SIZE_LIMITS.STORED_CONTENT_BYTES);
+    expect(STAGE4_WRITE_LIMITS.maxFragmentBytes).toBe(SIZE_LIMITS.FRAGMENT_BYTES);
+    expect(MAX_NOTE_DOCUMENT_NATIVE_BYTES).toBe(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES);
+    expect(MAX_NOTE_DOCUMENT_BLOCK_BYTES).toBe(SIZE_LIMITS.DOCUMENT_BLOCK_BYTES);
+    expect(MAX_NOTE_DOCUMENT_INLINE_BYTES).toBe(SIZE_LIMITS.DOCUMENT_INLINE_BYTES);
+    expect(MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES).toBe(
+      SIZE_LIMITS.DOCUMENT_OPAQUE_SENTINEL_BYTES,
+    );
+    expect(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES).toBe(SIZE_LIMITS.DOCUMENT_OPAQUE_TEXT_BYTES);
+    expect(MAX_NOTE_DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES).toBe(
+      SIZE_LIMITS.DOCUMENT_OPAQUE_TEXT_TOTAL_BYTES,
+    );
+    expect(MAX_NOTE_DOCUMENT_REFERENCE_URL_BYTES).toBe(SIZE_LIMITS.DOCUMENT_REFERENCE_URL_BYTES);
+    expect(MAX_NOTE_DOCUMENT_REFERENCE_LABEL_BYTES).toBe(
+      SIZE_LIMITS.DOCUMENT_REFERENCE_LABEL_BYTES,
+    );
+    expect(MAX_NOTE_DOCUMENT_MARKDOWN_BYTES).toBe(SIZE_LIMITS.DOCUMENT_MARKDOWN_BYTES);
+    expect(MAX_NOTES_VIEW_MARKDOWN_BYTES).toBe(SIZE_LIMITS.NOTES_VIEW_MARKDOWN_BYTES);
+    expect(MAX_NOTES_QUERY_BYTES).toBe(SIZE_LIMITS.NOTES_QUERY_BYTES);
+    expect(MAX_NOTES_READ_QUERY_BYTES).toBe(SIZE_LIMITS.NOTES_READ_QUERY_BYTES);
+    expect(MAX_EDITOR_MARKDOWN_BYTES).toBe(SIZE_LIMITS.EDITOR_MARKDOWN_BYTES);
+    expect(NOTES_UNDO_CONTENT_MAX_BYTES).toBe(SIZE_LIMITS.NOTES_UNDO_CONTENT_BYTES);
   });
 
-  it("is the only place a size literal appears in src/", () => {
-    const patterns = [
-      /\b65_536\b/,
-      /\b65536\b/,
-      /\b27_000\b/,
-      /\b262_144\b/,
-      /\b256\s*\*\s*1024\b/,
-      /\b8\s*\*\s*1024\s*\*\s*1024\b/,
-    ];
+  it("keeps the invariants that make the caps safe to reason about", () => {
+    // Everything the bridge writes it can read back.
+    expect(SIZE_LIMITS.STORED_CONTENT_BYTES).toBe(SIZE_LIMITS.STORED_CONTENT_READ_BYTES);
+    // A content cap above its own frame could never be satisfied.
+    expect(SIZE_LIMITS.RPC_CONTENT_BYTES).toBeLessThan(SIZE_LIMITS.RPC_FRAME_BYTES);
+    // The daemon store retains at least one maximum-size record.
+    expect(SIZE_LIMITS.UNDO_TOTAL_BYTES).toBeGreaterThan(SIZE_LIMITS.UNDO_RECORD_BYTES);
+    // Deliberately not asserted: that a response can carry a maximum-size
+    // stored row. It cannot, which is why a large note is refused or paged
+    // rather than returned whole.
+  });
+
+  it("defines byte caps by import, not by literal", () => {
+    // The risk this guards is a *new* cap written as a literal in a module far
+    // from the note-size work, so that a later change leaves it behind.
+    // Scanning for numbers alone is useless — `64 * 1024` is a clone buffer in
+    // one file and a frame size in another — so the check is on declarations
+    // named for bytes whose value is a literal.
+    const allowed = new Map([
+      ["config/service-config.ts: SERVICE_CONFIG_MAX_BYTES", "service config file, not note content"],
+      [
+        "core/note-document-version-claim.ts: MARKDOWN_VERSION_CLAIM_MAX_HEADER_BYTES",
+        "a fixed header prefix, not a note budget",
+      ],
+      ["service/exact-note-path-resolver.ts: MAX_PATH_BYTES", "path length, not a note budget"],
+      ["service/operator-capabilities.ts: MAX_DIRECTORY_FILE_BYTES", "a passwd/group file read"],
+      ["service/socket-group-resolver.ts: MAX_GROUP_FILE_BYTES", "a passwd/group file read"],
+      ["service/peer-credentials.ts: MAX_HELPER_STDOUT_BYTES", "helper stdout, not note content"],
+      ["service/rpc-protocol.ts: PREFLIGHT_ENVELOPE_OVERHEAD_BYTES", "envelope overhead arithmetic"],
+    ]);
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
-      if (file.endsWith("/core/size-limits.ts")) continue;
-      const code = stripComments(readFileSync(file, "utf8"));
-      if (patterns.some((pattern) => pattern.test(code))) {
-        offenders.push(file.slice(SRC.length + 1));
-      }
+      if (resolve(file) === resolve(SRC, "core", "size-limits.ts")) continue;
+      const ast = ts.createSourceFile(
+        "scan.ts",
+        readFileSync(file, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const visit = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          const name = node.name.text;
+          if (/BYTES$/.test(name)) {
+            const value = constantValue(node.initializer);
+            if (value !== null && value >= 1_024) {
+              const key = `${file.slice(SRC.length + 1)}: ${name}`;
+              if (!allowed.has(key)) offenders.push(`${key} = ${value}`);
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast);
     }
-    // Every limit moves together or not at all; a stray literal is a limit
-    // that would be left behind by a future change.
     expect(offenders).toEqual([]);
-  });
-
-  it("keeps the content cap below the frame that carries it", () => {
-    // The invariant, not the numbers: whatever the values become, a content
-    // cap that exceeds its own frame can never be satisfied.
-    expect(RPC_CONTENT_BYTES).toBeLessThan(RPC_FRAME_BYTES);
-    expect(DOCUMENT_BLOCK_BYTES).toBeLessThanOrEqual(PROJECTION_HTML_BYTES);
   });
 });

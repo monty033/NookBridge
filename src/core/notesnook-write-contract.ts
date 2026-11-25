@@ -53,6 +53,7 @@ import {
   inspectNoteDocumentMarkdownWithoutTaskTitles,
 } from "./note-document-markdown.js";
 import { STORED_CONTENT_BYTES } from "./size-limits.js";
+import { FRAGMENT_BYTES } from "./size-limits.js";
 
 // Canonical task-list titles are JSON text, not authored HTML, and the same is
 // true of a preserved block's derived `text`. Parse the whole document before
@@ -199,7 +200,7 @@ export interface Stage4WriteLimits {
 export const STAGE4_WRITE_LIMITS: Stage4WriteLimits = Object.freeze({
   maxTitleLength: 256,
   maxContentBytes: STORED_CONTENT_BYTES,
-  maxFragmentBytes: 32_768,
+  maxFragmentBytes: FRAGMENT_BYTES,
   maxTags: 16,
   maxTagLength: 64,
   maxIdLength: 128,

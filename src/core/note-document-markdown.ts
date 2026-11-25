@@ -20,6 +20,7 @@
 import { Buffer } from "node:buffer";
 import { types } from "node:util";
 import { URL } from "node:url";
+import { DOCUMENT_MARKDOWN_BYTES } from "./size-limits.js";
 import {
   NoteDocumentError,
   isNoteDocumentError,
@@ -41,7 +42,7 @@ import {
 } from "./note-document.js";
 
 export const NOTE_DOCUMENT_MARKDOWN_HEADER = "---\nnookbridge-format: 1\n---\n";
-export const MAX_NOTE_DOCUMENT_MARKDOWN_BYTES = 4 * 1024 * 1024;
+export const MAX_NOTE_DOCUMENT_MARKDOWN_BYTES = DOCUMENT_MARKDOWN_BYTES;
 export interface NoteDocumentMarkdownOptions {
   readonly preimage?: NoteDocumentV1;
 }
