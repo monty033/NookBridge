@@ -44,6 +44,7 @@ import {
   normaliseNotesnookListKind,
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
+import { DOCUMENT_BLOCK_BYTES } from "./size-limits.js";
 
 // ---------------------------------------------------------------------------
 // Version + closed error vocabulary.
@@ -280,7 +281,7 @@ export function normaliseNoteDocumentListKind(value: unknown): NoteListKind {
  *   (T02/T03 own payload handling).
  */
 export const MAX_NOTE_DOCUMENT_BLOCKS = 4096;
-export const MAX_NOTE_DOCUMENT_BLOCK_BYTES = 65_536;
+export const MAX_NOTE_DOCUMENT_BLOCK_BYTES = DOCUMENT_BLOCK_BYTES;
 export const MAX_NOTE_DOCUMENT_INLINE_BYTES = 8192;
 export const MAX_NOTE_DOCUMENT_INLINES_PER_BLOCK = 1024;
 export const MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST = 2048;

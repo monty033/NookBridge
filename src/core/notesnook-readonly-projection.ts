@@ -79,6 +79,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { STORED_CONTENT_READ_BYTES } from "./size-limits.js";
 
 import {
   createReadOnlyRevisionToken,
@@ -1030,7 +1031,7 @@ export function flattenLiveDatabaseToReadOnly(
       if (record.locked === true || isCipherRecord(record)) throw projectionError("vault_locked");
       if ((record.type !== "html" && record.type !== "tiptap") || typeof record.data !== "string")
         throw projectionError("unsupported_content");
-      if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > 256 * 1024)
+      if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > STORED_CONTENT_READ_BYTES)
         throw projectionError("unsupported_content");
       return Object.freeze({ type: record.type, data: record.data });
     },

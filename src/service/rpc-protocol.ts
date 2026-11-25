@@ -38,6 +38,7 @@ import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
+import { RPC_CONTENT_BYTES, RPC_FRAME_BYTES, RPC_RESPONSE_BYTES } from "../core/size-limits.js";
 
 // Capture every mutable intrinsic used by this closed boundary before any
 // caller can pollute a shared prototype or static method.
@@ -116,7 +117,7 @@ const stage5RpcLimits = objectCreate(null) as {
   maxTitleBytes: number;
   maxIdentifierBytes: number;
 };
-stage5RpcLimits.maxFrameBytes = 65_536;
+stage5RpcLimits.maxFrameBytes = RPC_FRAME_BYTES;
 stage5RpcLimits.maxQueryBytes = 512;
 /**
  * Content cap for `notes.create` / `notes.update` / `notes.append`.
@@ -135,8 +136,8 @@ stage5RpcLimits.maxQueryBytes = 512;
  * encode at six bytes each and is refused by the frame preflight rather
  * than truncated -- the frame check, not this cap, is the allocation bound.
  */
-stage5RpcLimits.maxContentBytes = 27_000;
-stage5RpcLimits.maxResponseBytes = 65_536;
+stage5RpcLimits.maxContentBytes = RPC_CONTENT_BYTES;
+stage5RpcLimits.maxResponseBytes = RPC_RESPONSE_BYTES;
 stage5RpcLimits.maxSearchHits = 64;
 stage5RpcLimits.maxTitleBytes = 256;
 stage5RpcLimits.maxIdentifierBytes = 256;

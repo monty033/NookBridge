@@ -5,6 +5,7 @@ import {
   SERIALIZATION_REFUSAL_CODES as CORE_SERIALIZATION_REFUSAL_CODES,
 } from "../core/note-document.js";
 import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+import { NOTES_VIEW_MARKDOWN_BYTES } from "../core/size-limits.js";
 
 /**
  * NookBridge Stage 9 §13.11 — operator-only `nookctl notes <subcommand>`.
@@ -86,7 +87,7 @@ const OPAQUE_VALUE_MAX_LENGTH = 128;
  */
 export const MAX_NOTES_QUERY_BYTES = 4 * 1024 * 1024;
 /** Maximum Markdown body emitted by `notes get`. */
-export const MAX_NOTES_VIEW_MARKDOWN_BYTES = 256 * 1024;
+export const MAX_NOTES_VIEW_MARKDOWN_BYTES = NOTES_VIEW_MARKDOWN_BYTES;
 
 // There is deliberately no edit-envelope or undo-token parser here.  The
 // frozen transport forbids a body or token crossing argv, env or stdin:

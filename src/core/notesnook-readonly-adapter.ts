@@ -49,6 +49,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { STORED_CONTENT_READ_BYTES } from "./size-limits.js";
 import { isNotesnookAdapterError } from "./notesnook-core-adapter.js";
 import { isExactFetchRequest } from "./readonly-sync-shape.js";
 import { createRevisionToken, type NotesnookRevisionToken } from "./notesnook-write-contract.js";
@@ -745,7 +746,7 @@ function coerceNoteContent(value: unknown): NotesnookReadOnlyNoteContent {
   const record = value as Record<string, unknown>;
   if ((record.type !== "html" && record.type !== "tiptap") || typeof record.data !== "string")
     throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
-  if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > 256 * 1024)
+  if (record.data.length === 0 || Buffer.byteLength(record.data, "utf8") > STORED_CONTENT_READ_BYTES)
     throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
   if (/\p{Cc}/u.test(record.data))
     throw readOnlyAdapterError("Notesnook read-only adapter: note content is invalid");
