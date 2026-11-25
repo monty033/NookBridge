@@ -1,16 +1,22 @@
 /**
  * Every named byte cap the bridge enforces, in one place.
  *
- * What this file is: the definition site for every cap measured in bytes, and
- * the place a note-size change has to start. What it is not: a set of derived
- * values. These caps are independent conservative numbers today, not
- * consequences of one another, and the comments say which is which.
+ * What this file is: the named definition site for the byte caps the bridge
+ * enforces on note content and on the wire, and the place a note-size change
+ * has to start. What it is not: a complete inventory of every number compared
+ * against a byte length in `src/`. Inline limits inside one function — a title
+ * length check, a per-field ceiling — still exist and are not all listed here;
+ * they are named below when they matter for note size. These caps are
+ * independent conservative numbers today, not consequences of one another, and
+ * the comments say which is which.
  *
  * Rules for this file:
  *
- *   - A byte cap is defined here and imported; it is not written as a literal
- *     anywhere else in `src/`. `tests/size-limits-registry.test.ts` enforces
- *     that by parsing the tree, not by matching spellings.
+ *   - A *named* byte cap is defined here and imported; it is not written as a
+ *     literal or derived from another table anywhere else in `src/`. The
+ *     registry test enforces that for module constants and for the published
+ *     limit tables by parsing the tree; it does not claim to catch every inline
+ *     comparison, which is why the first paragraph says so.
  *   - Sizes stated in prose live here only. A module that repeats the number
  *     in a comment has two homes for it and will drift.
  *   - Each entry says what it actually bounds and where. A comment that
@@ -138,8 +144,17 @@ export const STORED_CONTENT_BYTES = 262_144;
 /**
  * Largest stored content row the read path will decode.
  *
- * Equal to `STORED_CONTENT_BYTES` so that anything the bridge writes it can
- * read back. It is a refusal threshold, not an allowance: a larger row is
+ * Equal to the inbound `STORED_CONTENT_BYTES`, because the read threshold must
+ * not be tighter than what the native write path accepts.
+ *
+ * It is NOT a read-back guarantee, and saying so would be false: the Markdown
+ * codec's ceiling is `MARKDOWN_CODEC_STORED_BYTES`, four times this value, and
+ * the stored form expands (escaping plus block tags), so a row produced by that
+ * codec can exceed this threshold. Appending to an existing note compounds it:
+ * each fragment is bounded on its own while the composed row is bounded only by
+ * the codec ceiling, so a note can be written and then refused by this
+ * bridge's own read path. That asymmetry is a real defect, tracked as issue #331,
+ * and this file records it rather than hiding it. It is a refusal threshold, not an allowance: a larger row is
  * refused categorically, it is not partially read.
  */
 export const STORED_CONTENT_READ_BYTES = 262_144;

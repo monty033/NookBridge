@@ -48,7 +48,7 @@ import {
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../service/service-abuse-bounds.js";
-import { RPC_RESPONSE_BYTES } from "../core/size-limits.js";
+import { RPC_RESPONSE_BYTES, RPC_TITLE_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
@@ -415,7 +415,7 @@ function serializeRequest(
     if (
       typeof create.title !== "string" ||
       create.title.length === 0 ||
-      Buffer.byteLength(create.title, "utf8") > 256 ||
+      Buffer.byteLength(create.title, "utf8") > RPC_TITLE_BYTES ||
       hasControlCharacter(create.title) ||
       typeof create.content !== "string" ||
       create.content.length === 0 ||
@@ -649,7 +649,7 @@ function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> 
     if (key === "tags") {
       output[key] = snapshotUpdateTags(raw);
     } else if (key === "title") {
-      output[key] = requireBoundedSocketString(raw, 256, false);
+      output[key] = requireBoundedSocketString(raw, RPC_TITLE_BYTES, false);
     } else if (key === "content") {
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxContentBytes, false, true);
     } else if (key === "notebookId") {
@@ -1044,7 +1044,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         typeof resultRecord.titleBytes !== "number" ||
         !Number.isInteger(resultRecord.titleBytes) ||
         resultRecord.titleBytes < 0 ||
-        resultRecord.titleBytes > 256 ||
+        resultRecord.titleBytes > RPC_TITLE_BYTES ||
         typeof resultRecord.contentBytes !== "number" ||
         !Number.isInteger(resultRecord.contentBytes) ||
         resultRecord.contentBytes < 0 ||

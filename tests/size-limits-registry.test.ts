@@ -155,17 +155,34 @@ describe("size limit registry", () => {
     expect(NOTES_UNDO_CONTENT_MAX_BYTES).toBe(SIZE_LIMITS.NOTES_UNDO_CONTENT_BYTES);
   });
 
+  it("is a leaf module: it defines numbers and imports nothing", () => {
+    // Two boundary tests allow this module into the codec's and the write
+    // composition's import lists on the grounds that it pulls in nothing of its
+    // own. Nothing else checks that, so check it here.
+    const source = readFileSync(resolve(SRC, "core", "size-limits.ts"), "utf8");
+    const imports = [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
+    expect(imports).toEqual([]);
+  });
+
   it("keeps the invariants that make the caps safe to reason about", () => {
-    // Everything the bridge writes it can read back.
+    // The read threshold must not be tighter than the inbound write cap.
     expect(SIZE_LIMITS.STORED_CONTENT_BYTES).toBe(SIZE_LIMITS.STORED_CONTENT_READ_BYTES);
     // The content cap has to survive JSON escaping of the whole body plus the
     // rest of the envelope: 2x the body for escaping, and roughly 5 KiB of id,
     // revision, title and tag fields. This is the assertion that fails if the
     // cap is raised without raising the frame.
     expect(2 * SIZE_LIMITS.RPC_CONTENT_BYTES + 5_200).toBeLessThanOrEqual(SIZE_LIMITS.RPC_FRAME_BYTES);
-    // The produced row is what the read side has to accept: anything the
-    // bridge writes it must be able to read back.
+    // What the native codec produces, the read side accepts.
     expect(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES).toBeLessThanOrEqual(
+      SIZE_LIMITS.STORED_CONTENT_READ_BYTES,
+    );
+    // The Markdown codec does not: its ceiling is four times the read
+    // threshold, and appending composes fragments onto existing content while
+    // bounding only each fragment, so a note can be written and then refused by
+    // this bridge's own read path. This assertion records the gap rather than
+    // claiming it does not exist; when the two are reconciled it fails and this
+    // comment gets corrected with it.
+    expect(SIZE_LIMITS.MARKDOWN_CODEC_STORED_BYTES).toBeGreaterThan(
       SIZE_LIMITS.STORED_CONTENT_READ_BYTES,
     );
     // The daemon store retains at least one maximum-size record.
@@ -215,6 +232,14 @@ describe("size limit registry", () => {
         "envelope overhead arithmetic, not a body cap",
       ],
       [
+        "core/note-document.ts: MAX_NOTE_DOCUMENT_TEXT_BYTES",
+        "re-export of MAX_NOTE_DOCUMENT_INLINE_BYTES, which is DOCUMENT_INLINE_BYTES",
+      ],
+      [
+        "service/rpc-protocol.ts: PREFLIGHT_ITEM_STRUCTURE_BYTES",
+        "a frozen record of per-field structural sizes, not a single budget",
+      ],
+      [
         "service/nookd-server.ts: MAX_PAYLOAD_BYTES",
         "the frame payload bound: the registry frame minus its four-byte prefix",
       ],
@@ -232,6 +257,20 @@ describe("size limit registry", () => {
         ts.ScriptTarget.Latest,
         true,
       );
+      // Bindings this file imports. A cap has to be one of these, not merely a
+      // local name that happens to hold the same number.
+      const imported = new Set<string>();
+      for (const statement of ast.statements) {
+        if (!ts.isImportDeclaration(statement) || !statement.importClause) continue;
+        const bindings = statement.importClause.namedBindings;
+        if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) imported.add(element.name.text);
+        } else if (bindings && ts.isNamespaceImport(bindings)) {
+          imported.add(bindings.name.text);
+        } else if (statement.importClause.name) {
+          imported.add(statement.importClause.name.text);
+        }
+      }
       const visit = (node: ts.Node): void => {
         // Module consts, and the object members both published limit tables are
         // built from, plus class fields — the shapes a cap can hide in.
@@ -270,7 +309,15 @@ describe("size limit registry", () => {
             // derived product, a property read off another table — is a second
             // definition site, and a derived one is the shape that hid a
             // production 1 MiB cap from this check.
-            if (ts.isIdentifier(initializer)) return;
+            // A cap must BE an imported value, not a local alias of one: two
+            // hops — a literal into a non-`bytes` name, then that name into a
+            // cap — would otherwise be invisible.
+            if (ts.isIdentifier(initializer)) {
+              if (imported.has(initializer.text)) return;
+              const key = `${file.slice(SRC.length + 1)}: ${name}`;
+              if (!allowed.has(key)) offenders.push(`${key} = (local alias)`);
+              return;
+            }
             // Only numeric forms can be a rewritten cap; an object literal or a
             // call is configuration, not a budget.
             const numeric =
@@ -278,7 +325,9 @@ describe("size limit registry", () => {
               ts.isPropertyAccessExpression(initializer) ||
               ts.isNumericLiteral(initializer) ||
               ts.isAsExpression(initializer) ||
-              ts.isSatisfiesExpression(initializer);
+              ts.isSatisfiesExpression(initializer) ||
+              ts.isTypeAssertionExpression(initializer) ||
+              ts.isCallExpression(initializer);
             if (!numeric) return;
             const value = constantValue(initializer);
             if (value === 0) return; // a policy zero, not a size budget
