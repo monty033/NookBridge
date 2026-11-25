@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { noteHtmlReadonlyMarkdown, scanHtml } from "../src/core/note-html-readonly-markdown.js";
+import { noteHtmlReadonlyMarkdown, scanHtmlForTest } from "../src/core/note-html-readonly-markdown.js";
 
 describe("read-only Notesnook HTML Markdown projection", () => {
   it("drops decoration and renders headings", () => {
@@ -194,20 +194,35 @@ describe("read-only Notesnook HTML Markdown projection", () => {
   // regression this guards against when issue #327 raises them.
   const MB = 1024 * 1024;
   const roomy = { maxBytes: 16 * MB, maxTokens: 4_000_000 };
-  const scanTime = (html: string): number => {
+  // Asserting the node count matters: a scanner that bailed out early and
+  // returned `[]` would satisfy a pure timing assertion instantly.
+  const scanTime = (html: string, expectedNodes: number): number => {
     const started = Date.now();
-    expect(Array.isArray(scanHtml(html, roomy))).toBe(true);
-    return Date.now() - started;
+    const nodes = scanHtmlForTest(html, roomy);
+    const elapsed = Date.now() - started;
+    expect(nodes.length).toBe(expectedNodes);
+    return elapsed;
   };
 
   it("scans unterminated tag openers in linear time", () => {
     const html = "<a".repeat(100_000) + "x".repeat(8 * MB - 200_000);
-    expect(scanTime(html)).toBeLessThan(3_000);
+    // Each `<` is one literal node and the character after it another, so
+    // 100,000 openers plus the tail produce 200,000 nodes. Asserting the count
+    // is what stops an early-return regression from satisfying the timing.
+    expect(scanTime(html, 200_000)).toBeLessThan(3_000);
   });
 
   it("scans unterminated comments in linear time", () => {
     const html = "<!--".repeat(100_000) + "x".repeat(8 * MB - 400_000);
-    expect(scanTime(html)).toBeLessThan(3_000);
+    expect(scanTime(html, 200_000)).toBeLessThan(3_000);
+  });
+
+  // The same property inside today's production caps, so a regression fails
+  // fast instead of burning minutes of CI on an uninterruptible scan.
+  it("stays fast at the production caps", () => {
+    const started = Date.now();
+    expect(() => scanHtmlForTest("<!--".repeat(30_000))).toThrow("bounded HTML projection failed");
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   // An unterminated comment was not a comment to the old alternation: it fell

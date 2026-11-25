@@ -53,15 +53,23 @@ const decode = (text: string): string =>
 /**
  * Tokenise and build the element tree.
  *
- * Exported for the linearity test, which has to exercise sizes the live
- * projection does not allow yet: the caps below are what the size work in
- * issue #327 will raise, and the scanner has to stay linear at those sizes
- * rather than only under today's 256 KiB. Production callers use `parse`.
+ * Test-only entry point: it takes injectable limits so the linearity cases can
+ * run at the sizes issue #327 is heading for, because under the production caps
+ * the quadratic form is cheap enough to pass and a test written only at those
+ * sizes would not discriminate. Production always calls `parse`, which applies
+ * the module constants, and this symbol is deliberately not part of the package
+ * surface — do not re-export it from an index.
+ *
+ * The walk is sound only because the index never moves backwards: every branch
+ * either advances it past a terminator it found or advances it by one. That is
+ * what makes a latch (a terminator that `indexOf` reported absent) still true
+ * for the rest of the document.
  */
-export function scanHtml(
+export function scanHtmlForTest(
   html: string,
   limits: { maxBytes: number; maxTokens: number } = { maxBytes: MAX_BYTES, maxTokens: MAX_TOKENS },
 ): Array<Node | string> {
+  if (typeof html !== "string") throw new Error("bounded HTML projection failed");
   if (Buffer.byteLength(html) > limits.maxBytes) throw new Error("bounded HTML projection failed");
   const root: Node = { tag: "root", attrs: {}, children: [] };
   const stack: Node[] = [root];
@@ -98,6 +106,9 @@ export function scanHtml(
       // the next `>`. Reproduce that exactly; only when no `>` remains does the
       // opener degrade to literal text. Each successful scan jumps past the
       // `>` it found, so the document is still walked once.
+      //
+      // This is why `<!-->` is swallowed: it has no `-->`, so it is consumed
+      // here as a declaration. Do not "simplify" this into the comment branch.
       noMoreCommentClose = true;
       const declaration = noMoreTagClose ? -1 : html.indexOf(">", index + 2);
       if (declaration !== -1) {
@@ -371,7 +382,7 @@ function renderList(n: Node, depth: number): string {
     })
     .join("\n");
 }
-const parse = (html: string): Array<Node | string> => scanHtml(html);
+const parse = (html: string): Array<Node | string> => scanHtmlForTest(html);
 export function noteHtmlReadonlyMarkdown(html: string): string {
   if (typeof html !== "string") throw new Error("bounded HTML projection failed");
   return blocks(parse(html))
