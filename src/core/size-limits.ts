@@ -1,5 +1,5 @@
 /**
- * Every byte limit the bridge enforces, in one place.
+ * Every named byte cap the bridge enforces, in one place.
  *
  * What this file is: the definition site for every cap measured in bytes, and
  * the place a note-size change has to start. What it is not: a set of derived
@@ -88,8 +88,16 @@ export const RPC_QUERY_BYTES = 512;
 /** Largest note title on the RPC surface, in bytes. */
 export const RPC_TITLE_BYTES = 256;
 
-/** Largest id, revision or handle on the RPC surface, in bytes. */
+/**
+ * Largest id or handle on the RPC surface, in bytes.
+ *
+ * Not the revision bound: a revision token is shape-checked on this surface,
+ * and where a length is applied it is `RPC_REVISION_BYTES`.
+ */
 export const RPC_IDENTIFIER_BYTES = 256;
+
+/** Largest revision token the RPC surface length-checks, in bytes. */
+export const RPC_REVISION_BYTES = 64;
 
 /**
  * Largest MCP stdio message the bounded JSON-RPC decoder accepts.
@@ -120,8 +128,10 @@ export const MCP_QUERY_BYTES = 512;
  * Largest stored content the write path accepts.
  *
  * Applied to what a caller sends — an inbound Markdown body or native
- * envelope — not to what the path produces. The produced row is bounded by
- * `NATIVE_DOCUMENT_BYTES`.
+ * envelope — not to what the path produces. The produced row is bounded
+ * separately, and differently by codec: the native codec is bounded by
+ * `NATIVE_DOCUMENT_BYTES`, the Markdown codec by
+ * `MARKDOWN_CODEC_STORED_BYTES`.
  */
 export const STORED_CONTENT_BYTES = 262_144;
 
@@ -151,6 +161,20 @@ export const NATIVE_DOCUMENT_BYTES = 262_144;
  * and ids, not with note size, and a large note does not bind it.
  */
 export const CONFLICT_RESOLVE_PAYLOAD_BYTES = 65_536;
+
+/**
+ * Largest stored payload the Markdown write codec will emit.
+ *
+ * The stored representation is always larger than its Markdown source —
+ * escaping plus block tags — and the codec's own multiple of the inbound
+ * content cap is the bound it enforces. It is not derived from
+ * `STORED_CONTENT_BYTES` here, because the codec refuses on its own value and
+ * a silent change to either would otherwise move the refusal unnoticed.
+ */
+export const MARKDOWN_CODEC_STORED_BYTES = 1_048_576;
+
+/** Largest stored title, in bytes, for a title bounded at 256 characters. */
+export const STORED_TITLE_BYTES = 1_024;
 
 /** Largest fragment a single `notes.append` may carry. */
 export const FRAGMENT_BYTES = 32_768;
@@ -256,12 +280,15 @@ export const SIZE_LIMITS = Object.freeze({
   RPC_QUERY_BYTES,
   RPC_TITLE_BYTES,
   RPC_IDENTIFIER_BYTES,
+  RPC_REVISION_BYTES,
   MCP_MESSAGE_BYTES,
   MCP_QUERY_BYTES,
   STORED_CONTENT_BYTES,
   STORED_CONTENT_READ_BYTES,
   NATIVE_DOCUMENT_BYTES,
+  STORED_TITLE_BYTES,
   FRAGMENT_BYTES,
+  MARKDOWN_CODEC_STORED_BYTES,
   CONFLICT_RESOLVE_PAYLOAD_BYTES,
   DOCUMENT_BLOCK_BYTES,
   DOCUMENT_INLINE_BYTES,

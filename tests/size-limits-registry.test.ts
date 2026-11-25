@@ -92,12 +92,15 @@ describe("size limit registry", () => {
       RPC_QUERY_BYTES: 512,
       RPC_TITLE_BYTES: 256,
       RPC_IDENTIFIER_BYTES: 256,
+      RPC_REVISION_BYTES: 64,
       MCP_MESSAGE_BYTES: 65_536,
       MCP_QUERY_BYTES: 512,
       STORED_CONTENT_BYTES: 262_144,
       STORED_CONTENT_READ_BYTES: 262_144,
       NATIVE_DOCUMENT_BYTES: 262_144,
+      STORED_TITLE_BYTES: 1_024,
       FRAGMENT_BYTES: 32_768,
+      MARKDOWN_CODEC_STORED_BYTES: 1_048_576,
       CONFLICT_RESOLVE_PAYLOAD_BYTES: 65_536,
       DOCUMENT_BLOCK_BYTES: 65_536,
       DOCUMENT_INLINE_BYTES: 8_192,
@@ -172,7 +175,7 @@ describe("size limit registry", () => {
     // rather than returned whole.
   });
 
-  it("defines byte caps by import, not by literal", () => {
+  it("defines named byte caps by import, not by literal", () => {
     // The risk this guards is a cap written as a literal in a module far from
     // the note-size work, so that a later change leaves it behind. Numbers
     // alone cannot tell a cap from a clone buffer, so the check is on
@@ -211,6 +214,14 @@ describe("size limit registry", () => {
         "service/rpc-protocol.ts: PREFLIGHT_ENVELOPE_OVERHEAD_BYTES",
         "envelope overhead arithmetic, not a body cap",
       ],
+      [
+        "service/nookd-server.ts: MAX_PAYLOAD_BYTES",
+        "the frame payload bound: the registry frame minus its four-byte prefix",
+      ],
+      [
+        "service/nookd-server.ts: MAX_PENDING_BYTES",
+        "twice the wire frame: a per-connection read budget, not a note cap",
+      ],
     ]);
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
@@ -227,13 +238,14 @@ describe("size limit registry", () => {
         let name: string | undefined;
         let initializer: ts.Expression | undefined;
         let isAssignment = false;
-        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-          name = node.name.text;
-          initializer = node.initializer;
-        } else if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
-          name = node.name.text;
-          initializer = node.initializer;
-        } else if (ts.isPropertyDeclaration(node) && ts.isIdentifier(node.name)) {
+        // Module constants are SCREAMING_SNAKE. A camelCase `contentBytes` is
+        // a field on a value object, not a cap, so properties are only checked
+        // in the assignment shape below.
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          /^[A-Z][A-Z0-9_]*$/.test(node.name.text)
+        ) {
           name = node.name.text;
           initializer = node.initializer;
         } else if (
@@ -249,16 +261,30 @@ describe("size limit registry", () => {
           isAssignment = true;
         }
         if (name !== undefined && initializer !== undefined) {
-          // Both `MAX_FRAME_BYTES` and the camelCase `maxBodyBytes`. A plain
-          // assignment also has to be named like a cap, because `bytes = 0`
-          // and `recoveredBytes = 0` are accumulators initialised to zero.
-          const named = isAssignment ? /max|limit|cap/i.test(name) : true;
-          if (/bytes$/i.test(name) && named && !fixedPrimitive.test(name)) {
+          // Both `MAX_FRAME_BYTES` and the camelCase `maxBodyBytes`. An
+          // assignment also has to be named like a cap: `payload.contentBytes
+          // = ...` is a value field, and both published tables use `max*`.
+          const capShaped = !isAssignment || /^max/i.test(name);
+          if (/bytes$/i.test(name) && capShaped && !fixedPrimitive.test(name)) {
+            // A cap must BE an imported value. Anything else — a literal, a
+            // derived product, a property read off another table — is a second
+            // definition site, and a derived one is the shape that hid a
+            // production 1 MiB cap from this check.
+            if (ts.isIdentifier(initializer)) return;
+            // Only numeric forms can be a rewritten cap; an object literal or a
+            // call is configuration, not a budget.
+            const numeric =
+              ts.isBinaryExpression(initializer) ||
+              ts.isPropertyAccessExpression(initializer) ||
+              ts.isNumericLiteral(initializer) ||
+              ts.isAsExpression(initializer) ||
+              ts.isSatisfiesExpression(initializer);
+            if (!numeric) return;
             const value = constantValue(initializer);
-            // Zero is a policy (payloads disallowed), not a size budget.
-            if (value !== null && value !== 0) {
-              const key = `${file.slice(SRC.length + 1)}: ${name}`;
-              if (!allowed.has(key)) offenders.push(`${key} = ${value}`);
+            if (value === 0) return; // a policy zero, not a size budget
+            const key = `${file.slice(SRC.length + 1)}: ${name}`;
+            if (!allowed.has(key)) {
+              offenders.push(value === null ? `${key} = (derived)` : `${key} = ${value}`);
             }
           }
         }

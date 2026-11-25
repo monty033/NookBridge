@@ -35,13 +35,14 @@ import {
 } from "../core/note-document.js";
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
-import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "./rpc-protocol.js";
+import { fitsResponsePreflight } from "./rpc-protocol.js";
+import { RPC_RESPONSE_BYTES } from "../core/size-limits.js";
 
 const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const bufferByteLength = Buffer.byteLength;
 
 /** Bounded Markdown content size for `notes.get`; the whole frame shares it. */
-const MAX_PROJECTION_MARKDOWN_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
+const MAX_PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
 export type NoteProjectionOutcome =
   | "strict"

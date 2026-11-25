@@ -39,7 +39,12 @@ import {
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
 import { RPC_CONTENT_BYTES, RPC_FRAME_BYTES, RPC_RESPONSE_BYTES } from "../core/size-limits.js";
-import { RPC_IDENTIFIER_BYTES, RPC_QUERY_BYTES, RPC_TITLE_BYTES } from "../core/size-limits.js";
+import {
+  RPC_IDENTIFIER_BYTES,
+  RPC_QUERY_BYTES,
+  RPC_REVISION_BYTES,
+  RPC_TITLE_BYTES,
+} from "../core/size-limits.js";
 
 // Capture every mutable intrinsic used by this closed boundary before any
 // caller can pollute a shared prototype or static method.
@@ -3285,7 +3290,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const markdown = resultRecord.markdown;
       const contentBytes = resultRecord.contentBytes;
       assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "view id");
-      assertBoundedString(revision, 64, "view revision");
+      assertBoundedString(revision, RPC_REVISION_BYTES, "view revision");
       assertBoundedMarkdown(markdown, STAGE5_RPC_LIMITS.maxResponseBytes, "view markdown");
       preflightResponseStringField(noteId, rawSum);
       preflightResponseStringField(revision, rawSum);
@@ -3328,7 +3333,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const markdown = resultRecord.markdown;
       const contentBytes = resultRecord.contentBytes;
       assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "preimage id");
-      assertBoundedString(revision, 64, "preimage revision");
+      assertBoundedString(revision, RPC_REVISION_BYTES, "preimage revision");
       assertBoundedMarkdown(markdown, STAGE5_RPC_LIMITS.maxResponseBytes, "preimage markdown");
       preflightResponseStringField(noteId, rawSum);
       preflightResponseStringField(revision, rawSum);
@@ -3371,7 +3376,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       const revision = resultRecord.revision;
       const contentBytes = resultRecord.contentBytes;
       assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "edit id");
-      assertBoundedString(revision, 64, "edit revision");
+      assertBoundedString(revision, RPC_REVISION_BYTES, "edit revision");
       preflightResponseStringField(noteId, rawSum);
       preflightResponseStringField(revision, rawSum);
       if (
@@ -3428,7 +3433,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       if (noteId !== undefined) {
         assertBoundedString(noteId, STAGE5_RPC_LIMITS.maxIdentifierBytes, "undo id");
       }
-      assertBoundedString(revision, 64, "undo revision");
+      assertBoundedString(revision, RPC_REVISION_BYTES, "undo revision");
       if (noteId !== undefined) preflightResponseStringField(noteId, rawSum);
       preflightResponseStringField(revision, rawSum);
       if (

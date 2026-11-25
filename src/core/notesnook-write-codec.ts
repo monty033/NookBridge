@@ -58,6 +58,7 @@
 import { Buffer } from "node:buffer";
 
 import { STAGE4_WRITE_LIMITS } from "./notesnook-write-contract.js";
+import { MARKDOWN_CODEC_STORED_BYTES } from "./size-limits.js";
 import type {
   NotesnookStoredContent,
   NotesnookWriteMarkdownCodec,
@@ -75,12 +76,13 @@ import {
 } from "./notesnook-write-list-intent.js";
 
 /**
- * Largest stored payload this codec will emit.  The stored representation
- * is always larger than its Markdown source (escaping plus block tags), so
- * the bound is a small multiple of the contract content limit.  Exceeding it
+ * Largest stored payload this codec will emit, from the registry.  The stored
+ * representation is always larger than its Markdown source (escaping plus
+ * block tags), which is why the bound is a multiple of the contract content
+ * limit; the multiple and the number live in `size-limits.ts`.  Exceeding it
  * is a refusal rather than a silent truncation.
  */
-const MAX_STORED_BYTES = STAGE4_WRITE_LIMITS.maxContentBytes * 4;
+const MAX_STORED_BYTES = MARKDOWN_CODEC_STORED_BYTES;
 
 /**
  * Codec-owned refusal.  Chain-free and message-fixed: the adapter maps any

@@ -48,10 +48,11 @@ import {
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../service/service-abuse-bounds.js";
+import { RPC_RESPONSE_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
-const MAX_RESPONSE_FRAME_BYTES = STAGE5_RPC_LIMITS.maxResponseBytes;
+const MAX_RESPONSE_FRAME_BYTES = RPC_RESPONSE_BYTES;
 const ARRAY_PROTOTYPE = Array.prototype;
 const OBJECT_PROTOTYPE = Object.prototype;
 
