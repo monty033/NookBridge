@@ -37,7 +37,8 @@
  *   - `record` accepts ONLY a bounded opaque note handle (same
  *     `<prefix>_<token>` grammar as the CLI contract, with the
  *     reserved `rev_` family excluded), bounded revision tokens
- *     (`rev_[0-9a-f]{32}`), title <= 100, content <= 4 MiB UTF-8
+ *     (`rev_[0-9a-f]{32}`), title <= 100, content <= the registry's
+ *     operator undo content bound, in UTF-8 bytes
  *     bytes, and bounded metadata;
  *   - `load` and `consume` retrieve ciphertext by opaque undo
  *     token, decrypt it, validate the closed preimage schema and

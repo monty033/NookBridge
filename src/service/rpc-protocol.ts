@@ -2069,7 +2069,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     // T04 — closed `notes.apply-edit` params: exactly
     // { id, expectedRevision, markdown } (canonical vocabulary).
     // The `markdown` field is bounded by the editor markdown budget
-    // (D9 — 4 MiB upper; the wire cap below is the closed form).
+    // (D9 — the editor bound applies above; the wire cap below is the
+    // closed form).
     if (!keysAreExactly(paramKeys, ["id", "expectedRevision", "markdown"])) {
       throw rpcProtocolError("rpc protocol: apply-edit params have unexpected fields");
     }

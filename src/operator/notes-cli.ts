@@ -5,7 +5,7 @@ import {
   SERIALIZATION_REFUSAL_CODES as CORE_SERIALIZATION_REFUSAL_CODES,
 } from "../core/note-document.js";
 import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
-import { NOTES_VIEW_MARKDOWN_BYTES } from "../core/size-limits.js";
+import { NOTES_GET_MARKDOWN_BYTES } from "../core/size-limits.js";
 import { NOTES_QUERY_BYTES } from "../core/size-limits.js";
 
 /**
@@ -76,10 +76,10 @@ const OPAQUE_VALUE_MAX_LENGTH = 128;
 
 /**
  * Bounded maximum UTF-8 byte length the stdin reader will accept for a
- * search query.  Matches the established 4 MiB upper bound used by
- * `NOTES_UNDO_CONTENT_MAX_BYTES` for body payloads so a search query can
- * never push more data through the operator boundary than the bounded
- * bodies it queries against.
+ * search query.  Shares the same order of magnitude as the editor and undo
+ * payload bounds so a search query cannot push more data through the operator
+ * boundary than the bounded bodies it queries against; the values themselves
+ * live in `src/core/size-limits.ts`.
  *
  * This is NOT the query contract: `parseNotesSearchQuery` refuses anything
  * over the daemon's `STAGE5_RPC_LIMITS.maxQueryBytes`, because a query the
@@ -88,7 +88,7 @@ const OPAQUE_VALUE_MAX_LENGTH = 128;
  */
 export const MAX_NOTES_QUERY_BYTES = NOTES_QUERY_BYTES;
 /** Maximum Markdown body emitted by `notes get`. */
-export const MAX_NOTES_VIEW_MARKDOWN_BYTES = NOTES_VIEW_MARKDOWN_BYTES;
+export const MAX_NOTES_GET_MARKDOWN_BYTES = NOTES_GET_MARKDOWN_BYTES;
 
 // There is deliberately no edit-envelope or undo-token parser here.  The
 // frozen transport forbids a body or token crossing argv, env or stdin:
@@ -666,7 +666,7 @@ export function formatNotesResult(
           if (
             typeof result.content.markdown !== "string" ||
             new TextEncoder().encode(result.content.markdown).byteLength >
-              MAX_NOTES_VIEW_MARKDOWN_BYTES ||
+              MAX_NOTES_GET_MARKDOWN_BYTES ||
             // eslint-disable-next-line no-control-regex -- rejecting C0 control characters is the intent here
             /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(result.content.markdown) ||
             result.content.bytes !== new TextEncoder().encode(result.content.markdown).byteLength

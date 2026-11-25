@@ -44,8 +44,8 @@ import {
   normaliseNotesnookListKind,
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
-import { DOCUMENT_BLOCK_BYTES } from "./size-limits.js";
 import {
+  DOCUMENT_BLOCK_BYTES,
   DOCUMENT_INLINE_BYTES,
   DOCUMENT_OPAQUE_SENTINEL_BYTES,
   DOCUMENT_OPAQUE_TEXT_BYTES,
@@ -296,14 +296,14 @@ export const MAX_NOTE_DOCUMENT_LIST_ITEMS_PER_LIST = 2048;
 export const MAX_NOTE_DOCUMENT_TASK_CHILDREN = 1024;
 export const MAX_NOTE_DOCUMENT_DEPTH = 16;
 export const MAX_NOTE_DOCUMENT_OPAQUE_SENTINEL_BYTES = DOCUMENT_OPAQUE_SENTINEL_BYTES;
-/** Derived readable Markdown is capped at 8192 UTF-8 bytes per preserved block. */
+/** Derived readable Markdown is capped per preserved block; see the registry. */
 export const MAX_NOTE_DOCUMENT_OPAQUE_TEXT_BYTES = DOCUMENT_OPAQUE_TEXT_BYTES;
 
 /**
  * Total derived readable Markdown a single decoded document may carry.
  *
- * A response frame is 65,536 bytes and the Markdown escapes into it, so an
- * unbounded total would push a note with several large preserved regions from
+ * The Markdown escapes into the response frame, so an unbounded total would
+ * push a note with several large preserved regions from
  * a strict projection into `oversize` — which is a note nobody can read or edit
  * — when the whole point of preserving is that the note stays usable. Past this
  * budget the remaining regions keep their reference and simply carry no text.

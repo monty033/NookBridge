@@ -16,9 +16,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { buildNookMcpServer } from "./nook-mcp-server.js";
 import { NookdSocketClient } from "./socket-client.js";
-import { MCP_MESSAGE_BYTES } from "../core/size-limits.js";
+import { MCP_MESSAGE_BYTES, MCP_QUERY_BYTES } from "../core/size-limits.js";
 
-export const NOOK_MCP_MAX_QUERY_BYTES = 512;
+export const NOOK_MCP_MAX_QUERY_BYTES = MCP_QUERY_BYTES;
 
 const HELP_TEXT =
   "Usage: nook-mcp --socket /run/nookbridge/nookbridge.sock\n" +

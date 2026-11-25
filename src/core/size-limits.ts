@@ -65,13 +65,24 @@ export const RPC_RESPONSE_BYTES = 65_536;
  * refused by the frame preflight rather than truncated: the frame check, not
  * this cap, is the allocation bound.
  *
- * The derivation in full, with the numbers, is in the doc comment on
- * `STAGE5_RPC_LIMITS` in `src/service/rpc-protocol.ts`; it is not repeated
- * here so that changing this value means editing one place.
+ * The arithmetic that makes this number safe: text content is the worst case
+ * because JSON escaping of newlines, quotes and backslashes doubles it, so a
+ * full body of this size costs at most twice this value on the wire. The rest
+ * of the envelope — id, revision, title and notebook id plus sixteen tags — is
+ * bounded at a little over 5 KiB by the schema. Together that has to fit one
+ * frame: `2 x RPC_CONTENT_BYTES + envelope <= RPC_FRAME_BYTES`, which the
+ * registry test asserts, so raising this value without raising the frame fails
+ * a test rather than producing notes that can never be written.
  */
 export const RPC_CONTENT_BYTES = 27_000;
 
-/** Largest search query the RPC surface accepts. */
+/**
+ * Largest search query the RPC surface accepts.
+ *
+ * Also applied as a generic byte cap to `path`, `notebookPath` and diagnostic
+ * path values, so this one entry serves two purposes and cannot move for one
+ * without the other. Splitting them is a wire change, not a rename.
+ */
 export const RPC_QUERY_BYTES = 512;
 
 /** Largest note title on the RPC surface, in bytes. */
@@ -87,8 +98,8 @@ export const RPC_IDENTIFIER_BYTES = 256;
  * production MCP transport is the SDK's `StdioServerTransport`, whose own
  * message bound is outside this repository and is not controlled here.
  *
- * One entry covers two scopes — a whole input buffer and one line — because
- * both are the same logical message on the same path.
+ * One entry bounds both a buffer holding N newline-delimited messages and a
+ * single message within it, because the decoder applies it to each.
  */
 export const MCP_MESSAGE_BYTES = 65_536;
 
@@ -135,9 +146,9 @@ export const NATIVE_DOCUMENT_BYTES = 262_144;
 /**
  * Largest payload a single conflict resolution may carry.
  *
- * Bounds the captured resolution record — the note text plus the metadata used
- * to bind it — so this cap binds for large notes on the conflict path even
- * when the note itself was written within every other limit.
+ * The payload holds identifiers, digests and titles only — the note body is
+ * reduced to a digest before it is recorded — so this cap scales with titles
+ * and ids, not with note size, and a large note does not bind it.
  */
 export const CONFLICT_RESOLVE_PAYLOAD_BYTES = 65_536;
 
@@ -180,8 +191,9 @@ export const DOCUMENT_REFERENCE_LABEL_BYTES = 256;
 /**
  * Largest stored HTML the read-only Markdown projection will tokenise.
  *
- * The projection is the fallback used when the strict decoder refuses, so its
- * input is exactly the malformed or exotic HTML that decoder rejected.
+ * Its input is any stored HTML the read path may meet, not only the HTML the
+ * strict decoder rejected: the discovery and write-runner paths project
+ * stored content directly, and only the read path reaches it as a fallback.
  */
 export const PROJECTION_HTML_BYTES = 262_144;
 
@@ -190,7 +202,7 @@ export const PROJECTION_HTML_BYTES = 262_144;
 // ---------------------------------------------------------------------------
 
 /** Maximum Markdown body `nookctl notes get` will emit. */
-export const NOTES_VIEW_MARKDOWN_BYTES = 262_144;
+export const NOTES_GET_MARKDOWN_BYTES = 262_144;
 
 /**
  * Maximum search query text the operator CLI will read before refusing.
@@ -259,7 +271,7 @@ export const SIZE_LIMITS = Object.freeze({
   DOCUMENT_REFERENCE_URL_BYTES,
   DOCUMENT_REFERENCE_LABEL_BYTES,
   PROJECTION_HTML_BYTES,
-  NOTES_VIEW_MARKDOWN_BYTES,
+  NOTES_GET_MARKDOWN_BYTES,
   NOTES_QUERY_BYTES,
   DOCUMENT_MARKDOWN_BYTES,
   EDITOR_MARKDOWN_BYTES,

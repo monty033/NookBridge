@@ -20,7 +20,7 @@ import {
 import { STAGE4_WRITE_LIMITS } from "../src/core/notesnook-write-contract.js";
 import {
   MAX_NOTES_QUERY_BYTES,
-  MAX_NOTES_VIEW_MARKDOWN_BYTES,
+  MAX_NOTES_GET_MARKDOWN_BYTES,
 } from "../src/operator/notes-cli.js";
 import { MAX_EDITOR_MARKDOWN_BYTES } from "../src/operator/notes-editor-runner.js";
 import { MAX_NOTES_READ_QUERY_BYTES } from "../src/operator/notes-read-runtime.js";
@@ -49,6 +49,11 @@ function walk(dir: string): string[] {
 function constantValue(node: ts.Node): number | null {
   if (ts.isNumericLiteral(node)) return Number(node.text.replace(/_/g, ""));
   if (ts.isParenthesizedExpression(node)) return constantValue(node.expression);
+  // `as const`, `as number` and `satisfies` wrap the value without changing it,
+  // and `as const` is this codebase's idiom for a fixed constant.
+  if (ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node)) {
+    return constantValue(node.expression);
+  }
   if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
     const inner = constantValue(node.operand);
     return inner === null ? null : -inner;
@@ -102,7 +107,7 @@ describe("size limit registry", () => {
       DOCUMENT_REFERENCE_URL_BYTES: 2_048,
       DOCUMENT_REFERENCE_LABEL_BYTES: 256,
       PROJECTION_HTML_BYTES: 262_144,
-      NOTES_VIEW_MARKDOWN_BYTES: 262_144,
+      NOTES_GET_MARKDOWN_BYTES: 262_144,
       NOTES_QUERY_BYTES: 4_194_304,
       DOCUMENT_MARKDOWN_BYTES: 4_194_304,
       EDITOR_MARKDOWN_BYTES: 4_194_304,
@@ -140,7 +145,7 @@ describe("size limit registry", () => {
       SIZE_LIMITS.DOCUMENT_REFERENCE_LABEL_BYTES,
     );
     expect(MAX_NOTE_DOCUMENT_MARKDOWN_BYTES).toBe(SIZE_LIMITS.DOCUMENT_MARKDOWN_BYTES);
-    expect(MAX_NOTES_VIEW_MARKDOWN_BYTES).toBe(SIZE_LIMITS.NOTES_VIEW_MARKDOWN_BYTES);
+    expect(MAX_NOTES_GET_MARKDOWN_BYTES).toBe(SIZE_LIMITS.NOTES_GET_MARKDOWN_BYTES);
     expect(MAX_NOTES_QUERY_BYTES).toBe(SIZE_LIMITS.NOTES_QUERY_BYTES);
     expect(MAX_NOTES_READ_QUERY_BYTES).toBe(SIZE_LIMITS.NOTES_READ_QUERY_BYTES);
     expect(MAX_EDITOR_MARKDOWN_BYTES).toBe(SIZE_LIMITS.EDITOR_MARKDOWN_BYTES);
@@ -150,8 +155,16 @@ describe("size limit registry", () => {
   it("keeps the invariants that make the caps safe to reason about", () => {
     // Everything the bridge writes it can read back.
     expect(SIZE_LIMITS.STORED_CONTENT_BYTES).toBe(SIZE_LIMITS.STORED_CONTENT_READ_BYTES);
-    // A content cap above its own frame could never be satisfied.
-    expect(SIZE_LIMITS.RPC_CONTENT_BYTES).toBeLessThan(SIZE_LIMITS.RPC_FRAME_BYTES);
+    // The content cap has to survive JSON escaping of the whole body plus the
+    // rest of the envelope: 2x the body for escaping, and roughly 5 KiB of id,
+    // revision, title and tag fields. This is the assertion that fails if the
+    // cap is raised without raising the frame.
+    expect(2 * SIZE_LIMITS.RPC_CONTENT_BYTES + 5_200).toBeLessThanOrEqual(SIZE_LIMITS.RPC_FRAME_BYTES);
+    // The produced row is what the read side has to accept: anything the
+    // bridge writes it must be able to read back.
+    expect(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES).toBeLessThanOrEqual(
+      SIZE_LIMITS.STORED_CONTENT_READ_BYTES,
+    );
     // The daemon store retains at least one maximum-size record.
     expect(SIZE_LIMITS.UNDO_TOTAL_BYTES).toBeGreaterThan(SIZE_LIMITS.UNDO_RECORD_BYTES);
     // Deliberately not asserted: that a response can carry a maximum-size
@@ -160,22 +173,44 @@ describe("size limit registry", () => {
   });
 
   it("defines byte caps by import, not by literal", () => {
-    // The risk this guards is a *new* cap written as a literal in a module far
-    // from the note-size work, so that a later change leaves it behind.
-    // Scanning for numbers alone is useless — `64 * 1024` is a clone buffer in
-    // one file and a frame size in another — so the check is on declarations
-    // named for bytes whose value is a literal.
+    // The risk this guards is a cap written as a literal in a module far from
+    // the note-size work, so that a later change leaves it behind. Numbers
+    // alone cannot tell a cap from a clone buffer, so the check is on
+    // declarations named for bytes whose value is a literal; a definition that
+    // reads from the registry evaluates to no number and is not a hit.
+    //
+    // Fixed-size primitives are not caps and are excluded by name: key, nonce,
+    // tag, salt, hash and frame-prefix lengths are properties of a format.
+    const fixedPrimitive = /(KEY|NONCE|TAG|SALT|HASH|DIGEST|IV|PREFIX)_?bytes$/i;
     const allowed = new Map([
-      ["config/service-config.ts: SERVICE_CONFIG_MAX_BYTES", "service config file, not note content"],
+      ["config/service-config.ts: SERVICE_CONFIG_MAX_BYTES", "the service config file, not note content"],
       [
         "core/note-document-version-claim.ts: MARKDOWN_VERSION_CLAIM_MAX_HEADER_BYTES",
-        "a fixed header prefix, not a note budget",
+        "the window scanned for the version header; it never refuses a note",
       ],
-      ["service/exact-note-path-resolver.ts: MAX_PATH_BYTES", "path length, not a note budget"],
+      ["core/note-document.ts: MAX_NOTE_DOCUMENT_OPAQUE_PAYLOAD_BYTES", "a policy zero, not a budget"],
+      ["service/exact-note-path-resolver.ts: MAX_PATH_BYTES", "a path or title length, not a body"],
+      ["operator/path-diagnostic.ts: MAX_PATH_BYTES", "a path length"],
+      ["operator/locked-note-proof.ts: MAX_PATH_BYTES", "a path length"],
+      ["mcp/nook-mcp-server.ts: NOOK_MCP_MAX_NOTE_PATH_BYTES", "a path length"],
+      ["mcp/nook-mcp-server.ts: NOOK_MCP_MAX_REVISION_BYTES", "a revision id length"],
+      ["settings/notebook-index.ts: MAX_ID_BYTES", "an id length"],
+      ["operator/notes-production-runtime.ts: SOURCE_ID_MAX_BYTES", "an id length"],
+      ["operator/notes-production-runtime.ts: HANDLE_PAYLOAD_MAX_BYTES", "a handle length"],
+      ["cli.ts: MAX_UPLOAD_CONFIRMATION_BYTES", "a confirmation word length"],
+      [
+        "keystore/systemd-credential-keystore.ts: SYSTEMD_CREDENTIAL_MAX_BYTES",
+        "a credential file read, not note content",
+      ],
       ["service/operator-capabilities.ts: MAX_DIRECTORY_FILE_BYTES", "a passwd/group file read"],
       ["service/socket-group-resolver.ts: MAX_GROUP_FILE_BYTES", "a passwd/group file read"],
       ["service/peer-credentials.ts: MAX_HELPER_STDOUT_BYTES", "helper stdout, not note content"],
-      ["service/rpc-protocol.ts: PREFLIGHT_ENVELOPE_OVERHEAD_BYTES", "envelope overhead arithmetic"],
+      ["service/operator-socket-server.ts: UNIX_SOCKET_PATH_MAX_BYTES", "a socket path length"],
+      ["service/rpc-protocol.ts: PREFLIGHT_ARRAY_ENVELOPE_BYTES", "envelope overhead arithmetic"],
+      [
+        "service/rpc-protocol.ts: PREFLIGHT_ENVELOPE_OVERHEAD_BYTES",
+        "envelope overhead arithmetic, not a body cap",
+      ],
     ]);
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
@@ -187,11 +222,41 @@ describe("size limit registry", () => {
         true,
       );
       const visit = (node: ts.Node): void => {
-        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-          const name = node.name.text;
-          if (/BYTES$/.test(name)) {
-            const value = constantValue(node.initializer);
-            if (value !== null && value >= 1_024) {
+        // Module consts, and the object members both published limit tables are
+        // built from, plus class fields — the shapes a cap can hide in.
+        let name: string | undefined;
+        let initializer: ts.Expression | undefined;
+        let isAssignment = false;
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+          initializer = node.initializer;
+        } else if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+          initializer = node.initializer;
+        } else if (ts.isPropertyDeclaration(node) && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+          initializer = node.initializer;
+        } else if (
+          // `limitsTable.maxBodyBytes = 65_536;` — how both published limit
+          // tables are built, and the shape a new cap would arrive in.
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(node.left) &&
+          ts.isIdentifier(node.left.name)
+        ) {
+          name = node.left.name.text;
+          initializer = node.right;
+          isAssignment = true;
+        }
+        if (name !== undefined && initializer !== undefined) {
+          // Both `MAX_FRAME_BYTES` and the camelCase `maxBodyBytes`. A plain
+          // assignment also has to be named like a cap, because `bytes = 0`
+          // and `recoveredBytes = 0` are accumulators initialised to zero.
+          const named = isAssignment ? /max|limit|cap/i.test(name) : true;
+          if (/bytes$/i.test(name) && named && !fixedPrimitive.test(name)) {
+            const value = constantValue(initializer);
+            // Zero is a policy (payloads disallowed), not a size budget.
+            if (value !== null && value !== 0) {
               const key = `${file.slice(SRC.length + 1)}: ${name}`;
               if (!allowed.has(key)) offenders.push(`${key} = ${value}`);
             }
