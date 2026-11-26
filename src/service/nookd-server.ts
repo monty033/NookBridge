@@ -8,12 +8,14 @@
  */
 
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { chmodSync } from "node:fs";
 import { lchown, lstat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as scheduleTimeout, clearTimeout } from "node:timers";
+import { TextDecoder } from "node:util";
 
 import {
   buildServiceAuditRecord,
@@ -21,6 +23,7 @@ import {
   type ServiceAuditEvent,
   type ServiceAuditOutcome,
   type ServiceAuditPeerCredentials,
+  type ServiceAuditPhase,
 } from "./service-audit.js";
 import {
   DEFAULT_SERVICE_ABUSE_BOUNDS,
@@ -33,7 +36,23 @@ import {
   narrowServicePolicy,
   type ServicePolicy,
 } from "./service-policy.js";
-import { parseRpcFrame, serializeRpcResponse, type RpcMethod } from "./rpc-protocol.js";
+import {
+  RPC_ERROR_MESSAGES,
+  createRpcFrameParser,
+  createRpcResponseSerializer,
+  isRpcProtocolOversizeError,
+  type RpcAnyResponseEnvelope,
+  type RpcBodyRequest,
+  type RpcErrorCode,
+  type RpcFrameRequest,
+  type RpcMethod,
+  type RpcRequest,
+} from "./rpc-protocol.js";
+import {
+  createLargeBodyBudget,
+  type LargeBodyBudget,
+  type LargeBodyLease,
+} from "./large-body-budget.js";
 import {
   startOperatorSocketServer,
   UNIX_SOCKET_PATH_MAX_BYTES,
@@ -58,6 +77,8 @@ const DEFAULT_MAX_REQUESTS_PER_CONNECTION = 64;
 const MAX_REQUESTS_PER_CONNECTION = 1_024;
 const AUDIT_METHOD_SENTINEL = "notes.search" as const;
 const PEER_RESOLUTION_TIMEOUT_MS = 1_000;
+const parseDaemonRpcFrame = createRpcFrameParser({ allowBody: true });
+const serializeDaemonRpcResponse = createRpcResponseSerializer({ allowBody: true });
 
 export type NookdPeerResolver = (
   socket: net.Socket,
@@ -84,6 +105,7 @@ function peekRpcMethod(frame: Buffer): RpcMethod {
     }
     const method = (parsed as Record<string, unknown>).method;
     if (
+      method === "notes.capabilities" ||
       method === "notes.search" ||
       method === "notes.status" ||
       method === "notes.list_notebooks" ||
@@ -102,6 +124,21 @@ function peekRpcMethod(frame: Buffer): RpcMethod {
     // The full parser remains authoritative; this is a body-free breadcrumb.
   }
   return AUDIT_METHOD_SENTINEL;
+}
+
+/** Recover only the already size-bounded id for a codec-identified wire refusal. */
+function peekRpcRequestId(frame: Buffer): string | undefined {
+  try {
+    if (frame.length < FRAME_PREFIX_BYTES) return undefined;
+    const payloadLength = frame.readUInt32BE(0);
+    if (payloadLength !== frame.length - FRAME_PREFIX_BYTES) return undefined;
+    const parsed: unknown = JSON.parse(frame.subarray(FRAME_PREFIX_BYTES).toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const id = (parsed as Record<string, unknown>).id;
+    return typeof id === "string" && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The deliberately narrow runtime seam owned by the daemon. */
@@ -139,6 +176,8 @@ export type StartNookdServerOptions = Readonly<{
   maxRequestsPerConnection?: number;
   /** Closed service-side abuse bounds; defaults are applied once at startup. */
   abuseBounds?: ServiceAbuseBounds;
+  /** Internal test seam; production uses the daemon's one-slot body budget. */
+  bodyBudget?: LargeBodyBudget;
   /** Best-effort categorical audit logger. */
   auditLogger?: Logger;
   /**
@@ -159,9 +198,20 @@ export interface NookdServerHandle {
   readonly close: () => Promise<void>;
 }
 
+interface BodyReceiveState {
+  readonly lease: LargeBodyLease;
+  readonly buffer: Buffer;
+  readonly completion: Promise<Buffer | undefined>;
+  readonly resolve: (buffer: Buffer | undefined) => void;
+  offset: number;
+  continueSent: boolean;
+  timer: ReturnType<typeof scheduleTimeout> | undefined;
+}
+
 interface ConnectionState {
   readonly socket: net.Socket;
   pending: Buffer;
+  body: BodyReceiveState | undefined;
   processing: boolean;
   requestsHandled: number;
   ended: boolean;
@@ -228,6 +278,7 @@ export async function startNookdServer(
     requestIdEcho = false,
     latencyMs = 0,
     peerCredentials: ServiceAuditPeerCredentials = "unknown",
+    phase?: ServiceAuditPhase,
   ): void => {
     try {
       emitServiceAudit(
@@ -239,6 +290,7 @@ export async function startNookdServer(
           requestIdEcho,
           latencyMs,
           peerCredentials,
+          ...(phase === undefined ? {} : { phase }),
         }),
       );
     } catch {
@@ -297,6 +349,7 @@ export async function startNookdServer(
     const state: ConnectionState = {
       socket,
       pending: Buffer.alloc(0),
+      body: undefined,
       processing: false,
       requestsHandled: 0,
       ended: false,
@@ -332,6 +385,10 @@ export async function startNookdServer(
       if (state.closed || !accepting) return;
       state.lastActivityMs = Date.now();
       armIdleTimer(state);
+      if (state.body !== undefined) {
+        receiveBodyBytes(state, chunk);
+        return;
+      }
       if (state.pending.length + chunk.length > MAX_PENDING_BYTES) {
         destroyConnection(state);
         return;
@@ -343,17 +400,23 @@ export async function startNookdServer(
     socket.on("end", (): void => {
       state.ended = true;
       clearIdleTimer(state);
+      if (state.body !== undefined) {
+        destroyConnection(state);
+        return;
+      }
       processConnection(state);
     });
     socket.on("error", (): void => {
       // The close event normally follows, but unblock the cancellation race
       // immediately as defense in depth. Never forward the raw error.
       state.closed = true;
+      cancelBodyReceive(state);
       state.resolveClosed();
     });
     socket.on("close", (): void => {
       state.closed = true;
       clearIdleTimer(state);
+      cancelBodyReceive(state);
       state.resolveClosed();
       connections.delete(state);
       audit("rpc.connection.closed", "ok", AUDIT_METHOD_SENTINEL, false, 0, state.peerCategory);
@@ -458,6 +521,7 @@ export async function startNookdServer(
 
   function destroyConnection(state: ConnectionState): void {
     state.closing = true;
+    cancelBodyReceive(state);
     state.peerController.abort();
     clearIdleTimer(state);
     // PR-65 P1-5 — runtime ownership.  Resolve the close promise only
@@ -469,6 +533,36 @@ export async function startNookdServer(
     state.runtimeInFlight.clear();
     void drain.then(() => state.resolveClosed());
     state.socket.destroy();
+  }
+
+  function cancelBodyReceive(state: ConnectionState): void {
+    const body = state.body;
+    if (body === undefined) return;
+    state.body = undefined;
+    if (body.timer !== undefined) clearTimeout(body.timer);
+    body.lease.release();
+    body.resolve(undefined);
+  }
+
+  function completeBodyReceive(state: ConnectionState): void {
+    const body = state.body;
+    if (body === undefined) return;
+    state.body = undefined;
+    if (body.timer !== undefined) clearTimeout(body.timer);
+    // The caller owns the lease from here until the dispatched runtime settles.
+    body.resolve(body.buffer);
+  }
+
+  function receiveBodyBytes(state: ConnectionState, chunk: Buffer): void {
+    const body = state.body;
+    if (body === undefined) return;
+    if (!body.continueSent || chunk.length > body.buffer.length - body.offset) {
+      destroyConnection(state);
+      return;
+    }
+    chunk.copy(body.buffer, body.offset);
+    body.offset += chunk.length;
+    if (body.offset === body.buffer.length) completeBodyReceive(state);
   }
 
   function armIdleTimer(state: ConnectionState): void {
@@ -541,6 +635,31 @@ export async function startNookdServer(
     }
   }
 
+  async function refuseRequest(
+    state: ConnectionState,
+    id: string,
+    method: RpcMethod,
+    code: RpcErrorCode,
+    event: "rpc.protocol.rejected" | "rpc.request.dispatched",
+    phase?: ServiceAuditPhase,
+  ): Promise<void> {
+    audit(event, code, method, id.length > 0, 0, state.peerCategory, phase);
+    try {
+      const response: RpcAnyResponseEnvelope = {
+        id,
+        ok: false,
+        error: { code, message: RPC_ERROR_MESSAGES[code] },
+      };
+      const wrote = await writeFrame(state, serializeDaemonRpcResponse(response));
+      if (wrote) {
+        audit("rpc.response.sent", code, method, id.length > 0, 0, state.peerCategory, phase);
+      }
+    } catch {
+      // A malformed or unserialisable refusal has no safe second response.
+    }
+    destroyConnection(state);
+  }
+
   function processConnection(state: ConnectionState): void {
     if (state.processing || state.closed || state.closing) return;
     state.processing = true;
@@ -582,9 +701,9 @@ export async function startNookdServer(
             0,
             state.peerCategory,
           );
-          let request;
+          let request: RpcFrameRequest;
           try {
-            request = parseRpcFrame(next.frame);
+            request = parseDaemonRpcFrame(next.frame);
             if (
               request === undefined ||
               typeof request !== "object" ||
@@ -601,7 +720,23 @@ export async function startNookdServer(
             if (isOperatorOnlyMethod(request.method)) {
               throw new Error("rpc protocol: operator method on the daemon socket");
             }
-          } catch {
+          } catch (error) {
+            if (isRpcProtocolOversizeError(error)) {
+              const id = peekRpcRequestId(next.frame);
+              if (id !== undefined) {
+                await refuseRequest(
+                  state,
+                  id,
+                  peekRpcMethod(next.frame),
+                  "too_large",
+                  "rpc.protocol.rejected",
+                  "wire",
+                );
+              } else {
+                destroyConnection(state);
+              }
+              break;
+            }
             // A malformed frame has no trusted request id. The protocol has no
             // nullable-id response envelope, so close without an error body.
             audit(
@@ -626,6 +761,111 @@ export async function startNookdServer(
             0,
             state.peerCategory,
           );
+          const usedBody = request.body !== undefined;
+          let handlerRequest: RpcRequest;
+          let bodyLease: LargeBodyLease | undefined;
+          if (request.body !== undefined) {
+            // Bytes coalesced with the header arrived before continue could be
+            // written. They are framing violations, never pending body data.
+            if (state.pending.length > 0) {
+              destroyConnection(state);
+              break;
+            }
+            const bodyRequest = request;
+            let acquisition: ReturnType<LargeBodyBudget["tryAcquire"]>;
+            try {
+              acquisition = normalized.bodyBudget.tryAcquire(bodyRequest.body.bytes);
+            } catch {
+              destroyConnection(state);
+              break;
+            }
+            if (acquisition.kind === "busy") {
+              await refuseRequest(
+                state,
+                bodyRequest.id,
+                bodyRequest.method,
+                "busy",
+                "rpc.request.dispatched",
+              );
+              break;
+            }
+            bodyLease = acquisition;
+            let bodyState: BodyReceiveState;
+            try {
+              let resolveBody: (buffer: Buffer | undefined) => void = () => undefined;
+              const completion = new Promise<Buffer | undefined>((resolve) => {
+                resolveBody = resolve;
+              });
+              bodyState = {
+                lease: acquisition,
+                buffer: Buffer.alloc(bodyRequest.body.bytes),
+                completion,
+                resolve: resolveBody,
+                offset: 0,
+                continueSent: false,
+                timer: undefined,
+              };
+            } catch {
+              bodyLease.release();
+              destroyConnection(state);
+              break;
+            }
+            state.body = bodyState;
+            bodyState.timer = scheduleTimeout(() => {
+              audit(
+                "rpc.request.timeout",
+                "timeout",
+                bodyRequest.method,
+                bodyRequest.id.length > 0,
+                normalized.abuseBounds.bodyReceiveTimeoutMs,
+                state.peerCategory,
+              );
+              destroyConnection(state);
+            }, normalized.abuseBounds.bodyReceiveTimeoutMs);
+            let continueFrame: Uint8Array;
+            try {
+              continueFrame = serializeDaemonRpcResponse({
+                id: bodyRequest.id,
+                ok: true,
+                result: { kind: "body_continue", bytes: bodyRequest.body.bytes },
+              });
+            } catch {
+              cancelBodyReceive(state);
+              destroyConnection(state);
+              break;
+            }
+            if (!(await writeFrame(state, continueFrame))) {
+              cancelBodyReceive(state);
+              destroyConnection(state);
+              break;
+            }
+            if (state.body !== bodyState || state.closed || state.closing) break;
+            bodyState.continueSent = true;
+            const bodyBytes = await bodyState.completion;
+            if (bodyBytes === undefined) break;
+            try {
+              const digest = createHash("sha256").update(bodyBytes).digest("hex");
+              if (digest !== bodyRequest.body.sha256) throw new Error("body digest mismatch");
+              const value = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+                bodyBytes,
+              );
+              handlerRequest = attachRpcBody(bodyRequest, value);
+            } catch {
+              bodyLease.release();
+              audit(
+                "rpc.protocol.rejected",
+                "invalid_request",
+                bodyRequest.method,
+                bodyRequest.id.length > 0,
+                0,
+                state.peerCategory,
+              );
+              destroyConnection(state);
+              break;
+            }
+          } else {
+            handlerRequest = request;
+          }
           let timeoutHandle: ReturnType<typeof scheduleTimeout> | undefined;
           const timeout = new Promise<"timeout">((resolve) => {
             timeoutHandle = scheduleTimeout(
@@ -633,7 +873,25 @@ export async function startNookdServer(
               normalized.abuseBounds.requestTimeoutMs,
             );
           });
-          const runtimeOp = handleRpcRequest(request, normalized.runtime, normalized.policy);
+          const runtimeOp: Promise<RpcAnyResponseEnvelope> =
+            request.method === "notes.capabilities"
+              ? Promise.resolve({
+                  id: request.id,
+                  ok: true,
+                  result: { kind: "capabilities", protocol: 2 },
+                })
+              : handleRpcRequest(handlerRequest, normalized.runtime, normalized.policy, {
+                  bodyPath: usedBody,
+                });
+          if (bodyLease !== undefined) {
+            const lease = bodyLease;
+            // A disconnect can end the transport first; the slot remains owned
+            // until the already-dispatched runtime operation actually settles.
+            runtimeOp.then(
+              () => lease.release(),
+              () => lease.release(),
+            );
+          }
           registerRuntimeOp(state, runtimeOp);
           const responsePromise = runtimeOp
             .then((response) => ({
@@ -695,6 +953,7 @@ export async function startNookdServer(
           const response = raced.response;
           if (state.closed || state.closing || state.socket.destroyed) break;
           const outcome: ServiceAuditOutcome = response.ok ? "ok" : response.error.code;
+          const phase = outcome === "too_large" ? "admission" : undefined;
           audit(
             "rpc.request.dispatched",
             outcome,
@@ -702,10 +961,11 @@ export async function startNookdServer(
             request.id.length > 0,
             requestElapsedMs,
             state.peerCategory,
+            phase,
           );
           let responseFrame: Uint8Array;
           try {
-            responseFrame = serializeRpcResponse(response);
+            responseFrame = serializeDaemonRpcResponse(response);
           } catch {
             // In particular, do not attempt to serialize a second error when
             // the original response itself exceeded the published bound.
@@ -725,6 +985,7 @@ export async function startNookdServer(
             request.id.length > 0,
             Math.max(0, Date.now() - requestStartedMs),
             state.peerCategory,
+            phase,
           );
         }
       } finally {
@@ -743,6 +1004,33 @@ export async function startNookdServer(
         // rejection so a transport write failure cannot become unhandled.
       });
   }
+}
+
+/** Attach verified text only to the field the closed declaration named. */
+function attachRpcBody(request: RpcBodyRequest, value: string): RpcRequest {
+  const params = Object.assign(Object.create(null), request.params) as Record<string, unknown>;
+  if (request.method === "notes.update") {
+    const patch = Object.assign(Object.create(null), request.params.patch) as Record<
+      string,
+      unknown
+    >;
+    patch.content = value;
+    params.patch = Object.freeze(patch);
+  } else if (request.method === "notes.create") {
+    params.content = value;
+  } else if (request.method === "notes.append") {
+    params.markdownFragment = value;
+  } else {
+    params.markdown = value;
+  }
+  Object.freeze(params);
+  return Object.freeze(
+    Object.assign(Object.create(null), {
+      id: request.id,
+      method: request.method,
+      params,
+    }),
+  ) as RpcRequest;
 }
 
 /** Alias retained for callers that use a factory-style name. */
@@ -765,6 +1053,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
     const maxConnections = options.maxConnections;
     const maxRequestsPerConnection = options.maxRequestsPerConnection;
     const abuseBounds = options.abuseBounds;
+    const bodyBudget = options.bodyBudget;
     const auditLogger = options.auditLogger;
     const resolvePeer = options.resolvePeer;
     const installSignalHandlers = options.installSignalHandlers;
@@ -781,6 +1070,7 @@ function captureStartOptions(options: StartNookdServerOptions): StartNookdServer
       ...(maxConnections === undefined ? {} : { maxConnections }),
       ...(maxRequestsPerConnection === undefined ? {} : { maxRequestsPerConnection }),
       ...(abuseBounds === undefined ? {} : { abuseBounds }),
+      ...(bodyBudget === undefined ? {} : { bodyBudget }),
       ...(auditLogger === undefined ? {} : { auditLogger }),
       ...(resolvePeer === undefined ? {} : { resolvePeer }),
       ...(installSignalHandlers === undefined ? {} : { installSignalHandlers }),
@@ -798,6 +1088,7 @@ type NormalizedStartNookdServerOptions = Omit<
   | "maxConnections"
   | "maxRequestsPerConnection"
   | "abuseBounds"
+  | "bodyBudget"
   | "auditLogger"
   | "resolvePeer"
   | "installSignalHandlers"
@@ -809,6 +1100,7 @@ type NormalizedStartNookdServerOptions = Omit<
   readonly maxConnections: number;
   readonly maxRequestsPerConnection: number;
   readonly abuseBounds: ServiceAbuseBounds;
+  readonly bodyBudget: LargeBodyBudget;
   readonly auditLogger: Logger | undefined;
   readonly resolvePeer: NookdPeerResolver;
   readonly installSignalHandlers: boolean;
@@ -886,6 +1178,15 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
   } catch {
     throw nookdServerError("invalid nookd abuse bounds");
   }
+  const bodyBudget = options.bodyBudget;
+  if (
+    bodyBudget !== undefined &&
+    (typeof bodyBudget !== "object" ||
+      bodyBudget === null ||
+      typeof bodyBudget.tryAcquire !== "function")
+  ) {
+    throw nookdServerError("invalid nookd body budget");
+  }
   const auditLogger = options.auditLogger;
   if (auditLogger !== undefined && (typeof auditLogger !== "object" || auditLogger === null)) {
     throw nookdServerError("invalid nookd audit logger");
@@ -915,6 +1216,7 @@ function validateOptions(options: StartNookdServerOptions): NormalizedStartNookd
     maxConnections,
     maxRequestsPerConnection,
     abuseBounds,
+    bodyBudget: bodyBudget ?? createLargeBodyBudget(),
     auditLogger,
     resolvePeer,
     installSignalHandlers,

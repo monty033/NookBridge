@@ -59,9 +59,11 @@ import {
   type RpcLockedNoteProofResult,
   type RpcNotesPathDiagnosticResult,
   type RpcSyncResult,
+  type RpcCapabilitiesResult,
   type RpcSuccessEnvelope,
   RPC_ERROR_MESSAGES,
 } from "./rpc-protocol.js";
+import { WIRE_BODY_BYTES } from "../core/size-limits.js";
 import type {
   CreateNoteCommand,
   AppendNoteCommand,
@@ -248,10 +250,16 @@ type RpcHandlerResponse<T extends RpcRequest> = T extends RpcNotesSearchRequest
   ? RpcResponseEnvelope
   : RpcAnyResponseEnvelope;
 
+export interface RpcHandlerOptions {
+  /** Use the raw-body bound only after the daemon has verified and attached a body. */
+  readonly bodyPath?: boolean;
+}
+
 export async function handleRpcRequest<T extends RpcRequest>(
   request: T,
   runtime: RpcHandlerRuntimeLike,
   policy: ServicePolicy = DEFAULT_READ_ONLY_POLICY,
+  options: RpcHandlerOptions = {},
 ): Promise<RpcHandlerResponse<T>> {
   // Safe-id extraction MUST come first: any later failure must echo
   // back something categorical, and the id itself may be hostile.
@@ -259,8 +267,15 @@ export async function handleRpcRequest<T extends RpcRequest>(
   // pre-resolved value (already empty-fallback on hostile input).
   const id = extractRequestId(request);
   try {
-    const structural = validateRequestStructurally(request);
+    const structural = validateRequestStructurally(
+      request,
+      options.bodyPath === true ? WIRE_BODY_BYTES : STAGE5_RPC_LIMITS.maxContentBytes,
+    );
     if (structural.kind === "ok") {
+      // Negotiation is deliberately runtime- and policy-independent.
+      if (structural.request.method === "notes.capabilities") {
+        return runNotesCapabilities(id) as unknown as RpcHandlerResponse<T>;
+      }
       // Global operations have no note-specific context.  They still
       // consult an attached evaluator with the empty context, which lets
       // settings defaults decide whether the request is admitted.
@@ -563,7 +578,7 @@ type StructuralCheck =
  * captured `objectFreeze`, never with object literals that would
  * carry an `Object.prototype` link.
  */
-function validateRequestStructurally(input: unknown): StructuralCheck {
+function validateRequestStructurally(input: unknown, maxContentBytes: number): StructuralCheck {
   if (input === null || typeof input !== "object" || arrayIsArray(input)) {
     return { kind: "err", code: "invalid_request" };
   }
@@ -585,7 +600,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
     rawMethod !== "notes.delete" &&
     rawMethod !== "notes.locked_note_proof" &&
     rawMethod !== "notes.path_diagnostic" &&
-    rawMethod !== "notes.sync"
+    rawMethod !== "notes.sync" &&
+    rawMethod !== "notes.capabilities"
   ) {
     return { kind: "err", code: "invalid_request" };
   }
@@ -653,8 +669,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       hasControlCharacter(rawTitle) ||
       rawContent === undefined ||
       rawContent.length === 0 ||
-      rawContent.length > STAGE5_RPC_LIMITS.maxContentBytes ||
-      bufferByteLength(rawContent, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
+      rawContent.length > maxContentBytes ||
+      bufferByteLength(rawContent, "utf8") > maxContentBytes ||
       hasDisallowedControlCharacter(rawContent)
     ) {
       return { kind: "err", code: "invalid_request" };
@@ -702,8 +718,8 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
       !isBoundedRpcIdentifier(rawNoteId) ||
       rawFragment === undefined ||
       rawFragment.length === 0 ||
-      rawFragment.length > STAGE5_RPC_LIMITS.maxContentBytes ||
-      bufferByteLength(rawFragment, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
+      rawFragment.length > maxContentBytes ||
+      bufferByteLength(rawFragment, "utf8") > maxContentBytes ||
       hasDisallowedControlCharacter(rawFragment) ||
       !isRevisionToken(rawRevision)
     ) {
@@ -757,7 +773,7 @@ function validateRequestStructurally(input: unknown): StructuralCheck {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "content") {
-        if (!isBoundedRpcContent(value, STAGE5_RPC_LIMITS.maxContentBytes)) {
+        if (!isBoundedRpcContent(value, maxContentBytes)) {
           return { kind: "err", code: "invalid_request" };
         }
       } else if (key === "notebookId") {
@@ -971,6 +987,8 @@ async function runAuthorizedRpcMethod(
   id: string,
 ): Promise<RpcAnyResponseEnvelope> {
   switch (request.method) {
+    case "notes.capabilities":
+      return runNotesCapabilities(id);
     case "notes.search":
       return runNotesSearch(request, runtime, id);
     case "notes.status":
@@ -1741,7 +1759,7 @@ export async function runOperatorPathDiagnostic(
 ): Promise<RpcAnyResponseEnvelope> {
   const id = extractRequestId(request);
   try {
-    const structural = validateRequestStructurally(request);
+    const structural = validateRequestStructurally(request, STAGE5_RPC_LIMITS.maxContentBytes);
     if (structural.kind !== "ok" || structural.request.method !== "notes.path_diagnostic") {
       return buildErrorEnvelope(id, "invalid_request");
     }
@@ -2484,9 +2502,20 @@ function normaliseNoteMetadata(value: unknown): Record<string, unknown> | undefi
   return objectFreeze(output);
 }
 
+function runNotesCapabilities(id: string): RpcAnyResponseEnvelope {
+  const result = objectFreeze(
+    objectCreate(null, {
+      kind: { value: "capabilities", enumerable: true, configurable: false, writable: false },
+      protocol: { value: 2, enumerable: true, configurable: false, writable: false },
+    }),
+  ) as RpcCapabilitiesResult;
+  return buildResultSuccessEnvelope(id, result);
+}
+
 function buildResultSuccessEnvelope(
   id: string,
   result:
+    | RpcCapabilitiesResult
     | RpcStatusResult
     | RpcListNotebooksResult
     | {

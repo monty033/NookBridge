@@ -1,6 +1,6 @@
 /**
- * Every named bound the bridge enforces, in one place — plus one named
- * deadline that is not enforced yet, marked as such where it is defined.
+ * Every named bound the bridge enforces, in one place — including the absolute
+ * deadline for receiving a declared raw body.
  *
  * What this file is: the named definition site for the bounds the bridge
  * enforces on note content and on the wire, and the place a note-size change
@@ -236,8 +236,8 @@ export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
  * This is not an idle-between-chunks timeout: a peer cannot extend a body
  * exchange indefinitely by continuing to send small chunks.
  *
- * Not wired yet: no production path reads this. The body-receive step enforces
- * it; until then it describes a deadline the daemon does not keep.
+ * The daemon exposes this as the default `bodyReceiveTimeoutMs` service abuse
+ * bound and enforces it from body admission until all declared bytes arrive.
  */
 export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 

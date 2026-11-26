@@ -1,5 +1,7 @@
 /** Stage 7 Slice 2 — closed service-side abuse bounds. */
 
+import { BODY_RECEIVE_TIMEOUT_MS } from "../core/size-limits.js";
+
 const objectCreate = Object.create;
 const objectFreeze = Object.freeze;
 const objectDefineProperty = Object.defineProperty;
@@ -12,6 +14,7 @@ const numberIsInteger = Number.isInteger;
 export interface ServiceAbuseBounds {
   readonly requestTimeoutMs: number;
   readonly connectionIdleTimeoutMs: number;
+  readonly bodyReceiveTimeoutMs: number;
   readonly perConnectionBudgetMs: number;
   readonly perProcessRequestsPerSecond: number;
   readonly perProcessBurstSize: number;
@@ -21,6 +24,7 @@ export const SERVICE_ABUSE_BOUNDS_LIMITS = objectFreeze(
   objectCreate(null, {
     maxRequestTimeoutMs: { value: 60_000, enumerable: true },
     maxConnectionIdleTimeoutMs: { value: 300_000, enumerable: true },
+    maxBodyReceiveTimeoutMs: { value: 60_000, enumerable: true },
     maxPerConnectionBudgetMs: { value: 600_000, enumerable: true },
     maxPerProcessRequestsPerSecond: { value: 100, enumerable: true },
     maxPerProcessBurstSize: { value: 100, enumerable: true },
@@ -28,6 +32,7 @@ export const SERVICE_ABUSE_BOUNDS_LIMITS = objectFreeze(
 ) as unknown as Readonly<{
   readonly maxRequestTimeoutMs: number;
   readonly maxConnectionIdleTimeoutMs: number;
+  readonly maxBodyReceiveTimeoutMs: number;
   readonly maxPerConnectionBudgetMs: number;
   readonly maxPerProcessRequestsPerSecond: number;
   readonly maxPerProcessBurstSize: number;
@@ -36,6 +41,7 @@ export const SERVICE_ABUSE_BOUNDS_LIMITS = objectFreeze(
 const BOUND_FIELDS = objectFreeze([
   "requestTimeoutMs",
   "connectionIdleTimeoutMs",
+  "bodyReceiveTimeoutMs",
   "perConnectionBudgetMs",
   "perProcessRequestsPerSecond",
   "perProcessBurstSize",
@@ -46,6 +52,7 @@ type BoundField = (typeof BOUND_FIELDS)[number];
 export const DEFAULT_SERVICE_ABUSE_BOUNDS = makeBounds({
   requestTimeoutMs: 10_000,
   connectionIdleTimeoutMs: 30_000,
+  bodyReceiveTimeoutMs: BODY_RECEIVE_TIMEOUT_MS,
   perConnectionBudgetMs: 120_000,
   perProcessRequestsPerSecond: 20,
   perProcessBurstSize: 10,
@@ -96,6 +103,8 @@ function maximumFor(field: BoundField): number {
       return SERVICE_ABUSE_BOUNDS_LIMITS.maxRequestTimeoutMs;
     case "connectionIdleTimeoutMs":
       return SERVICE_ABUSE_BOUNDS_LIMITS.maxConnectionIdleTimeoutMs;
+    case "bodyReceiveTimeoutMs":
+      return SERVICE_ABUSE_BOUNDS_LIMITS.maxBodyReceiveTimeoutMs;
     case "perConnectionBudgetMs":
       return SERVICE_ABUSE_BOUNDS_LIMITS.maxPerConnectionBudgetMs;
     case "perProcessRequestsPerSecond":
