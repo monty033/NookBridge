@@ -6,6 +6,8 @@
  * singleton whose state could leak between tests or independent servers.
  */
 
+import { WIRE_BODY_BYTES } from "../core/size-limits.js";
+
 export interface LargeBodyLease {
   readonly kind: "acquired";
   /** Declared body size; the caller uses it to size the one assembly buffer. */
@@ -39,6 +41,13 @@ export function createLargeBodyBudget(): LargeBodyBudget {
     tryAcquire(bytes: number): LargeBodyAcquisition {
       if (!Number.isSafeInteger(bytes) || bytes < 1) {
         throw new TypeError("declared body bytes must be a positive safe integer");
+      }
+      // The parser refuses an over-bound declaration before this point, so
+      // reaching here with one is a programming error in the caller rather
+      // than a request to refuse: failing loudly beats sizing a buffer from a
+      // number the wire was never allowed to ask for.
+      if (bytes > WIRE_BODY_BYTES) {
+        throw new RangeError("declared body bytes exceed the wire body bound");
       }
       if (held) return busy;
       held = true;

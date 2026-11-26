@@ -1,14 +1,21 @@
 /**
- * Every named byte cap the bridge enforces, in one place.
+ * Every named bound the bridge enforces, in one place.
  *
- * What this file is: the named definition site for the byte caps the bridge
+ * What this file is: the named definition site for the bounds the bridge
  * enforces on note content and on the wire, and the place a note-size change
  * has to start. What it is not: a complete inventory of every number compared
  * against a byte length in `src/`. Inline limits inside one function — a title
  * length check, a per-field ceiling — still exist and are not all listed here;
- * they are named below when they matter for note size. These caps are
- * independent conservative numbers today, not consequences of one another, and
- * the comments say which is which.
+ * they are named below when they matter for note size.
+ *
+ * Most entries are independent conservative numbers, not consequences of one
+ * another. Three are deliberately derived, and the derivation is the point:
+ * `PROJECTION_MARKDOWN_BYTES` and `ADMISSION_ROW_BYTES` each name a job a
+ * neighbour is currently doing, so the job can move without moving the bound
+ * that happens to share its value; `WIRE_BODY_BYTES` is a multiple of
+ * `ADMISSION_ROW_BYTES` so wire sizing can never outrun admission. Every entry
+ * says which it is. One entry, `BODY_RECEIVE_TIMEOUT_MS`, is a deadline rather
+ * than a byte cap, and lives here because it bounds the same exchange.
  *
  * Rules for this file:
  *

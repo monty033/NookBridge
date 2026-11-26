@@ -36,13 +36,19 @@ import {
 import { serializeNoteDocumentMarkdown } from "../core/note-document-markdown.js";
 import { noteHtmlReadonlyMarkdown } from "../core/note-html-readonly-markdown.js";
 import { fitsResponsePreflight } from "./rpc-protocol.js";
-import { RPC_RESPONSE_BYTES } from "../core/size-limits.js";
+import { PROJECTION_MARKDOWN_BYTES } from "../core/size-limits.js";
 
 const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const bufferByteLength = Buffer.byteLength;
 
-/** Bounded Markdown content size for `notes.get`; the whole frame shares it. */
-const MAX_PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
+/**
+ * Bounded Markdown content size for `notes.get`.
+ *
+ * Named in the registry rather than aliased to the response bound here: the two
+ * share a value today, and a body-framed read has to be able to raise this one
+ * without moving the single-frame response bound.
+ */
+const MAX_PROJECTION_MARKDOWN_BYTES = PROJECTION_MARKDOWN_BYTES;
 
 export type NoteProjectionOutcome =
   | "strict"

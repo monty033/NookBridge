@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
@@ -6,6 +7,8 @@ import { WIRE_BODY_BYTES } from "../src/core/size-limits.js";
 import {
   RPC_ERROR_MESSAGES,
   createRpcFrameParser,
+  createRpcResponseSerializer,
+  isRpcProtocolOversizeError,
   parseRpcFrame,
   serializeRpcResponse,
   type RpcAnyResponseEnvelope,
@@ -78,25 +81,66 @@ describe("protocol 2 request body declarations", () => {
   });
 });
 
+describe("request body wire bound", () => {
+  const parser = createRpcFrameParser({ allowBody: true });
+  const declaration = (bytes: number): unknown => ({
+    id: "r",
+    method: "notes.create",
+    params: { title: "t" },
+    body: { field: "content", bytes, sha256: SHA256 },
+  });
+
+  it("accepts exactly the wire bound", () => {
+    expect(parser(frame(declaration(WIRE_BODY_BYTES)))).toBeDefined();
+  });
+
+  it("refuses one byte over the bound as a size refusal, not a malformed one", () => {
+    let thrown: unknown;
+    try {
+      parser(frame(declaration(WIRE_BODY_BYTES + 1)));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeDefined();
+    // The daemon answers `too_large` for this and `invalid_request` for a
+    // malformed declaration, so the two must stay distinguishable.
+    expect(isRpcProtocolOversizeError(thrown)).toBe(true);
+  });
+
+  it("does not classify a malformed declaration as a size refusal", () => {
+    let thrown: unknown;
+    try {
+      parser(frame({ ...(declaration(4) as object), body: { field: "content", bytes: 0, sha256: SHA256 } }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRpcProtocolOversizeError(thrown)).toBe(false);
+  });
+});
+
 describe("protocol 2 response codec", () => {
+  // The serializer takes the same explicit policy as the parser: protocol-2
+  // shapes exist only on a path that opted in.
+  const serializeProtocol2 = createRpcResponseSerializer({ allowBody: true });
+
   it.each([
     ["body_continue", { kind: "body_continue", bytes: 128 }],
     ["capabilities", { kind: "capabilities", protocol: 2 }],
   ] as const)("serializes and round-trips %s", (_name, result) => {
-    const serialized = serializeRpcResponse({ id: "response", ok: true, result });
+    const serialized = serializeProtocol2({ id: "response", ok: true, result });
     expect(decode(serialized)).toEqual({ id: "response", ok: true, result });
   });
 
   it("accepts body_continue at the wire bound and refuses one byte more", () => {
     expect(() =>
-      serializeRpcResponse({
+      serializeProtocol2({
         id: "at-limit",
         ok: true,
         result: { kind: "body_continue", bytes: WIRE_BODY_BYTES },
       }),
     ).not.toThrow();
     expect(() =>
-      serializeRpcResponse({
+      serializeProtocol2({
         id: "over-limit",
         ok: true,
         result: { kind: "body_continue", bytes: WIRE_BODY_BYTES + 1 },
@@ -117,7 +161,7 @@ describe("protocol 2 response codec", () => {
       },
       body,
     };
-    expect(decode(serializeRpcResponse(envelope))).toEqual({
+    expect(decode(serializeProtocol2(envelope))).toEqual({
       id: "body-read",
       ok: true,
       result: {
@@ -130,11 +174,26 @@ describe("protocol 2 response codec", () => {
     });
   });
 
+  it("declares each error message exactly once", () => {
+    // The serializer refuses an envelope whose message is not the table's
+    // string for its code, so a second assignment for the same code does not
+    // just win — it makes the producer's message wrong and the refusal
+    // unserialisable. This is that check, at the source.
+    const source = readFileSync("src/service/rpc-protocol.ts", "utf8");
+    const assignments = [...source.matchAll(/^rpcErrorMessages\.([a-z_]+) = /gm)].map(
+      (match) => match[1],
+    );
+    expect(assignments.length).toBe(new Set(assignments).size);
+    for (const code of Object.keys(RPC_ERROR_MESSAGES)) {
+      expect(assignments.filter((name) => name === code)).toHaveLength(1);
+    }
+  });
+
   it("adds busy to the closed error vocabulary with a fixed message", () => {
-    expect(RPC_ERROR_MESSAGES.busy).toBe("Busy");
+    expect(RPC_ERROR_MESSAGES.busy).toBe("Service busy");
     expect(
       decode(
-        serializeRpcResponse({
+        serializeProtocol2({
           id: "busy",
           ok: false,
           error: { code: "busy", message: RPC_ERROR_MESSAGES.busy },
@@ -143,7 +202,19 @@ describe("protocol 2 response codec", () => {
     ).toEqual({
       id: "busy",
       ok: false,
-      error: { code: "busy", message: "Busy" },
+      error: { code: "busy", message: "Service busy" },
     });
+  });
+});
+
+describe("legacy response serializer", () => {
+  it.each([
+    ["an outgoing body", { id: "r", ok: true, result: { kind: "note" }, body: { field: "markdown", bytes: 4, sha256: SHA256 } }],
+    ["body_continue", { id: "r", ok: true, result: { kind: "body_continue", bytes: 4 } }],
+    ["capabilities", { id: "r", ok: true, result: { kind: "capabilities", protocol: 2 } }],
+  ] as const)("refuses %s without the protocol-2 policy", (_name, envelope) => {
+    expect(() => serializeRpcResponse(envelope as unknown as RpcAnyResponseEnvelope)).toThrow(
+      /not permitted on this path/,
+    );
   });
 });

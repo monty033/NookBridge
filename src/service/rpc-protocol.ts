@@ -1172,7 +1172,6 @@ rpcErrorMessages.local_sync_marker_failed = "Local change committed; sync intent
 rpcErrorMessages.unapproved_pending = "Unapproved pending changes";
 rpcErrorMessages.unsupported_content = "Unsupported content";
 rpcErrorMessages.sync_required = "Sync required";
-rpcErrorMessages.busy = "Busy";
 /**
  * The single source of truth for the categorical error vocabulary.
  *
@@ -1211,6 +1210,25 @@ const RPC_PROTOCOL_ERROR_MESSAGES = new WeakMap<object, string>();
  * `__context__` are explicitly cleared so a hostile parser exception
  * cannot smuggle data through the error chain.
  */
+/**
+ * The one message a body declaration larger than the wire bound carries.
+ *
+ * This is not a protocol violation: the caller spoke the grammar correctly and
+ * asked for a size the daemon will not assemble, so the daemon answers
+ * `too_large` rather than `invalid_request`. The canonical message is the
+ * marker, because the boundary wrapper deliberately rebuilds every protocol
+ * error from its canonical text and no per-error property survives it.
+ */
+const RPC_BODY_OVERSIZE_MESSAGE = "rpc protocol: request body exceeds the declared wire body bound";
+
+/** `true` for a body declaration refused on size rather than on shape. */
+export function isRpcProtocolOversizeError(value: unknown): boolean {
+  return (
+    isRpcProtocolError(value) &&
+    reflectApply(weakMapGet, RPC_PROTOCOL_ERROR_MESSAGES, [value]) === RPC_BODY_OVERSIZE_MESSAGE
+  );
+}
+
 function rpcProtocolError(message: string): Error {
   const error = new ErrorConstructor(message);
   objectDefineProperty(error, "cause", { configurable: true, value: undefined });
@@ -2431,7 +2449,7 @@ export const parseRpcFrame: (input: Uint8Array) => RpcRequest = wrapProtocolBoun
  * categorical RpcProtocolError so a hostile envelope cannot leak raw
  * error messages, `cause` chains, or context through the boundary.
  */
-function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
+function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Uint8Array {
   if (envelope === null || typeof envelope !== "object" || arrayIsArray(envelope)) {
     throw rpcProtocolError("rpc protocol: response envelope must be a plain object");
   }
@@ -2465,6 +2483,11 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
 
   if (ok === true) {
     const hasBody = envKeys.includes("body");
+    // The gate is one-sided unless the serializer enforces it too: a daemon
+    // that never negotiated protocol 2 must not be able to emit its shapes.
+    if (hasBody && !allowBody) {
+      throw rpcProtocolError("rpc protocol: response body is not permitted on this path");
+    }
     const expectedEnvelopeKeys = hasBody ? ["id", "ok", "result", "body"] : ["id", "ok", "result"];
     if (envKeys.length !== expectedEnvelopeKeys.length || !keysAreExactly(envKeys, expectedEnvelopeKeys)) {
       throw rpcProtocolError("rpc protocol: success envelope has unexpected fields");
@@ -2480,6 +2503,9 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
     const kind = resultRecord.kind;
     if (responseBody !== undefined && kind !== "note") {
       throw rpcProtocolError("rpc protocol: response body requires an accepted note read");
+    }
+    if ((kind === "body_continue" || kind === "capabilities") && !allowBody) {
+      throw rpcProtocolError("rpc protocol: protocol-2 result is not permitted on this path");
     }
     if (kind === "body_continue") {
       const resultKeys = validateClosedObject(
@@ -4196,7 +4222,24 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
  * getter or `toJSON` trap) is normalized to a categorical
  * RpcProtocolError before it crosses the module boundary.
  */
-export const serializeRpcResponse = wrapProtocolBoundary(serializeRpcResponseInternal);
+export const serializeRpcResponse = wrapProtocolBoundary((envelope: unknown): Uint8Array =>
+  serializeRpcResponseInternal(envelope, false),
+);
+
+/**
+ * Construct a serializer with the same explicit policy the parser takes.
+ *
+ * A daemon enables this for a connection that negotiated protocol 2 and leaves
+ * every other path on the legacy serializer.
+ */
+export function createRpcResponseSerializer(
+  options: RpcFrameParserOptions = {},
+): (envelope: unknown) => Uint8Array {
+  const allowBody = options.allowBody === true;
+  return wrapProtocolBoundary((envelope: unknown): Uint8Array =>
+    serializeRpcResponseInternal(envelope, allowBody),
+  );
+}
 
 function serializeSuccessFrame(
   id: string,
@@ -4466,6 +4509,13 @@ function parseRequestBodyDeclaration(value: JsonValue | undefined, method: RpcMe
   }
   if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 1) {
     throw rpcProtocolError("rpc protocol: request body bytes are invalid");
+  }
+  // The wire bound is enforced here, before anything allocates for the body,
+  // and it is a different refusal from a malformed declaration: the daemon
+  // answers `too_large` rather than `invalid_request`, and sends no
+  // `body_continue`.
+  if (bytes > WIRE_BODY_BYTES) {
+    throw rpcProtocolError(RPC_BODY_OVERSIZE_MESSAGE);
   }
   if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
     throw rpcProtocolError("rpc protocol: request body sha256 is invalid");

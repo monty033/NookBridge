@@ -859,6 +859,21 @@ describe("R2d — audit and wire contract", () => {
     }
   });
 
+  it("(d2) busy is protocol-2 only and degrades to service_unavailable at L2", async () => {
+    // The design reserves `busy` for callers that negotiated protocol 2: a
+    // protocol-1 client must not be handed a code it has never seen. It is a
+    // real envelope code, so this asserts the degradation rather than trusting
+    // the absence of a row in the legacy table.
+    const daemon = await startEnvelopeDaemon("busy" as RpcErrorCode);
+    try {
+      const client = new NookdSocketClient({ socketPath: daemon.socketPath });
+      const result = await client.createNote({ title: TITLE, content: CONTENT });
+      expect(result).toMatchObject({ ok: false, code: "service_unavailable" });
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("(e) the MCP tool list is 9 tools with unchanged input schemas", () => {
     const client = new NookdSocketClient({ socketPath: "/tmp/nbk-never-used.sock" });
     const { tools } = buildNookMcpServer({ client });
