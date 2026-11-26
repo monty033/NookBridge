@@ -278,7 +278,14 @@ describe("service audit records", () => {
       "rpc.connection.admission_rejected",
       "rpc.connection.closed",
     ]);
-    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(16);
+    // A count alone only tells you the set changed; these say what it must
+    // contain, including the refusals the write and wire work added. The type
+    // and this list are two halves of one closed set, and a disagreement makes
+    // the audit throw where its catch swallows the error — a refusal that is
+    // never recorded.
+    expect(SERVICE_AUDIT_OUTCOMES).toHaveLength(18);
+    expect(SERVICE_AUDIT_OUTCOMES).toContain("too_large");
+    expect(SERVICE_AUDIT_OUTCOMES).toContain("busy");
     expect(SERVICE_AUDIT_OUTCOMES).toContain("unapproved_pending");
     expect(SERVICE_AUDIT_OUTCOMES).toContain("unsupported_content");
     expect(SERVICE_AUDIT_OUTCOMES).toContain("sync_required");

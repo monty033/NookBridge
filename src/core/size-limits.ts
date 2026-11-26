@@ -1,14 +1,22 @@
 /**
- * Every named byte cap the bridge enforces, in one place.
+ * Every named bound the bridge enforces, in one place — plus one named
+ * deadline that is not enforced yet, marked as such where it is defined.
  *
- * What this file is: the named definition site for the byte caps the bridge
+ * What this file is: the named definition site for the bounds the bridge
  * enforces on note content and on the wire, and the place a note-size change
  * has to start. What it is not: a complete inventory of every number compared
  * against a byte length in `src/`. Inline limits inside one function — a title
  * length check, a per-field ceiling — still exist and are not all listed here;
- * they are named below when they matter for note size. These caps are
- * independent conservative numbers today, not consequences of one another, and
- * the comments say which is which.
+ * they are named below when they matter for note size.
+ *
+ * Most entries are independent conservative numbers, not consequences of one
+ * another. Three are deliberately derived, and the derivation is the point:
+ * `PROJECTION_MARKDOWN_BYTES` and `ADMISSION_ROW_BYTES` each name a job a
+ * neighbour is currently doing, so the job can move without moving the bound
+ * that happens to share its value; `WIRE_BODY_BYTES` is a multiple of
+ * `ADMISSION_ROW_BYTES` so wire sizing can never outrun admission. Every entry
+ * says which it is. One entry, `BODY_RECEIVE_TIMEOUT_MS`, is a deadline rather
+ * than a byte cap, and lives here because it bounds the same exchange.
  *
  * Rules for this file:
  *
@@ -61,6 +69,16 @@ export const RPC_FRAME_BYTES = 65_536;
  * reply, and therefore also bounds the projection a note is turned into.
  */
 export const RPC_RESPONSE_BYTES = 65_536;
+
+/**
+ * Largest Markdown projection produced for a note read.
+ *
+ * `RPC_RESPONSE_BYTES` currently does two jobs: it bounds a single-frame
+ * response and it bounds the projection carried by that response. This entry
+ * names the second job so body-framed reads can size projections independently
+ * without changing the single-frame response bound.
+ */
+export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
 /**
  * Content cap for `notes.create` / `notes.update` / `notes.append` bodies.
@@ -188,6 +206,40 @@ export const STORED_CONTENT_BYTES = 262_144;
  * categorically, it is not partially read.
  */
 export const STORED_CONTENT_READ_BYTES = 262_144;
+
+/**
+ * Largest produced stored-content row admitted by the write path.
+ *
+ * This is the wire-sizing name for the bound `STORED_CONTENT_READ_BYTES`
+ * already states — the two are the same number deliberately, and that entry is
+ * where the admission rule itself lives. It follows the read threshold today;
+ * when the stored-row limit changes, this entry becomes `MAX_STORED_JSON_BYTES`
+ * so wire sizing continues to follow admission rather than moving ahead of it.
+ */
+export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
+
+/**
+ * Largest declared raw body carried alongside an RPC header frame.
+ *
+ * The 2x is a budget choice, not a derived invariant: it is chosen so that a
+ * writable row's projection and escaping have room, and no test establishes
+ * that every stored shape projects within it. Nothing depends on the allowance
+ * holding — a body over it is refused, never truncated — but do not read it as
+ * a proven bound. Today the projection is refused earlier and by a different
+ * entry (`PROJECTION_MARKDOWN_BYTES`), so this bound only governs the wire.
+ */
+export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
+
+/**
+ * Absolute deadline for receiving a declared raw body, in milliseconds.
+ *
+ * This is not an idle-between-chunks timeout: a peer cannot extend a body
+ * exchange indefinitely by continuing to send small chunks.
+ *
+ * Not wired yet: no production path reads this. The body-receive step enforces
+ * it; until then it describes a deadline the daemon does not keep.
+ */
+export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 
 /**
  * Largest native (`tiptap`) document envelope the bridge will accept or emit.
@@ -326,6 +378,7 @@ export const SIZE_LIMITS = Object.freeze({
   OPERATOR_FRAME_BYTES,
   RPC_FRAME_BYTES,
   RPC_RESPONSE_BYTES,
+  PROJECTION_MARKDOWN_BYTES,
   RPC_CONTENT_BYTES,
   RPC_QUERY_BYTES,
   RPC_TITLE_BYTES,
@@ -336,6 +389,9 @@ export const SIZE_LIMITS = Object.freeze({
   MCP_QUERY_BYTES,
   STORED_CONTENT_BYTES,
   STORED_CONTENT_READ_BYTES,
+  ADMISSION_ROW_BYTES,
+  WIRE_BODY_BYTES,
+  BODY_RECEIVE_TIMEOUT_MS,
   NATIVE_DOCUMENT_BYTES,
   STORED_TITLE_BYTES,
   FRAGMENT_BYTES,

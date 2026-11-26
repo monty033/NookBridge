@@ -60,6 +60,7 @@ import {
   type RpcNotesPathDiagnosticResult,
   type RpcSyncResult,
   type RpcSuccessEnvelope,
+  RPC_ERROR_MESSAGES,
 } from "./rpc-protocol.js";
 import type {
   CreateNoteCommand,
@@ -2753,6 +2754,7 @@ function buildErrorEnvelope(
   id: string,
   code:
     | "invalid_request"
+    | "busy"
     | "too_large"
     | "permission_denied"
     | "service_unavailable"
@@ -2766,22 +2768,11 @@ function buildErrorEnvelope(
     | "unsupported_content"
     | "sync_required",
 ): RpcAnyResponseEnvelope {
-  const messages = {
-    invalid_request: "Invalid request",
-    too_large: "Content too large",
-    permission_denied: "Permission denied",
-    service_unavailable: "Service unavailable",
-    stale_revision: "Stale revision",
-    conflict: "Conflict",
-    sync_failed: "Sync failed",
-    vault_locked: "Vault locked",
-    not_found: "Not found",
-    local_sync_marker_failed: "Local change committed; sync intent not persisted",
-    unapproved_pending: "Unapproved pending changes",
-    unsupported_content: "Unsupported content",
-    sync_required: "Sync required",
-  } as const;
-  const message = messages[code];
+  // One table, not two. `serializeRpcResponse` refuses an envelope whose
+  // message is not exactly the protocol's fixed string for its code, so a
+  // second copy here is a trap: a mismatched word turns a categorical refusal
+  // into a failed serialization and a dropped connection.
+  const message = RPC_ERROR_MESSAGES[code];
 
   const error: RpcErrorEnvelope["error"] = objectFreeze(
     objectCreate(null, {

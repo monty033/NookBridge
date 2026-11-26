@@ -88,6 +88,7 @@ describe("size limit registry", () => {
       OPERATOR_FRAME_BYTES: 65_536,
       RPC_FRAME_BYTES: 65_536,
       RPC_RESPONSE_BYTES: 65_536,
+      PROJECTION_MARKDOWN_BYTES: 65_536,
       RPC_CONTENT_BYTES: 27_000,
       RPC_QUERY_BYTES: 512,
       RPC_TITLE_BYTES: 256,
@@ -98,6 +99,9 @@ describe("size limit registry", () => {
       MCP_QUERY_BYTES: 512,
       STORED_CONTENT_BYTES: 262_144,
       STORED_CONTENT_READ_BYTES: 262_144,
+      ADMISSION_ROW_BYTES: 262_144,
+      WIRE_BODY_BYTES: 2 * SIZE_LIMITS.ADMISSION_ROW_BYTES,
+      BODY_RECEIVE_TIMEOUT_MS: 30_000,
       NATIVE_DOCUMENT_BYTES: 262_144,
       STORED_TITLE_BYTES: 1_024,
       FRAGMENT_BYTES: 32_768,
@@ -173,6 +177,12 @@ describe("size limit registry", () => {
     // revision, title and tag fields. This is the assertion that fails if the
     // cap is raised without raising the frame.
     expect(2 * SIZE_LIMITS.RPC_CONTENT_BYTES + 5_200).toBeLessThanOrEqual(SIZE_LIMITS.RPC_FRAME_BYTES);
+    // Wire bodies retain the deliberate 2x projection/escape allowance over
+    // the current admission row; this is a relationship, not a second value.
+    expect(SIZE_LIMITS.WIRE_BODY_BYTES).toBe(2 * SIZE_LIMITS.ADMISSION_ROW_BYTES);
+    // This equality is deliberate and temporary: the registry now names the
+    // projection job separately before the body-framing slice rewires its use.
+    expect(SIZE_LIMITS.PROJECTION_MARKDOWN_BYTES).toBe(SIZE_LIMITS.RPC_RESPONSE_BYTES);
     // What the native codec produces, the read side accepts.
     expect(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES).toBeLessThanOrEqual(
       SIZE_LIMITS.STORED_CONTENT_READ_BYTES,

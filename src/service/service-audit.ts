@@ -37,6 +37,7 @@ export type ServiceAuditEvent =
 export type ServiceAuditOutcome =
   | "ok"
   | "invalid_request"
+  | "busy"
   | "too_large"
   | "permission_denied"
   | "service_unavailable"
@@ -82,6 +83,8 @@ export const SERVICE_AUDIT_EVENTS = objectFreeze([
 export const SERVICE_AUDIT_OUTCOMES = objectFreeze([
   "ok",
   "invalid_request",
+  "too_large",
+  "busy",
   "permission_denied",
   "service_unavailable",
   "stale_revision",
