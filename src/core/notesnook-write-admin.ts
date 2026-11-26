@@ -915,6 +915,7 @@ function categoricalFailureLabel(error: unknown): string {
       case "invalid_input":
         return "rejected: invalid input";
       case "too_large":
+        return "rejected: content too large";
       case "unsupported_content":
         return "rejected: unsupported content";
       case "unsupported_patch_field":

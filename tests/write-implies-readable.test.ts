@@ -229,6 +229,62 @@ describe("write implies readable", () => {
     expect(calls.notesAdd).toHaveLength(0);
   });
 
+  it("reports a too-large update as too_large, not as unsupported content", async () => {
+    const oversized = seededDocumentOf(STORED_CONTENT_READ_BYTES + 1);
+    const { database, calls } = createFakeDatabase();
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: {
+        ...DETERMINISTIC_MARKDOWN_CODEC,
+        encodeMarkdown: () => ({ type: "html", data: oversized }),
+      } as NotesnookWriteMarkdownCodec,
+    });
+
+    // The update path used to wrap the encode in a bare catch, which relabelled
+    // the post-encode refusal as a codec failure. Same refusal, wrong diagnosis.
+    expect(
+      await refusalOf(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          patch: { content: "replacement" },
+          expectedRevision: createRevisionToken({
+            id: NOTE_ID,
+            dateEdited: EDITED_AT,
+            revisionCounter: 0,
+          }),
+        }),
+      ),
+    ).toBe("too_large");
+    expect(calls.contentUpdate).toHaveLength(0);
+  });
+
+  it("refuses an empty stored row, because the read path refuses one too", async () => {
+    const { database, calls, stored } = createFakeDatabase();
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: DETERMINISTIC_MARKDOWN_CODEC,
+    });
+
+    // A caller-supplied native envelope is written verbatim; the reader rejects
+    // an empty `data`, so the write path has to reject it first. This is the
+    // same defect as the oversized row, approached from below.
+    expect(
+      await refusalOf(() =>
+        adapter.updateNote({
+          id: NOTE_ID,
+          patch: { storedContent: { type: "html", data: "" } },
+          expectedRevision: createRevisionToken({
+            id: NOTE_ID,
+            dateEdited: EDITED_AT,
+            revisionCounter: 0,
+          }),
+        }),
+      ),
+    ).toBe("unsupported_content");
+    expect(calls.contentUpdate).toHaveLength(0);
+    expect(stored()?.data).not.toBe("");
+  });
+
   it("accepts one byte under the threshold and refuses one byte over", async () => {
     const under = seededDocumentOf(STORED_CONTENT_READ_BYTES - 1);
     const over = seededDocumentOf(STORED_CONTENT_READ_BYTES + 1);

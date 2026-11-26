@@ -97,7 +97,25 @@ import {
  * block tagging make the row larger, and by a ratio that depends on the shape of
  * the content, so an input-side check cannot decide this.
  */
+/**
+ * Refuse a row the read path would refuse.
+ *
+ * Both ends matter. The reader rejects an empty `data` outright and refuses a
+ * row above `STORED_CONTENT_READ_BYTES`, so a write that produced either would
+ * hand back a note the bridge cannot open — the defect this guard exists to
+ * prevent, in whichever direction it is approached.
+ *
+ * The two conditions are different diagnoses, so they carry different codes: an
+ * empty row is content we cannot represent, an oversized one is content too
+ * large to read.
+ */
 function assertStoredRowReadable(stored: NotesnookStoredContent): NotesnookStoredContent {
+  if (stored.data.length === 0) {
+    throw adapterError(
+      "unsupported_content",
+      "Notesnook write adapter: encoded content is empty and the bridge cannot read it back",
+    );
+  }
   if (Buffer.byteLength(stored.data, "utf8") > STORED_CONTENT_READ_BYTES) {
     throw adapterError(
       "too_large",
@@ -735,8 +753,13 @@ export class NotesnookWriteAdapter {
         // opaque subtrees survive byte-for-byte.  Re-running the Markdown
         // codec here would destroy them, so the envelope is written
         // verbatim and re-pinned to the note's existing slot type.
-        preparedContent = { type: stored.type, data: plan.storedContent.data };
-        contentBytes = Buffer.byteLength(plan.storedContent.data, "utf8");
+        // Verbatim, but not unmeasured: this envelope is supplied by the
+        // caller, so it is the one content channel the codec never sees.
+        preparedContent = assertStoredRowReadable({
+          type: stored.type,
+          data: plan.storedContent.data,
+        });
+        contentBytes = Buffer.byteLength(preparedContent.data, "utf8");
       } else {
         const newContent = patch.content as string;
         contentBytes = Buffer.byteLength(newContent, "utf8");
@@ -928,15 +951,12 @@ export class NotesnookWriteAdapter {
               );
             }
           }
-          try {
-            const encoded = this.#encodeMarkdown(newContent, effectiveListKind);
-            preparedContent = { type: stored.type, data: encoded.data };
-          } catch {
-            throw adapterError(
-              "unsupported_content",
-              "Notesnook write adapter: update content uses an unsupported construct",
-            );
-          }
+          // `#encodeMarkdown` already normalises a codec refusal to
+          // `unsupported_content` and reports the post-encode check as its own
+          // code, so this must not swallow what it throws: relabelling here
+          // would report "too large" as "unsupported" on this path only.
+          const encoded = this.#encodeMarkdown(newContent, effectiveListKind);
+          preparedContent = { type: stored.type, data: encoded.data };
         }
       }
       // Only the prepared bytes are written forward; the stored shape

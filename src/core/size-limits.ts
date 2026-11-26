@@ -159,13 +159,28 @@ export const STORED_CONTENT_BYTES = 262_144;
  * Equal to the inbound `STORED_CONTENT_BYTES`, because the read threshold must
  * not be tighter than what the native write path accepts.
  *
- * This is the row that decides whether a write may happen. The Markdown codec's
- * own bound (`MARKDOWN_CODEC_STORED_BYTES`) is larger, because it is an
- * allocation guard rather than an admission rule, so the write path measures
- * every encoded row — created or composed by an append — against this threshold
- * before any mutation. A row above it is refused as `too_large` and nothing is
- * written; that check is what makes "never write a note we cannot read back"
- * true rather than aspirational (issue #331).
+ * This is the row the read path will accept, and the row the write path is
+ * allowed to produce. The Markdown codec's own bound (`MARKDOWN_CODEC_STORED_BYTES`)
+ * is larger, because it is an allocation guard rather than an admission rule, so
+ * the adapter measures the row it produced — after encoding, on create, update
+ * and the composed result of an append — and refuses it as `too_large` before
+ * any mutator runs.
+ *
+ * Where a write is bounded somewhere else instead, that bound is never looser
+ * than this one, and the refusal carries that layer's own code:
+ *
+ *   - the native stored envelope is caller-supplied and written verbatim; the
+ *     contract refuses one above this value as `invalid_input` before the
+ *     adapter sees it, and the adapter's own check catches an empty one;
+ *   - a native document is bounded by `NATIVE_DOCUMENT_BYTES` (equal to this
+ *     value) inside the serializer, refused as `unsupported_content`;
+ *   - conflict keep-both refuses when either side's text exceeds the Stage 4
+ *     content cap (equal to this value), also `unsupported_content`.
+ *
+ * An empty row is refused too, by the same check, as `unsupported_content`: the
+ * reader rejects it and this threshold only describes the upper end. The one
+ * write that is not measured is compensation, which restores the pre-mutation
+ * row verbatim rather than composing anything new.
  *
  * It is a refusal threshold, not an allowance: a larger row is refused
  * categorically, it is not partially read.
