@@ -179,10 +179,10 @@ export const STORED_CONTENT_BYTES = 262_144;
  *     Stage 4 content cap (equal to this value), as `unsupported_content` — it
  *     refuses the whole conflict rather than diagnosing one row.
  *
- * An empty row is refused on every channel, because the reader rejects it and
- * this threshold only describes the upper end. The one write that is not
- * measured is compensation, which restores the pre-mutation row verbatim rather
- * than composing anything new.
+ * An empty row is refused on every channel except compensation, because the
+ * reader rejects it and this threshold only describes the upper end. The one
+ * write that is neither measured nor refused is compensation, which restores the
+ * pre-mutation row verbatim rather than composing anything new.
  *
  * It is a refusal threshold, not an allowance: a larger row is refused
  * categorically, it is not partially read.

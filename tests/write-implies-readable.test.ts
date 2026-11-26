@@ -258,6 +258,25 @@ describe("write implies readable", () => {
     expect(calls.contentUpdate).toHaveLength(0);
   });
 
+  it("reports a codec that returns no stored content as a content fault", async () => {
+    const { database, calls } = createFakeDatabase();
+    const adapter = createNotesnookWriteAdapter({
+      source: database,
+      codec: {
+        ...DETERMINISTIC_MARKDOWN_CODEC,
+        encodeMarkdown: () => undefined,
+      } as unknown as NotesnookWriteMarkdownCodec,
+    });
+
+    // The guard trusts nothing about the codec's return value: a shape fault is
+    // reported as a content fault here, not as a TypeError that the composition
+    // would turn into "sync failed and needs a retry".
+    expect(await refusalOf(() => adapter.createNote({ title: "Shape", content: "x" }))).toBe(
+      "unsupported_content",
+    );
+    expect(calls.notesAdd).toHaveLength(0);
+  });
+
   it("refuses an empty stored row, because the read path refuses one too", async () => {
     const { database, calls, stored } = createFakeDatabase();
     const adapter = createNotesnookWriteAdapter({

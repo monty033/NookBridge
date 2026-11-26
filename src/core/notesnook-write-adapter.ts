@@ -107,6 +107,19 @@ import {
  * large to read.
  */
 function assertStoredRowReadable(stored: NotesnookStoredContent): NotesnookStoredContent {
+  // The codec is an injected seam. A return value that is not a stored content
+  // is a codec fault, not a size fault, and it must not surface as a TypeError
+  // from inside this guard.
+  if (
+    typeof stored !== "object" ||
+    stored === null ||
+    typeof (stored as { readonly data?: unknown }).data !== "string"
+  ) {
+    throw adapterError(
+      "unsupported_content",
+      "Notesnook write adapter: content encoding returned no stored content",
+    );
+  }
   if (stored.data.length === 0) {
     throw adapterError(
       "unsupported_content",
@@ -873,7 +886,11 @@ export class NotesnookWriteAdapter {
           } catch (error) {
             // A too-large document is a size diagnosis, not a format one, and
             // the caller can act on the difference.
-            if ((error as { readonly reason?: unknown }).reason === "document_too_large") {
+            const reason =
+              typeof error === "object" && error !== null
+                ? (error as { readonly reason?: unknown }).reason
+                : undefined;
+            if (reason === "document_too_large") {
               throw adapterError(
                 "too_large",
                 "Notesnook write adapter: native document exceeds what the bridge can read back",
