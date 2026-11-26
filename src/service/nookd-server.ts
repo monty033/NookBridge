@@ -34,6 +34,7 @@ import { handleRpcRequest, type RpcHandlerRuntimeLike } from "./rpc-handler.js";
 import {
   createReadOnlyServicePolicy,
   narrowServicePolicy,
+  policyNamesMethod,
   type ServicePolicy,
 } from "./service-policy.js";
 import {
@@ -126,6 +127,24 @@ function peekRpcMethod(frame: Buffer): RpcMethod {
   return AUDIT_METHOD_SENTINEL;
 }
 
+/**
+ * `true` when a codec-refused frame names an operator literal the daemon must
+ * not answer. A frame that cannot be re-read is treated as one: no answer.
+ */
+function peekOperatorOnlyMethod(frame: Buffer): boolean {
+  try {
+    if (frame.length < FRAME_PREFIX_BYTES) return true;
+    const payloadLength = frame.readUInt32BE(0);
+    if (payloadLength !== frame.length - FRAME_PREFIX_BYTES) return true;
+    const parsed: unknown = JSON.parse(frame.subarray(FRAME_PREFIX_BYTES).toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return true;
+    const method = (parsed as Record<string, unknown>).method;
+    return typeof method !== "string" || isOperatorOnlyMethod(method);
+  } catch {
+    return true;
+  }
+}
+
 /** Recover only the already size-bounded id for a codec-identified wire refusal. */
 function peekRpcRequestId(frame: Buffer): string | undefined {
   try {
@@ -212,6 +231,11 @@ interface ConnectionState {
   readonly socket: net.Socket;
   pending: Buffer;
   body: BodyReceiveState | undefined;
+  /**
+   * Set once a body is complete and cleared only as its response is written.
+   * Any byte in between is beyond the declared length, not a next request.
+   */
+  bodyAwaitingResponse: boolean;
   processing: boolean;
   requestsHandled: number;
   ended: boolean;
@@ -350,6 +374,7 @@ export async function startNookdServer(
       socket,
       pending: Buffer.alloc(0),
       body: undefined,
+      bodyAwaitingResponse: false,
       processing: false,
       requestsHandled: 0,
       ended: false,
@@ -387,6 +412,10 @@ export async function startNookdServer(
       armIdleTimer(state);
       if (state.body !== undefined) {
         receiveBodyBytes(state, chunk);
+        return;
+      }
+      if (state.bodyAwaitingResponse) {
+        destroyConnection(state);
         return;
       }
       if (state.pending.length + chunk.length > MAX_PENDING_BYTES) {
@@ -548,6 +577,7 @@ export async function startNookdServer(
     const body = state.body;
     if (body === undefined) return;
     state.body = undefined;
+    state.bodyAwaitingResponse = true;
     if (body.timer !== undefined) clearTimeout(body.timer);
     // The caller owns the lease from here until the dispatched runtime settles.
     body.resolve(body.buffer);
@@ -721,7 +751,9 @@ export async function startNookdServer(
               throw new Error("rpc protocol: operator method on the daemon socket");
             }
           } catch (error) {
-            if (isRpcProtocolOversizeError(error)) {
+            // An operator literal stays unanswered even when its declaration is
+            // oversize; answering too_large would reveal the method exists here.
+            if (isRpcProtocolOversizeError(error) && !peekOperatorOnlyMethod(next.frame)) {
               const id = peekRpcRequestId(next.frame);
               if (id !== undefined) {
                 await refuseRequest(
@@ -772,6 +804,20 @@ export async function startNookdServer(
               break;
             }
             const bodyRequest = request;
+            // Refuse before the lease or any continue: a method the allowlist
+            // does not name can never be admitted, because a settings context
+            // only narrows within the allowlist. Inviting the body first would
+            // let any peer hold the single slot for a request bound to fail.
+            if (!policyNamesMethod(normalized.policy, bodyRequest.method)) {
+              await refuseRequest(
+                state,
+                bodyRequest.id,
+                bodyRequest.method,
+                "permission_denied",
+                "rpc.protocol.rejected",
+              );
+              break;
+            }
             let acquisition: ReturnType<LargeBodyBudget["tryAcquire"]>;
             try {
               acquisition = normalized.bodyBudget.tryAcquire(bodyRequest.body.bytes);
@@ -785,7 +831,7 @@ export async function startNookdServer(
                 bodyRequest.id,
                 bodyRequest.method,
                 "busy",
-                "rpc.request.dispatched",
+                "rpc.protocol.rejected",
               );
               break;
             }
@@ -843,9 +889,16 @@ export async function startNookdServer(
             bodyState.continueSent = true;
             const bodyBytes = await bodyState.completion;
             if (bodyBytes === undefined) break;
+            if (state.closed || state.closing) {
+              bodyLease.release();
+              break;
+            }
             try {
               const digest = createHash("sha256").update(bodyBytes).digest("hex");
               if (digest !== bodyRequest.body.sha256) throw new Error("body digest mismatch");
+              // The lease accounts for the assembly buffer only, sized to the
+              // declared bytes. The decoded string and the request that carries
+              // it are additional, unaccounted memory held alongside it.
               const value = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
                 bodyBytes,
               );
@@ -887,6 +940,9 @@ export async function startNookdServer(
             const lease = bodyLease;
             // A disconnect can end the transport first; the slot remains owned
             // until the already-dispatched runtime operation actually settles.
+            // By design there is no timeout here: a runtime operation that
+            // never settles holds the slot indefinitely, and every later body
+            // is refused busy until it does.
             runtimeOp.then(
               () => lease.release(),
               () => lease.release(),
@@ -972,6 +1028,9 @@ export async function startNookdServer(
             destroyConnection(state);
             break;
           }
+          // From the response write on, a following byte is the peer's next
+          // request. There is no await between this and writeFrame issuing it.
+          state.bodyAwaitingResponse = false;
           const wrote = await writeFrame(state, responseFrame);
           if (!wrote) {
             destroyConnection(state);

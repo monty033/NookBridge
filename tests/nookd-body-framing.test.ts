@@ -23,7 +23,12 @@ import {
   type ServiceAbuseBounds,
 } from "../src/service/service-abuse-bounds.js";
 import type { ServiceAuditRecord } from "../src/service/service-audit.js";
-import { createReadWriteNoDeleteServicePolicy } from "../src/service/service-policy.js";
+import {
+  createCustomServicePolicy,
+  createReadOnlyServicePolicy,
+  createReadWriteNoDeleteServicePolicy,
+  type ServicePolicy,
+} from "../src/service/service-policy.js";
 
 const handles: NookdServerHandle[] = [];
 const sockets: net.Socket[] = [];
@@ -51,6 +56,58 @@ function createBodyHeader(id: string, body: Buffer, declaredBytes = body.length)
       bytes: declaredBytes,
       sha256: createHash("sha256").update(body).digest("hex"),
     },
+  });
+}
+
+const NOTE_ID = "0123456789abcdef0123456789abcdef";
+const REVISION = "rev_00000000000000000000000000000000";
+
+type BodyMethod = "notes.create" | "notes.append" | "notes.update";
+
+/** A well-formed body header for each daemon body method, optionally with the
+ * declared field also present in params. */
+function bodyMethodHeader(
+  method: BodyMethod,
+  id: string,
+  body: Buffer,
+  options: { readonly duplicateInParams?: boolean } = {},
+): Buffer {
+  const duplicate = options.duplicateInParams === true;
+  const text = body.toString("utf8");
+  const declaration = (field: string) => ({
+    field,
+    bytes: body.length,
+    sha256: createHash("sha256").update(body).digest("hex"),
+  });
+  if (method === "notes.create") {
+    return frame({
+      id,
+      method,
+      params: { title: "Body framing", ...(duplicate ? { content: text } : {}) },
+      body: declaration("content"),
+    });
+  }
+  if (method === "notes.append") {
+    return frame({
+      id,
+      method,
+      params: {
+        id: NOTE_ID,
+        expectedRevision: REVISION,
+        ...(duplicate ? { markdownFragment: text } : {}),
+      },
+      body: declaration("markdownFragment"),
+    });
+  }
+  return frame({
+    id,
+    method,
+    params: {
+      id: NOTE_ID,
+      expectedRevision: REVISION,
+      patch: duplicate ? { content: text } : {},
+    },
+    body: declaration("content"),
   });
 }
 
@@ -83,6 +140,50 @@ async function readFrame(socket: net.Socket): Promise<RpcAnyResponseEnvelope> {
   return JSON.parse(bytes.subarray(4).toString("utf8")) as RpcAnyResponseEnvelope;
 }
 
+/** The next frame, or "closed" if the peer closes first. Never hangs on a close. */
+async function readFrameOrClose(socket: net.Socket): Promise<RpcAnyResponseEnvelope | "closed"> {
+  return new Promise((resolve) => {
+    let bytes = Buffer.alloc(0);
+    const onData = (chunk: Buffer): void => {
+      bytes = Buffer.concat([bytes, chunk]);
+      if (bytes.length < 4) return;
+      const size = bytes.readUInt32BE(0);
+      if (bytes.length < size + 4) return;
+      finish(JSON.parse(bytes.subarray(4, size + 4).toString("utf8")) as RpcAnyResponseEnvelope);
+    };
+    const onClose = (): void => finish("closed");
+    const finish = (value: RpcAnyResponseEnvelope | "closed"): void => {
+      socket.removeListener("data", onData);
+      socket.removeListener("close", onClose);
+      resolve(value);
+    };
+    if (socket.destroyed) {
+      resolve("closed");
+      return;
+    }
+    socket.on("data", onData);
+    socket.once("close", onClose);
+  });
+}
+
+/** Count every byte the daemon writes from now until the socket closes. */
+function collectUntilClose(socket: net.Socket): Promise<number> {
+  return new Promise((resolve) => {
+    let received = 0;
+    socket.on("data", (chunk: Buffer) => {
+      received += chunk.length;
+    });
+    if (socket.destroyed) resolve(received);
+    else socket.once("close", () => resolve(received));
+  });
+}
+
+/** Resolves `true` if the socket closes within `ms`, `false` otherwise. */
+async function closesWithin(socket: net.Socket, ms: number): Promise<boolean> {
+  const bound = delay(ms).then(() => false);
+  return Promise.race([waitForClose(socket).then(() => true), bound]);
+}
+
 async function waitForClose(socket: net.Socket): Promise<void> {
   if (socket.destroyed) return;
   await new Promise<void>((resolve) => socket.once("close", resolve));
@@ -106,6 +207,7 @@ interface FixtureOptions {
   readonly createNote?: CreateNote;
   readonly maxRequestsPerConnection?: number;
   readonly abuseBounds?: Partial<ServiceAbuseBounds>;
+  readonly policy?: ServicePolicy;
 }
 
 async function fixture(options: FixtureOptions = {}) {
@@ -131,7 +233,7 @@ async function fixture(options: FixtureOptions = {}) {
   const handle = await startNookdServer({
     socketPath,
     runtime: Object.freeze({ search, createNote, cleanup }) as NookdServerRuntime,
-    policy: createReadWriteNoDeleteServicePolicy(),
+    policy: options.policy ?? createReadWriteNoDeleteServicePolicy(),
     bodyBudget: budget,
     installSignalHandlers: false,
     resolvePeer: async () => ({
@@ -187,6 +289,28 @@ describe("nookd protocol-2 negotiation and legacy compatibility", () => {
     });
     expect(search).not.toHaveBeenCalled();
     expect(createNote).not.toHaveBeenCalled();
+  });
+
+  it("answers notes.capabilities under a deny-all policy", async () => {
+    const { socketPath, search } = await fixture({ policy: createCustomServicePolicy([]) });
+    const socket = await connect(socketPath);
+    // The same policy refuses an ordinary read, so the probe below is not
+    // answered by a policy that happens to allow it.
+    socket.write(searchFrame("denied", "needle"));
+    await expect(readFrame(socket)).resolves.toMatchObject({
+      id: "denied",
+      ok: false,
+      error: { code: "permission_denied" },
+    });
+
+    const probe = await connect(socketPath);
+    probe.write(capabilitiesFrame("probe"));
+    await expect(readFrame(probe)).resolves.toEqual({
+      id: "probe",
+      ok: true,
+      result: { kind: "capabilities", protocol: 2 },
+    });
+    expect(search).not.toHaveBeenCalled();
   });
 
   it("keeps a small single-frame request and response byte-identical", async () => {
@@ -269,7 +393,7 @@ describe("nookd request bodies", () => {
   });
 
   it("counts the header and body as one request against the connection limit", async () => {
-    const { socketPath, createNote } = await fixture({ maxRequestsPerConnection: 1 });
+    const { socketPath, createNote, search } = await fixture({ maxRequestsPerConnection: 2 });
     const body = Buffer.from("one request");
     const socket = await connect(socketPath);
     socket.write(createBodyHeader("one-logical", body));
@@ -278,7 +402,90 @@ describe("nookd request bodies", () => {
 
     await expect(readFrame(socket)).resolves.toMatchObject({ id: "one-logical", ok: true });
     expect(createNote).toHaveBeenCalledTimes(1);
+
+    // Counted twice, the body exchange would exhaust a limit of two and this
+    // request would be closed unanswered.
+    socket.write(searchFrame("second", "needle"));
+    await expect(readFrameOrClose(socket)).resolves.toMatchObject({
+      id: "second",
+      ok: true,
+      result: { kind: "search" },
+    });
+    expect(search).toHaveBeenCalledTimes(1);
     await waitForClose(socket);
+  });
+
+  it.each(["notes.create", "notes.append", "notes.update"] as const)(
+    "refuses %s at the header when the policy does not name it",
+    async (method) => {
+      const inner = createLargeBodyBudget();
+      const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+      const { socketPath, createNote, records } = await fixture({
+        budget: { tryAcquire },
+        policy: createReadOnlyServicePolicy(),
+      });
+      const socket = await connect(socketPath);
+      socket.write(bodyMethodHeader(method, "denied", Buffer.from("never invited")));
+
+      // Inviting the body first would make this frame a body_continue.
+      await expect(readFrameOrClose(socket)).resolves.toMatchObject({
+        id: "denied",
+        ok: false,
+        error: { code: "permission_denied" },
+      });
+      await waitForClose(socket);
+      expect(tryAcquire).not.toHaveBeenCalled();
+      expect(createNote).not.toHaveBeenCalled();
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          event: "rpc.protocol.rejected",
+          outcome: "permission_denied",
+          method,
+        }),
+      );
+      expect(records.filter((record) => record.event === "rpc.request.dispatched")).toEqual([]);
+    },
+  );
+
+  it.each(["notes.create", "notes.append", "notes.update"] as const)(
+    "closes %s unanswered when the declared field also appears in params",
+    async (method) => {
+      const inner = createLargeBodyBudget();
+      const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+      const { socketPath, createNote } = await fixture({ budget: { tryAcquire } });
+      const socket = await connect(socketPath);
+      const received = collectUntilClose(socket);
+      socket.write(
+        bodyMethodHeader(method, "duplicate", Buffer.from("twice"), { duplicateInParams: true }),
+      );
+
+      await expect(closesWithin(socket, 2_000)).resolves.toBe(true);
+      await expect(received).resolves.toBe(0);
+      expect(tryAcquire).not.toHaveBeenCalled();
+      expect(createNote).not.toHaveBeenCalled();
+    },
+  );
+
+  it("closes an oversize operator-only declaration unanswered", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    const { socketPath, records } = await fixture({ budget: { tryAcquire } });
+    const socket = await connect(socketPath);
+    const received = collectUntilClose(socket);
+    socket.write(
+      frame({
+        id: "operator",
+        method: "notes.apply-edit",
+        params: {},
+        body: { field: "markdown", bytes: WIRE_BODY_BYTES + 1, sha256: "0".repeat(64) },
+      }),
+    );
+
+    // An unknown method gets exactly this: no envelope, closed.
+    await expect(closesWithin(socket, 2_000)).resolves.toBe(true);
+    await expect(received).resolves.toBe(0);
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(records.some((record) => record.outcome === "too_large")).toBe(false);
   });
 
   it("marks an admission too_large refusal without auditing body content", async () => {
@@ -307,55 +514,146 @@ describe("nookd request bodies", () => {
 });
 
 describe("nookd body failure containment", () => {
-  it.each(["sha", "utf8", "overrun", "early"] as const)(
+  it.each(["sha", "utf8"] as const)(
     "fails closed and releases the lease for %s",
     async (kind) => {
       const { socketPath, createNote, budget } = await fixture();
       const socket = await connect(socketPath);
-      const valid = Buffer.from("valid body");
-      if (kind === "early") {
-        socket.write(Buffer.concat([createBodyHeader("early", valid), valid]));
-        await waitForClose(socket);
+      const body = kind === "utf8" ? Buffer.from([0xf0, 0x28, 0x8c, 0x28]) : Buffer.from("four");
+      const header = createBodyHeader(kind, body);
+      if (kind === "sha") {
+        const parsed = JSON.parse(header.subarray(4).toString("utf8")) as {
+          body: { sha256: string };
+        };
+        parsed.body.sha256 = "0".repeat(64);
+        socket.write(frame(parsed));
       } else {
-        const body = kind === "utf8" ? Buffer.from([0xf0, 0x28, 0x8c, 0x28]) : Buffer.from("four");
-        const header = createBodyHeader(kind, body, kind === "overrun" ? 3 : body.length);
-        if (kind === "sha") {
-          const parsed = JSON.parse(header.subarray(4).toString("utf8")) as {
-            body: { sha256: string };
-          };
-          parsed.body.sha256 = "0".repeat(64);
-          socket.write(frame(parsed));
-        } else {
-          socket.write(header);
-        }
-        await readFrame(socket);
-        socket.write(kind === "overrun" ? Buffer.from("four") : body);
-        await waitForClose(socket);
+        socket.write(header);
       }
+      await readFrame(socket);
+      socket.write(body);
+      await waitForClose(socket);
       expect(createNote).not.toHaveBeenCalled();
       await expectLeaseReleased(budget);
     },
   );
 
-  it("enforces an absolute deadline despite regular chunks and releases the lease", async () => {
+  it("fails closed on a byte beyond the declared length in the same chunk", async () => {
+    // Long deadlines, so only the overrun refusal can close this promptly.
     const { socketPath, createNote, budget } = await fixture({
-      abuseBounds: { bodyReceiveTimeoutMs: 40, connectionIdleTimeoutMs: 1_000 },
+      abuseBounds: { bodyReceiveTimeoutMs: 20_000, connectionIdleTimeoutMs: 20_000 },
     });
-    const body = Buffer.alloc(100, 120);
+    const declared = Buffer.from("fou");
     const socket = await connect(socketPath);
+    // The digest is correct for the declared bytes: it cannot be what refuses.
+    socket.write(createBodyHeader("overrun", declared));
+    await expect(readFrame(socket)).resolves.toMatchObject({
+      result: { kind: "body_continue", bytes: 3 },
+    });
+    const received = collectUntilClose(socket);
+    socket.write(Buffer.concat([declared, Buffer.from("r")]));
+
+    await expect(closesWithin(socket, 2_000)).resolves.toBe(true);
+    await expect(received).resolves.toBe(0);
+    expect(createNote).not.toHaveBeenCalled();
+    await expectLeaseReleased(budget);
+  });
+
+  it("fails closed on a byte beyond the declared length in a later chunk", async () => {
+    let finishCreate: (() => void) | undefined;
+    const createNote: CreateNote = async (command) =>
+      new Promise((resolve) => {
+        finishCreate = () =>
+          resolve({
+            operation: "create",
+            id: "note-1",
+            titleBytes: Buffer.byteLength(command.title),
+            contentBytes: Buffer.byteLength(command.content),
+            localCommitted: true,
+            remoteSynced: false,
+            pendingSync: true,
+          });
+      });
+    const {
+      socketPath,
+      createNote: createSpy,
+      search,
+      budget,
+    } = await fixture({ createNote, maxRequestsPerConnection: 8 });
+    const body = Buffer.from("exact");
+    const socket = await connect(socketPath);
+    socket.write(createBodyHeader("later-overrun", body));
+    await readFrame(socket);
+    socket.write(body);
+    await vi.waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+
+    // A whole, valid request sent before the create's response is written is
+    // still beyond the declared length; it must not be served.
+    const received = collectUntilClose(socket);
+    socket.write(searchFrame("smuggled", "needle"));
+    const closedPromptly = await closesWithin(socket, 2_000);
+    finishCreate?.();
+    expect(closedPromptly).toBe(true);
+    await expect(received).resolves.toBe(0);
+    expect(search).not.toHaveBeenCalled();
+    await expectLeaseReleased(budget);
+  });
+
+  it("closes on body bytes coalesced with the header without inviting them", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    const { socketPath, createNote } = await fixture({ budget: { tryAcquire } });
+    const socket = await connect(socketPath);
+    const received = collectUntilClose(socket);
+    const valid = Buffer.from("valid body");
+    socket.write(Buffer.concat([createBodyHeader("early", valid), valid]));
+
+    // No body_continue, nor any other frame, was written.
+    await expect(closesWithin(socket, 2_000)).resolves.toBe(true);
+    await expect(received).resolves.toBe(0);
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(createNote).not.toHaveBeenCalled();
+  });
+
+  it("enforces an absolute deadline despite regular chunks and releases the lease", async () => {
+    const bodyReceiveTimeoutMs = 200;
+    const connectionIdleTimeoutMs = 20_000;
+    const { socketPath, createNote, budget, records } = await fixture({
+      abuseBounds: { bodyReceiveTimeoutMs, connectionIdleTimeoutMs },
+    });
+    const body = Buffer.alloc(1_000, 120);
+    const socket = await connect(socketPath);
+    const startedMs = Date.now();
     socket.write(createBodyHeader("deadline", body));
     await readFrame(socket);
 
-    const closed = waitForClose(socket);
-    for (let index = 0; index < 3 && !socket.destroyed; index += 1) {
-      try {
+    // Keep the connection active well past the deadline, so neither the idle
+    // timeout nor a stall can be what closes it.
+    const closedAt = waitForClose(socket).then(() => Date.now());
+    const sender = (async () => {
+      for (let index = 0; index < body.length - 1 && !socket.destroyed; index += 1) {
         socket.write(body.subarray(index, index + 1), () => undefined);
-      } catch {
-        break;
+        await delay(10);
       }
-      await delay(20);
-    }
-    await closed;
+    })();
+    const boundMs = bodyReceiveTimeoutMs * 5;
+    const closedMs = await Promise.race([closedAt, delay(boundMs).then(() => undefined)]);
+    expect(closedMs, "the body deadline did not close the connection").toBeDefined();
+    await sender;
+    const elapsedMs = (closedMs ?? Number.POSITIVE_INFINITY) - startedMs;
+    expect(elapsedMs).toBeGreaterThanOrEqual(bodyReceiveTimeoutMs - 20);
+    expect(elapsedMs).toBeLessThan(boundMs);
+    expect(boundMs).toBeLessThan(connectionIdleTimeoutMs);
+
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.request.timeout",
+        outcome: "timeout",
+        method: "notes.create",
+        latencyMs: bodyReceiveTimeoutMs,
+      }),
+    );
+    expect(records.filter((record) => record.event === "rpc.request.dispatched")).toEqual([]);
     expect(createNote).not.toHaveBeenCalled();
     await expectLeaseReleased(budget);
   });
@@ -427,7 +725,7 @@ describe("nookd body failure containment", () => {
         });
       },
     };
-    const { socketPath } = await fixture({ budget });
+    const { socketPath, records } = await fixture({ budget });
     const first = await connect(socketPath);
     const second = await connect(socketPath);
     const firstBody = Buffer.from("first");
@@ -444,6 +742,10 @@ describe("nookd body failure containment", () => {
       error: { code: "busy" },
     });
     await waitForClose(second);
+    expect(records).toContainEqual(
+      expect.objectContaining({ event: "rpc.protocol.rejected", outcome: "busy" }),
+    );
+    expect(records.filter((record) => record.event === "rpc.request.dispatched")).toEqual([]);
     expect(maximumActive).toBe(1);
     expect(active).toBe(1);
     expect(first.destroyed).toBe(false);

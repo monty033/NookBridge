@@ -622,6 +622,24 @@ export function authorizeServiceMethod(
   return denyServicePolicyDecision();
 }
 
+/**
+ * `true` only when the policy is structurally valid and its allowlist names
+ * `method` exactly.
+ *
+ * This is a necessary condition for {@link authorizeServiceMethod}, never a
+ * sufficient one: a settings context can only narrow within the allowlist,
+ * never widen past it. So a `false` here is a refusal no later context can
+ * reverse, which is what lets a caller refuse before it has the context.
+ */
+export function policyNamesMethod(policy: ServicePolicy, method: string): boolean {
+  const allowlist = inspectPolicyAllowlist(policy);
+  if (allowlist === undefined || typeof method !== "string") return false;
+  for (let index = 0; index < allowlist.length; index += 1) {
+    if (allowlist[index] === method) return true;
+  }
+  return false;
+}
+
 function denyServicePolicyDecision(): ServicePolicyDecision {
   const deny = objectCreate(null) as { allowed: false; reason: ServicePolicyDenialReason };
   deny.allowed = false;

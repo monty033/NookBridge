@@ -1223,11 +1223,13 @@ const RPC_PROTOCOL_ERROR_MESSAGES = new WeakMap<object, string>();
  *
  * This is not a protocol violation: the caller spoke the grammar correctly and
  * asked for a size the daemon will not assemble, so it is a different refusal
- * from a malformed declaration and can carry `too_large` rather than
- * `invalid_request` once the daemon handles body declarations. Nothing maps it
- * yet: this slice adds the codec only. The canonical message is the marker,
- * because the boundary wrapper deliberately rebuilds every protocol error from
- * its canonical text and no per-error property survives it.
+ * from a malformed declaration and carries `too_large` rather than
+ * `invalid_request`: the daemon maps it through
+ * {@link isRpcProtocolOversizeError} and answers it with no `body_continue`
+ * (except for an operator-only method, which it closes unanswered). The
+ * canonical message is the marker, because the boundary wrapper deliberately
+ * rebuilds every protocol error from its canonical text and no per-error
+ * property survives it.
  */
 const RPC_BODY_OVERSIZE_MESSAGE = "rpc protocol: request body exceeds the declared wire body bound";
 
@@ -2529,8 +2531,10 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
     }
     // `capabilities` is the answer that begins negotiation, so it must be
     // serialisable on a path that has not negotiated: refusing it makes the
-    // probe unanswerable and the negotiation impossible. `body_continue` only
-    // ever follows a body request, which already required the policy.
+    // probe unanswerable and the negotiation impossible. `body_continue` is
+    // gated only by `allowBody`; the daemon sends it after checking that the
+    // policy's allowlist names the method, before the full authorization that
+    // runs once the body has arrived.
     if (kind === "body_continue" && !allowBody) {
       throw rpcProtocolError("rpc protocol: protocol-2 result is not permitted on this path");
     }
