@@ -63,6 +63,16 @@ export const RPC_FRAME_BYTES = 65_536;
 export const RPC_RESPONSE_BYTES = 65_536;
 
 /**
+ * Largest Markdown projection produced for a note read.
+ *
+ * `RPC_RESPONSE_BYTES` currently does two jobs: it bounds a single-frame
+ * response and it bounds the projection carried by that response. This entry
+ * names the second job so body-framed reads can size projections independently
+ * without changing the single-frame response bound.
+ */
+export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
+
+/**
  * Content cap for `notes.create` / `notes.update` / `notes.append` bodies.
  *
  * It must stay well below `RPC_FRAME_BYTES`, but it must also be large enough
@@ -188,6 +198,34 @@ export const STORED_CONTENT_BYTES = 262_144;
  * categorically, it is not partially read.
  */
 export const STORED_CONTENT_READ_BYTES = 262_144;
+
+/**
+ * Largest produced stored-content row admitted by the write path.
+ *
+ * This is the single place the admission bound is named. It follows the read
+ * threshold today; when the stored-row limit changes, this entry becomes
+ * `MAX_STORED_JSON_BYTES` so wire sizing continues to follow admission rather
+ * than moving ahead of it.
+ */
+export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
+
+/**
+ * Largest declared raw body carried alongside an RPC header frame.
+ *
+ * The 2x allowance covers projection growth and escaping, but has not been
+ * proven for every stored shape; it is backed by property tests rather than a
+ * claimed encoding invariant. A projection over this bound is refused as
+ * `oversize`, never truncated.
+ */
+export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
+
+/**
+ * Absolute deadline for receiving a declared raw body, in milliseconds.
+ *
+ * This is not an idle-between-chunks timeout: a peer cannot extend a body
+ * exchange indefinitely by continuing to send small chunks.
+ */
+export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 
 /**
  * Largest native (`tiptap`) document envelope the bridge will accept or emit.
@@ -326,6 +364,7 @@ export const SIZE_LIMITS = Object.freeze({
   OPERATOR_FRAME_BYTES,
   RPC_FRAME_BYTES,
   RPC_RESPONSE_BYTES,
+  PROJECTION_MARKDOWN_BYTES,
   RPC_CONTENT_BYTES,
   RPC_QUERY_BYTES,
   RPC_TITLE_BYTES,
@@ -336,6 +375,9 @@ export const SIZE_LIMITS = Object.freeze({
   MCP_QUERY_BYTES,
   STORED_CONTENT_BYTES,
   STORED_CONTENT_READ_BYTES,
+  ADMISSION_ROW_BYTES,
+  WIRE_BODY_BYTES,
+  BODY_RECEIVE_TIMEOUT_MS,
   NATIVE_DOCUMENT_BYTES,
   STORED_TITLE_BYTES,
   FRAGMENT_BYTES,

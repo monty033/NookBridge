@@ -38,7 +38,12 @@ import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
-import { RPC_CONTENT_BYTES, RPC_FRAME_BYTES, RPC_RESPONSE_BYTES } from "../core/size-limits.js";
+import {
+  RPC_CONTENT_BYTES,
+  RPC_FRAME_BYTES,
+  RPC_RESPONSE_BYTES,
+  WIRE_BODY_BYTES,
+} from "../core/size-limits.js";
 import {
   RPC_IDENTIFIER_BYTES,
   RPC_QUERY_BYTES,
@@ -141,6 +146,28 @@ export const STAGE5_RPC_LIMITS: Stage5RpcLimits = objectFreeze(stage5RpcLimits);
 // These are the ONLY shapes the protocol accepts on the wire.  Any
 // deviation is rejected categorically.
 // ---------------------------------------------------------------------------
+
+/** Body fields admitted by protocol 2 request and response headers. */
+export type RpcBodyField = "content" | "markdownFragment" | "markdown";
+
+/**
+ * Declaration of raw bytes that follow a header frame.
+ *
+ * `bytes` is the exact body length, not a maximum, and `sha256` commits the
+ * header to those bytes before the receiver allocates an assembly buffer.
+ */
+export interface RpcBodyDeclaration {
+  readonly field: RpcBodyField;
+  readonly bytes: number;
+  readonly sha256: string;
+}
+
+export interface RpcFrameParserOptions {
+  /** Opt in to protocol-2 body declarations; the default remains protocol 1. */
+  readonly allowBody?: boolean;
+}
+
+export type RpcFrameParser = (input: Uint8Array) => RpcFrameRequest;
 
 export interface RpcNotesSearchParams {
   readonly query: string;
@@ -546,7 +573,7 @@ export interface RpcNotesConflictInspectRequest {
   readonly params: RpcOperatorConflictInspectParams;
 }
 
-export type RpcRequest =
+export type RpcRequest = (
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
   | RpcNotesListNotebooksRequest
@@ -571,7 +598,42 @@ export type RpcRequest =
   | RpcNotesEditCensusRequest
   | RpcNotesConflictResolveRequest
   | RpcNotesConflictInspectRequest
-  | RpcNotesAbandonResolveRequest;
+  | RpcNotesAbandonResolveRequest
+) & {
+  /** The legacy request contract never carries a separate body declaration. */
+  readonly body?: undefined;
+};
+
+type RpcBodyDeclarationFor<Field extends RpcBodyField> = Omit<RpcBodyDeclaration, "field"> & {
+  readonly field: Field;
+};
+
+/**
+ * A protocol-2 request whose declared field is absent from `params` until the
+ * daemon has received and verified the raw bytes. Keeping this separate from
+ * {@link RpcRequest} preserves the legacy handlers' fully populated params.
+ */
+export type RpcBodyRequest =
+  | (Omit<RpcNotesCreateRequest, "params"> & {
+      readonly params: Omit<RpcNotesCreateParams, "content">;
+      readonly body: RpcBodyDeclarationFor<"content">;
+    })
+  | (Omit<RpcNotesAppendRequest, "params"> & {
+      readonly params: Omit<RpcNotesAppendParams, "markdownFragment">;
+      readonly body: RpcBodyDeclarationFor<"markdownFragment">;
+    })
+  | (Omit<RpcNotesUpdateRequest, "params"> & {
+      readonly params: Omit<RpcNotesUpdateParams, "patch"> & {
+        readonly patch: Omit<RpcNotesUpdatePatch, "content">;
+      };
+      readonly body: RpcBodyDeclarationFor<"content">;
+    })
+  | (Omit<RpcNotesApplyEditRequest, "params"> & {
+      readonly params: Omit<RpcOperatorApplyEditParams, "markdown">;
+      readonly body: RpcBodyDeclarationFor<"markdown">;
+    });
+
+export type RpcFrameRequest = RpcRequest | RpcBodyRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -1013,7 +1075,24 @@ export type RpcNotesConflictInspectResult =
       binding: string;
     }>;
 
+/** Permission to send exactly the declared request-body byte count next. */
+export interface RpcBodyContinueResult {
+  readonly kind: "body_continue";
+  readonly bytes: number;
+}
+
+/**
+ * Minimal protocol advertisement: version 2 or greater means the daemon can
+ * negotiate declared raw bodies. No feature list is needed for that decision.
+ */
+export interface RpcCapabilitiesResult {
+  readonly kind: "capabilities";
+  readonly protocol: 2;
+}
+
 export type RpcResult =
+  | RpcBodyContinueResult
+  | RpcCapabilitiesResult
   | RpcSearchResult
   | RpcStatusResult
   | RpcListNotebooksResult
@@ -1049,6 +1128,8 @@ export interface RpcAnySuccessEnvelope {
   readonly id: string;
   readonly ok: true;
   readonly result: RpcResult;
+  /** Declares raw response bytes following an accepted body-read header. */
+  readonly body?: RpcBodyDeclaration;
 }
 
 export interface RpcErrorEnvelopePayload {
@@ -1072,11 +1153,13 @@ export type RpcErrorCode =
   | "local_sync_marker_failed"
   | "unapproved_pending"
   | "unsupported_content"
-  | "sync_required";
+  | "sync_required"
+  | "busy";
 
 /** Fixed, non-sensitive messages for the categorical RPC error vocabulary. */
 const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
 rpcErrorMessages.invalid_request = "Invalid request";
+rpcErrorMessages.busy = "Service busy";
 rpcErrorMessages.too_large = "Content too large";
 rpcErrorMessages.permission_denied = "Permission denied";
 rpcErrorMessages.service_unavailable = "Service unavailable";
@@ -1089,6 +1172,7 @@ rpcErrorMessages.local_sync_marker_failed = "Local change committed; sync intent
 rpcErrorMessages.unapproved_pending = "Unapproved pending changes";
 rpcErrorMessages.unsupported_content = "Unsupported content";
 rpcErrorMessages.sync_required = "Sync required";
+rpcErrorMessages.busy = "Busy";
 /**
  * The single source of truth for the categorical error vocabulary.
  *
@@ -1487,7 +1571,7 @@ function preflightItemStructure(rawSum: PreflightSum, bytes: number): void {
  * Proxy / getter cannot leak raw error messages, `cause` chains, or
  * context through the boundary.
  */
-function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
+function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameRequest {
   if (!(input instanceof Uint8ArrayConstructor)) {
     throw rpcProtocolError("rpc protocol: input must be a Uint8Array");
   }
@@ -1537,11 +1621,14 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
   }
   const root = parsed as Record<string, JsonValue>;
 
-  // Only three top-level keys are allowed: id, method, params.  Anything
-  // else — `path`, `core`, `sync`, `credential`, `__proto__`, etc. —
-  // is rejected categorically.
+  // Protocol 1 keeps its exact three-key root. Protocol 2 adds only `body`,
+  // and only for a parser explicitly constructed to accept that framing.
   const topKeys = objectKeys(root);
-  if (topKeys.length !== 3 || !keysAreExactly(topKeys, ["id", "method", "params"])) {
+  const hasBody = reflectApply(objectHasOwnProperty, root, ["body"]);
+  const validRoot = hasBody
+    ? allowBody && keysAreExactly(topKeys, ["id", "method", "params", "body"])
+    : keysAreExactly(topKeys, ["id", "method", "params"]);
+  if (!validRoot) {
     throw rpcProtocolError("rpc protocol: request root has unexpected fields");
   }
 
@@ -1585,6 +1672,8 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
   ) {
     throw rpcProtocolError("rpc protocol: method is not allowed");
   }
+
+  const body = hasBody ? parseRequestBodyDeclaration(root.body, method) : undefined;
 
   const params = root.params;
   if (params === null || typeof params !== "object" || arrayIsArray(params)) {
@@ -1678,12 +1767,15 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     // { title, content, notebookId, listKind }.  Tags, MIME,
     // attachments, and every other upstream field are rejected
     // categorically.
-    const allowedCreateShapes: ReadonlyArray<ReadonlyArray<string>> = [
-      ["title", "content"],
-      ["title", "content", "notebookId"],
-      ["title", "content", "listKind"],
-      ["title", "content", "notebookId", "listKind"],
-    ];
+    const allowedCreateShapes: ReadonlyArray<ReadonlyArray<string>> =
+      body === undefined
+        ? [
+            ["title", "content"],
+            ["title", "content", "notebookId"],
+            ["title", "content", "listKind"],
+            ["title", "content", "notebookId", "listKind"],
+          ]
+        : [["title"], ["title", "notebookId"], ["title", "listKind"], ["title", "notebookId", "listKind"]];
     let createShapeMatched = false;
     for (const shape of allowedCreateShapes) {
       if (keysAreExactly(paramKeys, shape)) {
@@ -1706,18 +1798,19 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     const content = paramsRecord.content;
     if (
-      typeof content !== "string" ||
-      content.length === 0 ||
-      content.length > STAGE5_RPC_LIMITS.maxContentBytes ||
-      utf8ByteLength(content, STAGE5_RPC_LIMITS.maxContentBytes) >
-        STAGE5_RPC_LIMITS.maxContentBytes ||
-      hasDisallowedControlCharacter(content)
+      body === undefined &&
+      (typeof content !== "string" ||
+        content.length === 0 ||
+        content.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+        utf8ByteLength(content, STAGE5_RPC_LIMITS.maxContentBytes) >
+          STAGE5_RPC_LIMITS.maxContentBytes ||
+        hasDisallowedControlCharacter(content))
     ) {
       throw rpcProtocolError("rpc protocol: request create content is invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.title = title;
-    paramsObj.content = content;
+    if (body === undefined) paramsObj.content = content;
     if (reflectApply(objectHasOwnProperty, paramsRecord, ["notebookId"])) {
       const notebookId = paramsRecord.notebookId;
       if (
@@ -1746,10 +1839,13 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     // rejected categorically.  The revision token must match the
     // closed `rev_<32 hex chars>` format published by the Stage 4
     // write contract.
-    const allowedAppendShapes: ReadonlyArray<ReadonlyArray<string>> = [
-      ["id", "markdownFragment", "expectedRevision"],
-      ["id", "markdownFragment", "expectedRevision", "listKind"],
-    ];
+    const allowedAppendShapes: ReadonlyArray<ReadonlyArray<string>> =
+      body === undefined
+        ? [
+            ["id", "markdownFragment", "expectedRevision"],
+            ["id", "markdownFragment", "expectedRevision", "listKind"],
+          ]
+        : [["id", "expectedRevision"], ["id", "expectedRevision", "listKind"]];
     let appendShapeMatched = false;
     for (const shape of allowedAppendShapes) {
       if (keysAreExactly(paramKeys, shape)) {
@@ -1773,12 +1869,13 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     const markdownFragment = paramsRecord.markdownFragment;
     if (
-      typeof markdownFragment !== "string" ||
-      markdownFragment.length === 0 ||
-      markdownFragment.length > STAGE5_RPC_LIMITS.maxContentBytes ||
-      utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxContentBytes) >
-        STAGE5_RPC_LIMITS.maxContentBytes ||
-      hasDisallowedControlCharacter(markdownFragment)
+      body === undefined &&
+      (typeof markdownFragment !== "string" ||
+        markdownFragment.length === 0 ||
+        markdownFragment.length > STAGE5_RPC_LIMITS.maxContentBytes ||
+        utf8ByteLength(markdownFragment, STAGE5_RPC_LIMITS.maxContentBytes) >
+          STAGE5_RPC_LIMITS.maxContentBytes ||
+        hasDisallowedControlCharacter(markdownFragment))
     ) {
       throw rpcProtocolError("rpc protocol: request append markdown fragment is invalid");
     }
@@ -1792,7 +1889,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
-    paramsObj.markdownFragment = markdownFragment;
+    if (body === undefined) paramsObj.markdownFragment = markdownFragment;
     paramsObj.expectedRevision = expectedRevision;
     if (reflectApply(objectHasOwnProperty, paramsRecord, ["listKind"])) {
       const listKind = paramsRecord.listKind;
@@ -1835,7 +1932,7 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     }
     const patchObj = objectCreate(null) as Record<string, unknown>;
     const patchKeys = objectKeys(patchRecord);
-    if (patchKeys.length === 0) {
+    if (patchKeys.length === 0 && body === undefined) {
       throw rpcProtocolError("rpc protocol: request update patch is empty");
     }
     const ALLOWED_PATCH_FIELDS_READONLY: ReadonlyArray<string> = [
@@ -1865,6 +1962,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
         throw rpcProtocolError("rpc protocol: update patch title is invalid");
       }
       patchObj.title = value;
+    }
+    if (body !== undefined && reflectApply(objectHasOwnProperty, patchRecord, ["content"])) {
+      throw rpcProtocolError("rpc protocol: update body field is also present in params");
     }
     if (patchRecord.content !== undefined) {
       const value = patchRecord.content;
@@ -2078,7 +2178,9 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     // The `markdown` field is bounded by the editor markdown budget
     // (D9 — the editor bound applies above; the wire cap below is the
     // closed form).
-    if (!keysAreExactly(paramKeys, ["id", "expectedRevision", "markdown"])) {
+    const expectedApplyEditKeys =
+      body === undefined ? ["id", "expectedRevision", "markdown"] : ["id", "expectedRevision"];
+    if (!keysAreExactly(paramKeys, expectedApplyEditKeys)) {
       throw rpcProtocolError("rpc protocol: apply-edit params have unexpected fields");
     }
     const noteId = paramsRecord.id;
@@ -2094,14 +2196,14 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
       typeof expectedRevision !== "string" ||
       expectedRevision.length === 0 ||
       !isWellFormedRevisionToken(expectedRevision) ||
-      typeof markdown !== "string"
+      (body === undefined && typeof markdown !== "string")
     ) {
       throw rpcProtocolError("rpc protocol: apply-edit params are invalid");
     }
     paramsObj = objectCreate(null) as Record<string, unknown>;
     paramsObj.id = noteId;
     paramsObj.expectedRevision = expectedRevision;
-    paramsObj.markdown = markdown;
+    if (body === undefined) paramsObj.markdown = markdown;
   } else if (method === "notes.apply-undo") {
     // T04 — closed `notes.apply-undo` params.  Two shapes are admitted:
     //
@@ -2270,21 +2372,34 @@ function parseRpcFrameInternal(input: Uint8Array): RpcRequest {
     id: string;
     method: RpcMethod;
     params: Record<string, unknown>;
+    body?: RpcBodyDeclaration;
   };
   requestTarget.id = id;
   requestTarget.method = method;
   requestTarget.params = paramsObj;
+  if (body !== undefined) requestTarget.body = body;
   objectFreeze(requestTarget);
-  return requestTarget as unknown as RpcRequest;
+  return requestTarget as unknown as RpcFrameRequest;
 }
 
 /**
- * Public `parseRpcFrame` entry point.  Wraps the internal parser with
- * the boundary wrapper so any non-RpcProtocolError thrown by input
- * inspection / decoding / parsing is normalized to a categorical
- * RpcProtocolError before it crosses the module boundary.
+ * Construct a parser with an explicit framing policy.
+ *
+ * The default rejects body declarations. Keeping that policy at construction
+ * prevents one protocol-2 connection from enabling bodies on another caller
+ * that still uses the legacy `parseRpcFrame` function.
  */
-export const parseRpcFrame = wrapProtocolBoundary(parseRpcFrameInternal);
+export function createRpcFrameParser(options: RpcFrameParserOptions = {}): RpcFrameParser {
+  const allowBody = options.allowBody === true;
+  return wrapProtocolBoundary((input: Uint8Array): RpcFrameRequest =>
+    parseRpcFrameInternal(input, allowBody),
+  );
+}
+
+/** Legacy protocol-1 parser; requests without `body` are unchanged. */
+export const parseRpcFrame: (input: Uint8Array) => RpcRequest = wrapProtocolBoundary(
+  (input: Uint8Array): RpcRequest => parseRpcFrameInternal(input, false) as RpcRequest,
+);
 
 // ---------------------------------------------------------------------------
 // Response serialization.
@@ -2324,7 +2439,7 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   const env = envelope as Record<string, JsonValue>;
   const envKeys = validateClosedObject(
     env,
-    ["id", "ok", "result", "error"],
+    ["id", "ok", "result", "error", "body"],
     "rpc protocol: response envelope has unexpected fields",
   );
 
@@ -2349,15 +2464,63 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
   }
 
   if (ok === true) {
-    if (envKeys.length !== 3 || !keysAreExactly(envKeys, ["id", "ok", "result"])) {
+    const hasBody = envKeys.includes("body");
+    const expectedEnvelopeKeys = hasBody ? ["id", "ok", "result", "body"] : ["id", "ok", "result"];
+    if (envKeys.length !== expectedEnvelopeKeys.length || !keysAreExactly(envKeys, expectedEnvelopeKeys)) {
       throw rpcProtocolError("rpc protocol: success envelope has unexpected fields");
     }
+    const responseBody = hasBody
+      ? normaliseResponseBodyDeclaration(env.body, rawSum)
+      : undefined;
     const result = env.result;
     if (result === null || typeof result !== "object" || arrayIsArray(result)) {
       throw rpcProtocolError("rpc protocol: success result must be a plain object");
     }
     const resultRecord = result as Record<string, JsonValue>;
     const kind = resultRecord.kind;
+    if (responseBody !== undefined && kind !== "note") {
+      throw rpcProtocolError("rpc protocol: response body requires an accepted note read");
+    }
+    if (kind === "body_continue") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "bytes"],
+        "rpc protocol: body-continue result has unexpected fields",
+      );
+      const bytes = resultRecord.bytes;
+      if (
+        resultKeys.length !== 2 ||
+        !keysAreExactly(resultKeys, ["kind", "bytes"]) ||
+        typeof bytes !== "number" ||
+        !Number.isSafeInteger(bytes) ||
+        bytes < 1 ||
+        bytes > WIRE_BODY_BYTES
+      ) {
+        throw rpcProtocolError("rpc protocol: body-continue result is invalid");
+      }
+      const resultPayload = objectCreate(null) as { kind: "body_continue"; bytes: number };
+      resultPayload.kind = "body_continue";
+      resultPayload.bytes = bytes;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
+    if (kind === "capabilities") {
+      const resultKeys = validateClosedObject(
+        resultRecord,
+        ["kind", "protocol"],
+        "rpc protocol: capabilities result has unexpected fields",
+      );
+      if (
+        resultKeys.length !== 2 ||
+        !keysAreExactly(resultKeys, ["kind", "protocol"]) ||
+        resultRecord.protocol !== 2
+      ) {
+        throw rpcProtocolError("rpc protocol: capabilities result is invalid");
+      }
+      const resultPayload = objectCreate(null) as { kind: "capabilities"; protocol: 2 };
+      resultPayload.kind = "capabilities";
+      resultPayload.protocol = 2;
+      return serializeSuccessFrame(id, resultPayload, rawSum);
+    }
     if (kind === "search") {
       const resultKeys = validateClosedObject(
         resultRecord,
@@ -2484,22 +2647,16 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       );
       const hasContent = resultKeys.includes("markdown");
       const hasReason = resultKeys.includes("contentReason");
-      if (
-        (resultKeys.length !== 3 &&
-          resultKeys.length !== 4 &&
-          resultKeys.length !== 5 &&
-          resultKeys.length !== 6) ||
-        !keysAreExactly(
-          resultKeys,
-          hasContent
-            ? hasReason
-              ? ["kind", "note", "contentStatus", "contentReason", "markdown", "markdownBytes"]
-              : ["kind", "note", "contentStatus", "markdown", "markdownBytes"]
-            : hasReason
-              ? ["kind", "note", "contentStatus", "contentReason"]
-              : ["kind", "note", "contentStatus"],
-        )
-      ) {
+      const expectedNoteKeys = responseBody
+        ? ["kind", "note", "contentStatus", "markdownBytes"]
+        : hasContent
+          ? hasReason
+            ? ["kind", "note", "contentStatus", "contentReason", "markdown", "markdownBytes"]
+            : ["kind", "note", "contentStatus", "markdown", "markdownBytes"]
+          : hasReason
+            ? ["kind", "note", "contentStatus", "contentReason"]
+            : ["kind", "note", "contentStatus"];
+      if (!keysAreExactly(resultKeys, expectedNoteKeys)) {
         throw rpcProtocolError("rpc protocol: note result has unexpected fields");
       }
       const contentStatus = resultRecord.contentStatus;
@@ -2511,7 +2668,10 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
       ) {
         throw rpcProtocolError("rpc protocol: note result has an invalid contentStatus");
       }
-      if (hasContent !== (contentStatus === "ok")) {
+      if (
+        hasContent !== (contentStatus === "ok" && responseBody === undefined) ||
+        (responseBody !== undefined && contentStatus !== "ok")
+      ) {
         throw rpcProtocolError(
           "rpc protocol: note result content fields do not match contentStatus",
         );
@@ -2570,7 +2730,20 @@ function serializeRpcResponseInternal(envelope: unknown): Uint8Array {
         resultPayload.markdown = resultRecord.markdown as string;
         resultPayload.markdownBytes = resultRecord.markdownBytes;
       }
-      return serializeSuccessFrame(id, resultPayload, rawSum);
+      if (responseBody !== undefined) {
+        const markdownBytes = resultRecord.markdownBytes;
+        if (
+          typeof markdownBytes !== "number" ||
+          !Number.isSafeInteger(markdownBytes) ||
+          markdownBytes < 1 ||
+          markdownBytes > WIRE_BODY_BYTES ||
+          responseBody.bytes !== markdownBytes
+        ) {
+          throw rpcProtocolError("rpc protocol: response body byte count is invalid");
+        }
+        resultPayload.markdownBytes = markdownBytes;
+      }
+      return serializeSuccessFrame(id, resultPayload, rawSum, responseBody);
     }
 
     if (kind === "create") {
@@ -4029,15 +4202,18 @@ function serializeSuccessFrame(
   id: string,
   resultPayload: Record<string, unknown>,
   rawSum: PreflightSum,
+  body?: RpcBodyDeclaration,
 ): Uint8Array {
   const successEnvelope = objectCreate(null) as {
     id: string;
     ok: true;
     result: Record<string, unknown>;
+    body?: RpcBodyDeclaration;
   };
   successEnvelope.id = id;
   successEnvelope.ok = true;
   successEnvelope.result = resultPayload;
+  if (body !== undefined) successEnvelope.body = body;
   const payload = jsonStringify(successEnvelope);
   if (typeof payload !== "string")
     throw rpcProtocolError("rpc protocol: response is not serializable");
@@ -4053,6 +4229,53 @@ function serializeSuccessFrame(
     frame[LENGTH_PREFIX_BYTES + index] = payloadBytes[index] ?? 0;
   }
   return frame;
+}
+
+/** Validate the outgoing declaration for an accepted Markdown body read. */
+function normaliseResponseBodyDeclaration(
+  value: JsonValue | undefined,
+  rawSum: PreflightSum,
+): RpcBodyDeclaration {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: response body declaration is invalid");
+  }
+  const record = value as Record<string, JsonValue>;
+  const keys = validateClosedObject(
+    record,
+    ["field", "bytes", "sha256"],
+    "rpc protocol: response body declaration has unexpected fields",
+  );
+  const field = record.field;
+  const bytes = record.bytes;
+  const sha256 = record.sha256;
+  if (keys.length !== 3 || !keysAreExactly(keys, ["field", "bytes", "sha256"])) {
+    throw rpcProtocolError("rpc protocol: response body declaration has unexpected fields");
+  }
+  if (field !== "markdown") {
+    throw rpcProtocolError("rpc protocol: response body field is invalid");
+  }
+  if (
+    typeof bytes !== "number" ||
+    !Number.isSafeInteger(bytes) ||
+    bytes < 1 ||
+    bytes > WIRE_BODY_BYTES
+  ) {
+    throw rpcProtocolError("rpc protocol: response body bytes are invalid");
+  }
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
+    throw rpcProtocolError("rpc protocol: response body sha256 is invalid");
+  }
+  preflightResponseStringField(field, rawSum);
+  preflightResponseStringField(sha256, rawSum);
+  const clean = objectCreate(null) as {
+    field: "markdown";
+    bytes: number;
+    sha256: string;
+  };
+  clean.field = field;
+  clean.bytes = bytes;
+  clean.sha256 = sha256;
+  return objectFreeze(clean);
 }
 
 function assertBoundedString(
@@ -4205,6 +4428,58 @@ function normaliseNoteResult(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+/** Parse the closed declaration and pin its field to the request method. */
+function parseRequestBodyDeclaration(value: JsonValue | undefined, method: RpcMethod): RpcBodyDeclaration {
+  let expectedField: RpcBodyField;
+  switch (method) {
+    case "notes.create":
+    case "notes.update":
+      expectedField = "content";
+      break;
+    case "notes.append":
+      expectedField = "markdownFragment";
+      break;
+    case "notes.apply-edit":
+      expectedField = "markdown";
+      break;
+    default:
+      throw rpcProtocolError("rpc protocol: request method does not accept a body");
+  }
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: request body declaration is invalid");
+  }
+  const record = value as Record<string, JsonValue>;
+  const keys = validateClosedObject(
+    record,
+    ["field", "bytes", "sha256"],
+    "rpc protocol: request body declaration has unexpected fields",
+  );
+  if (keys.length !== 3 || !keysAreExactly(keys, ["field", "bytes", "sha256"])) {
+    throw rpcProtocolError("rpc protocol: request body declaration has unexpected fields");
+  }
+  const field = record.field;
+  const bytes = record.bytes;
+  const sha256 = record.sha256;
+  if (field !== expectedField) {
+    throw rpcProtocolError("rpc protocol: request body field is invalid");
+  }
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 1) {
+    throw rpcProtocolError("rpc protocol: request body bytes are invalid");
+  }
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
+    throw rpcProtocolError("rpc protocol: request body sha256 is invalid");
+  }
+  const clean = objectCreate(null) as {
+    field: RpcBodyField;
+    bytes: number;
+    sha256: string;
+  };
+  clean.field = field;
+  clean.bytes = bytes;
+  clean.sha256 = sha256;
+  return objectFreeze(clean);
+}
 
 /**
  * Count the UTF-8 bytes TextEncoder would emit without allocating.

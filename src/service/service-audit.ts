@@ -37,6 +37,7 @@ export type ServiceAuditEvent =
 export type ServiceAuditOutcome =
   | "ok"
   | "invalid_request"
+  | "busy"
   | "too_large"
   | "permission_denied"
   | "service_unavailable"

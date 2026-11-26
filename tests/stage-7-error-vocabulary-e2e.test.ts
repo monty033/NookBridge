@@ -137,7 +137,7 @@ const POLICY_METHODS = [
 const WRITE_METHODS: readonly WriteMethod[] = ["create", "append", "update", "delete"];
 
 /** Expected triple for a code that must pass through unchanged at every layer. */
-function same<C extends RpcErrorCode>(code: C): Triple {
+function same<C extends Exclude<RpcErrorCode, "busy">>(code: C): Triple {
   return { rpc: code, socket: code, mcp: code };
 }
 
@@ -159,8 +159,8 @@ const T1_EXPECTED: Record<NotesnookWriteErrorCode, Triple> = {
 };
 const WRITE_CODES = Object.keys(T1_EXPECTED) as NotesnookWriteErrorCode[];
 
-/** RPC envelope code -> MCP code. Identity for every code; typed exhaustively. */
-const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
+/** Legacy protocol-1 RPC envelope code -> MCP code. Identity for every code. */
+const RPC_TO_MCP: Readonly<Record<Exclude<RpcErrorCode, "busy">, NookMcpErrorCode>> = {
   invalid_request: "invalid_request",
   too_large: "too_large",
   permission_denied: "permission_denied",
@@ -175,7 +175,8 @@ const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
   unsupported_content: "unsupported_content",
   sync_required: "sync_required",
 };
-const RPC_CODES = Object.keys(RPC_TO_MCP) as RpcErrorCode[];
+// `busy` is protocol-2-only; legacy clients deliberately classify it as unknown.
+const RPC_CODES = Object.keys(RPC_TO_MCP) as Exclude<RpcErrorCode, "busy">[];
 
 const LAYER_LABELS = {
   rpc: "L1 (RPC handler)",

@@ -2753,6 +2753,7 @@ function buildErrorEnvelope(
   id: string,
   code:
     | "invalid_request"
+    | "busy"
     | "too_large"
     | "permission_denied"
     | "service_unavailable"
@@ -2780,6 +2781,7 @@ function buildErrorEnvelope(
     unapproved_pending: "Unapproved pending changes",
     unsupported_content: "Unsupported content",
     sync_required: "Sync required",
+    busy: "Service busy",
   } as const;
   const message = messages[code];
 
