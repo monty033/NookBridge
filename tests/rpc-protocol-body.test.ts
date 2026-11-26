@@ -180,9 +180,12 @@ describe("protocol 2 response codec", () => {
     // just win — it makes the producer's message wrong and the refusal
     // unserialisable. This is that check, at the source.
     const source = readFileSync("src/service/rpc-protocol.ts", "utf8");
-    const assignments = [...source.matchAll(/^rpcErrorMessages\.([a-z_]+) = /gm)].map(
-      (match) => match[1],
-    );
+    // Both spellings, any spacing: a duplicate is a duplicate whether it is
+    // written with a dot or an index, and a scan that only knows one form is
+    // the kind of test that agrees with itself.
+    const assignments = [
+      ...source.matchAll(/rpcErrorMessages\s*(?:\.([a-z_]+)|\[\s*"([a-z_]+)"\s*\])\s*=/g),
+    ].map((match) => match[1] ?? match[2]);
     expect(assignments.length).toBe(new Set(assignments).size);
     for (const code of Object.keys(RPC_ERROR_MESSAGES)) {
       expect(assignments.filter((name) => name === code)).toHaveLength(1);

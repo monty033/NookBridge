@@ -864,7 +864,7 @@ describe("R2d — audit and wire contract", () => {
     // protocol-1 client must not be handed a code it has never seen. It is a
     // real envelope code, so this asserts the degradation rather than trusting
     // the absence of a row in the legacy table.
-    const daemon = await startEnvelopeDaemon("busy" as RpcErrorCode);
+    const daemon = await startEnvelopeDaemon("busy");
     try {
       const client = new NookdSocketClient({ socketPath: daemon.socketPath });
       const result = await client.createNote({ title: TITLE, content: CONTENT });

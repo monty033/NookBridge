@@ -11,6 +11,7 @@ import {
   serializeRpcResponse,
   type RpcAnyResponseEnvelope,
   type RpcRequest,
+  RPC_ERROR_MESSAGES,
 } from "./rpc-protocol.js";
 import { isOperatorTransportMethod, type OperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
@@ -334,7 +335,14 @@ async function dispatchFrame(
   if (decision.allowed !== true) {
     // The policy's categorical reason is the code the operator receives, so a
     // lock refusal stays distinguishable from a permission problem.
-    const message = decision.reason === "vault_locked" ? "Vault locked" : "Permission denied";
+    // The fixed strings live in the protocol's one table. Copying them here is
+    // how a refusal becomes unserialisable: the serializer checks the message
+    // against that table and a mismatch turns an answer into a dropped
+    // connection.
+    const message =
+      decision.reason === "vault_locked"
+        ? RPC_ERROR_MESSAGES.vault_locked
+        : RPC_ERROR_MESSAGES.permission_denied;
     await writeResponse(
       socket,
       { id: request.id, ok: false, error: { code: decision.reason, message } },
@@ -360,7 +368,7 @@ async function dispatchFrame(
       {
         id: request.id,
         ok: false,
-        error: { code: "service_unavailable", message: "Service unavailable" },
+        error: { code: "service_unavailable", message: RPC_ERROR_MESSAGES.service_unavailable },
       },
       refusalLog,
       request.method,
