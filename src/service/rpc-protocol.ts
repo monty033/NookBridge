@@ -1214,10 +1214,12 @@ const RPC_PROTOCOL_ERROR_MESSAGES = new WeakMap<object, string>();
  * The one message a body declaration larger than the wire bound carries.
  *
  * This is not a protocol violation: the caller spoke the grammar correctly and
- * asked for a size the daemon will not assemble, so the daemon answers
- * `too_large` rather than `invalid_request`. The canonical message is the
- * marker, because the boundary wrapper deliberately rebuilds every protocol
- * error from its canonical text and no per-error property survives it.
+ * asked for a size the daemon will not assemble, so it is a different refusal
+ * from a malformed declaration and can carry `too_large` rather than
+ * `invalid_request` once the daemon handles body declarations. Nothing maps it
+ * yet: this slice adds the codec only. The canonical message is the marker,
+ * because the boundary wrapper deliberately rebuilds every protocol error from
+ * its canonical text and no per-error property survives it.
  */
 const RPC_BODY_OVERSIZE_MESSAGE = "rpc protocol: request body exceeds the declared wire body bound";
 
@@ -2484,7 +2486,9 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
   if (ok === true) {
     const hasBody = envKeys.includes("body");
     // The gate is one-sided unless the serializer enforces it too: a daemon
-    // that never negotiated protocol 2 must not be able to emit its shapes.
+    // that never negotiated protocol 2 must not emit a body envelope. The
+    // negotiation answer itself is not gated — see the result-kind check below
+    // for why `capabilities` is the exception.
     if (hasBody && !allowBody) {
       throw rpcProtocolError("rpc protocol: response body is not permitted on this path");
     }
