@@ -1,5 +1,6 @@
 /**
- * Every named bound the bridge enforces, in one place.
+ * Every named bound the bridge enforces, in one place — plus one named
+ * deadline that is not enforced yet, marked as such where it is defined.
  *
  * What this file is: the named definition site for the bounds the bridge
  * enforces on note content and on the wire, and the place a note-size change

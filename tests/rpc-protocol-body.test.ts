@@ -1,7 +1,10 @@
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { nookMcpErrorMessage } from "../src/mcp/errors.js";
 
 import { WIRE_BODY_BYTES } from "../src/core/size-limits.js";
 import {
@@ -10,6 +13,7 @@ import {
   createRpcResponseSerializer,
   isRpcProtocolOversizeError,
   parseRpcFrame,
+  type RpcErrorCode,
   serializeRpcResponse,
   type RpcAnyResponseEnvelope,
 } from "../src/service/rpc-protocol.js";
@@ -207,6 +211,53 @@ describe("protocol 2 response codec", () => {
       ok: false,
       error: { code: "busy", message: "Service busy" },
     });
+  });
+});
+
+describe("fixed error text has one source per surface", () => {
+  it("the MCP surface does not disagree with the wire for a shared code", () => {
+    // Two tables exist by design: the socket's wire vocabulary and the MCP
+    // proxy's client-facing text. What must not happen is silent drift between
+    // them — a client matching on text would then see two answers for one
+    // condition. Where they overlap, they agree.
+    const shared: string[] = [];
+    for (const code of Object.keys(RPC_ERROR_MESSAGES) as RpcErrorCode[]) {
+      // A code the MCP surface does not carry answers undefined rather than
+      // throwing, so absence is the skip condition, not an exception.
+      const mcp = nookMcpErrorMessage(code as never) as string | undefined;
+      if (mcp === undefined) continue;
+      shared.push(code);
+      expect(mcp).toBe(RPC_ERROR_MESSAGES[code]);
+    }
+    // A comparison that silently compared nothing would pass forever.
+    expect(shared.length).toBeGreaterThan(0);
+  });
+
+  it("no other module hand-writes one of those strings", () => {
+    // The failure this guards is a second producer — the operator socket used
+    // to build two of these by hand, and a hand-built copy turns a categorical
+    // answer into a dropped connection. Reading the source is the only way to
+    // see a literal that never becomes a table entry.
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!entry.name.endsWith(".ts")) continue;
+        // The two tables are the sources; the protocol boundary rebuilds from
+        // its own table, so both are expected to contain the literals.
+        if (path === "src/service/rpc-protocol.ts" || path === "src/mcp/errors.ts") continue;
+        const source = readFileSync(path, "utf8");
+        for (const message of Object.values(RPC_ERROR_MESSAGES)) {
+          if (source.includes(`"${message}"`)) offenders.push(`${path}: ${message}`);
+        }
+      }
+    };
+    walk("src");
+    expect(offenders).toEqual([]);
   });
 });
 
