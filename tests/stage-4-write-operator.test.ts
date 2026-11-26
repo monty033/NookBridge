@@ -1408,6 +1408,9 @@ describe("Stage 4 operator write source boundaries", () => {
         "./notesnook-write-adapter.js",
         "./notesnook-write-contract.js",
         "./notesnook-write-list-intent.js",
+        // The size registry: a leaf module of frozen numbers with no imports
+        // of its own, so it adds no capability to the codec's boundary.
+        "./size-limits.js",
         "node:buffer",
       ].sort(),
     );

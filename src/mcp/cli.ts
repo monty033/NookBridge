@@ -16,8 +16,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { buildNookMcpServer } from "./nook-mcp-server.js";
 import { NookdSocketClient } from "./socket-client.js";
+import { MCP_MESSAGE_BYTES } from "../core/size-limits.js";
 
-export const NOOK_MCP_MAX_QUERY_BYTES = 512;
+// Re-exported for callers that reach the MCP surface through the CLI module; the
+// value itself is defined once, in `nook-mcp-server.ts`, from the registry.
+export { NOOK_MCP_MAX_QUERY_BYTES } from "./nook-mcp-server.js";
 
 const HELP_TEXT =
   "Usage: nook-mcp --socket /run/nookbridge/nookbridge.sock\n" +
@@ -92,13 +95,13 @@ function hasControlCharacter(value: string): boolean {
 
 /** Decode newline-delimited JSON messages for bounded diagnostics/tests. */
 export function decodeMcpJsonRpcMessages(input: Uint8Array): unknown[] {
-  if (input.byteLength > 65_536) throw new TypeError("nook-mcp: message input too large");
+  if (input.byteLength > MCP_MESSAGE_BYTES) throw new TypeError("nook-mcp: message input too large");
   const text = Buffer.from(input).toString("utf8");
   const messages: unknown[] = [];
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    if (Buffer.byteLength(trimmed, "utf8") > 65_536)
+    if (Buffer.byteLength(trimmed, "utf8") > MCP_MESSAGE_BYTES)
       throw new TypeError("nook-mcp: message too large");
     messages.push(JSON.parse(trimmed) as unknown);
   }

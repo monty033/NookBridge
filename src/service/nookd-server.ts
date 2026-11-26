@@ -33,12 +33,7 @@ import {
   narrowServicePolicy,
   type ServicePolicy,
 } from "./service-policy.js";
-import {
-  STAGE5_RPC_LIMITS,
-  parseRpcFrame,
-  serializeRpcResponse,
-  type RpcMethod,
-} from "./rpc-protocol.js";
+import { parseRpcFrame, serializeRpcResponse, type RpcMethod } from "./rpc-protocol.js";
 import {
   startOperatorSocketServer,
   UNIX_SOCKET_PATH_MAX_BYTES,
@@ -49,9 +44,10 @@ import { isOperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 import type { Logger } from "../logging/logger.js";
+import { RPC_FRAME_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
-const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
+const MAX_FRAME_BYTES_ON_WIRE = RPC_FRAME_BYTES;
 const MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES_ON_WIRE - FRAME_PREFIX_BYTES;
 const MAX_PENDING_BYTES = MAX_FRAME_BYTES_ON_WIRE * 2;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;

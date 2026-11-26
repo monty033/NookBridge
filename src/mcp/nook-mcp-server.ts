@@ -36,9 +36,10 @@ import type { CallToolResult, Tool, ToolAnnotations } from "@modelcontextprotoco
 import { z } from "zod";
 
 import { parseExactNotePath } from "../service/exact-note-path-resolver.js";
-import { STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+import {  } from "../service/rpc-protocol.js";
 import { toMcpErrorResult, type NookMcpErrorCode } from "./errors.js";
 import { NookdSocketClient, type NookdSocketFailure } from "./socket-client.js";
+import { MCP_QUERY_BYTES, RPC_CONTENT_BYTES, RPC_IDENTIFIER_BYTES, RPC_TITLE_BYTES } from "../core/size-limits.js";
 import {
   NOTESNOOK_LIST_KINDS,
   type NotesnookListKind,
@@ -105,10 +106,10 @@ export const FORBIDDEN_TOOL_NAMES: ReadonlyArray<string> = Object.freeze([
  * `STAGE5_RPC_LIMITS.maxQueryBytes` so the MCP layer cannot
  * accept a query that the underlying RPC would reject.
  */
-export const NOOK_MCP_MAX_QUERY_BYTES = 512;
-export const NOOK_MCP_MAX_CONTENT_BYTES = STAGE5_RPC_LIMITS.maxContentBytes;
-export const NOOK_MCP_MAX_TITLE_BYTES = 256;
-export const NOOK_MCP_MAX_IDENTIFIER_BYTES = 256;
+export const NOOK_MCP_MAX_QUERY_BYTES = MCP_QUERY_BYTES;
+export const NOOK_MCP_MAX_CONTENT_BYTES = RPC_CONTENT_BYTES;
+export const NOOK_MCP_MAX_TITLE_BYTES = RPC_TITLE_BYTES;
+export const NOOK_MCP_MAX_IDENTIFIER_BYTES = RPC_IDENTIFIER_BYTES;
 export const NOOK_MCP_MAX_TAGS = 16;
 export const NOOK_MCP_MAX_REVISION_BYTES = 36;
 export const NOOK_MCP_MAX_NOTE_PATH_BYTES = 512;

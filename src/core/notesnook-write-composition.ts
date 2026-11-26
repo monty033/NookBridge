@@ -114,6 +114,7 @@ import {
   type SyncPendingMarker,
 } from "./notesnook-sync-coordinator.js";
 import { withMutex } from "./notesnook-database-mutex.js";
+import { STORED_CONTENT_BYTES, STORED_TITLE_BYTES } from "./size-limits.js";
 
 // ---------------------------------------------------------------------------
 // Bounds.
@@ -125,10 +126,10 @@ import { withMutex } from "./notesnook-database-mutex.js";
 // ---------------------------------------------------------------------------
 
 /** Largest byte count the composition will relay for a body/fragment. */
-const MAX_RESULT_CONTENT_BYTES = STAGE4_WRITE_LIMITS.maxContentBytes;
+const MAX_RESULT_CONTENT_BYTES = STORED_CONTENT_BYTES;
 
 /** Largest byte count the composition will relay for a title (UTF-8 ≤ 4 B/char). */
-const MAX_RESULT_TITLE_BYTES = STAGE4_WRITE_LIMITS.maxTitleLength * 4;
+const MAX_RESULT_TITLE_BYTES = STORED_TITLE_BYTES;
 
 /** Largest number of allowed patch fields an update result may report. */
 const MAX_RESULT_PATCH_FIELDS = 6;

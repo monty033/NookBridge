@@ -2192,6 +2192,9 @@ describe("Stage 4 write composition — exact closed surface", () => {
       "./notesnook-sync-coordinator.js",
       "./notesnook-write-adapter.js",
       "./notesnook-write-contract.js",
+      // The size registry: a leaf module of frozen numbers with no imports of
+      // its own, so it adds no dependency to the composition boundary.
+      "./size-limits.js",
     ]);
   });
 

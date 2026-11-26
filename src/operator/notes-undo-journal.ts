@@ -37,7 +37,8 @@
  *   - `record` accepts ONLY a bounded opaque note handle (same
  *     `<prefix>_<token>` grammar as the CLI contract, with the
  *     reserved `rev_` family excluded), bounded revision tokens
- *     (`rev_[0-9a-f]{32}`), title <= 100, content <= 4 MiB UTF-8
+ *     (`rev_[0-9a-f]{32}`), title <= 100, content <= the registry's
+ *     operator undo content bound, in UTF-8 bytes
  *     bytes, and bounded metadata;
  *   - `load` and `consume` retrieve ciphertext by opaque undo
  *     token, decrypt it, validate the closed preimage schema and
@@ -70,6 +71,7 @@
 import { Buffer } from "node:buffer";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { TextDecoder, TextEncoder } from "node:util";
+import { NOTES_UNDO_CONTENT_BYTES } from "../core/size-limits.js";
 
 // ---------------------------------------------------------------------------
 // Public constants — closed framing invariants.
@@ -93,7 +95,7 @@ export const AES_GCM_AUTH_TAG_BYTES = 16;
 export const AES_GCM_VERSION_PREFIX = "NBV1" as const;
 
 /** Closed maximum content length (UTF-8 bytes) per preimage. */
-export const NOTES_UNDO_CONTENT_MAX_BYTES = 4 * 1024 * 1024;
+export const NOTES_UNDO_CONTENT_MAX_BYTES = NOTES_UNDO_CONTENT_BYTES;
 
 /** Closed maximum title length per preimage (mirrors the CLI cap). */
 export const NOTES_UNDO_TITLE_MAX_LENGTH = 100;

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import { UNDO_RECORD_BYTES, UNDO_TOTAL_BYTES } from "../core/size-limits.js";
 
 /** One daemon owns one store instance. The adapter owns a private directory,
  * rejects symlinks/non-regular files, bounds reads/listing before allocation,
@@ -66,14 +67,14 @@ export async function createNotesUndoStore(options: NotesUndoStoreOptions) {
   const { fs } = options;
   const now = options.now ?? Date.now;
   const maxRecords = options.maxRecords ?? 256;
-  const maxRecordBytes = options.maxRecordBytes ?? 65536;
-  const maxTotalBytes = options.maxTotalBytes ?? 8 * 1024 * 1024;
+  const maxRecordBytes = options.maxRecordBytes ?? UNDO_RECORD_BYTES;
+  const maxTotalBytes = options.maxTotalBytes ?? UNDO_TOTAL_BYTES;
   if (
     !(options.daemonKey instanceof Uint8Array) ||
     options.daemonKey.length !== 32 ||
     ![maxRecords, maxRecordBytes, maxTotalBytes].every(positive) ||
     maxRecords > 10000 ||
-    maxRecordBytes > 65536
+    maxRecordBytes > UNDO_RECORD_BYTES
   )
     fail("invalid-input");
   const copy = Buffer.from(options.daemonKey);

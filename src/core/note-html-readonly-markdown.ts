@@ -1,8 +1,9 @@
 import { Buffer } from "node:buffer";
+import { PROJECTION_HTML_BYTES } from "./size-limits.js";
 
 const MAX_TOKENS = 30_000;
 const MAX_DEPTH = 64;
-const MAX_BYTES = 256 * 1024;
+const MAX_BYTES = PROJECTION_HTML_BYTES;
 type Node = { tag: string; attrs: Record<string, string>; children: Array<Node | string> };
 const voidTags = new Set(["br", "hr", "img", "col", "source", "input"]);
 const cleanControls = (value: string, preserveNewline = false): string => {

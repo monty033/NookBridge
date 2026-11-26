@@ -26,9 +26,10 @@ import {
   type NotesnookListKind,
 } from "./notesnook-write-list-intent.js";
 import type { NotesnookStoredContent } from "./notesnook-write-adapter.js";
+import { NATIVE_DOCUMENT_BYTES } from "./size-limits.js";
 
 export const NOTESNOOK_JSON_WRITER_ENABLED = false;
-export const MAX_NOTE_DOCUMENT_NATIVE_BYTES = 256 * 1024;
+export const MAX_NOTE_DOCUMENT_NATIVE_BYTES = NATIVE_DOCUMENT_BYTES;
 export interface NativeNoteBinding {
   readonly noteId: string;
   readonly revision: string;

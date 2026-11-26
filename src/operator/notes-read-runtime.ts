@@ -67,6 +67,7 @@ import { TextEncoder } from "node:util";
  */
 
 import { Buffer } from "node:buffer";
+import { NOTES_READ_QUERY_BYTES } from "../core/size-limits.js";
 
 // ---------------------------------------------------------------------------
 // Public constants.
@@ -81,7 +82,7 @@ import { Buffer } from "node:buffer";
 export const NOTES_READ_PAGE_LIMIT_MAX = 100;
 
 /** Bounded UTF-8 byte length for title-search queries. */
-export const MAX_NOTES_READ_QUERY_BYTES = 4 * 1024 * 1024;
+export const MAX_NOTES_READ_QUERY_BYTES = NOTES_READ_QUERY_BYTES;
 
 /**
  * Closed per-input title-length cap.  Source titles longer than

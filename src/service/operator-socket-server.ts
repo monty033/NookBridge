@@ -18,9 +18,10 @@ import type { OperatorRefusalSink } from "./operator-refusal.js";
 import { UNATTRIBUTED_METHOD, classifyOperatorError } from "./operator-refusal.js";
 import type { OperatorPolicyDecision } from "./operator-policy.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
+import { OPERATOR_FRAME_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
-const MAX_FRAME_BYTES = 65_536;
+const MAX_FRAME_BYTES = OPERATOR_FRAME_BYTES;
 /** The mode the operator socket is created with unless a caller asks for 0o770. */
 export const DEFAULT_OPERATOR_SOCKET_MODE = 0o660;
 export const ACCEPTED_OPERATOR_SOCKET_MODES: ReadonlyArray<number> = [
