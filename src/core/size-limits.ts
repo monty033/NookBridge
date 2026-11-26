@@ -209,20 +209,23 @@ export const STORED_CONTENT_READ_BYTES = 262_144;
 /**
  * Largest produced stored-content row admitted by the write path.
  *
- * This is the single place the admission bound is named. It follows the read
- * threshold today; when the stored-row limit changes, this entry becomes
- * `MAX_STORED_JSON_BYTES` so wire sizing continues to follow admission rather
- * than moving ahead of it.
+ * This is the wire-sizing name for the bound `STORED_CONTENT_READ_BYTES`
+ * already states — the two are the same number deliberately, and that entry is
+ * where the admission rule itself lives. It follows the read threshold today;
+ * when the stored-row limit changes, this entry becomes `MAX_STORED_JSON_BYTES`
+ * so wire sizing continues to follow admission rather than moving ahead of it.
  */
 export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
 
 /**
  * Largest declared raw body carried alongside an RPC header frame.
  *
- * The 2x allowance covers projection growth and escaping, but has not been
- * proven for every stored shape; it is backed by property tests rather than a
- * claimed encoding invariant. A projection over this bound is refused as
- * `oversize`, never truncated.
+ * The 2x is a budget choice, not a derived invariant: it is chosen so that a
+ * writable row's projection and escaping have room, and no test establishes
+ * that every stored shape projects within it. Nothing depends on the allowance
+ * holding — a body over it is refused, never truncated — but do not read it as
+ * a proven bound. Today the projection is refused earlier and by a different
+ * entry (`PROJECTION_MARKDOWN_BYTES`), so this bound only governs the wire.
  */
 export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
 
@@ -231,6 +234,9 @@ export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
  *
  * This is not an idle-between-chunks timeout: a peer cannot extend a body
  * exchange indefinitely by continuing to send small chunks.
+ *
+ * Not wired yet: no production path reads this. The body-receive step enforces
+ * it; until then it describes a deadline the daemon does not keep.
  */
 export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 
