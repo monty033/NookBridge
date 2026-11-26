@@ -2504,7 +2504,11 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
     if (responseBody !== undefined && kind !== "note") {
       throw rpcProtocolError("rpc protocol: response body requires an accepted note read");
     }
-    if ((kind === "body_continue" || kind === "capabilities") && !allowBody) {
+    // `capabilities` is the answer that begins negotiation, so it must be
+    // serialisable on a path that has not negotiated: refusing it makes the
+    // probe unanswerable and the negotiation impossible. `body_continue` only
+    // ever follows a body request, which already required the policy.
+    if (kind === "body_continue" && !allowBody) {
       throw rpcProtocolError("rpc protocol: protocol-2 result is not permitted on this path");
     }
     if (kind === "body_continue") {

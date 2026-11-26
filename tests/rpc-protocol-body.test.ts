@@ -211,10 +211,19 @@ describe("protocol 2 response codec", () => {
 });
 
 describe("legacy response serializer", () => {
+  it("can answer the negotiation probe", () => {
+    // The probe is sent by a client that has not negotiated yet, so its answer
+    // has to be serialisable on the legacy path or negotiation never starts.
+    expect(
+      decode(
+        serializeRpcResponse({ id: "probe", ok: true, result: { kind: "capabilities", protocol: 2 } }),
+      ),
+    ).toEqual({ id: "probe", ok: true, result: { kind: "capabilities", protocol: 2 } });
+  });
+
   it.each([
     ["an outgoing body", { id: "r", ok: true, result: { kind: "note" }, body: { field: "markdown", bytes: 4, sha256: SHA256 } }],
     ["body_continue", { id: "r", ok: true, result: { kind: "body_continue", bytes: 4 } }],
-    ["capabilities", { id: "r", ok: true, result: { kind: "capabilities", protocol: 2 } }],
   ] as const)("refuses %s without the protocol-2 policy", (_name, envelope) => {
     expect(() => serializeRpcResponse(envelope as unknown as RpcAnyResponseEnvelope)).toThrow(
       /not permitted on this path/,
