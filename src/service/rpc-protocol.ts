@@ -1061,6 +1061,7 @@ export interface RpcErrorEnvelopePayload {
 /** The only error categories that may cross the RPC response boundary. */
 export type RpcErrorCode =
   | "invalid_request"
+  | "too_large"
   | "permission_denied"
   | "service_unavailable"
   | "stale_revision"
@@ -1076,6 +1077,7 @@ export type RpcErrorCode =
 /** Fixed, non-sensitive messages for the categorical RPC error vocabulary. */
 const rpcErrorMessages = objectCreate(null) as Record<RpcErrorCode, string>;
 rpcErrorMessages.invalid_request = "Invalid request";
+rpcErrorMessages.too_large = "Content too large";
 rpcErrorMessages.permission_denied = "Permission denied";
 rpcErrorMessages.service_unavailable = "Service unavailable";
 rpcErrorMessages.stale_revision = "Stale revision";

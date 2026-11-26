@@ -914,6 +914,7 @@ function categoricalFailureLabel(error: unknown): string {
     switch (code as NotesnookWriteErrorCode) {
       case "invalid_input":
         return "rejected: invalid input";
+      case "too_large":
       case "unsupported_content":
         return "rejected: unsupported content";
       case "unsupported_patch_field":

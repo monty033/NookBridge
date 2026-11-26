@@ -159,15 +159,16 @@ export const STORED_CONTENT_BYTES = 262_144;
  * Equal to the inbound `STORED_CONTENT_BYTES`, because the read threshold must
  * not be tighter than what the native write path accepts.
  *
- * It is NOT a read-back guarantee, and saying so would be false: the Markdown
- * codec's ceiling is `MARKDOWN_CODEC_STORED_BYTES`, four times this value, and
- * the stored form expands (escaping plus block tags), so a row produced by that
- * codec can exceed this threshold. Appending to an existing note compounds it:
- * each fragment is bounded on its own while the composed row is bounded only by
- * the codec ceiling, so a note can be written and then refused by this
- * bridge's own read path. That asymmetry is a real defect, tracked as issue #331,
- * and this file records it rather than hiding it. It is a refusal threshold, not an allowance: a larger row is
- * refused categorically, it is not partially read.
+ * This is the row that decides whether a write may happen. The Markdown codec's
+ * own bound (`MARKDOWN_CODEC_STORED_BYTES`) is larger, because it is an
+ * allocation guard rather than an admission rule, so the write path measures
+ * every encoded row — created or composed by an append — against this threshold
+ * before any mutation. A row above it is refused as `too_large` and nothing is
+ * written; that check is what makes "never write a note we cannot read back"
+ * true rather than aspirational (issue #331).
+ *
+ * It is a refusal threshold, not an allowance: a larger row is refused
+ * categorically, it is not partially read.
  */
 export const STORED_CONTENT_READ_BYTES = 262_144;
 
@@ -192,11 +193,16 @@ export const CONFLICT_RESOLVE_PAYLOAD_BYTES = 65_536;
 /**
  * Largest stored payload the Markdown write codec will emit.
  *
- * The stored representation is always larger than its Markdown source —
- * escaping plus block tags — and the codec's own multiple of the inbound
- * content cap is the bound it enforces. It is not derived from
- * `STORED_CONTENT_BYTES` here, because the codec refuses on its own value and
- * a silent change to either would otherwise move the refusal unnoticed.
+ * This is an allocation guard, not an admission rule. It exists so a runaway
+ * encode cannot allocate without bound; it is not the size a note is allowed to
+ * be. The codec must be able to produce a row bigger than the read threshold,
+ * because the read threshold may move (and does, with the server limit) while
+ * the codec's own guard stays put — and an injected codec need not honour this
+ * value at all.
+ *
+ * What a note is allowed to be is decided after encoding, in the write adapter,
+ * against `STORED_CONTENT_READ_BYTES`. That check is deliberately downstream of
+ * the codec so it binds whatever codec is installed.
  */
 export const MARKDOWN_CODEC_STORED_BYTES = 1_048_576;
 

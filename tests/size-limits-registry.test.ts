@@ -177,12 +177,10 @@ describe("size limit registry", () => {
     expect(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES).toBeLessThanOrEqual(
       SIZE_LIMITS.STORED_CONTENT_READ_BYTES,
     );
-    // The Markdown codec does not: its ceiling is four times the read
-    // threshold, and appending composes fragments onto existing content while
-    // bounding only each fragment, so a note can be written and then refused by
-    // this bridge's own read path. This assertion records the gap rather than
-    // claiming it does not exist; when the two are reconciled it fails and this
-    // comment gets corrected with it.
+    // The codec's guard is looser than the admission rule on purpose: it bounds
+    // allocation, and the adapter measures the produced row against the read
+    // threshold afterwards. `tests/write-implies-readable.test.ts` proves that
+    // check binds, including for an injected codec that ignores this value.
     expect(SIZE_LIMITS.MARKDOWN_CODEC_STORED_BYTES).toBeGreaterThan(
       SIZE_LIMITS.STORED_CONTENT_READ_BYTES,
     );

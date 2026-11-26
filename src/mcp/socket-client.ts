@@ -76,6 +76,7 @@ export type NookdSocketResult =
 export type NookdSocketFailure =
   | "service_unavailable"
   | "invalid_request"
+  | "too_large"
   | "permission_denied"
   | "sync_failed"
   | "stale_revision"
@@ -97,6 +98,8 @@ function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure 
   switch (code) {
     case "invalid_request":
       return "invalid_request";
+    case "too_large":
+      return "too_large";
     case "permission_denied":
       return "permission_denied";
     case "service_unavailable":
@@ -1409,6 +1412,7 @@ function decodeNote(value: unknown): Readonly<Record<string, unknown>> {
 function isRpcErrorCode(value: unknown): value is RpcErrorCode {
   return (
     value === "invalid_request" ||
+    value === "too_large" ||
     value === "permission_denied" ||
     value === "service_unavailable" ||
     value === "stale_revision" ||

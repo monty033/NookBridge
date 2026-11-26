@@ -147,6 +147,7 @@ function same<C extends RpcErrorCode>(code: C): Triple {
  */
 const T1_EXPECTED: Record<NotesnookWriteErrorCode, Triple> = {
   invalid_input: same("invalid_request"),
+  too_large: same("too_large"),
   unsupported_content: same("unsupported_content"),
   unsupported_patch_field: same("invalid_request"),
   stale_revision: same("stale_revision"),
@@ -161,6 +162,7 @@ const WRITE_CODES = Object.keys(T1_EXPECTED) as NotesnookWriteErrorCode[];
 /** RPC envelope code -> MCP code. Identity for every code; typed exhaustively. */
 const RPC_TO_MCP: Readonly<Record<RpcErrorCode, NookMcpErrorCode>> = {
   invalid_request: "invalid_request",
+  too_large: "too_large",
   permission_denied: "permission_denied",
   service_unavailable: "service_unavailable",
   stale_revision: "stale_revision",

@@ -1247,6 +1247,7 @@ function sanitizeError(
     if (
       candidate === "invalid_input" ||
       candidate === "unsupported_content" ||
+      candidate === "too_large" ||
       candidate === "unsupported_patch_field" ||
       candidate === "stale_revision" ||
       candidate === "conflict" ||

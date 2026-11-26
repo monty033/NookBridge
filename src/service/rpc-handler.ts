@@ -872,6 +872,7 @@ const revisionTokenPattern = /^rev_[0-9a-f]{32}$/;
  */
 const WRITE_ERROR_TO_RPC: Readonly<Record<NotesnookWriteErrorCode, RpcErrorCode>> = objectFreeze({
   invalid_input: "invalid_request",
+  too_large: "too_large",
   unsupported_content: "unsupported_content",
   unsupported_patch_field: "invalid_request",
   stale_revision: "stale_revision",
@@ -2752,6 +2753,7 @@ function buildErrorEnvelope(
   id: string,
   code:
     | "invalid_request"
+    | "too_large"
     | "permission_denied"
     | "service_unavailable"
     | "stale_revision"
@@ -2766,6 +2768,7 @@ function buildErrorEnvelope(
 ): RpcAnyResponseEnvelope {
   const messages = {
     invalid_request: "Invalid request",
+    too_large: "Content too large",
     permission_denied: "Permission denied",
     service_unavailable: "Service unavailable",
     stale_revision: "Stale revision",

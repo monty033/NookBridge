@@ -77,11 +77,35 @@ import type { NoteBlock } from "./note-document.js";
 import { classifyMarkdownVersionClaim } from "./note-document-version-claim.js";
 import { noteHtmlReadonlyMarkdown } from "./note-html-readonly-markdown.js";
 import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+import { STORED_CONTENT_READ_BYTES } from "./size-limits.js";
 import {
   createNotesnookRecoveryMarker,
   type NotesnookRecoveryJournal,
   type NotesnookRecoveryStage,
 } from "./notesnook-recovery-journal.js";
+
+/**
+ * The write-side half of the bridge's size contract.
+ *
+ * A row the read path will not accept must never reach storage. The codec's own
+ * bound is an allocation guard, not an admission rule, and an injected codec is
+ * free to ignore it — so every encoded row is measured here, after encoding and
+ * before any mutator, against the threshold the reader enforces. A row between
+ * the two is exactly the shape issue #331 describes: written, then unreadable.
+ *
+ * The check is on the produced row, never on the caller's Markdown: escaping and
+ * block tagging make the row larger, and by a ratio that depends on the shape of
+ * the content, so an input-side check cannot decide this.
+ */
+function assertStoredRowReadable(stored: NotesnookStoredContent): NotesnookStoredContent {
+  if (Buffer.byteLength(stored.data, "utf8") > STORED_CONTENT_READ_BYTES) {
+    throw adapterError(
+      "too_large",
+      "Notesnook write adapter: encoded content exceeds what the bridge can read back",
+    );
+  }
+  return stored;
+}
 
 // ---------------------------------------------------------------------------
 // Markdown → stored-content codec seam.
@@ -505,6 +529,10 @@ export class NotesnookWriteAdapter {
         "Notesnook write adapter: stored content cannot accept a Markdown append",
       );
     }
+    // The fragment is bounded by the contract; the composed row is what lands in
+    // storage, and appending grows it past the read threshold long before any
+    // single fragment is refused.
+    next = assertStoredRowReadable(next);
 
     // Order matters.  The pinned `@notesnook/core@8.1.3` Content
     // collection does not bump the parent note's `dateEdited` when a
@@ -1391,14 +1419,18 @@ export class NotesnookWriteAdapter {
   }
 
   #encodeMarkdown(markdown: string, listKind?: NotesnookListKind): NotesnookStoredContent {
+    let encoded: NotesnookStoredContent;
     try {
-      return this.#codec.encodeMarkdown(markdown, listKind);
+      encoded = this.#codec.encodeMarkdown(markdown, listKind);
     } catch {
       throw adapterError(
         "unsupported_content",
         "Notesnook write adapter: content encoding refused the new body",
       );
     }
+    // Measured after encoding: the codec's own bound is an allocation guard and
+    // an injected codec need not honour it.
+    return assertStoredRowReadable(encoded);
   }
 
   async #readNoteFreshly(id: string): Promise<NotesnookWriteNoteMetadata> {
