@@ -77,11 +77,63 @@ import type { NoteBlock } from "./note-document.js";
 import { classifyMarkdownVersionClaim } from "./note-document-version-claim.js";
 import { noteHtmlReadonlyMarkdown } from "./note-html-readonly-markdown.js";
 import { fitsResponsePreflight, STAGE5_RPC_LIMITS } from "../service/rpc-protocol.js";
+import { STORED_CONTENT_READ_BYTES } from "./size-limits.js";
 import {
   createNotesnookRecoveryMarker,
   type NotesnookRecoveryJournal,
   type NotesnookRecoveryStage,
 } from "./notesnook-recovery-journal.js";
+
+/**
+ * The write-side half of the bridge's size contract.
+ *
+ * A row the read path will not accept must never reach storage. The codec's own
+ * bound is an allocation guard, not an admission rule, and an injected codec is
+ * free to ignore it — so every encoded row is measured here, after encoding and
+ * before any mutator, against the threshold the reader enforces. A row between
+ * the two is exactly the shape issue #331 describes: written, then unreadable.
+ *
+ * The check is on the produced row, never on the caller's Markdown: escaping and
+ * block tagging make the row larger, and by a ratio that depends on the shape of
+ * the content, so an input-side check cannot decide this.
+ *
+ * Both ends matter. The reader rejects an empty `data` outright and refuses a
+ * row above `STORED_CONTENT_READ_BYTES`, so a write that produced either would
+ * hand back a note the bridge cannot open — the defect this guard exists to
+ * prevent, in whichever direction it is approached.
+ *
+ * The two conditions are different diagnoses, so they carry different codes: an
+ * empty row is content we cannot represent, an oversized one is content too
+ * large to read.
+ */
+function assertStoredRowReadable(stored: NotesnookStoredContent): NotesnookStoredContent {
+  // The codec is an injected seam. A return value that is not a stored content
+  // is a codec fault, not a size fault, and it must not surface as a TypeError
+  // from inside this guard.
+  if (
+    typeof stored !== "object" ||
+    stored === null ||
+    typeof (stored as { readonly data?: unknown }).data !== "string"
+  ) {
+    throw adapterError(
+      "unsupported_content",
+      "Notesnook write adapter: content encoding returned no stored content",
+    );
+  }
+  if (stored.data.length === 0) {
+    throw adapterError(
+      "unsupported_content",
+      "Notesnook write adapter: encoded content is empty and the bridge cannot read it back",
+    );
+  }
+  if (Buffer.byteLength(stored.data, "utf8") > STORED_CONTENT_READ_BYTES) {
+    throw adapterError(
+      "too_large",
+      "Notesnook write adapter: encoded content exceeds what the bridge can read back",
+    );
+  }
+  return stored;
+}
 
 // ---------------------------------------------------------------------------
 // Markdown → stored-content codec seam.
@@ -505,6 +557,10 @@ export class NotesnookWriteAdapter {
         "Notesnook write adapter: stored content cannot accept a Markdown append",
       );
     }
+    // The fragment is bounded by the contract; the composed row is what lands in
+    // storage, and appending grows it past the read threshold long before any
+    // single fragment is refused.
+    next = assertStoredRowReadable(next);
 
     // Order matters.  The pinned `@notesnook/core@8.1.3` Content
     // collection does not bump the parent note's `dateEdited` when a
@@ -707,8 +763,13 @@ export class NotesnookWriteAdapter {
         // opaque subtrees survive byte-for-byte.  Re-running the Markdown
         // codec here would destroy them, so the envelope is written
         // verbatim and re-pinned to the note's existing slot type.
-        preparedContent = { type: stored.type, data: plan.storedContent.data };
-        contentBytes = Buffer.byteLength(plan.storedContent.data, "utf8");
+        // Verbatim, but not unmeasured: this envelope is supplied by the
+        // caller, so it is the one content channel the codec never sees.
+        preparedContent = assertStoredRowReadable({
+          type: stored.type,
+          data: plan.storedContent.data,
+        });
+        contentBytes = Buffer.byteLength(preparedContent.data, "utf8");
       } else {
         const newContent = patch.content as string;
         contentBytes = Buffer.byteLength(newContent, "utf8");
@@ -822,7 +883,19 @@ export class NotesnookWriteAdapter {
               ...(effectiveListKind === undefined ? {} : { listKind: effectiveListKind }),
             });
             preparedContent = { type: stored.type, data: nativeStored.data };
-          } catch {
+          } catch (error) {
+            // A too-large document is a size diagnosis, not a format one, and
+            // the caller can act on the difference.
+            const reason =
+              typeof error === "object" && error !== null
+                ? (error as { readonly reason?: unknown }).reason
+                : undefined;
+            if (reason === "document_too_large") {
+              throw adapterError(
+                "too_large",
+                "Notesnook write adapter: native document exceeds what the bridge can read back",
+              );
+            }
             throw adapterError(
               "unsupported_content",
               "Notesnook write adapter: unsupported content format",
@@ -900,15 +973,12 @@ export class NotesnookWriteAdapter {
               );
             }
           }
-          try {
-            const encoded = this.#encodeMarkdown(newContent, effectiveListKind);
-            preparedContent = { type: stored.type, data: encoded.data };
-          } catch {
-            throw adapterError(
-              "unsupported_content",
-              "Notesnook write adapter: update content uses an unsupported construct",
-            );
-          }
+          // `#encodeMarkdown` already normalises a codec refusal to
+          // `unsupported_content` and reports the post-encode check as its own
+          // code, so this must not swallow what it throws: relabelling here
+          // would report "too large" as "unsupported" on this path only.
+          const encoded = this.#encodeMarkdown(newContent, effectiveListKind);
+          preparedContent = { type: stored.type, data: encoded.data };
         }
       }
       // Only the prepared bytes are written forward; the stored shape
@@ -1391,14 +1461,18 @@ export class NotesnookWriteAdapter {
   }
 
   #encodeMarkdown(markdown: string, listKind?: NotesnookListKind): NotesnookStoredContent {
+    let encoded: NotesnookStoredContent;
     try {
-      return this.#codec.encodeMarkdown(markdown, listKind);
+      encoded = this.#codec.encodeMarkdown(markdown, listKind);
     } catch {
       throw adapterError(
         "unsupported_content",
         "Notesnook write adapter: content encoding refused the new body",
       );
     }
+    // Measured after encoding: the codec's own bound is an allocation guard and
+    // an injected codec need not honour it.
+    return assertStoredRowReadable(encoded);
   }
 
   async #readNoteFreshly(id: string): Promise<NotesnookWriteNoteMetadata> {

@@ -44,6 +44,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
  */
 export type NookMcpErrorCode =
   | "invalid_request"
+  | "too_large"
   | "permission_denied"
   | "service_unavailable"
   | "sync_failed"
@@ -79,6 +80,7 @@ const NOOK_MCP_UPDATE_REFUSAL_REASONS: readonly NookMcpUpdateRefusalReason[] = O
  */
 const NOOK_MCP_ERROR_MESSAGES: Readonly<Record<NookMcpErrorCode, string>> = Object.freeze({
   invalid_request: "Invalid request",
+  too_large: "Content too large",
   permission_denied: "Permission denied",
   service_unavailable: "Service unavailable",
   sync_failed: "Sync failed",

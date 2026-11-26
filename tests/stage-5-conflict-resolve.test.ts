@@ -559,6 +559,15 @@ describe("Stage 5 keep-both refusals leave the original untouched", () => {
     ["an absent remote side", { content: { conflicted: null } }, "unsupported_content"],
     ["a local side without data", { content: { data: undefined } }, "unsupported_content"],
     ["a local side over the size cap", { content: { data: OVER_CAP } }, "unsupported_content"],
+    // An empty side is refused for the same reason an oversized one is: this
+    // resolve writes a side verbatim, and the bridge cannot read an empty row.
+    // Adopting an empty remote side would make a readable note unreadable.
+    ["a local side with empty data", { content: { data: "" } }, "unsupported_content"],
+    [
+      "a remote side with empty data",
+      { content: { conflicted: remoteSide({ data: "" }) } },
+      "unsupported_content",
+    ],
     [
       "a remote side over the size cap",
       { content: { conflicted: remoteSide({ data: OVER_CAP }) } },

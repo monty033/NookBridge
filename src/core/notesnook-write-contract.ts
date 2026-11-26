@@ -94,6 +94,7 @@ function hasForbiddenEmbeddedMarkup(value: string, allowCanonicalTaskTitles = fa
  */
 export type NotesnookWriteErrorCode =
   | "invalid_input"
+  | "too_large"
   | "unsupported_content"
   | "unsupported_patch_field"
   | "stale_revision"
@@ -116,6 +117,7 @@ const WRITE_CONTRACT_ERRORS = new WeakSet<object>();
 const WRITE_CONTRACT_ERROR_MESSAGES: { readonly [K in NotesnookWriteErrorCode]: string } =
   Object.freeze({
     invalid_input: "Notesnook write contract: invalid input",
+    too_large: "Notesnook write contract: content is too large to store readably",
     unsupported_content: "Notesnook write contract: unsupported content",
     unsupported_patch_field: "Notesnook write contract: unsupported patch field",
     stale_revision: "Notesnook write contract: stale revision",

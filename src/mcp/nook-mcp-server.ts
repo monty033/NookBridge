@@ -1577,6 +1577,8 @@ function socketFailureToCode(reason: NookdSocketFailure): NookMcpErrorCode {
   switch (reason) {
     case "invalid_request":
       return "invalid_request";
+    case "too_large":
+      return "too_large";
     case "permission_denied":
       return "permission_denied";
     case "stale_revision":

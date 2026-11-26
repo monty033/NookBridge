@@ -240,6 +240,7 @@ const COMPOSITION_ERRORS = new WeakSet<object>();
 const COMPOSITION_ERROR_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.freeze([
   "invalid_input",
   "unsupported_content",
+  "too_large",
   "unsupported_patch_field",
   "stale_revision",
   "conflict",
@@ -1451,6 +1452,7 @@ function checkMutationCapacity(state: CompositionState): void {
 const NOTHING_MUTATED_CODES: ReadonlyArray<NotesnookWriteErrorCode> = Object.freeze([
   "invalid_input",
   "unsupported_content",
+  "too_large",
   "unsupported_patch_field",
   "stale_revision",
   "conflict",
