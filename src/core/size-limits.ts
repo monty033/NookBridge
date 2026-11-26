@@ -173,14 +173,16 @@ export const STORED_CONTENT_BYTES = 262_144;
  *     contract refuses one above this value as `invalid_input` before the
  *     adapter sees it, and the adapter's own check catches an empty one;
  *   - a native document is bounded by `NATIVE_DOCUMENT_BYTES` (equal to this
- *     value) inside the serializer, refused as `unsupported_content`;
- *   - conflict keep-both refuses when either side's text exceeds the Stage 4
- *     content cap (equal to this value), also `unsupported_content`.
+ *     value) inside the serializer; its `document_too_large` reason is reported
+ *     as `too_large`, its other refusals as `unsupported_content`;
+ *   - conflict keep-both refuses when either side's text is empty or exceeds the
+ *     Stage 4 content cap (equal to this value), as `unsupported_content` — it
+ *     refuses the whole conflict rather than diagnosing one row.
  *
- * An empty row is refused too, by the same check, as `unsupported_content`: the
- * reader rejects it and this threshold only describes the upper end. The one
- * write that is not measured is compensation, which restores the pre-mutation
- * row verbatim rather than composing anything new.
+ * An empty row is refused on every channel, because the reader rejects it and
+ * this threshold only describes the upper end. The one write that is not
+ * measured is compensation, which restores the pre-mutation row verbatim rather
+ * than composing anything new.
  *
  * It is a refusal threshold, not an allowance: a larger row is refused
  * categorically, it is not partially read.

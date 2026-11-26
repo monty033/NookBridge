@@ -485,8 +485,13 @@ async function gate(slots: CapturedSlots, id: string, expectedBinding: string): 
   const oversized =
     Buffer.byteLength(plan.localText, "utf8") > STAGE4_WRITE_LIMITS.maxContentBytes ||
     Buffer.byteLength(plan.remoteText, "utf8") > STAGE4_WRITE_LIMITS.maxContentBytes;
+  // An empty side is refused for the same reason as an oversized one: this
+  // resolve writes a side verbatim, and the bridge cannot read a row whose data
+  // is empty. Adopting the remote side would make a readable note unreadable;
+  // copying an empty local side would create one.
+  const empty = plan.localText.length === 0 || plan.remoteText.length === 0;
   const hasAttachments = ATTACHMENT_MARKER.test(plan.localText) || inspection.remoteHasAttachments;
-  if (oversized || hasAttachments) return refuse({ outcome: "unsupported_content" });
+  if (oversized || empty || hasAttachments) return refuse({ outcome: "unsupported_content" });
 
   return Object.freeze({ plan });
 }

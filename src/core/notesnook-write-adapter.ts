@@ -96,9 +96,6 @@ import {
  * The check is on the produced row, never on the caller's Markdown: escaping and
  * block tagging make the row larger, and by a ratio that depends on the shape of
  * the content, so an input-side check cannot decide this.
- */
-/**
- * Refuse a row the read path would refuse.
  *
  * Both ends matter. The reader rejects an empty `data` outright and refuses a
  * row above `STORED_CONTENT_READ_BYTES`, so a write that produced either would
@@ -873,7 +870,15 @@ export class NotesnookWriteAdapter {
               ...(effectiveListKind === undefined ? {} : { listKind: effectiveListKind }),
             });
             preparedContent = { type: stored.type, data: nativeStored.data };
-          } catch {
+          } catch (error) {
+            // A too-large document is a size diagnosis, not a format one, and
+            // the caller can act on the difference.
+            if ((error as { readonly reason?: unknown }).reason === "document_too_large") {
+              throw adapterError(
+                "too_large",
+                "Notesnook write adapter: native document exceeds what the bridge can read back",
+              );
+            }
             throw adapterError(
               "unsupported_content",
               "Notesnook write adapter: unsupported content format",
