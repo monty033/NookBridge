@@ -13,7 +13,11 @@
  *     defaults. The transport seam rejects relative paths.
  *   - Requests are bounded by the published Stage 5 frame budget
  *     before they cross the wire, so a hostile caller cannot
- *     force the proxy to write an oversized framed payload.
+ *     force the proxy to write an oversized framed payload. A
+ *     request the single frame cannot carry takes the protocol-2
+ *     body path only when the daemon has advertised it; the raw
+ *     body is bounded by `WIRE_BODY_BYTES` and is written only
+ *     after the daemon's `body_continue`.
  *   - Responses are bounded by the same Stage 5 frame budget.
  *   - Any connect / read / write / timeout failure is normalized
  *     to a categorical `service_unavailable` outcome. The
@@ -24,6 +28,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute, resolve } from "node:path";
 
@@ -48,7 +53,7 @@ import {
   type NotesnookListKind,
 } from "../core/notesnook-write-list-intent.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../service/service-abuse-bounds.js";
-import { RPC_RESPONSE_BYTES, RPC_TITLE_BYTES } from "../core/size-limits.js";
+import { RPC_RESPONSE_BYTES, RPC_TITLE_BYTES, WIRE_BODY_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = STAGE5_RPC_LIMITS.maxFrameBytes;
@@ -86,18 +91,31 @@ export type NookdSocketFailure =
   | "local_sync_marker_failed"
   | "unapproved_pending"
   | "unsupported_content"
-  | "sync_required";
+  | "sync_required"
+  | "busy";
+
+/**
+ * The daemon protocol this client negotiated: 2 accepts a declared raw
+ * body after a header frame, 1 accepts single frames only.
+ */
+export type NookdProtocolVersion = 1 | 2;
 
 /**
  * Map a Stage 5 RPC error envelope code to the closed
  * socket-failure vocabulary. Anything we don't recognise falls
  * back to `service_unavailable` so the agent never sees a raw
  * upstream category.
+ *
+ * `busy` only reaches this function from a body-path header reply;
+ * every other response is decoded without it, so a client that never
+ * negotiates still reports a stray `busy` as `service_unavailable`.
  */
 function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure {
   switch (code) {
     case "invalid_request":
       return "invalid_request";
+    case "busy":
+      return "busy";
     case "too_large":
       return "too_large";
     case "permission_denied":
@@ -174,9 +192,45 @@ export interface NookdSocketClientOptions {
   readonly socketPath: string;
   /** Tests may substitute a fake connect. */
   readonly connect?: SocketConnect;
-  /** Whole-request deadline in ms, covering connect, write and read. Defaults to 12s. */
+  /**
+   * Whole-request deadline in ms, covering connect, write and read — and, on
+   * the body path, the header, the continue, the body and the reply as one
+   * exchange. Defaults to 12s.
+   */
   readonly ioTimeoutMs?: number;
 }
+
+type SocketMethod =
+  | "notes.capabilities"
+  | "notes.search"
+  | "notes.status"
+  | "notes.list_notebooks"
+  | "notes.get"
+  | "notes.create"
+  | "notes.append"
+  | "notes.update"
+  | "notes.delete"
+  | "notes.locked_note_proof"
+  | "notes.path_diagnostic"
+  | "notes.sync";
+
+type SocketParams =
+  | RpcNotesSearchParams
+  | RpcNotesCreateParams
+  | RpcNotesAppendParams
+  | RpcNotesUpdateParams
+  | RpcNotesGetParams
+  | RpcNotesDeleteParams
+  | RpcNotesLockedNoteProofParams
+  | RpcNotesPathDiagnosticParams
+  | Record<string, never>
+  | { readonly id: string };
+
+/** How one request crosses the wire, decided before any connection opens. */
+type RequestPlan =
+  | { readonly kind: "frame"; readonly frame: Uint8Array }
+  | { readonly kind: "body"; readonly header: Uint8Array; readonly body: Uint8Array }
+  | { readonly kind: "refused"; readonly code: "invalid_request" | "too_large" };
 
 export interface NookdSearchRequest extends RpcNotesSearchParams {
   /** Optional bounded internal correlation id used by tests and callers. */
@@ -189,12 +243,16 @@ export type NookdSearchResult =
 
 /**
  * The closed transport seam. Stateless apart from the configured
- * socket path; safe to construct per-call.
+ * socket path and the negotiated protocol, which is probed lazily —
+ * only for a request one frame cannot carry — and forgotten on any
+ * `service_unavailable` so a restarted or replaced daemon is
+ * re-probed. Safe to construct per-call.
  */
 export class NookdSocketClient {
   readonly #socketPath: string;
   readonly #connect: SocketConnect;
   readonly #ioTimeoutMs: number;
+  #protocol: Promise<NookdProtocolVersion | undefined> | undefined;
 
   constructor(options: NookdSocketClientOptions) {
     if (
@@ -271,40 +329,73 @@ export class NookdSocketClient {
     return this.#request("notes.sync", {});
   }
 
+  /**
+   * The version-negotiation probe. A protocol-2 daemon answers
+   * `{ kind: "capabilities", protocol: 2 }`; a protocol-1 daemon closes
+   * the connection, which surfaces as `service_unavailable`.
+   */
+  async capabilities(): Promise<NookdSocketResult> {
+    return this.#request("notes.capabilities", {});
+  }
+
   async #request(
-    method:
-      | "notes.search"
-      | "notes.status"
-      | "notes.list_notebooks"
-      | "notes.get"
-      | "notes.create"
-      | "notes.append"
-      | "notes.update"
-      | "notes.delete"
-      | "notes.locked_note_proof"
-      | "notes.path_diagnostic"
-      | "notes.sync",
-    params:
-      | RpcNotesSearchParams
-      | RpcNotesCreateParams
-      | RpcNotesAppendParams
-      | RpcNotesUpdateParams
-      | RpcNotesDeleteParams
-      | RpcNotesLockedNoteProofParams
-      | RpcNotesPathDiagnosticParams
-      | Record<string, never>
-      | { readonly id: string },
+    method: SocketMethod,
+    params: SocketParams,
+    suppliedId?: string,
+  ): Promise<NookdSocketResult> {
+    const result = await this.#dispatch(method, params, suppliedId);
+    if (!result.ok && result.code === "service_unavailable") this.#protocol = undefined;
+    return result;
+  }
+
+  async #dispatch(
+    method: SocketMethod,
+    params: SocketParams,
     suppliedId?: string,
   ): Promise<NookdSocketResult> {
     const id = suppliedId ?? generateRequestId();
-    let frame: Uint8Array;
-    try {
-      frame = serializeRequest(id, method, params);
-    } catch {
-      return { ok: false, code: "invalid_request" };
-    }
-    if (frame.byteLength > MAX_FRAME_BYTES_ON_WIRE) return { ok: false, code: "invalid_request" };
+    const plan = planRequest(id, method, params);
+    if (plan.kind === "refused") return { ok: false, code: plan.code };
+    if (plan.kind === "frame") return this.#exchange(id, method, plan.frame);
+    const protocol = await this.#negotiatedProtocol();
+    if (protocol === undefined) return { ok: false, code: "service_unavailable" };
+    // An old daemon cannot take the body; refuse here rather than connect and guess.
+    if (protocol < 2) return { ok: false, code: "too_large" };
+    return this.#exchange(id, method, plan.header, plan.body);
+  }
 
+  /** The cached protocol answer, probing once when there is none. */
+  async #negotiatedProtocol(): Promise<NookdProtocolVersion | undefined> {
+    let pending = this.#protocol;
+    if (pending === undefined) {
+      pending = this.#probeProtocol();
+      this.#protocol = pending;
+    }
+    const protocol = await pending;
+    if (protocol === undefined && this.#protocol === pending) this.#protocol = undefined;
+    return protocol;
+  }
+
+  /**
+   * `notes.capabilities` first; a daemon that does not answer it is asked
+   * `notes.status` once, whose success means protocol 1 and whose failure
+   * means the daemon is unavailable.
+   */
+  async #probeProtocol(): Promise<NookdProtocolVersion | undefined> {
+    // The probes bypass `#request`: their own `service_unavailable` must not
+    // clear the very answer they are computing.
+    const capabilities = await this.#dispatch("notes.capabilities", {});
+    if (capabilities.ok && capabilities.envelope.result.kind === "capabilities") return 2;
+    const status = await this.#dispatch("notes.status", {});
+    return status.ok ? 1 : undefined;
+  }
+
+  async #exchange(
+    id: string,
+    method: SocketMethod,
+    frame: Uint8Array,
+    body?: Uint8Array,
+  ): Promise<NookdSocketResult> {
     const abortController = new AbortController();
     let socket: Socket | undefined;
     let deadlineExpired = false;
@@ -332,19 +423,35 @@ export class NookdSocketClient {
         },
       );
       socket = await Promise.race([connected, deadline]);
-      const responseFrame = await Promise.race([
-        readFramedResponse(socket, abortController.signal),
-        deadline,
-      ]);
-      if (responseFrame.byteLength > MAX_RESPONSE_FRAME_BYTES)
-        return { ok: false, code: "service_unavailable" };
-      let response: RpcAnyResponseEnvelope;
-      try {
-        const json = Buffer.from(responseFrame.subarray(FRAME_PREFIX_BYTES)).toString("utf8");
-        response = decodeResponseEnvelope(JSON.parse(json) as unknown);
-      } catch {
-        return { ok: false, code: "service_unavailable" };
+      if (body !== undefined) {
+        // Phase two of the body path: nothing of the body is written unless
+        // the daemon's reply to the header is a continue for exactly its size.
+        const invitation = decodeResponseFrame(
+          await Promise.race([readFramedResponse(socket, abortController.signal), deadline]),
+          { method, allowBusy: true, continueBytes: body.byteLength },
+        );
+        if (invitation === undefined) return { ok: false, code: "service_unavailable" };
+        if (invitation.ok === false) return mapResponseEnvelope(invitation, id);
+        if (invitation.id !== id || invitation.result.kind !== "body_continue") {
+          return { ok: false, code: "service_unavailable" };
+        }
+        if (deadlineExpired) throw new Error("timeout");
+        // Listen for the reply before writing, so a close mid-body is observed.
+        const reply = readFramedResponse(socket, abortController.signal);
+        reply.catch(() => undefined);
+        await Promise.race([writeAll(socket, body), deadline]);
+        const response = decodeResponseFrame(await Promise.race([reply, deadline]), {
+          method,
+          resultContentBytes: WIRE_BODY_BYTES,
+        });
+        if (response === undefined) return { ok: false, code: "service_unavailable" };
+        return mapResponseEnvelope(response, id);
       }
+      const response = decodeResponseFrame(
+        await Promise.race([readFramedResponse(socket, abortController.signal), deadline]),
+        { method },
+      );
+      if (response === undefined) return { ok: false, code: "service_unavailable" };
       return mapResponseEnvelope(response, id);
     } catch {
       return { ok: false, code: "service_unavailable" };
@@ -352,6 +459,113 @@ export class NookdSocketClient {
       globalThis.clearTimeout(timer);
       if (socket !== undefined) destroyQuietly(socket);
     }
+  }
+}
+
+/**
+ * Decide how a request crosses the wire before anything connects.
+ *
+ * A request fits one frame exactly when today's serializer accepts it —
+ * its field bounds, which are the daemon's protocol-1 grammar, and the
+ * frame bound — and then it goes as that frame, byte for byte. Only a
+ * create / append / update that today's serializer refuses, and that is
+ * valid once its body field is bounded by `WIRE_BODY_BYTES` instead,
+ * becomes a body-path candidate. A body over that bound is `too_large`
+ * for any daemon; anything else keeps today's `invalid_request`.
+ */
+function planRequest(id: string, method: SocketMethod, params: SocketParams): RequestPlan {
+  try {
+    return { kind: "frame", frame: serializeRequest(id, method, params) };
+  } catch {
+    // Not a single frame; only a body method can go further.
+  }
+  if (method !== "notes.create" && method !== "notes.append" && method !== "notes.update") {
+    return { kind: "refused", code: "invalid_request" };
+  }
+  try {
+    requireRequestId(id);
+    const split = splitBodyField(method, projectRequestParams(method, params, WIRE_BODY_BYTES));
+    // A body the frame could not carry in full, with no body field to move.
+    if (split === undefined) return { kind: "refused", code: "too_large" };
+    // The declared bytes must be the caller's text exactly; a lone surrogate
+    // would be replaced by U+FFFD on encoding rather than refused.
+    if (!isWellFormedUtf16(split.value)) return { kind: "refused", code: "invalid_request" };
+    const body = Buffer.from(split.value, "utf8");
+    const declaration = Object.create(null) as Record<string, unknown>;
+    declaration.field = split.field;
+    declaration.bytes = body.byteLength;
+    declaration.sha256 = createHash("sha256").update(body).digest("hex");
+    return {
+      kind: "body",
+      header: frameRequestEnvelope(id, method, split.params, declaration),
+      body: Uint8Array.from(body),
+    };
+  } catch {
+    // Fall through: decide between oversize and malformed.
+  }
+  try {
+    projectRequestParams(method, params, Number.POSITIVE_INFINITY);
+  } catch {
+    return { kind: "refused", code: "invalid_request" };
+  }
+  return { kind: "refused", code: "too_large" };
+}
+
+/**
+ * The body field is fixed per method, matching the daemon's declaration
+ * grammar: `content` for create and update, `markdownFragment` for append.
+ * Returns the params with that field removed, or `undefined` when an
+ * update patch carries no content.
+ */
+function splitBodyField(
+  method: "notes.create" | "notes.append" | "notes.update",
+  cleanParams: Record<string, unknown>,
+):
+  | {
+      readonly field: "content" | "markdownFragment";
+      readonly value: string;
+      readonly params: Record<string, unknown>;
+    }
+  | undefined {
+  const params = Object.create(null) as Record<string, unknown>;
+  if (method === "notes.update") {
+    const patch = Object.create(null) as Record<string, unknown>;
+    const source = cleanParams.patch as Record<string, unknown>;
+    if (typeof source.content !== "string") return undefined;
+    for (const key of Object.keys(source)) {
+      if (key !== "content") patch[key] = source[key];
+    }
+    for (const key of Object.keys(cleanParams)) {
+      params[key] = key === "patch" ? Object.freeze(patch) : cleanParams[key];
+    }
+    return { field: "content", value: source.content, params: Object.freeze(params) };
+  }
+  const field = method === "notes.create" ? "content" : "markdownFragment";
+  const value = cleanParams[field];
+  if (typeof value !== "string") throw new TypeError("nook-mcp: body field is missing");
+  for (const key of Object.keys(cleanParams)) {
+    if (key !== field) params[key] = cleanParams[key];
+  }
+  return { field, value, params: Object.freeze(params) };
+}
+
+function isWellFormedUtf16(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function requireRequestId(id: string): void {
+  if (typeof id !== "string" || id.length === 0 || id.length > 128 || hasControlCharacter(id)) {
+    throw new TypeError("nook-mcp: invalid request id");
   }
 }
 
@@ -364,33 +578,26 @@ export class NookdSocketClient {
  * the Stage 5 `maxQueryBytes` budget so a multi-byte hostile payload
  * is rejected before any allocation happens.
  */
-function serializeRequest(
-  id: string,
-  method:
-    | "notes.search"
-    | "notes.status"
-    | "notes.list_notebooks"
-    | "notes.get"
-    | "notes.create"
-    | "notes.append"
-    | "notes.update"
-    | "notes.delete"
-    | "notes.locked_note_proof"
-    | "notes.path_diagnostic"
-    | "notes.sync",
-  params:
-    | RpcNotesSearchParams
-    | RpcNotesCreateParams
-    | RpcNotesAppendParams
-    | RpcNotesUpdateParams
-    | RpcNotesGetParams
-    | RpcNotesDeleteParams
-    | Record<string, never>
-    | { readonly id: string },
-): Uint8Array {
-  if (typeof id !== "string" || id.length === 0 || id.length > 128 || hasControlCharacter(id)) {
-    throw new TypeError("nook-mcp: invalid request id");
-  }
+function serializeRequest(id: string, method: SocketMethod, params: SocketParams): Uint8Array {
+  requireRequestId(id);
+  return frameRequestEnvelope(
+    id,
+    method,
+    projectRequestParams(method, params, STAGE5_RPC_LIMITS.maxContentBytes),
+  );
+}
+
+/**
+ * Validate and project the caller's params. `contentCap` bounds the body
+ * field — create `content`, append `markdownFragment`, update
+ * `patch.content` — and nothing else: it is the single-frame field bound
+ * for a single frame and `WIRE_BODY_BYTES` for a body-path header.
+ */
+function projectRequestParams(
+  method: SocketMethod,
+  params: SocketParams,
+  contentCap: number,
+): Record<string, unknown> {
   let cleanParams: Record<string, unknown> | Record<string, never>;
   if (method === "notes.search") {
     const query = (params as RpcNotesSearchParams).query;
@@ -422,7 +629,7 @@ function serializeRequest(
       hasControlCharacter(create.title) ||
       typeof create.content !== "string" ||
       create.content.length === 0 ||
-      Buffer.byteLength(create.content, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
+      Buffer.byteLength(create.content, "utf8") > contentCap ||
       hasDisallowedControlCharacter(create.content) ||
       (create.notebookId !== undefined &&
         (!isSafeIdentifier(create.notebookId) ||
@@ -445,7 +652,7 @@ function serializeRequest(
       Buffer.byteLength(append.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
       typeof append.markdownFragment !== "string" ||
       append.markdownFragment.length === 0 ||
-      Buffer.byteLength(append.markdownFragment, "utf8") > STAGE5_RPC_LIMITS.maxContentBytes ||
+      Buffer.byteLength(append.markdownFragment, "utf8") > contentCap ||
       hasDisallowedControlCharacter(append.markdownFragment) ||
       typeof append.expectedRevision !== "string" ||
       !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision) ||
@@ -461,7 +668,7 @@ function serializeRequest(
     if (append.listKind !== undefined) baseParams.listKind = append.listKind;
     cleanParams = baseParams;
   } else if (method === "notes.update") {
-    cleanParams = snapshotUpdateParams(params);
+    cleanParams = snapshotUpdateParams(params, contentCap);
   } else if (method === "notes.delete") {
     cleanParams = snapshotDeleteParams(params);
   } else if (method === "notes.locked_note_proof") {
@@ -473,10 +680,24 @@ function serializeRequest(
       throw new TypeError("nook-mcp: parameterless request has fields");
     cleanParams = {};
   }
+  return cleanParams;
+}
+
+/**
+ * Frame `{ id, method, params }` — plus `body` for a body-path header —
+ * behind its four-byte length prefix, refusing a frame over the bound.
+ */
+function frameRequestEnvelope(
+  id: string,
+  method: SocketMethod,
+  cleanParams: Record<string, unknown>,
+  body?: Record<string, unknown>,
+): Uint8Array {
   const envelope = Object.create(null) as Record<string, unknown>;
   envelope.id = id;
   envelope.method = method;
   envelope.params = cleanParams;
+  if (body !== undefined) envelope.body = body;
   const payload = JSON.stringify(envelope);
   const payloadBytes = Buffer.from(payload, "utf8");
   if (payloadBytes.byteLength + FRAME_PREFIX_BYTES > MAX_FRAME_BYTES_ON_WIRE) {
@@ -544,7 +765,7 @@ function snapshotDeleteParams(value: unknown): Record<string, unknown> {
   throw new TypeError("nook-mcp: delete parameters are invalid");
 }
 
-function snapshotUpdateParams(value: unknown): Record<string, unknown> {
+function snapshotUpdateParams(value: unknown, contentCap: number): Record<string, unknown> {
   const values = readExactDataProperties(value, ["id", "expectedRevision", "patch"]);
   const id = values.id;
   if (
@@ -568,7 +789,7 @@ function snapshotUpdateParams(value: unknown): Record<string, unknown> {
   const output = Object.create(null) as Record<string, unknown>;
   output.id = id;
   output.expectedRevision = expectedRevision;
-  output.patch = snapshotUpdatePatch(values.patch);
+  output.patch = snapshotUpdatePatch(values.patch, contentCap);
   return Object.freeze(output);
 }
 
@@ -613,7 +834,10 @@ function readExactDataProperties(
   }
 }
 
-function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> {
+function snapshotUpdatePatch(
+  value: unknown,
+  contentCap: number,
+): Readonly<Record<string, unknown>> {
   let isArray: boolean;
   try {
     isArray = Array.isArray(value);
@@ -654,7 +878,7 @@ function snapshotUpdatePatch(value: unknown): Readonly<Record<string, unknown>> 
     } else if (key === "title") {
       output[key] = requireBoundedSocketString(raw, RPC_TITLE_BYTES, false);
     } else if (key === "content") {
-      output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxContentBytes, false, true);
+      output[key] = requireBoundedSocketString(raw, contentCap, false, true);
     } else if (key === "notebookId") {
       output[key] = requireBoundedSocketString(raw, STAGE5_RPC_LIMITS.maxIdentifierBytes, true);
     } else if (key === "listKind") {
@@ -867,7 +1091,36 @@ function hasExactOwnKeys(value: object, expected: readonly string[]): boolean {
   return expected.every((name) => names.includes(name));
 }
 
-function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
+interface ResponseDecodeOptions {
+  /** The request's method: only `notes.capabilities` may be answered with `capabilities`. */
+  readonly method: SocketMethod;
+  /** Admit `busy`, which only a body-path header reply may carry. */
+  readonly allowBusy?: boolean;
+  /** Admit `body_continue`, and only for exactly this many bytes. */
+  readonly continueBytes?: number;
+  /** Bound on a result's content byte count; a body-path reply may reach `WIRE_BODY_BYTES`. */
+  readonly resultContentBytes?: number;
+}
+
+/** Decode one response frame, or `undefined` for anything not a valid envelope. */
+function decodeResponseFrame(
+  frame: Uint8Array,
+  options: ResponseDecodeOptions,
+): RpcAnyResponseEnvelope | undefined {
+  if (frame.byteLength > MAX_RESPONSE_FRAME_BYTES) return undefined;
+  try {
+    const json = Buffer.from(frame.subarray(FRAME_PREFIX_BYTES)).toString("utf8");
+    return decodeResponseEnvelope(JSON.parse(json) as unknown, options);
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeResponseEnvelope(
+  value: unknown,
+  options: ResponseDecodeOptions,
+): RpcAnyResponseEnvelope {
+  const resultContentBytes = options.resultContentBytes ?? STAGE5_RPC_LIMITS.maxContentBytes;
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error("invalid response");
   const candidate = value as Record<string, unknown>;
@@ -883,6 +1136,33 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
       throw new Error("invalid response");
     }
     const resultRecord = result as Record<string, unknown>;
+    if (resultRecord.kind === "body_continue" && options.continueBytes !== undefined) {
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "bytes"]) ||
+        resultRecord.bytes !== options.continueBytes
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "body_continue", bytes: options.continueBytes }),
+      });
+    }
+    if (resultRecord.kind === "capabilities" && options.method === "notes.capabilities") {
+      // Version 2 or greater can negotiate a body; this client speaks 2.
+      if (
+        !hasExactOwnKeys(resultRecord, ["kind", "protocol"]) ||
+        typeof resultRecord.protocol !== "number" ||
+        !Number.isSafeInteger(resultRecord.protocol) ||
+        resultRecord.protocol < 2
+      )
+        throw new Error("invalid response");
+      return Object.freeze({
+        id: candidate.id,
+        ok: true,
+        result: Object.freeze({ kind: "capabilities", protocol: 2 }),
+      });
+    }
     if (resultRecord.kind === "search") {
       if (!hasExactOwnKeys(resultRecord, ["kind", "notes"]) || !Array.isArray(resultRecord.notes))
         throw new Error("invalid response");
@@ -1051,7 +1331,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         typeof resultRecord.contentBytes !== "number" ||
         !Number.isInteger(resultRecord.contentBytes) ||
         resultRecord.contentBytes < 0 ||
-        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes
+        resultRecord.contentBytes > resultContentBytes
       )
         throw new Error("invalid response");
       return Object.freeze({
@@ -1074,7 +1354,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
         typeof resultRecord.fragmentBytes !== "number" ||
         !Number.isFinite(resultRecord.fragmentBytes) ||
         resultRecord.fragmentBytes < 0 ||
-        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxContentBytes
+        resultRecord.fragmentBytes > resultContentBytes
       )
         throw new Error("invalid response");
       return Object.freeze({
@@ -1112,7 +1392,7 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
           (typeof resultRecord.contentBytes !== "number" ||
             !Number.isFinite(resultRecord.contentBytes) ||
             resultRecord.contentBytes < 0 ||
-            resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes))
+            resultRecord.contentBytes > resultContentBytes))
       )
         throw new Error("invalid response");
       const updateResult: Record<string, unknown> = {
@@ -1260,7 +1540,10 @@ function decodeResponseEnvelope(value: unknown): RpcAnyResponseEnvelope {
   const errorRecord = error as Record<string, unknown>;
   if (
     !hasExactOwnKeys(errorRecord, ["code", "message"]) ||
-    !isRpcErrorCode(errorRecord.code) ||
+    !(
+      isRpcErrorCode(errorRecord.code) ||
+      (options.allowBusy === true && errorRecord.code === "busy")
+    ) ||
     typeof errorRecord.message !== "string"
   ) {
     throw new Error("invalid response");
@@ -1453,6 +1736,7 @@ function mapResponseEnvelope(
         "locked_note_proof",
         "path_diagnostic",
         "sync",
+        "capabilities",
       ].includes(result.kind)
     ) {
       return { ok: false, code: "service_unavailable" };
