@@ -368,6 +368,7 @@ export interface RpcOperatorDiscoveryPageResult {
 
 /** The closed set of allowed RPC methods. */
 export type RpcMethod =
+  | "notes.capabilities"
   | "notes.search"
   | "notes.status"
   | "notes.list_notebooks"
@@ -396,6 +397,12 @@ export type RpcMethod =
   | "notes.resolve-conflict"
   | "notes.inspect-conflict"
   | "notes.abandon-resolve";
+
+export interface RpcNotesCapabilitiesRequest {
+  readonly id: string;
+  readonly method: "notes.capabilities";
+  readonly params: Record<string, never>;
+}
 
 export interface RpcNotesSearchRequest {
   readonly id: string;
@@ -574,6 +581,7 @@ export interface RpcNotesConflictInspectRequest {
 }
 
 export type RpcRequest = (
+  | RpcNotesCapabilitiesRequest
   | RpcNotesSearchRequest
   | RpcNotesStatusRequest
   | RpcNotesListNotebooksRequest
@@ -1215,11 +1223,13 @@ const RPC_PROTOCOL_ERROR_MESSAGES = new WeakMap<object, string>();
  *
  * This is not a protocol violation: the caller spoke the grammar correctly and
  * asked for a size the daemon will not assemble, so it is a different refusal
- * from a malformed declaration and can carry `too_large` rather than
- * `invalid_request` once the daemon handles body declarations. Nothing maps it
- * yet: this slice adds the codec only. The canonical message is the marker,
- * because the boundary wrapper deliberately rebuilds every protocol error from
- * its canonical text and no per-error property survives it.
+ * from a malformed declaration and carries `too_large` rather than
+ * `invalid_request`: the daemon maps it through
+ * {@link isRpcProtocolOversizeError} and answers it with no `body_continue`
+ * (except for an operator-only method, which it closes unanswered). The
+ * canonical message is the marker, because the boundary wrapper deliberately
+ * rebuilds every protocol error from its canonical text and no per-error
+ * property survives it.
  */
 const RPC_BODY_OVERSIZE_MESSAGE = "rpc protocol: request body exceeds the declared wire body bound";
 
@@ -1659,6 +1669,7 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
 
   const method = root.method;
   if (
+    method !== "notes.capabilities" &&
     method !== "notes.search" &&
     method !== "notes.status" &&
     method !== "notes.list_notebooks" &&
@@ -1795,7 +1806,12 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
             ["title", "content", "listKind"],
             ["title", "content", "notebookId", "listKind"],
           ]
-        : [["title"], ["title", "notebookId"], ["title", "listKind"], ["title", "notebookId", "listKind"]];
+        : [
+            ["title"],
+            ["title", "notebookId"],
+            ["title", "listKind"],
+            ["title", "notebookId", "listKind"],
+          ];
     let createShapeMatched = false;
     for (const shape of allowedCreateShapes) {
       if (keysAreExactly(paramKeys, shape)) {
@@ -1865,7 +1881,10 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
             ["id", "markdownFragment", "expectedRevision"],
             ["id", "markdownFragment", "expectedRevision", "listKind"],
           ]
-        : [["id", "expectedRevision"], ["id", "expectedRevision", "listKind"]];
+        : [
+            ["id", "expectedRevision"],
+            ["id", "expectedRevision", "listKind"],
+          ];
     let appendShapeMatched = false;
     for (const shape of allowedAppendShapes) {
       if (keysAreExactly(paramKeys, shape)) {
@@ -2411,8 +2430,8 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
  */
 export function createRpcFrameParser(options: RpcFrameParserOptions = {}): RpcFrameParser {
   const allowBody = options.allowBody === true;
-  return wrapProtocolBoundary((input: Uint8Array): RpcFrameRequest =>
-    parseRpcFrameInternal(input, allowBody),
+  return wrapProtocolBoundary(
+    (input: Uint8Array): RpcFrameRequest => parseRpcFrameInternal(input, allowBody),
   );
 }
 
@@ -2452,6 +2471,7 @@ export const parseRpcFrame: (input: Uint8Array) => RpcRequest = wrapProtocolBoun
  * error messages, `cause` chains, or context through the boundary.
  */
 function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Uint8Array {
+  const resultContentBytes = allowBody ? WIRE_BODY_BYTES : STAGE5_RPC_LIMITS.maxContentBytes;
   if (envelope === null || typeof envelope !== "object" || arrayIsArray(envelope)) {
     throw rpcProtocolError("rpc protocol: response envelope must be a plain object");
   }
@@ -2493,12 +2513,13 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
       throw rpcProtocolError("rpc protocol: response body is not permitted on this path");
     }
     const expectedEnvelopeKeys = hasBody ? ["id", "ok", "result", "body"] : ["id", "ok", "result"];
-    if (envKeys.length !== expectedEnvelopeKeys.length || !keysAreExactly(envKeys, expectedEnvelopeKeys)) {
+    if (
+      envKeys.length !== expectedEnvelopeKeys.length ||
+      !keysAreExactly(envKeys, expectedEnvelopeKeys)
+    ) {
       throw rpcProtocolError("rpc protocol: success envelope has unexpected fields");
     }
-    const responseBody = hasBody
-      ? normaliseResponseBodyDeclaration(env.body, rawSum)
-      : undefined;
+    const responseBody = hasBody ? normaliseResponseBodyDeclaration(env.body, rawSum) : undefined;
     const result = env.result;
     if (result === null || typeof result !== "object" || arrayIsArray(result)) {
       throw rpcProtocolError("rpc protocol: success result must be a plain object");
@@ -2510,8 +2531,10 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
     }
     // `capabilities` is the answer that begins negotiation, so it must be
     // serialisable on a path that has not negotiated: refusing it makes the
-    // probe unanswerable and the negotiation impossible. `body_continue` only
-    // ever follows a body request, which already required the policy.
+    // probe unanswerable and the negotiation impossible. `body_continue` is
+    // gated only by `allowBody`; the daemon sends it after checking that the
+    // policy's allowlist names the method, before the full authorization that
+    // runs once the body has arrived.
     if (kind === "body_continue" && !allowBody) {
       throw rpcProtocolError("rpc protocol: protocol-2 result is not permitted on this path");
     }
@@ -2804,7 +2827,7 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
         !isNonNegativeFiniteNumber(resultRecord.titleBytes) ||
         resultRecord.titleBytes > STAGE5_RPC_LIMITS.maxTitleBytes ||
         !isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
-        resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes
+        resultRecord.contentBytes > resultContentBytes
       ) {
         throw rpcProtocolError("rpc protocol: create result byte counts are invalid");
       }
@@ -2848,7 +2871,7 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
       preflightResponseStringField(noteId, rawSum);
       if (
         !isNonNegativeFiniteNumber(resultRecord.fragmentBytes) ||
-        resultRecord.fragmentBytes > STAGE5_RPC_LIMITS.maxContentBytes
+        resultRecord.fragmentBytes > resultContentBytes
       ) {
         throw rpcProtocolError("rpc protocol: append result fragmentBytes is invalid");
       }
@@ -2953,7 +2976,7 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
       if (
         resultRecord.contentBytes !== undefined &&
         (!isNonNegativeFiniteNumber(resultRecord.contentBytes) ||
-          resultRecord.contentBytes > STAGE5_RPC_LIMITS.maxContentBytes)
+          resultRecord.contentBytes > resultContentBytes)
       ) {
         throw rpcProtocolError("rpc protocol: update result contentBytes is invalid");
       }
@@ -4230,8 +4253,8 @@ function serializeRpcResponseInternal(envelope: unknown, allowBody: boolean): Ui
  * getter or `toJSON` trap) is normalized to a categorical
  * RpcProtocolError before it crosses the module boundary.
  */
-export const serializeRpcResponse = wrapProtocolBoundary((envelope: unknown): Uint8Array =>
-  serializeRpcResponseInternal(envelope, false),
+export const serializeRpcResponse = wrapProtocolBoundary(
+  (envelope: unknown): Uint8Array => serializeRpcResponseInternal(envelope, false),
 );
 
 /**
@@ -4244,8 +4267,8 @@ export function createRpcResponseSerializer(
   options: RpcFrameParserOptions = {},
 ): (envelope: unknown) => Uint8Array {
   const allowBody = options.allowBody === true;
-  return wrapProtocolBoundary((envelope: unknown): Uint8Array =>
-    serializeRpcResponseInternal(envelope, allowBody),
+  return wrapProtocolBoundary(
+    (envelope: unknown): Uint8Array => serializeRpcResponseInternal(envelope, allowBody),
   );
 }
 
@@ -4481,7 +4504,10 @@ function normaliseNoteResult(
 // ---------------------------------------------------------------------------
 
 /** Parse the closed declaration and pin its field to the request method. */
-function parseRequestBodyDeclaration(value: JsonValue | undefined, method: RpcMethod): RpcBodyDeclaration {
+function parseRequestBodyDeclaration(
+  value: JsonValue | undefined,
+  method: RpcMethod,
+): RpcBodyDeclaration {
   let expectedField: RpcBodyField;
   switch (method) {
     case "notes.create":

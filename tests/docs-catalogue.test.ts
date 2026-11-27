@@ -84,7 +84,7 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
   });
 
   it("§3.3 or §6.1 names every RpcMethod literal in backticks", () => {
-    expect(rpcMethods).toHaveLength(24);
+    expect(rpcMethods).toHaveLength(25);
     const surface = `${section33}\n${section61}\n${section1322}`;
     for (const method of rpcMethods) {
       expect(surface, `RPC method \`${method}\` is undocumented`).toContain(`\`${method}\``);
@@ -101,22 +101,24 @@ describe("documented MCP tool and RPC method catalogue (R13)", () => {
 
   it("§6.1 states the closed MCP tool count and the RPC surface split", () => {
     expect(section61).toContain("MCP surface is exactly the 9 tools");
-    expect(section61).toContain("`RpcMethod` union holds 24 literals");
+    expect(section61).toContain("`RpcMethod` union holds 25 literals");
     expect(section61).toContain("9 are reachable through MCP tools");
     expect(section61).toContain("1 is issued by the CLI over the daemon socket with no MCP tool");
+    expect(section61).toContain("1 is the version negotiation probe with no MCP tool");
+    expect(section61).toContain("`notes.capabilities`");
     expect(section61).toContain("14 are operator-only");
     expect(section61).toContain("`notes.locked_note_proof`");
     expect(section61).toContain("`notes.path_diagnostic`");
     expect(section61).not.toContain("never admitted by the daemon listener");
   });
 
-  it("§3.3 separates the eleven parsed names from the ten policy-admitted methods, and claims no method is never admitted", () => {
-    expect(section33).toContain("recognises eleven method names");
+  it("§3.3 separates the twelve parsed names from the eleven policy-admitted methods, and claims no method is never admitted", () => {
+    expect(section33).toContain("recognises twelve method names");
     // The census is dropped by the daemon socket, not refused with an envelope.
-    expect(section33).toContain("`notes.edit-census` is not one of the eleven");
+    expect(section33).toContain("`notes.edit-census` is not one of the twelve");
     expect(section33).not.toContain("refuses `notes.path_diagnostic` and `notes.edit-census`");
-    expect(section33).toContain("The service policy admits the first ten");
-    expect(section33).toContain("holds twenty-four methods");
+    expect(section33).toContain("The service policy admits the first eleven");
+    expect(section33).toContain("holds twenty-five methods");
     expect(section33).toContain("fourteen are operator-only");
     expect(section33).not.toContain("never admitted by the daemon listener");
   });

@@ -55,6 +55,9 @@ export type ServiceAuditOutcome =
   | "budget_exceeded";
 
 export type ServiceAuditPeerCredentials = "self" | "verified" | "unknown" | "rejected";
+export type ServiceAuditPhase = "wire" | "admission";
+
+export const SERVICE_AUDIT_PHASES = objectFreeze(["wire", "admission"] as const);
 
 export interface ServiceAuditRecord {
   readonly event: ServiceAuditEvent;
@@ -63,6 +66,8 @@ export interface ServiceAuditRecord {
   readonly requestIdEcho: boolean;
   readonly latencyMs: number;
   readonly peerCredentials: ServiceAuditPeerCredentials;
+  /** Operator-only layer attribution for a categorical size refusal. */
+  readonly phase?: ServiceAuditPhase;
 }
 
 export const SERVICE_AUDIT_EVENTS = objectFreeze([
@@ -106,7 +111,8 @@ export function buildServiceAuditRecord(input: ServiceAuditRecord): ServiceAudit
     throw new Error("invalid service audit record");
   }
   const keys = ownKeys(input);
-  if (keys.length !== 6) throw new Error("invalid service audit record");
+  const hasPhase = keys.includes("phase");
+  if (keys.length !== (hasPhase ? 7 : 6)) throw new Error("invalid service audit record");
   for (const key of keys) {
     if (
       typeof key !== "string" ||
@@ -115,7 +121,8 @@ export function buildServiceAuditRecord(input: ServiceAuditRecord): ServiceAudit
         key !== "method" &&
         key !== "requestIdEcho" &&
         key !== "latencyMs" &&
-        key !== "peerCredentials")
+        key !== "peerCredentials" &&
+        key !== "phase")
     ) {
       throw new Error("invalid service audit record");
     }
@@ -126,6 +133,7 @@ export function buildServiceAuditRecord(input: ServiceAuditRecord): ServiceAudit
   const requestIdEcho = readOwn(input, "requestIdEcho");
   const latencyMs = readOwn(input, "latencyMs");
   const peerCredentials = readOwn(input, "peerCredentials");
+  const phase = hasPhase ? readOwn(input, "phase") : undefined;
   if (!isEvent(event) || !isOutcome(outcome) || !isMethod(method)) {
     throw new Error("invalid service audit record");
   }
@@ -138,6 +146,7 @@ export function buildServiceAuditRecord(input: ServiceAuditRecord): ServiceAudit
     throw new Error("invalid service audit record");
   }
   if (!isPeerCredentials(peerCredentials)) throw new Error("invalid service audit record");
+  if (hasPhase && !isPhase(phase)) throw new Error("invalid service audit record");
   const clampedLatency = Math.max(0, Math.min(MAX_AUDIT_LATENCY_MS, latencyMs));
   const record = objectCreate(null) as Record<string, unknown>;
   for (const [key, value] of [
@@ -150,6 +159,14 @@ export function buildServiceAuditRecord(input: ServiceAuditRecord): ServiceAudit
   ] as const) {
     objectDefineProperty(record, key, {
       value,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  if (phase !== undefined) {
+    objectDefineProperty(record, "phase", {
+      value: phase,
       enumerable: true,
       configurable: false,
       writable: false,
@@ -177,6 +194,13 @@ export function emitServiceAudit(logger: Logger | undefined, record: ServiceAudi
     ["peerCredentials", safe.peerCredentials],
   ] as const) {
     objectDefineProperty(logRecord, key, { value, enumerable: true, writable: false });
+  }
+  if (safe.phase !== undefined) {
+    objectDefineProperty(logRecord, "phase", {
+      value: safe.phase,
+      enumerable: true,
+      writable: false,
+    });
   }
   try {
     if (safe.outcome === "ok") logger.info("service_audit", logRecord);
@@ -225,6 +249,7 @@ function isOutcome(value: unknown): value is ServiceAuditOutcome {
 }
 function isMethod(value: unknown): value is RpcMethod {
   return (
+    value === "notes.capabilities" ||
     value === "notes.search" ||
     value === "notes.status" ||
     value === "notes.list_notebooks" ||
@@ -237,6 +262,9 @@ function isMethod(value: unknown): value is RpcMethod {
     value === "notes.path_diagnostic" ||
     value === "notes.sync"
   );
+}
+function isPhase(value: unknown): value is ServiceAuditPhase {
+  return value === "wire" || value === "admission";
 }
 function isPeerCredentials(value: unknown): value is ServiceAuditPeerCredentials {
   return value === "self" || value === "verified" || value === "unknown" || value === "rejected";

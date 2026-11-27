@@ -53,6 +53,7 @@ import {
   createReadWriteNoDeleteServicePolicy,
   methodToSettingsOperation,
   narrowServicePolicy,
+  policyNamesMethod,
   type ServicePolicy,
   type ServicePolicyDecision,
 } from "../src/service/service-policy.js";
@@ -531,4 +532,24 @@ describe("SR-7 sync settings authorization without a notebook path", () => {
       );
     },
   );
+});
+
+describe("policyNamesMethod — allowlist membership only", () => {
+  it("names exactly the allowlist, whatever an evaluator would decide", () => {
+    const denyAll = (): SettingsDecision => ({ allowed: false });
+    const readOnly = createReadOnlyServicePolicy(denyAll);
+    const readWrite = createReadWriteNoDeleteServicePolicy(denyAll);
+    expect(policyNamesMethod(readOnly, "notes.create")).toBe(false);
+    expect(policyNamesMethod(readOnly, "notes.get")).toBe(true);
+    // An evaluator can only narrow, so it does not change membership.
+    expect(authorizeServiceMethod(readWrite, "notes.create").allowed).toBe(false);
+    expect(policyNamesMethod(readWrite, "notes.create")).toBe(true);
+    expect(policyNamesMethod(createCustomServicePolicy([]), "notes.get")).toBe(false);
+    expect(policyNamesMethod(readWrite, "notes.apply-edit")).toBe(false);
+  });
+
+  it("refuses a structurally invalid policy", () => {
+    const forged = { profile: "readWriteNoDelete", allowedMethods: ["notes.create"] };
+    expect(policyNamesMethod(forged as unknown as ServicePolicy, "notes.create")).toBe(false);
+  });
 });
