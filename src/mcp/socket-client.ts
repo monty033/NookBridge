@@ -11,13 +11,16 @@
  *   - Only the configured absolute socket path is connected.
  *     No fallback paths, no env-driven path lookup, no implicit
  *     defaults. The transport seam rejects relative paths.
- *   - Requests are bounded by the published Stage 5 frame budget
- *     before they cross the wire, so a hostile caller cannot
- *     force the proxy to write an oversized framed payload. A
- *     request the single frame cannot carry takes the protocol-2
- *     body path only when the daemon has advertised it; the raw
- *     body is bounded by `WIRE_BODY_BYTES` and is written only
- *     after the daemon's `body_continue`.
+ *   - Requests are validated against the daemon's protocol-1 field
+ *     grammar before they cross the wire, and a single frame is
+ *     additionally refused over the Stage 5 frame budget, so a
+ *     hostile caller cannot force the proxy to write an oversized
+ *     framed payload. The single-frame / body-path boundary is that
+ *     grammar — a body field over the inline content cap — not the
+ *     frame size; see `planRequest`. Such a request takes the
+ *     protocol-2 body path only when the daemon has advertised it;
+ *     the raw body is bounded by `WIRE_BODY_BYTES` and is written
+ *     only after the daemon's `body_continue`.
  *   - Responses are bounded by the same Stage 5 frame budget.
  *   - Any connect / read / write / timeout failure is normalized
  *     to a categorical `service_unavailable` outcome. The
@@ -61,9 +64,14 @@ const MAX_RESPONSE_FRAME_BYTES = RPC_RESPONSE_BYTES;
 const ARRAY_PROTOTYPE = Array.prototype;
 const OBJECT_PROTOTYPE = Object.prototype;
 
-/** Default whole-request deadline. It must outlast the daemon's own
- *  request timeout so the daemon can answer with its categorical
- *  timeout before the client gives up. */
+/** Default whole-request deadline, a margin over the daemon's own request
+ *  timeout. On timeout the daemon closes the connection without an error
+ *  reply, which this client reports as `service_unavailable` either way; the
+ *  margin only decides which side gives up first. For a single frame the
+ *  daemon's timer starts when the frame arrives, so it normally fires first.
+ *  On the body path it starts only once the body has been received, so the
+ *  probe, the wait for `body_continue` and the transfer all come out of the
+ *  margin, and a slow transfer ends on this deadline instead. */
 const DEFAULT_IO_TIMEOUT_MS = DEFAULT_SERVICE_ABUSE_BOUNDS.requestTimeoutMs + 2_000;
 
 /**
@@ -106,9 +114,9 @@ export type NookdProtocolVersion = 1 | 2;
  * back to `service_unavailable` so the agent never sees a raw
  * upstream category.
  *
- * `busy` only reaches this function from a body-path header reply;
- * every other response is decoded without it, so a client that never
- * negotiates still reports a stray `busy` as `service_unavailable`.
+ * `busy` only reaches this function from a body-path header reply.
+ * Every single-frame reply is decoded without it — on any client,
+ * negotiated or not — so a stray `busy` there is `service_unavailable`.
  */
 function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure {
   switch (code) {
@@ -193,9 +201,10 @@ export interface NookdSocketClientOptions {
   /** Tests may substitute a fake connect. */
   readonly connect?: SocketConnect;
   /**
-   * Whole-request deadline in ms, covering connect, write and read — and, on
-   * the body path, the header, the continue, the body and the reply as one
-   * exchange. Defaults to 12s.
+   * Whole-request deadline in ms. One timer per call covers connect, write
+   * and read — and, for a request that needs the body path, the protocol
+   * probes (or the wait for a probe another call already started), the
+   * header, the continue, the body and the reply. Defaults to 12s.
    */
   readonly ioTimeoutMs?: number;
 }
@@ -244,9 +253,14 @@ export type NookdSearchResult =
 /**
  * The closed transport seam. Stateless apart from the configured
  * socket path and the negotiated protocol, which is probed lazily —
- * only for a request one frame cannot carry — and forgotten on any
- * `service_unavailable` so a restarted or replaced daemon is
- * re-probed. Safe to construct per-call.
+ * only for a request one frame cannot carry. Only a protocol-2 answer
+ * is kept, and it is forgotten on any `service_unavailable` so a
+ * restarted or replaced daemon is re-probed. Any other answer is
+ * re-established by the next request that needs it: the daemon's
+ * admission control (not yet accepting, connection limit, rate limit)
+ * closes the probe connection exactly as a protocol-1 daemon does, so
+ * "not protocol 2" may be transient and must never be cached. Safe to
+ * construct per-call.
  */
 export class NookdSocketClient {
   readonly #socketPath: string;
@@ -343,50 +357,68 @@ export class NookdSocketClient {
     params: SocketParams,
     suppliedId?: string,
   ): Promise<NookdSocketResult> {
-    const result = await this.#dispatch(method, params, suppliedId);
-    if (!result.ok && result.code === "service_unavailable") this.#protocol = undefined;
-    return result;
+    // The one deadline for this call: the probes and every exchange run under it.
+    const deadline = new RequestDeadline(this.#ioTimeoutMs);
+    try {
+      const result = await this.#dispatch(method, params, deadline, suppliedId);
+      if (!result.ok && result.code === "service_unavailable") this.#protocol = undefined;
+      return result;
+    } finally {
+      deadline.clear();
+    }
   }
 
   async #dispatch(
     method: SocketMethod,
     params: SocketParams,
+    deadline: RequestDeadline,
     suppliedId?: string,
   ): Promise<NookdSocketResult> {
     const id = suppliedId ?? generateRequestId();
     const plan = planRequest(id, method, params);
     if (plan.kind === "refused") return { ok: false, code: plan.code };
-    if (plan.kind === "frame") return this.#exchange(id, method, plan.frame);
-    const protocol = await this.#negotiatedProtocol();
+    if (plan.kind === "frame") return this.#exchange(id, method, plan.frame, deadline);
+    let protocol: NookdProtocolVersion | undefined;
+    try {
+      // A probe another call started runs under that call's deadline; this
+      // call still gives up on its own.
+      protocol = await Promise.race([this.#negotiatedProtocol(deadline), deadline.expired]);
+    } catch {
+      return { ok: false, code: "service_unavailable" };
+    }
     if (protocol === undefined) return { ok: false, code: "service_unavailable" };
     // An old daemon cannot take the body; refuse here rather than connect and guess.
     if (protocol < 2) return { ok: false, code: "too_large" };
-    return this.#exchange(id, method, plan.header, plan.body);
+    return this.#exchange(id, method, plan.header, deadline, plan.body);
   }
 
-  /** The cached protocol answer, probing once when there is none. */
-  async #negotiatedProtocol(): Promise<NookdProtocolVersion | undefined> {
+  /**
+   * The kept protocol-2 answer, or one probe shared by every call that needs
+   * it while it runs. Only protocol 2 outlives the probe: anything else is
+   * dropped as soon as it settles, so the next large request asks again.
+   */
+  async #negotiatedProtocol(deadline: RequestDeadline): Promise<NookdProtocolVersion | undefined> {
     let pending = this.#protocol;
     if (pending === undefined) {
-      pending = this.#probeProtocol();
+      pending = this.#probeProtocol(deadline);
       this.#protocol = pending;
     }
     const protocol = await pending;
-    if (protocol === undefined && this.#protocol === pending) this.#protocol = undefined;
+    if (protocol !== 2 && this.#protocol === pending) this.#protocol = undefined;
     return protocol;
   }
 
   /**
    * `notes.capabilities` first; a daemon that does not answer it is asked
-   * `notes.status` once, whose success means protocol 1 and whose failure
-   * means the daemon is unavailable.
+   * `notes.status` once, whose success means protocol 1 for now and whose
+   * failure means the daemon is unavailable.
    */
-  async #probeProtocol(): Promise<NookdProtocolVersion | undefined> {
+  async #probeProtocol(deadline: RequestDeadline): Promise<NookdProtocolVersion | undefined> {
     // The probes bypass `#request`: their own `service_unavailable` must not
     // clear the very answer they are computing.
-    const capabilities = await this.#dispatch("notes.capabilities", {});
+    const capabilities = await this.#dispatch("notes.capabilities", {}, deadline);
     if (capabilities.ok && capabilities.envelope.result.kind === "capabilities") return 2;
-    const status = await this.#dispatch("notes.status", {});
+    const status = await this.#dispatch("notes.status", {}, deadline);
     return status.ok ? 1 : undefined;
   }
 
@@ -394,26 +426,20 @@ export class NookdSocketClient {
     id: string,
     method: SocketMethod,
     frame: Uint8Array,
+    deadline: RequestDeadline,
     body?: Uint8Array,
   ): Promise<NookdSocketResult> {
-    const abortController = new AbortController();
+    if (deadline.signal.aborted) return { ok: false, code: "service_unavailable" };
     let socket: Socket | undefined;
-    let deadlineExpired = false;
-    let rejectDeadline: ((error: Error) => void) | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      rejectDeadline = reject;
-    });
-    const timer = globalThis.setTimeout(() => {
-      deadlineExpired = true;
-      abortController.abort();
+    const onExpired = (): void => {
       if (socket !== undefined) destroyQuietly(socket);
-      rejectDeadline?.(new Error("timeout"));
-    }, this.#ioTimeoutMs);
+    };
+    deadline.signal.addEventListener("abort", onExpired, { once: true });
 
     try {
-      const connected = this.#connect(this.#socketPath, abortController.signal).then(
+      const connected = this.#connect(this.#socketPath, deadline.signal).then(
         async (connectedSocket) => {
-          if (deadlineExpired) {
+          if (deadline.signal.aborted) {
             destroyQuietly(connectedSocket);
             throw new Error("timeout");
           }
@@ -422,12 +448,12 @@ export class NookdSocketClient {
           return connectedSocket;
         },
       );
-      socket = await Promise.race([connected, deadline]);
+      socket = await Promise.race([connected, deadline.expired]);
       if (body !== undefined) {
         // Phase two of the body path: nothing of the body is written unless
         // the daemon's reply to the header is a continue for exactly its size.
         const invitation = decodeResponseFrame(
-          await Promise.race([readFramedResponse(socket, abortController.signal), deadline]),
+          await Promise.race([readFramedResponse(socket, deadline.signal), deadline.expired]),
           { method, allowBusy: true, continueBytes: body.byteLength },
         );
         if (invitation === undefined) return { ok: false, code: "service_unavailable" };
@@ -435,12 +461,16 @@ export class NookdSocketClient {
         if (invitation.id !== id || invitation.result.kind !== "body_continue") {
           return { ok: false, code: "service_unavailable" };
         }
-        if (deadlineExpired) throw new Error("timeout");
+        if (deadline.signal.aborted) throw new Error("timeout");
         // Listen for the reply before writing, so a close mid-body is observed.
-        const reply = readFramedResponse(socket, abortController.signal);
+        const reply = readFramedResponse(socket, deadline.signal);
         reply.catch(() => undefined);
-        await Promise.race([writeAll(socket, body), deadline]);
-        const response = decodeResponseFrame(await Promise.race([reply, deadline]), {
+        await Promise.race([writeAll(socket, body), deadline.expired]);
+        // The reply's byte count can exceed the single-frame cap but is not
+        // `body.byteLength`: an update reports the stored document it wrote,
+        // which may be larger than the Markdown sent. The daemon bounds the
+        // same field by `WIRE_BODY_BYTES` on this path, so the client does too.
+        const response = decodeResponseFrame(await Promise.race([reply, deadline.expired]), {
           method,
           resultContentBytes: WIRE_BODY_BYTES,
         });
@@ -448,7 +478,7 @@ export class NookdSocketClient {
         return mapResponseEnvelope(response, id);
       }
       const response = decodeResponseFrame(
-        await Promise.race([readFramedResponse(socket, abortController.signal), deadline]),
+        await Promise.race([readFramedResponse(socket, deadline.signal), deadline.expired]),
         { method },
       );
       if (response === undefined) return { ok: false, code: "service_unavailable" };
@@ -456,97 +486,152 @@ export class NookdSocketClient {
     } catch {
       return { ok: false, code: "service_unavailable" };
     } finally {
-      globalThis.clearTimeout(timer);
+      deadline.signal.removeEventListener("abort", onExpired);
       if (socket !== undefined) destroyQuietly(socket);
     }
   }
 }
 
 /**
+ * One call's deadline: a single timer whose expiry aborts the signal every
+ * phase running under it listens to, and rejects `expired` for the races.
+ */
+class RequestDeadline {
+  readonly #controller = new AbortController();
+  readonly #timer: ReturnType<typeof globalThis.setTimeout>;
+  readonly expired: Promise<never>;
+
+  constructor(timeoutMs: number) {
+    let reject: ((error: Error) => void) | undefined;
+    this.expired = new Promise<never>((_resolve, rejectExpired) => {
+      reject = rejectExpired;
+    });
+    this.expired.catch(() => undefined);
+    this.#timer = globalThis.setTimeout(() => {
+      this.#controller.abort();
+      reject?.(new Error("timeout"));
+    }, timeoutMs);
+  }
+
+  get signal(): AbortSignal {
+    return this.#controller.signal;
+  }
+
+  clear(): void {
+    globalThis.clearTimeout(this.#timer);
+  }
+}
+
+/**
  * Decide how a request crosses the wire before anything connects.
  *
- * A request fits one frame exactly when today's serializer accepts it —
- * its field bounds, which are the daemon's protocol-1 grammar, and the
- * frame bound — and then it goes as that frame, byte for byte. Only a
- * create / append / update that today's serializer refuses, and that is
- * valid once its body field is bounded by `WIRE_BODY_BYTES` instead,
- * becomes a body-path candidate. A body over that bound is `too_large`
- * for any daemon; anything else keeps today's `invalid_request`.
+ * The caller's params are read and validated exactly once, with the body
+ * field unbounded; everything after works on that snapshot of primitives,
+ * so the value validated is the value digested and written. Malformed is
+ * `invalid_request` whatever its size.
+ *
+ * The boundary between the paths is the daemon's protocol-1 field grammar —
+ * the body field against the inline content cap — not the frame size. A
+ * valid request whose body field is under that cap cannot reach
+ * `RPC_FRAME_BYTES` even with every other field at its maximum, so asking
+ * "does it fit a frame?" would never move a request that the grammar keeps
+ * inline, and would admit to the body path only what the grammar already
+ * sends there. Under the cap the request goes as one frame, byte for byte
+ * as before; the frame bound is still checked there, as a backstop. Over
+ * it, a body up to `WIRE_BODY_BYTES` is a body-path candidate and anything
+ * larger is `too_large` for any daemon.
  */
 function planRequest(id: string, method: SocketMethod, params: SocketParams): RequestPlan {
-  try {
-    return { kind: "frame", frame: serializeRequest(id, method, params) };
-  } catch {
-    // Not a single frame; only a body method can go further.
-  }
-  if (method !== "notes.create" && method !== "notes.append" && method !== "notes.update") {
-    return { kind: "refused", code: "invalid_request" };
-  }
+  let cleanParams: Record<string, unknown>;
   try {
     requireRequestId(id);
-    const split = splitBodyField(method, projectRequestParams(method, params, WIRE_BODY_BYTES));
-    // A body the frame could not carry in full, with no body field to move.
-    if (split === undefined) return { kind: "refused", code: "too_large" };
-    // The declared bytes must be the caller's text exactly; a lone surrogate
-    // would be replaced by U+FFFD on encoding rather than refused.
-    if (!isWellFormedUtf16(split.value)) return { kind: "refused", code: "invalid_request" };
-    const body = Buffer.from(split.value, "utf8");
-    const declaration = Object.create(null) as Record<string, unknown>;
-    declaration.field = split.field;
-    declaration.bytes = body.byteLength;
-    declaration.sha256 = createHash("sha256").update(body).digest("hex");
+    cleanParams = projectRequestParams(method, params, Number.POSITIVE_INFINITY);
+  } catch {
+    return { kind: "refused", code: "invalid_request" };
+  }
+  const located = locateBodyField(method, cleanParams);
+  const bodyBytes = located === undefined ? 0 : Buffer.byteLength(located.value, "utf8");
+  if (bodyBytes <= STAGE5_RPC_LIMITS.maxContentBytes) {
+    try {
+      return { kind: "frame", frame: frameRequestEnvelope(id, method, cleanParams) };
+    } catch {
+      // Defensive: unreachable for a request the grammar accepted (above).
+      return { kind: "refused", code: "too_large" };
+    }
+  }
+  // Over the inline cap implies a body field was found.
+  if (located === undefined || bodyBytes > WIRE_BODY_BYTES) {
+    return { kind: "refused", code: "too_large" };
+  }
+  // The declared bytes must be the caller's text exactly; a lone surrogate
+  // would be replaced by U+FFFD on encoding rather than refused.
+  if (!isWellFormedUtf16(located.value)) return { kind: "refused", code: "invalid_request" };
+  const body = Buffer.from(located.value, "utf8");
+  const declaration = Object.create(null) as Record<string, unknown>;
+  declaration.field = located.field;
+  declaration.bytes = body.byteLength;
+  declaration.sha256 = createHash("sha256").update(body).digest("hex");
+  try {
     return {
       kind: "body",
-      header: frameRequestEnvelope(id, method, split.params, declaration),
+      header: frameRequestEnvelope(id, method, withoutBodyField(method, cleanParams), declaration),
       body: Uint8Array.from(body),
     };
   } catch {
-    // Fall through: decide between oversize and malformed.
+    // Defensive: the header is the same bounded fields with the body removed.
+    return { kind: "refused", code: "too_large" };
   }
-  try {
-    projectRequestParams(method, params, Number.POSITIVE_INFINITY);
-  } catch {
-    return { kind: "refused", code: "invalid_request" };
-  }
-  return { kind: "refused", code: "too_large" };
 }
 
 /**
  * The body field is fixed per method, matching the daemon's declaration
  * grammar: `content` for create and update, `markdownFragment` for append.
- * Returns the params with that field removed, or `undefined` when an
- * update patch carries no content.
+ * `undefined` for any other method, and for an update whose patch carries
+ * no content — which therefore always goes as a single frame.
  */
-function splitBodyField(
-  method: "notes.create" | "notes.append" | "notes.update",
+function locateBodyField(
+  method: SocketMethod,
   cleanParams: Record<string, unknown>,
-):
-  | {
-      readonly field: "content" | "markdownFragment";
-      readonly value: string;
-      readonly params: Record<string, unknown>;
-    }
-  | undefined {
+): { readonly field: "content" | "markdownFragment"; readonly value: string } | undefined {
+  let value: unknown;
+  let field: "content" | "markdownFragment";
+  if (method === "notes.update") {
+    field = "content";
+    value = (cleanParams.patch as Record<string, unknown>).content;
+  } else if (method === "notes.create") {
+    field = "content";
+    value = cleanParams.content;
+  } else if (method === "notes.append") {
+    field = "markdownFragment";
+    value = cleanParams.markdownFragment;
+  } else {
+    return undefined;
+  }
+  return typeof value === "string" ? { field, value } : undefined;
+}
+
+/** The projected params with the body field removed, for a body-path header. */
+function withoutBodyField(
+  method: SocketMethod,
+  cleanParams: Record<string, unknown>,
+): Record<string, unknown> {
   const params = Object.create(null) as Record<string, unknown>;
   if (method === "notes.update") {
     const patch = Object.create(null) as Record<string, unknown>;
     const source = cleanParams.patch as Record<string, unknown>;
-    if (typeof source.content !== "string") return undefined;
     for (const key of Object.keys(source)) {
       if (key !== "content") patch[key] = source[key];
     }
     for (const key of Object.keys(cleanParams)) {
       params[key] = key === "patch" ? Object.freeze(patch) : cleanParams[key];
     }
-    return { field: "content", value: source.content, params: Object.freeze(params) };
+    return Object.freeze(params);
   }
   const field = method === "notes.create" ? "content" : "markdownFragment";
-  const value = cleanParams[field];
-  if (typeof value !== "string") throw new TypeError("nook-mcp: body field is missing");
   for (const key of Object.keys(cleanParams)) {
     if (key !== field) params[key] = cleanParams[key];
   }
-  return { field, value, params: Object.freeze(params) };
+  return Object.freeze(params);
 }
 
 function isWellFormedUtf16(value: string): boolean {
@@ -570,28 +655,17 @@ function requireRequestId(id: string): void {
 }
 
 /**
- * Serialise the request payload into a length-prefixed frame.
+ * Validate and project the caller's params into a fresh object of
+ * allowlisted primitives, so a hostile request envelope cannot smuggle
+ * extra fields or a hostile `toJSON` trap past the boundary into the
+ * frame. The query is bounded by the Stage 5 `maxQueryBytes` budget so a
+ * multi-byte hostile payload is rejected before any allocation happens.
  *
- * The implementation deliberately hand-rolls the JSON serialisation
- * so a hostile request envelope cannot smuggle extra fields or a
- * hostile `toJSON` trap past the boundary. The query is bounded by
- * the Stage 5 `maxQueryBytes` budget so a multi-byte hostile payload
- * is rejected before any allocation happens.
- */
-function serializeRequest(id: string, method: SocketMethod, params: SocketParams): Uint8Array {
-  requireRequestId(id);
-  return frameRequestEnvelope(
-    id,
-    method,
-    projectRequestParams(method, params, STAGE5_RPC_LIMITS.maxContentBytes),
-  );
-}
-
-/**
- * Validate and project the caller's params. `contentCap` bounds the body
- * field — create `content`, append `markdownFragment`, update
- * `patch.content` — and nothing else: it is the single-frame field bound
- * for a single frame and `WIRE_BODY_BYTES` for a body-path header.
+ * `contentCap` bounds the body field — create `content`, append
+ * `markdownFragment`, update `patch.content` — and nothing else.
+ * `planRequest` passes it unbounded and applies the inline cap and
+ * `WIRE_BODY_BYTES` to the projected field itself, so the caller's
+ * params are projected once.
  */
 function projectRequestParams(
   method: SocketMethod,
@@ -621,52 +695,49 @@ function projectRequestParams(
       cleanParams = { id: noteId };
     } else cleanParams = snapshotDeleteParams(getParams);
   } else if (method === "notes.create") {
+    // Each field is read once: a getter cannot hand validation one value
+    // and the frame or body another.
     const create = params as RpcNotesCreateParams;
+    const { title, content, notebookId, listKind } = create;
     if (
-      typeof create.title !== "string" ||
-      create.title.length === 0 ||
-      Buffer.byteLength(create.title, "utf8") > RPC_TITLE_BYTES ||
-      hasControlCharacter(create.title) ||
-      typeof create.content !== "string" ||
-      create.content.length === 0 ||
-      Buffer.byteLength(create.content, "utf8") > contentCap ||
-      hasDisallowedControlCharacter(create.content) ||
-      (create.notebookId !== undefined &&
-        (!isSafeIdentifier(create.notebookId) ||
-          Buffer.byteLength(create.notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes)) ||
-      (create.listKind !== undefined && !isClosedListKind(create.listKind))
+      typeof title !== "string" ||
+      title.length === 0 ||
+      Buffer.byteLength(title, "utf8") > RPC_TITLE_BYTES ||
+      hasControlCharacter(title) ||
+      typeof content !== "string" ||
+      content.length === 0 ||
+      Buffer.byteLength(content, "utf8") > contentCap ||
+      hasDisallowedControlCharacter(content) ||
+      (notebookId !== undefined &&
+        (!isSafeIdentifier(notebookId) ||
+          Buffer.byteLength(notebookId, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes)) ||
+      (listKind !== undefined && !isClosedListKind(listKind))
     ) {
       throw new TypeError("nook-mcp: create parameters are invalid");
     }
-    const baseParams: Record<string, unknown> = {
-      title: create.title,
-      content: create.content,
-    };
-    if (create.notebookId !== undefined) baseParams.notebookId = create.notebookId;
-    if (create.listKind !== undefined) baseParams.listKind = create.listKind;
-    cleanParams = baseParams;
+    const baseParams: Record<string, unknown> = { title, content };
+    if (notebookId !== undefined) baseParams.notebookId = notebookId;
+    if (listKind !== undefined) baseParams.listKind = listKind;
+    cleanParams = Object.freeze(baseParams);
   } else if (method === "notes.append") {
     const append = params as RpcNotesAppendParams;
+    const { id, markdownFragment, expectedRevision, listKind } = append;
     if (
-      !isSafeIdentifier(append.id) ||
-      Buffer.byteLength(append.id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
-      typeof append.markdownFragment !== "string" ||
-      append.markdownFragment.length === 0 ||
-      Buffer.byteLength(append.markdownFragment, "utf8") > contentCap ||
-      hasDisallowedControlCharacter(append.markdownFragment) ||
-      typeof append.expectedRevision !== "string" ||
-      !/^rev_[0-9a-f]{32}$/.test(append.expectedRevision) ||
-      (append.listKind !== undefined && !isClosedListKind(append.listKind))
+      !isSafeIdentifier(id) ||
+      Buffer.byteLength(id, "utf8") > STAGE5_RPC_LIMITS.maxIdentifierBytes ||
+      typeof markdownFragment !== "string" ||
+      markdownFragment.length === 0 ||
+      Buffer.byteLength(markdownFragment, "utf8") > contentCap ||
+      hasDisallowedControlCharacter(markdownFragment) ||
+      typeof expectedRevision !== "string" ||
+      !/^rev_[0-9a-f]{32}$/.test(expectedRevision) ||
+      (listKind !== undefined && !isClosedListKind(listKind))
     ) {
       throw new TypeError("nook-mcp: append parameters are invalid");
     }
-    const baseParams: Record<string, unknown> = {
-      id: append.id,
-      markdownFragment: append.markdownFragment,
-      expectedRevision: append.expectedRevision,
-    };
-    if (append.listKind !== undefined) baseParams.listKind = append.listKind;
-    cleanParams = baseParams;
+    const baseParams: Record<string, unknown> = { id, markdownFragment, expectedRevision };
+    if (listKind !== undefined) baseParams.listKind = listKind;
+    cleanParams = Object.freeze(baseParams);
   } else if (method === "notes.update") {
     cleanParams = snapshotUpdateParams(params, contentCap);
   } else if (method === "notes.delete") {

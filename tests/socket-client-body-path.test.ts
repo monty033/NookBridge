@@ -328,7 +328,7 @@ describe("compatibility, byte for byte", () => {
       },
     },
     {
-      name: "status answered busy (never negotiated, so still service_unavailable)",
+      name: "status answered busy (a single-frame reply, so service_unavailable)",
       run: (c) => c.status(),
       reply: (id) => fail(id, "busy"),
       bytes: 78,
@@ -459,11 +459,52 @@ describe("negotiation fallback", () => {
       "notes.status",
       "notes.status",
     ]);
-    // The protocol-1 answer is cached: a second large request is refused without a probe.
+    // A protocol-1 answer is not kept: a second large request asks again, and
+    // is refused again without the request or its body ever being sent.
     await expect(
       c.createNote({ title: "Large", content: "a".repeat(INLINE_CONTENT_BYTES + 1) }),
     ).resolves.toEqual({ ok: false, code: "too_large" });
-    expect(daemon.connections).toHaveLength(3);
+    expect(methodsOf(daemon.connections)).toEqual([
+      "notes.capabilities",
+      "notes.status",
+      "notes.status",
+      "notes.capabilities",
+      "notes.status",
+    ]);
+    for (const connection of daemon.connections) expect(connection.writes).toHaveLength(1);
+  });
+
+  it("does not keep a protocol-1 answer that was really an admission rejection of the probe", async () => {
+    // Admission control (not yet accepting, connection limit, rate limit)
+    // closes the probe connection with no reply, exactly as protocol 1 does.
+    let rejectProbe = true;
+    const accepting = protocol2();
+    const daemon = fakeDaemon((connection, bytes, index) => {
+      if (index === 0 && parseFrame(bytes).method === "notes.capabilities" && rejectProbe) {
+        rejectProbe = false;
+        connection.hangUp();
+        return;
+      }
+      accepting(connection, bytes, index);
+    });
+    const c = client(daemon.connect);
+    const large = { title: "Large", content: "a".repeat(INLINE_CONTENT_BYTES + 1) };
+    await expect(c.createNote(large)).resolves.toEqual({ ok: false, code: "too_large" });
+    expect(methodsOf(daemon.connections)).toEqual(["notes.capabilities", "notes.status"]);
+
+    // The daemon now answers the probe. A kept protocol-1 answer would refuse
+    // this client-side for the life of the process.
+    const result = await c.createNote(large);
+    expect(result).toMatchObject({ ok: true, envelope: { result: { kind: "create" } } });
+    expect(methodsOf(daemon.connections)).toEqual([
+      "notes.capabilities",
+      "notes.status",
+      "notes.capabilities",
+      "notes.create",
+    ]);
+    const connection = daemon.connections[3] as FakeConnection;
+    expect(connection.request.body?.bytes).toBe(INLINE_CONTENT_BYTES + 1);
+    expect(connection.writes).toHaveLength(2);
   });
 
   it("reports unavailable when both probes fail", async () => {
@@ -490,27 +531,30 @@ describe("negotiation fallback", () => {
     ]);
   });
 
-  it("forgets a cached answer after a service_unavailable and re-probes the replaced daemon", async () => {
-    const daemon = fakeDaemon(protocol1);
+  it("forgets a kept protocol-2 answer after a service_unavailable and re-probes the replaced daemon", async () => {
+    const daemon = fakeDaemon(protocol2());
     const c = client(daemon.connect);
     const large = { title: "Large", content: "a".repeat(INLINE_CONTENT_BYTES + 1) };
-    await expect(c.createNote(large)).resolves.toEqual({ ok: false, code: "too_large" });
+    expect((await c.createNote(large)).ok).toBe(true);
 
     // The daemon goes away: any request now fails unavailable.
     daemon.setHandler(unreachable);
     await expect(c.status()).resolves.toEqual({ ok: false, code: "service_unavailable" });
 
-    // It comes back as protocol 2. A kept protocol-1 answer would refuse again.
-    daemon.setHandler(protocol2());
-    const result = await c.createNote(large);
-    expect(result.ok).toBe(true);
+    // It comes back as protocol 1. A kept protocol-2 answer would send it a body.
+    daemon.setHandler(protocol1);
+    await expect(c.createNote(large)).resolves.toEqual({ ok: false, code: "too_large" });
     expect(methodsOf(daemon.connections)).toEqual([
       "notes.capabilities",
-      "notes.status",
+      "notes.create",
       "notes.status",
       "notes.capabilities",
-      "notes.create",
+      "notes.status",
     ]);
+    for (const connection of daemon.connections.slice(2)) {
+      expect(connection.writes).toHaveLength(1);
+      expect(connection.request.body).toBeUndefined();
+    }
   });
 });
 
@@ -686,6 +730,87 @@ describe("two-phase write", () => {
     expect(append.writes[1]?.toString("utf8")).toBe(text);
     expect(update.writes[1]?.toString("utf8")).toBe(text);
   });
+
+  it("rejects busy on a single-frame reply even after protocol 2 was negotiated", async () => {
+    const daemon = fakeDaemon(protocol2());
+    const c = client(daemon.connect);
+    expect(
+      (await c.createNote({ title: "Large", content: "a".repeat(INLINE_CONTENT_BYTES + 1) })).ok,
+    ).toBe(true);
+    daemon.setHandler((connection, bytes) => connection.reply(fail(parseFrame(bytes).id, "busy")));
+    await expect(c.status()).resolves.toEqual({ ok: false, code: "service_unavailable" });
+  });
+
+  it.each([
+    ["create", (c: NookdSocketClient) => c.createNote({ title: "Small", content: "x" })],
+    [
+      "append",
+      (c: NookdSocketClient) =>
+        c.appendNote({ id: "note-1", markdownFragment: "x", expectedRevision: REV } as never),
+    ],
+    [
+      "update",
+      (c: NookdSocketClient) =>
+        c.updateNote({
+          id: "note-1",
+          expectedRevision: REV,
+          patch: { content: "x" },
+        } as unknown as RpcNotesUpdateParams),
+    ],
+  ] as const)(
+    "bounds a single-frame %s reply's byte count by the inline cap, not WIRE_BODY_BYTES",
+    async (_name, run) => {
+      // A single frame carried at most the inline cap, so a larger count is not its answer.
+      const daemon = fakeDaemon((connection, bytes) => {
+        const request = parseFrame(bytes);
+        connection.reply(ok(request.id, resultFor(request, INLINE_CONTENT_BYTES + 1)));
+      });
+      await expect(run(client(daemon.connect))).resolves.toEqual({
+        ok: false,
+        code: "service_unavailable",
+      });
+      expect(daemon.connections).toHaveLength(1);
+      expect(daemon.connections[0]?.request.body).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["create", "content"],
+    ["append", "markdownFragment"],
+  ] as const)(
+    "reads a %s body field once, so a getter cannot swap in an unvalidated body",
+    async (method, field) => {
+      const daemon = fakeDaemon(protocol2());
+      const valid = "a".repeat(INLINE_CONTENT_BYTES + 1);
+      // Every later read returns something no validation would pass.
+      const hostile = "\u0000".repeat(WIRE_BODY_BYTES + 1);
+      let reads = 0;
+      const params: Record<string, unknown> =
+        method === "create" ? { title: "Getter" } : { id: "note-1", expectedRevision: REV };
+      Object.defineProperty(params, field, {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          return reads === 1 ? valid : hostile;
+        },
+      });
+      const c = client(daemon.connect);
+      const result =
+        method === "create"
+          ? await c.createNote(params as never)
+          : await c.appendNote(params as never);
+      expect(result.ok).toBe(true);
+      expect(reads).toBe(1);
+      const connection = daemon.connections[1] as FakeConnection;
+      const written = connection.writes[1] as Buffer;
+      expect(written.toString("utf8")).toBe(valid);
+      expect(connection.request.body).toEqual({
+        field,
+        bytes: valid.length,
+        sha256: sha256(Buffer.from(valid)),
+      });
+    },
+  );
 });
 
 describe("deadline over the whole exchange", () => {
@@ -752,6 +877,79 @@ describe("deadline over the whole exchange", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     await expect(pending).resolves.toEqual({ ok: false, code: "service_unavailable" });
     expect(daemon.connections[1]?.writes).toHaveLength(2);
+  });
+
+  /** Reports whether the call has returned yet, so a test can watch the clock. */
+  function track<T>(pending: Promise<T>): { readonly settled: () => boolean } {
+    let done = false;
+    pending
+      .finally(() => {
+        done = true;
+      })
+      .catch(() => undefined);
+    return { settled: () => done };
+  }
+
+  it("fails within the configured deadline when the probe stalls, not a multiple of it", async () => {
+    vi.useFakeTimers();
+    // Neither probe is ever answered: separately timed, each would take the whole deadline.
+    const daemon = fakeDaemon(() => undefined);
+    const pending = client(daemon.connect, 1_000).createNote({
+      title: "Large",
+      content: "a".repeat(INLINE_CONTENT_BYTES + 1),
+    });
+    const watch = track(pending);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(watch.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(watch.settled()).toBe(true);
+    await expect(pending).resolves.toEqual({ ok: false, code: "service_unavailable" });
+    // The expired deadline also stops the fallback probe from connecting.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(methodsOf(daemon.connections)).toEqual(["notes.capabilities"]);
+    expect(daemon.connections[0]?.destroyed).toBe(true);
+  });
+
+  it("gives the body exchange only what the probe left of the deadline", async () => {
+    vi.useFakeTimers();
+    const daemon = fakeDaemon((connection, bytes) => {
+      const request = parseFrame(bytes);
+      // The probe answers at 600 ms and the continue 600 ms after the header:
+      // inside a fresh deadline per phase, outside one for the whole request.
+      const answer =
+        request.method === "notes.capabilities"
+          ? ok(request.id, { kind: "capabilities", protocol: 2 })
+          : ok(request.id, { kind: "body_continue", bytes: request.body?.bytes ?? 0 });
+      globalThis.setTimeout(() => connection.reply(answer), 600);
+    });
+    const pending = client(daemon.connect, 1_000).createNote({
+      title: "Large",
+      content: "a".repeat(INLINE_CONTENT_BYTES + 1),
+    });
+    const watch = track(pending);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(watch.settled()).toBe(true);
+    await expect(pending).resolves.toEqual({ ok: false, code: "service_unavailable" });
+    expect(methodsOf(daemon.connections)).toEqual(["notes.capabilities", "notes.create"]);
+    // The continue never arrived in time, so no body byte was written.
+    expect(daemon.connections[1]?.writes).toHaveLength(1);
+  });
+
+  it("bounds a call waiting on a probe another call started", async () => {
+    vi.useFakeTimers();
+    const daemon = fakeDaemon(() => undefined);
+    const c = client(daemon.connect, 1_000);
+    const large = { title: "Large", content: "a".repeat(INLINE_CONTENT_BYTES + 1) };
+    const first = c.createNote(large);
+    await vi.advanceTimersByTimeAsync(500);
+    const second = c.createNote(large);
+    const watch = track(second);
+    // The second call shares the first call's probe rather than starting its own.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(watch.settled()).toBe(true);
+    await expect(first).resolves.toEqual({ ok: false, code: "service_unavailable" });
+    await expect(second).resolves.toEqual({ ok: false, code: "service_unavailable" });
+    expect(methodsOf(daemon.connections)).toEqual(["notes.capabilities"]);
   });
 });
 
