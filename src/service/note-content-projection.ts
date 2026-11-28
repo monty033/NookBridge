@@ -44,9 +44,10 @@ const bufferByteLength = Buffer.byteLength;
 /**
  * Bounded Markdown content size for `notes.get` when the read carries no
  * `accept`. It is the single-frame response bound, so the two are equal by
- * definition. A body-framed read does not raise this value: it uses the bound
- * it negotiated (`bodyBound ?? MAX_PROJECTION_MARKDOWN_BYTES`), and only text a
- * declared body cannot carry comes back under this one.
+ * definition. A body-framed read that can send Markdown as a declared body
+ * does not raise this value: it uses the bound it negotiated. Text a declared
+ * body cannot carry is measured here, so the answer matches the read without
+ * `accept`.
  */
 const MAX_PROJECTION_MARKDOWN_BYTES = PROJECTION_MARKDOWN_BYTES;
 
@@ -122,9 +123,11 @@ export interface ClassifyNoteContentInput {
   readonly requestId: string;
   /**
    * Present only for a read that offered to take its Markdown as a declared
-   * response body: the projection is then bounded by this value instead of
-   * `PROJECTION_MARKDOWN_BYTES`, and is not charged to the header frame's
-   * preflight because it does not travel in that frame. The daemon passes
+   * response body: when the Markdown can travel as one, the projection is
+   * bounded by this value instead of `PROJECTION_MARKDOWN_BYTES` and is charged
+   * the declaration, not the whole Markdown, in the header preflight. Markdown
+   * a body cannot carry keeps `PROJECTION_MARKDOWN_BYTES` and the inline
+   * charge, so the answer matches the read without `accept`. The daemon passes
    * `min(accept.bodyBytes, WIRE_BODY_BYTES)`; it is never raised here.
    */
   readonly bodyMarkdownBytes?: number;

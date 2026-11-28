@@ -255,8 +255,10 @@ export interface RpcHandlerOptions {
   readonly bodyPath?: boolean;
   /**
    * The `notes.get` projection bound for a request that carried `accept`:
-   * `min(accept.bodyBytes, WIRE_BODY_BYTES)`, computed by the daemon. Absent,
-   * the projection keeps the single-frame bound exactly as before.
+   * `min(accept.bodyBytes, WIRE_BODY_BYTES)`, computed by the daemon. It applies
+   * only to Markdown that can travel as a declared body; Markdown that cannot
+   * keeps the single-frame bound. Absent, the projection keeps that bound
+   * exactly as before.
    */
   readonly markdownBodyBytes?: number;
 }

@@ -70,10 +70,12 @@ export const RPC_FRAME_BYTES = 65_536;
  * response frame from this value.
  *
  * This is the single-frame read budget: it bounds the JSON a caller can pull
- * out in one reply frame. It bounds a note's projection only through
- * `PROJECTION_MARKDOWN_BYTES`, and only for a read without `accept`; a read
- * that carries `accept` is bounded by `WIRE_BODY_BYTES` instead (see there),
- * and only its header has to fit this frame.
+ * out in one reply frame. A note's projection is bounded through
+ * `PROJECTION_MARKDOWN_BYTES`, which is this value. A read that carries
+ * `accept` may send Markdown it can carry as a declared body under
+ * `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead, with only its header in
+ * this frame; Markdown a body cannot carry is still bounded and answered by
+ * this frame, exactly as the read without `accept` is.
  */
 export const RPC_RESPONSE_BYTES = 65_536;
 
@@ -240,12 +242,12 @@ export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
  * shape projects within it, so do not read the allowance as a proven bound.
  * Nothing depends on it holding — a body over it is refused, never truncated.
  *
- * It governs both directions. A request body is refused above it. A note read
- * that carries `accept` has its projection bounded by
+ * It governs both directions. A request body is refused above it. For a note
+ * read that carries `accept`, Markdown the body path can carry is bounded by
  * `min(accept.bodyBytes, WIRE_BODY_BYTES)` — refused `oversize` above that,
- * never truncated — and the Markdown then travels as a declared response body
- * of at most this many bytes. A read without `accept` is still bounded by
- * `PROJECTION_MARKDOWN_BYTES`.
+ * never truncated — and then travels as a declared response body of at most
+ * this many bytes. Markdown a body cannot carry, and every read without
+ * `accept`, is bounded by `PROJECTION_MARKDOWN_BYTES`.
  */
 export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
 

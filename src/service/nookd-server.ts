@@ -1266,6 +1266,10 @@ function withoutAccept(request: RpcAcceptRequest): RpcRequest {
  * connection closes with nothing sent exactly as it does without `accept`.
  * Over it, the answer is `oversize`, as it is without `accept`. The body path
  * therefore never refuses anything the inline path would answer.
+ *
+ * The projection has already made that decision, so the refusal below is
+ * defensive: it keeps this function honest if a caller ever passes Markdown the
+ * projection did not classify.
  */
 function splitMarkdownBody(
   response: RpcAnyResponseEnvelope,

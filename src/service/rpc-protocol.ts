@@ -164,9 +164,11 @@ export interface RpcBodyDeclaration {
 
 /**
  * A protocol-2 reader's offer to take note content as a declared response
- * body of at most `bodyBytes` raw bytes. The daemon bounds the projection by
- * the smaller of this and `WIRE_BODY_BYTES`; it is an offer, not a request for
- * a body, and a result that carries no content is still one frame.
+ * body of at most `bodyBytes` raw bytes. For Markdown that can travel as a
+ * body, the daemon bounds the projection by the smaller of this and
+ * `WIRE_BODY_BYTES`; Markdown a body cannot carry stays on the single-frame
+ * bound. It is an offer, not a request for a body, and a result that carries no
+ * content is still one frame.
  */
 export interface RpcBodyAccept {
   readonly bodyBytes: number;
