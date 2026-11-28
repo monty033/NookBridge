@@ -10,15 +10,15 @@ release entries describe the supported boundary at the time of the release.
 - Protocol-2 response bodies for note reads. A daemon that advertises protocol 2
   can return note Markdown as a declared body when the caller offers to accept
   one, so a read that answered `oversize` only because the Markdown did not fit
-  one frame now returns the whole note, provided the stored row is under the
-  read threshold and the text can be carried as a body.
+  one frame can now return the whole note, when the body slot is free and the
+  Markdown fits the accepted bound.
   A read still goes out as a single frame first and is retried with `accept` only
   when it does not fit, so concurrent reads never contend for the body slot and
   callers that do not negotiate see byte-identical results. The content ceiling
-  this project wants is Notesnook's own; today's bounds — the stored-row read
-  threshold, the response budget and the wire body bound — are staging values
+  this project wants is Notesnook's own; today's content bounds — the stored-row
+  read threshold, the wire body bound and the decoder limits — are staging values
   that come from decoding, projection and encoding running on the daemon's main
-  thread, and issue #337 removes them.
+  thread, and issue #337 replaces them with Notesnook's own limits.
 - Optional `operatorAccess` service-configuration block. It maps groups or users
   to the capability families `discover`, `read`, `write`, `conflict` and
   `admin`, is deny-by-default and has no deny entries, and is evaluated by the

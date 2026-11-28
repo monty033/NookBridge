@@ -34,7 +34,7 @@ does not expose a TCP or HTTP listener.
 ## Privacy boundary for agents
 
 `notesnook_get_note` returns a bounded, decoded Markdown content view
-(`contentStatus: "ok"`) for unlocked notes within the response size bound;
+(`contentStatus: "ok"`) for unlocked notes within the applicable size bound;
 Vault-locked notes never have their content read (the reader is not called
 once metadata reports `locked`) and oversize content is withheld
 categorically. This is a deliberate, owner-authorized exposure for local/
@@ -42,7 +42,7 @@ self-hosted deployments: access is managed via Notesnook's own per-note Vault
 lock and the deployment's permission settings, not by withholding content
 from every caller.
 
-The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance, the echoed request id, and the note's charged metadata (id, title, revision and notebook id), measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.
+The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance, the echoed request id, and the note's charged metadata (id, title, revision and notebook id), measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character. That is the bound for a read that does not offer to accept a response body; a protocol-2 body read is bounded as described below.
 
 The intended content limit is Notesnook's, not this project's: NookBridge must
 not withhold note content that Notesnook itself accepts. That limit is not in
@@ -50,27 +50,37 @@ force yet, and the bounds below are staging values rather than policy.
 
 A read is bounded in several places. A stored content row over
 `STORED_CONTENT_READ_BYTES` (262,144 bytes) is refused before any projection
-runs, and the caller sees `unavailable` rather than `oversize`; for a
-body-framed read of a large note that threshold binds before the response
-budget. A read without `accept` is bounded by the response budget (65,536 bytes
-less the envelope allowance and the note's charged metadata). A protocol-2
-caller may offer to accept a response body (`accept: { bodyBytes }`), which
-raises that read's bound to the smaller of its offer and `WIRE_BODY_BYTES`
-(524,288 bytes).
+runs, and the caller sees `unavailable` rather than `oversize` — on every read,
+framed or not, so a read that answered `oversize` is already under that
+threshold. A read without `accept` is bounded by the response budget (65,536
+bytes less the envelope allowance and the note's charged metadata). A
+protocol-2 caller may offer to accept a response body (`accept: { bodyBytes }`),
+which raises that read's content bound to the smaller of its offer and
+`WIRE_BODY_BYTES` (524,288 bytes). That is twice the stored-row threshold, so a
+body read of a large note still hits the threshold first.
 
-Text a declared body cannot carry is not delivered at all. Markdown that is not
-well-formed UTF-16, or that holds a disallowed control character, falls back to
-the single-frame bound; there the serializer refuses it and the connection
-closes with nothing sent, exactly as before this framing existed.
+Text a declared body cannot carry goes back to the single-frame answer rather
+than being sent as a body. A lone surrogate is delivered inline as a JSON
+escape. A disallowed control character is refused by the serializer and the
+connection closes with nothing sent. Either of them over the single-frame bound
+is answered `oversize`. A client only offers to accept a body after a
+single-frame `oversize`, so in that flow the answer is `oversize`.
 
-The document decoder bounds (`PROJECTION_HTML_BYTES`, `NATIVE_DOCUMENT_BYTES`
-and the `DOCUMENT_*` limits) bound how much the native decoder will attempt.
-Content beyond them is not refused: it takes the read-only Markdown fallback,
-whose own token and depth caps then decide whether any Markdown is produced.
+Stored HTML larger than `PROJECTION_HTML_BYTES` is refused (`unavailable`)
+rather than tokenised; that cap is the read-only Markdown fallback's own input
+bound, and on the read path it equals the stored-row threshold, so it never
+binds there. `NATIVE_DOCUMENT_BYTES` and the `DOCUMENT_*` limits bound how much
+the native decoder will attempt, and content beyond them takes the read-only
+Markdown fallback, whose own byte, token and depth caps decide whether any
+Markdown is produced.
 
-These bounds are staging values rather than policy. They exist because decoding,
-projection and encoding run on the daemon's main thread; issue #337 moves that
-work into a document worker and replaces them with Notesnook's own limits.
+The content bounds here are staging values rather than policy, because decoding,
+projection and encoding run on the daemon's main thread: the stored-row
+threshold, the wire body bound, `PROJECTION_MARKDOWN_BYTES` and the decoder
+limits are replaced with Notesnook's own limits by issue #337. The single-frame
+response budget is not one of them — it is the frame every client has to
+accept, and a caller that does not negotiate a body stays bound by it whatever
+#337 does.
 
 The conditions do not change with the bound. A Vault-locked note still never has
 its content read, content over the applicable bound is still withheld rather
