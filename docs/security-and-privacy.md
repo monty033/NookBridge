@@ -76,11 +76,12 @@ Markdown is produced.
 
 The content bounds here are staging values rather than policy, because decoding,
 projection and encoding run on the daemon's main thread: the stored-row
-threshold, the wire body bound, `PROJECTION_MARKDOWN_BYTES` and the decoder
-limits are replaced with Notesnook's own limits by issue #337. The single-frame
-response budget is not one of them — it is the frame every client has to
-accept, and a caller that does not negotiate a body stays bound by it whatever
-#337 does.
+threshold, the wire body bound, the decoder limits and the fallback's byte,
+token and depth caps are replaced with Notesnook's own limits by issue #337.
+Neither the single-frame response budget nor `PROJECTION_MARKDOWN_BYTES` is one
+of them — the budget is the frame every client has to accept and
+`PROJECTION_MARKDOWN_BYTES` is defined as it, so a caller that does not
+negotiate a body stays bound by the frame whatever #337 does.
 
 The conditions do not change with the bound. A Vault-locked note still never has
 its content read, content over the applicable bound is still withheld rather

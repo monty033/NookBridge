@@ -81,7 +81,9 @@ export const RPC_RESPONSE_BYTES = 65_536;
  * body-framed read can size its projection independently: a read with
  * `accept` is bounded by `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead, and
  * this value does not apply to it — except to Markdown a declared body cannot
- * carry (a lone surrogate), which goes back in one frame under this bound.
+ * carry: a lone surrogate, or a disallowed control character. Both go back in
+ * one frame under this bound, answered inline or refused by the serializer
+ * exactly as a read without `accept` is.
  */
 export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
@@ -333,8 +335,13 @@ export const DOCUMENT_REFERENCE_LABEL_BYTES = 256;
  * Its input is any stored HTML the read path may meet, not only the HTML the
  * strict decoder rejected: the discovery and write-runner paths project
  * stored content directly, and only the read path reaches it as a fallback.
+ *
+ * Derived from `STORED_CONTENT_READ_BYTES` rather than repeating the literal:
+ * both measure the same stored `data` string, so equal values mean this cap
+ * cannot bind before the read threshold. As an independent literal it would
+ * start refusing HTML that passes the threshold the moment that threshold rises.
  */
-export const PROJECTION_HTML_BYTES = 262_144;
+export const PROJECTION_HTML_BYTES = STORED_CONTENT_READ_BYTES;
 
 // ---------------------------------------------------------------------------
 // Operator CLI and journals.
