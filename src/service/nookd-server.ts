@@ -42,6 +42,7 @@ import {
   createRpcFrameParser,
   createRpcResponseSerializer,
   isRpcProtocolOversizeError,
+  type RpcAcceptRequest,
   type RpcAnyResponseEnvelope,
   type RpcBodyRequest,
   type RpcErrorCode,
@@ -64,7 +65,7 @@ import { isOperatorTransportMethod } from "./operator-methods.js";
 import type { OperatorPeer } from "./operator-server.js";
 import { defaultPeerCredentialHelperPath, resolvePeerAsync } from "./peer-credentials.js";
 import type { Logger } from "../logging/logger.js";
-import { RPC_FRAME_BYTES } from "../core/size-limits.js";
+import { RPC_FRAME_BYTES, WIRE_BODY_BYTES } from "../core/size-limits.js";
 
 const FRAME_PREFIX_BYTES = 4;
 const MAX_FRAME_BYTES_ON_WIRE = RPC_FRAME_BYTES;
@@ -690,6 +691,36 @@ export async function startNookdServer(
     destroyConnection(state);
   }
 
+  /**
+   * Write a body-framed response: the header, then exactly the declared raw
+   * bytes. The exchange runs under the same absolute deadline as a received
+   * body, so a peer that stops reading cannot hold the connection and the
+   * buffered body indefinitely. Any failure, including that deadline, destroys
+   * the connection; nothing about the exchange outlives it.
+   */
+  async function writeHeaderAndBody(
+    state: ConnectionState,
+    header: Uint8Array,
+    body: Buffer,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof scheduleTimeout> | undefined;
+    const expired = new Promise<false>((resolve) => {
+      timer = scheduleTimeout(() => {
+        destroyConnection(state);
+        resolve(false);
+      }, normalized.abuseBounds.bodyReceiveTimeoutMs);
+    });
+    try {
+      const wrote = await Promise.race([
+        writeFrame(state, header).then((ok) => ok && writeFrame(state, body)),
+        expired,
+      ]);
+      return wrote;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   function processConnection(state: ConnectionState): void {
     if (state.processing || state.closed || state.closing) return;
     state.processing = true;
@@ -796,6 +827,8 @@ export async function startNookdServer(
           const usedBody = request.body !== undefined;
           let handlerRequest: RpcRequest;
           let bodyLease: LargeBodyLease | undefined;
+          // Set only for a read that carried `accept`: the projection bound.
+          let acceptBodyBytes: number | undefined;
           if (request.body !== undefined) {
             // Bytes coalesced with the header arrived before continue could be
             // written. They are framing violations, never pending body data.
@@ -916,6 +949,11 @@ export async function startNookdServer(
               destroyConnection(state);
               break;
             }
+          } else if (request.accept !== undefined) {
+            // The offer bounds the projection; it is not part of the request
+            // the handler authorizes, so it never reaches the handler.
+            handlerRequest = withoutAccept(request);
+            acceptBodyBytes = Math.min(request.accept.bodyBytes, WIRE_BODY_BYTES);
           } else {
             handlerRequest = request;
           }
@@ -935,6 +973,7 @@ export async function startNookdServer(
                 })
               : handleRpcRequest(handlerRequest, normalized.runtime, normalized.policy, {
                   bodyPath: usedBody,
+                  ...(acceptBodyBytes === undefined ? {} : { markdownBodyBytes: acceptBodyBytes }),
                 });
           if (bodyLease !== undefined) {
             const lease = bodyLease;
@@ -1020,8 +1059,16 @@ export async function startNookdServer(
             phase,
           );
           let responseFrame: Uint8Array;
+          let responseBody: Buffer | undefined;
           try {
-            responseFrame = serializeDaemonRpcResponse(response);
+            // The handler has already produced the whole projection, so the
+            // header and every body byte exist before anything is written.
+            const split =
+              acceptBodyBytes === undefined
+                ? undefined
+                : splitMarkdownBody(response, acceptBodyBytes);
+            responseFrame = serializeDaemonRpcResponse(split?.header ?? response);
+            responseBody = split?.body;
           } catch {
             // In particular, do not attempt to serialize a second error when
             // the original response itself exceeded the published bound.
@@ -1031,7 +1078,10 @@ export async function startNookdServer(
           // From the response write on, a following byte is the peer's next
           // request. There is no await between this and writeFrame issuing it.
           state.bodyAwaitingResponse = false;
-          const wrote = await writeFrame(state, responseFrame);
+          const wrote =
+            responseBody === undefined
+              ? await writeFrame(state, responseFrame)
+              : await writeHeaderAndBody(state, responseFrame, responseBody);
           if (!wrote) {
             destroyConnection(state);
             break;
@@ -1090,6 +1140,87 @@ function attachRpcBody(request: RpcBodyRequest, value: string): RpcRequest {
       params,
     }),
   ) as RpcRequest;
+}
+
+/** The `notes.get` request the handler sees: the same read without the offer. */
+function withoutAccept(request: RpcAcceptRequest): RpcRequest {
+  return Object.freeze(
+    Object.assign(Object.create(null), {
+      id: request.id,
+      method: request.method,
+      params: request.params,
+    }),
+  ) as RpcRequest;
+}
+
+/**
+ * Turn an accepted read's content into a header and the raw bytes it
+ * declares. `undefined` means the result goes as one frame unchanged: any
+ * result without content (`locked`, `oversize`, `unavailable`, an error), and
+ * an empty note, because a declared body is at least one byte.
+ *
+ * The checks repeat what the single-frame serializer applies to inline
+ * Markdown, so content it would refuse is not delivered by the other route; a
+ * failure throws and the caller closes the connection with nothing sent.
+ */
+function splitMarkdownBody(
+  response: RpcAnyResponseEnvelope,
+  bound: number,
+): { readonly header: RpcAnyResponseEnvelope; readonly body: Buffer } | undefined {
+  if (!response.ok || response.result.kind !== "note") return undefined;
+  const result = response.result;
+  if (result.contentStatus !== "ok") return undefined;
+  const markdown = result.markdown;
+  if (typeof markdown !== "string") throw new Error("note result carries no markdown");
+  if (markdown.length === 0) return undefined;
+  if (!isWellFormedUtf16(markdown) || hasDisallowedMarkdownControl(markdown)) {
+    throw new Error("note markdown is not deliverable");
+  }
+  const body = Buffer.from(markdown, "utf8");
+  if (body.length !== result.markdownBytes || body.length > bound) {
+    throw new Error("note markdown does not match its declared size");
+  }
+  const header: RpcAnyResponseEnvelope = {
+    id: response.id,
+    ok: true,
+    result: {
+      kind: "note",
+      note: result.note,
+      contentStatus: "ok",
+      markdownBytes: body.length,
+    },
+    body: {
+      field: "markdown",
+      bytes: body.length,
+      sha256: createHash("sha256").update(body).digest("hex"),
+    },
+  };
+  return { header, body };
+}
+
+/** A lone surrogate would be replaced on encoding rather than carried. */
+function isWellFormedUtf16(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The serializer's rule for inline Markdown: tab, LF and CR only. */
+function hasDisallowedMarkdownControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 /** Alias retained for callers that use a factory-style name. */

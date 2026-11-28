@@ -253,6 +253,12 @@ type RpcHandlerResponse<T extends RpcRequest> = T extends RpcNotesSearchRequest
 export interface RpcHandlerOptions {
   /** Use the raw-body bound only after the daemon has verified and attached a body. */
   readonly bodyPath?: boolean;
+  /**
+   * The `notes.get` projection bound for a request that carried `accept`:
+   * `min(accept.bodyBytes, WIRE_BODY_BYTES)`, computed by the daemon. Absent,
+   * the projection keeps the single-frame bound exactly as before.
+   */
+  readonly markdownBodyBytes?: number;
 }
 
 export async function handleRpcRequest<T extends RpcRequest>(
@@ -266,6 +272,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
   // We extract id here so the categorical wrapper below sees a
   // pre-resolved value (already empty-fallback on hostile input).
   const id = extractRequestId(request);
+  const markdownBodyBytes = normaliseMarkdownBodyBytes(options.markdownBodyBytes);
   try {
     const structural = validateRequestStructurally(
       request,
@@ -295,6 +302,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
           structural.request,
           runtime,
           id,
+          markdownBodyBytes,
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -319,12 +327,18 @@ export async function handleRpcRequest<T extends RpcRequest>(
           if (!authorizeEveryContext(policy, "notes.get", resolved.contexts)) {
             return buildErrorEnvelope(id, "permission_denied") as unknown as RpcHandlerResponse<T>;
           }
-          return (await runNotesGet(structural.request, runtime, id, {
-            note: resolved.note,
-            basis: resolved.basis,
-            // Same code the id form's own authorization failure answers with.
-            refusal: "permission_denied",
-          })) as unknown as RpcHandlerResponse<T>;
+          return (await runNotesGet(
+            structural.request,
+            runtime,
+            id,
+            {
+              note: resolved.note,
+              basis: resolved.basis,
+              // Same code the id form's own authorization failure answers with.
+              refusal: "permission_denied",
+            },
+            markdownBodyBytes,
+          )) as unknown as RpcHandlerResponse<T>;
         }
         const target = exactNotePathInput(structural.request.params);
         const parsedPath = parseExactNotePath(target);
@@ -363,6 +377,7 @@ export async function handleRpcRequest<T extends RpcRequest>(
           id,
           // The path form answers a denied resolved note as a missing path.
           { note: actual.note, basis: actual.basis, refusal: "not_found" },
+          markdownBodyBytes,
         )) as unknown as RpcHandlerResponse<T>;
       }
 
@@ -985,6 +1000,7 @@ async function runAuthorizedRpcMethod(
   request: RpcRequest,
   runtime: RpcHandlerRuntimeLike,
   id: string,
+  markdownBodyBytes?: number,
 ): Promise<RpcAnyResponseEnvelope> {
   switch (request.method) {
     case "notes.capabilities":
@@ -996,7 +1012,7 @@ async function runAuthorizedRpcMethod(
     case "notes.list_notebooks":
       return runNotesListNotebooks(request, runtime, id);
     case "notes.get":
-      return runNotesGet(request, runtime, id);
+      return runNotesGet(request, runtime, id, undefined, markdownBodyBytes);
     case "notes.create":
       return runNotesCreate(request, runtime, id);
     case "notes.append":
@@ -2081,6 +2097,7 @@ async function runNotesGet(
   runtime: RpcHandlerRuntimeLike,
   id: string,
   authorised?: PreAuthorisedNote,
+  markdownBodyBytes?: number,
 ): Promise<RpcAnyResponseEnvelope> {
   // Path-form requests reach here directly when no settings evaluator is
   // configured (the evaluator branch rewrites them to an id first). Resolve
@@ -2160,6 +2177,7 @@ async function runNotesGet(
       noteId,
       note,
       id,
+      markdownBodyBytes,
     );
   }
   const { contentStatus, contentReason, markdown, markdownBytes } = read;
@@ -2199,6 +2217,16 @@ async function runNotesGet(
   return buildResultSuccessEnvelope(id, result);
 }
 
+/**
+ * The body-framed projection bound, or `undefined` for the single-frame read.
+ * Never above `WIRE_BODY_BYTES` whatever the caller passed; a value that is not
+ * a positive safe integer is treated as no offer rather than guessed at.
+ */
+function normaliseMarkdownBodyBytes(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return undefined;
+  return value > WIRE_BODY_BYTES ? WIRE_BODY_BYTES : value;
+}
+
 type BoundedNoteRead = {
   readonly contentStatus: "ok" | "locked" | "oversize" | "unavailable";
   readonly contentReason?: "reader_unavailable" | "read_failed";
@@ -2221,6 +2249,7 @@ function readBoundedNoteContent(
   noteId: string,
   note: Record<string, unknown>,
   requestId: string,
+  bodyMarkdownBytes?: number,
 ): BoundedNoteRead {
   const classification = classifyNoteContentProjection({
     contentRefusal,
@@ -2228,6 +2257,7 @@ function readBoundedNoteContent(
     noteId,
     note,
     requestId,
+    ...(bodyMarkdownBytes === undefined ? {} : { bodyMarkdownBytes }),
   });
   if (classification.outcome === "locked") return { contentStatus: "locked" };
   if (classification.outcome === "oversize") return { contentStatus: "oversize" };

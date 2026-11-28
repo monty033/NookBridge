@@ -120,7 +120,21 @@ export interface ClassifyNoteContentInput {
   readonly noteId: string;
   readonly note: Record<string, unknown>;
   readonly requestId: string;
+  /**
+   * Present only for a read that offered to take its Markdown as a declared
+   * response body: the projection is then bounded by this value instead of
+   * `PROJECTION_MARKDOWN_BYTES`, and is not charged to the header frame's
+   * preflight because it does not travel in that frame. The daemon passes
+   * `min(accept.bodyBytes, WIRE_BODY_BYTES)`; it is never raised here.
+   */
+  readonly bodyMarkdownBytes?: number;
 }
+
+/**
+ * The bytes a body-framed header carries in place of the Markdown: the field
+ * name and a hex SHA-256. Charged so the preflight still covers the header.
+ */
+const BODY_DECLARATION_CHARGE: readonly string[] = ["markdown", "0".repeat(64)];
 
 function readOwnBooleanField(record: Record<string, unknown>, key: string): boolean | undefined {
   try {
@@ -241,7 +255,10 @@ export function classifyNoteContentProjection(
         : nothing),
     } as const;
     const oversize = { ...result, outcome: "oversize", ...nothing } as const;
-    if (markdownBytes > MAX_PROJECTION_MARKDOWN_BYTES) return oversize;
+    // The whole projection exists before this point, so a refusal here is
+    // categorical: nothing is truncated to fit either bound.
+    const bodyBound = input.bodyMarkdownBytes;
+    if (markdownBytes > (bodyBound ?? MAX_PROJECTION_MARKDOWN_BYTES)) return oversize;
     // Mirror the serializer's preflight over every response-owned string field
     // it will charge, so the census classifies a note the same way a read does.
     const charged: string[] = [input.requestId];
@@ -249,7 +266,8 @@ export function classifyNoteContentProjection(
       const value = input.note[key];
       if (typeof value === "string") charged.push(value);
     }
-    charged.push(markdown);
+    if (bodyBound === undefined) charged.push(markdown);
+    else charged.push(...BODY_DECLARATION_CHARGE);
     if (!fitsResponsePreflight(charged)) return oversize;
     return { ...result, markdown, markdownBytes };
   } catch {
