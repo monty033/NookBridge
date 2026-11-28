@@ -81,13 +81,14 @@ export const RPC_RESPONSE_BYTES = 65_536;
  * Largest Markdown projection produced for a note read without `accept` — the
  * projection a single-frame reply carries inline.
  *
- * It names the second job `RPC_RESPONSE_BYTES` used to do alone, so that a
- * body-framed read can size its projection independently: a read with
- * `accept` is bounded by `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead, and
- * this value does not apply to it — except to Markdown a declared body cannot
- * carry: a lone surrogate, or a disallowed control character. Both go back in
- * one frame under this bound, answered inline or refused by the serializer
- * exactly as a read without `accept` is.
+ * Derived, and equal to `RPC_RESPONSE_BYTES` by definition: a read that carries
+ * no `accept` is bounded by the frame it has to fit. It is not a value that
+ * could drift from the frame, and a body-framed read does not raise it — that
+ * read is bounded by `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead. This
+ * value still applies to Markdown a declared body cannot carry: a lone
+ * surrogate, or a disallowed control character. Both go back to the bound the
+ * same read without `accept` would get, answered inline or refused by the
+ * serializer exactly as that read is.
  */
 export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
@@ -232,11 +233,12 @@ export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
 /**
  * Largest declared raw body carried alongside an RPC header frame.
  *
- * The 2x is a budget choice, not a derived invariant: it is chosen so that a
- * writable row's projection and escaping have room, and no test establishes
- * that every stored shape projects within it. Nothing depends on the allowance
- * holding — a body over it is refused, never truncated — but do not read it as
- * a proven bound.
+ * Derived from `ADMISSION_ROW_BYTES`, though the factor is a budget choice
+ * rather than a derived invariant: the multiple keeps wire sizing from
+ * outrunning what admission accepts, and the 2 is chosen so a writable row's
+ * projection and escaping have room. No test establishes that every stored
+ * shape projects within it, so do not read the allowance as a proven bound.
+ * Nothing depends on it holding — a body over it is refused, never truncated.
  *
  * It governs both directions. A request body is refused above it. A note read
  * that carries `accept` has its projection bounded by

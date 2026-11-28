@@ -206,6 +206,42 @@ export function fitsSingleFrameNoteProjection(
   return fitsResponsePreflight(charged);
 }
 
+/**
+ * Can this Markdown travel as a declared body? Raw bytes cannot carry a lone
+ * surrogate (encoding would replace it), and the body path must not deliver a
+ * control character the inline serializer refuses. Both therefore go back to
+ * the single-frame bound, and the daemon's split uses this same predicate so
+ * the projection and the framing agree on which bound applies.
+ */
+export function canCarryMarkdownAsBody(markdown: string): boolean {
+  return isWellFormedUtf16(markdown) && !hasDisallowedMarkdownControl(markdown);
+}
+
+/** A lone surrogate would be replaced on encoding rather than carried. */
+function isWellFormedUtf16(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The serializer's rule for inline Markdown: tab, LF and CR only. */
+function hasDisallowedMarkdownControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function readOnlyMarkdownFallback(envelope: unknown): string {
   if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
   const candidate = envelope as { type?: unknown; data?: unknown };
@@ -286,12 +322,17 @@ export function classifyNoteContentProjection(
     // The whole projection exists before this point, so a refusal here is
     // categorical: nothing is truncated to fit either bound.
     const bodyBound = input.bodyMarkdownBytes;
-    if (markdownBytes > (bodyBound ?? MAX_PROJECTION_MARKDOWN_BYTES)) return oversize;
+    // Markdown a declared body cannot carry is measured against the bound the
+    // same read without `accept` would get, not against the offer: otherwise a
+    // small offer alone would turn an inline answer into `oversize`.
+    const carriesBody = bodyBound !== undefined && canCarryMarkdownAsBody(markdown);
+    if (markdownBytes > (carriesBody ? (bodyBound as number) : MAX_PROJECTION_MARKDOWN_BYTES))
+      return oversize;
     // Mirror the serializer's preflight over every response-owned string field
     // it will charge, so the census classifies a note the same way a read does.
     const charged = chargedNoteFields(input.requestId, input.note);
-    if (bodyBound === undefined) charged.push(markdown);
-    else charged.push(...BODY_DECLARATION_CHARGE);
+    if (carriesBody) charged.push(...BODY_DECLARATION_CHARGE);
+    else charged.push(markdown);
     if (!fitsResponsePreflight(charged)) return oversize;
     return { ...result, markdown, markdownBytes };
   } catch {

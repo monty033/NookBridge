@@ -31,7 +31,10 @@ import {
   type ServiceAbuseBounds,
 } from "./service-abuse-bounds.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "./rpc-handler.js";
-import { fitsSingleFrameNoteProjection } from "./note-content-projection.js";
+import {
+  canCarryMarkdownAsBody,
+  fitsSingleFrameNoteProjection,
+} from "./note-content-projection.js";
 import {
   createReadOnlyServicePolicy,
   narrowServicePolicy,
@@ -1274,7 +1277,9 @@ function splitMarkdownBody(
   const markdown = result.markdown;
   if (typeof markdown !== "string") throw new Error("note result carries no markdown");
   if (markdown.length === 0) return undefined;
-  if (hasDisallowedMarkdownControl(markdown) || !isWellFormedUtf16(markdown)) {
+  if (!canCarryMarkdownAsBody(markdown)) {
+    // The projection already measured this against the single-frame bound, so
+    // reaching here means the answer is the one a read without `accept` gives.
     if (fitsSingleFrameNoteProjection(response.id, result.note, markdown)) return undefined;
     return {
       header: {
@@ -1304,31 +1309,6 @@ function splitMarkdownBody(
     },
   };
   return { header, body };
-}
-
-/** A lone surrogate would be replaced on encoding rather than carried. */
-function isWellFormedUtf16(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** The serializer's rule for inline Markdown: tab, LF and CR only. */
-function hasDisallowedMarkdownControl(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
 }
 
 /** Alias retained for callers that use a factory-style name. */

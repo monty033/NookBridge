@@ -513,32 +513,43 @@ describe("locked and failed reads with accept", () => {
   });
 
   it("answers a lone surrogate exactly as the read without accept does", async () => {
-    // No mock: a stored HTML note whose projection really is not well-formed.
-    for (const name of ["surrogate", "surrogateLarge"]) {
-      const markdown = projectionOf(name);
-      expect(markdown, name).toContain("\uD83D");
-      // Encoding replaces a lone surrogate, so the round trip differs.
-      expect(Buffer.from(markdown, "utf8").toString("utf8"), name).not.toBe(markdown);
-    }
-    expect(Buffer.byteLength(projectionOf("surrogate"))).toBeLessThan(PROJECTION_MARKDOWN_BYTES);
-    expect(Buffer.byteLength(projectionOf("surrogateLarge"))).toBeGreaterThan(
-      PROJECTION_MARKDOWN_BYTES,
-    );
+    // No mock for the first case: a stored HTML note whose projection really is
+    // not well-formed.
+    const markdown = projectionOf("surrogate");
+    expect(markdown).toContain("\uD83D");
+    // Encoding replaces a lone surrogate, so the round trip differs.
+    expect(Buffer.from(markdown, "utf8").toString("utf8")).not.toBe(markdown);
+    expect(Buffer.byteLength(markdown)).toBeLessThan(PROJECTION_MARKDOWN_BYTES);
+
     const { socketPath } = await daemon();
-    for (const [name, status] of [
-      ["surrogate", "ok"],
-      ["surrogateLarge", "oversize"],
-    ] as const) {
-      const accepted = await exchange(socketPath, getFrame(name, noteId(name), WIRE_BODY_BYTES));
-      const plain = await exchange(socketPath, getFrame(name, noteId(name)));
-      expect(accepted.closed, name).toBe(false);
-      // Byte for byte the single-frame reply: one frame, no declaration.
-      expect(accepted.bytes.equals(plain.bytes), name).toBe(true);
-      const { header, rest } = splitHeader(accepted.bytes);
-      expect(header, name).toMatchObject({ result: { contentStatus: status } });
-      expect(header, name).not.toHaveProperty("body");
-      expect(rest.length, name).toBe(0);
-    }
+    const accepted = await exchange(
+      socketPath,
+      getFrame("surrogate", noteId("surrogate"), WIRE_BODY_BYTES),
+    );
+    const plain = await exchange(socketPath, getFrame("surrogate", noteId("surrogate")));
+    expect(accepted.closed).toBe(false);
+    // Byte for byte the single-frame reply: one frame, no declaration.
+    expect(accepted.bytes.equals(plain.bytes)).toBe(true);
+    const small = splitHeader(accepted.bytes);
+    expect(small.header).toMatchObject({ result: { contentStatus: "ok" } });
+    expect(small.header).not.toHaveProperty("body");
+    expect(small.rest.length).toBe(0);
+
+    // Past the single-frame bound. Synthesised rather than stored: a body read
+    // now measures Markdown it cannot carry against that bound, so a fixture
+    // this large could not project at all.
+    serializerOverride.value = `${"a".repeat(PROJECTION_MARKDOWN_BYTES)}\uD83Dtail`;
+    const refused = await exchange(
+      socketPath,
+      getFrame("surrogateLarge", noteId("small"), WIRE_BODY_BYTES),
+    );
+    const refusedPlain = await exchange(socketPath, getFrame("surrogateLarge", noteId("small")));
+    expect(refused.closed).toBe(false);
+    expect(refused.bytes.equals(refusedPlain.bytes)).toBe(true);
+    const big = splitHeader(refused.bytes);
+    expect(big.header).toMatchObject({ result: { contentStatus: "oversize" } });
+    expect(big.header).not.toHaveProperty("body");
+    expect(big.rest.length).toBe(0);
   });
 
   it("answers Markdown the single-frame path refuses exactly as the read without accept does", async () => {
@@ -571,6 +582,27 @@ describe("locked and failed reads with accept", () => {
         expect(header).not.toHaveProperty("body");
         expect(rest.length).toBe(0);
       }
+    }
+  });
+
+  it("ignores an offer too small to carry Markdown a body cannot carry anyway", async () => {
+    // A small offer bounds the body, but Markdown a declared body cannot carry
+    // is measured against the single-frame bound regardless: otherwise the size
+    // of the offer alone would turn an inline answer into `oversize`.
+    const { socketPath } = await daemon();
+    for (const [markdown, expected] of [
+      [`${"a".repeat(5_000)}\ud83dtail`, "ok"],
+      [`${"a".repeat(PROJECTION_MARKDOWN_BYTES)}\ud83dtail`, "oversize"],
+    ] as const) {
+      serializerOverride.value = markdown;
+      const accepted = await exchange(socketPath, getFrame("small", noteId("small"), 1_000));
+      const plain = await exchange(socketPath, getFrame("small", noteId("small")));
+      expect(accepted.closed, expected).toBe(false);
+      expect(accepted.bytes.equals(plain.bytes), expected).toBe(true);
+      const { header, rest } = splitHeader(accepted.bytes);
+      expect(header, expected).toMatchObject({ result: { contentStatus: expected } });
+      expect(header, expected).not.toHaveProperty("body");
+      expect(rest.length, expected).toBe(0);
     }
   });
 });

@@ -55,8 +55,9 @@ framed or not, so a read that answered `oversize` is already under that
 threshold. A read without `accept` is bounded by the response budget (65,536
 bytes less the envelope allowance and the note's charged metadata). A
 protocol-2 caller may offer to accept a response body (`accept: { bodyBytes }`),
-which raises that read's content bound to the smaller of its offer and
-`WIRE_BODY_BYTES` (524,288 bytes). That is twice the stored-row threshold, so a
+which sets that read's content bound to the smaller of its offer and
+`WIRE_BODY_BYTES` (524,288 bytes) — an offer below the single-frame budget
+therefore lowers it. That is twice the stored-row threshold, so a
 body read of a large note normally hits the threshold first. Projection is not
 bounded at twice the stored row, though: an `accept` offer below that bound, a
 failed header preflight, Markdown a body cannot carry, or structure that grows
