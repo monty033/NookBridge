@@ -121,9 +121,10 @@ export type NookdProtocolVersion = 1 | 2;
  * back to `service_unavailable` so the agent never sees a raw
  * upstream category.
  *
- * `busy` only reaches this function from a body-path header reply.
- * Every single-frame reply is decoded without it — on any client,
- * negotiated or not — so a stray `busy` there is `service_unavailable`.
+ * `busy` only reaches this function from a body-path header reply: the reply
+ * to a request body's header, or to a note read that carried `accept`. Every
+ * other single-frame reply is decoded without it — on any client, negotiated
+ * or not — so a stray `busy` there is `service_unavailable`.
  */
 function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure {
   switch (code) {
@@ -1230,9 +1231,17 @@ interface DeclaredMarkdownBody {
  * Read the reply to a note read that offered a response body: one header
  * frame, then — only when that header declares a body — exactly the declared
  * raw bytes. A header without a body is decoded as an ordinary single-frame
- * reply. A byte beyond the declared length, a close before the last byte, a
- * digest that does not match, or bytes that are not strict UTF-8 all reject:
- * the caller never sees part of a body.
+ * reply. A close before the last byte, a digest that does not match, or bytes
+ * that are not strict UTF-8 all reject: the caller never sees part of a body.
+ *
+ * Bytes beyond the declared length are rejected only when they arrive in a
+ * chunk read while the body is still incomplete — the one that ends the header
+ * or the one that carries the body's last byte. Once the body is complete this
+ * reader settles and stops listening, so a byte that arrives in a later chunk
+ * is never read at all. That is harmless: the body was already verified
+ * against its declared length and digest, nothing after it can extend or
+ * alter it, and the caller destroys the socket as soon as the exchange
+ * settles.
  */
 async function readResponseWithBody(
   socket: Socket,
@@ -1348,7 +1357,10 @@ function decodeAcceptedHeader(
     throw new Error("invalid response");
   }
   const candidate = value as Record<string, unknown>;
-  if (!Object.hasOwn(candidate, "body")) return decodeResponseEnvelope(candidate, { method });
+  // `busy`: the daemon admits an accepted read through its one body slot.
+  if (!Object.hasOwn(candidate, "body")) {
+    return decodeResponseEnvelope(candidate, { method, allowBusy: true });
+  }
   const result = candidate.result;
   const declaration = candidate.body;
   if (

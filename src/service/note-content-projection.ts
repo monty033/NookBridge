@@ -178,6 +178,34 @@ function countPreserved(
   }
 }
 
+/** The response-owned strings a note result charges besides its Markdown. */
+function chargedNoteFields(requestId: string, note: object): string[] {
+  const record = note as Record<string, unknown>;
+  const charged: string[] = [requestId];
+  for (const key of ["id", "title", "revision", "notebookId"] as const) {
+    const value = record[key];
+    if (typeof value === "string") charged.push(value);
+  }
+  return charged;
+}
+
+/**
+ * Would this Markdown be delivered by a read without `accept`: within
+ * `PROJECTION_MARKDOWN_BYTES` and the single frame's preflight. The daemon
+ * uses it for Markdown a declared body cannot carry, so that a read with
+ * `accept` answers exactly what the same read without it would.
+ */
+export function fitsSingleFrameNoteProjection(
+  requestId: string,
+  note: object,
+  markdown: string,
+): boolean {
+  if (bufferByteLength(markdown, "utf8") > MAX_PROJECTION_MARKDOWN_BYTES) return false;
+  const charged = chargedNoteFields(requestId, note);
+  charged.push(markdown);
+  return fitsResponsePreflight(charged);
+}
+
 function readOnlyMarkdownFallback(envelope: unknown): string {
   if (!envelope || typeof envelope !== "object") throw new Error("unavailable");
   const candidate = envelope as { type?: unknown; data?: unknown };
@@ -261,11 +289,7 @@ export function classifyNoteContentProjection(
     if (markdownBytes > (bodyBound ?? MAX_PROJECTION_MARKDOWN_BYTES)) return oversize;
     // Mirror the serializer's preflight over every response-owned string field
     // it will charge, so the census classifies a note the same way a read does.
-    const charged: string[] = [input.requestId];
-    for (const key of ["id", "title", "revision", "notebookId"] as const) {
-      const value = input.note[key];
-      if (typeof value === "string") charged.push(value);
-    }
+    const charged = chargedNoteFields(input.requestId, input.note);
     if (bodyBound === undefined) charged.push(markdown);
     else charged.push(...BODY_DECLARATION_CHARGE);
     if (!fitsResponsePreflight(charged)) return oversize;

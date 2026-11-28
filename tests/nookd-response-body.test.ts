@@ -19,15 +19,17 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PROJECTION_MARKDOWN_BYTES, WIRE_BODY_BYTES } from "../src/core/size-limits.js";
+import { createLogger } from "../src/logging/logger.js";
 import { NookdSocketClient } from "../src/mcp/socket-client.js";
 import type * as NoteDocumentMarkdown from "../src/core/note-document-markdown.js";
-import { createLargeBodyBudget } from "../src/service/large-body-budget.js";
+import { createLargeBodyBudget, type LargeBodyBudget } from "../src/service/large-body-budget.js";
 import { classifyNoteContentProjection } from "../src/service/note-content-projection.js";
 import {
   createRpcFrameParser,
   isRpcProtocolError,
   parseRpcFrame,
 } from "../src/service/rpc-protocol.js";
+import type { ServiceAuditRecord } from "../src/service/service-audit.js";
 import {
   NOTE_HTML,
   REVISION,
@@ -112,6 +114,38 @@ function splitHeader(bytes: Buffer): { readonly header: Record<string, unknown>;
     unknown
   >;
   return { header, rest: bytes.subarray(4 + length) };
+}
+
+/** Service-audit records, captured the way the daemon's logger emits them. */
+function auditCapture(): {
+  readonly records: ServiceAuditRecord[];
+  readonly auditLogger: ReturnType<typeof createLogger>;
+} {
+  const records: ServiceAuditRecord[] = [];
+  const auditLogger = createLogger({
+    sink: (line) => {
+      const record = JSON.parse(line) as ServiceAuditRecord & { component?: string };
+      if (record.component === "service_audit") records.push(record);
+    },
+  });
+  return { records, auditLogger };
+}
+
+/** True when the budget's one slot is held: a probe is refused busy. */
+function slotHeld(budget: LargeBodyBudget): boolean {
+  const probe = budget.tryAcquire(1);
+  if (probe.kind === "busy") return true;
+  probe.release();
+  return false;
+}
+
+/** Wait, within `withinMs`, for the slot to come free; fails if it never does. */
+async function expectSlotReleased(budget: LargeBodyBudget, withinMs = 2_000): Promise<void> {
+  const deadline = Date.now() + withinMs;
+  while (slotHeld(budget)) {
+    if (Date.now() > deadline) throw new Error("the response-body lease was never released");
+    await delay(10);
+  }
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -374,6 +408,59 @@ describe("bound selection with accept", () => {
     expect(rest.length).toBe(0);
   });
 
+  it("bounds multibyte Markdown by its UTF-8 bytes, not its UTF-16 code units", async () => {
+    // Four bytes and two code units per character: measured in code units,
+    // the over-bound projection below would be half the bound, and delivered.
+    const unit = "\u{1F600}";
+    expect(Buffer.byteLength(unit)).toBe(4);
+    expect(unit.length).toBe(2);
+    expect(WIRE_BODY_BYTES % 4).toBe(0);
+    const { socketPath } = await daemon();
+
+    const atBound = unit.repeat(WIRE_BODY_BYTES / 4);
+    serializerOverride.value = atBound;
+    const at = splitHeader(
+      (await exchange(socketPath, getFrame("at", noteId("small"), WIRE_BODY_BYTES))).bytes,
+    );
+    expect(at.header).toMatchObject({
+      result: { contentStatus: "ok", markdownBytes: WIRE_BODY_BYTES },
+      body: { field: "markdown", bytes: WIRE_BODY_BYTES },
+    });
+    expect(at.rest.equals(Buffer.from(atBound, "utf8"))).toBe(true);
+
+    // One byte more than the wire bound, still far under it in code units.
+    serializerOverride.value = `${unit.repeat(WIRE_BODY_BYTES / 4 - 1)}zzzzz`;
+    expect(Buffer.byteLength(serializerOverride.value)).toBe(WIRE_BODY_BYTES + 1);
+    expect(serializerOverride.value.length).toBeLessThan(WIRE_BODY_BYTES / 2 + 5);
+    const over = splitHeader(
+      (await exchange(socketPath, getFrame("over", noteId("small"), WIRE_BODY_BYTES))).bytes,
+    );
+    expect(over.header).toMatchObject({ result: { contentStatus: "oversize" } });
+    expect(over.header).not.toHaveProperty("body");
+    expect(over.rest.length).toBe(0);
+  });
+
+  it("bounds a real multibyte note by the offer in bytes, either side of it", async () => {
+    const markdown = projectionOf("multibyte");
+    const markdownBytes = Buffer.byteLength(markdown);
+    // The note's code units are far fewer than its bytes, so an offer of one
+    // byte short is still far more than its code units.
+    expect(markdown.length).toBeLessThan(markdownBytes - 1);
+    const { socketPath } = await daemon();
+    const fits = await exchange(socketPath, getFrame("fits", noteId("multibyte"), markdownBytes));
+    const delivered = splitHeader(fits.bytes);
+    expect(delivered.header).toMatchObject({ body: { bytes: markdownBytes } });
+    expect(delivered.rest.equals(Buffer.from(markdown, "utf8"))).toBe(true);
+    const short = await exchange(
+      socketPath,
+      getFrame("short", noteId("multibyte"), markdownBytes - 1),
+    );
+    const refused = splitHeader(short.bytes);
+    expect(refused.header).toMatchObject({ result: { contentStatus: "oversize" } });
+    expect(refused.header).not.toHaveProperty("body");
+    expect(refused.rest.length).toBe(0);
+  });
+
   it("keeps an empty note in one frame, because a declared body is at least one byte", async () => {
     const { socketPath } = await daemon();
     const { bytes } = await exchange(
@@ -390,15 +477,18 @@ describe("bound selection with accept", () => {
 });
 
 describe("locked and failed reads with accept", () => {
-  it("answers a locked note with locked in one frame, without calling the reader or sending a body", async () => {
-    const started = await daemon();
+  it("answers a locked note with locked in one frame, never sending the body the slot returned", async () => {
+    // The slot ignores the lock and hands back the body, so only the daemon's
+    // own check of the metadata flag can keep it off the wire.
+    const started = await daemon({ readLockedContent: true });
     const accepted = await exchange(
       started.socketPath,
       getFrame("compat-locked", noteId("locked"), WIRE_BODY_BYTES),
     );
     const plain = await exchange(started.socketPath, getFrame("compat-locked", noteId("locked")));
-    expect(started.contentReads).not.toContain(noteId("locked"));
+    expect(started.contentReads).toContain(noteId("locked"));
     expect(accepted.closed).toBe(false);
+    expect(accepted.bytes.includes(Buffer.from("locked secret"))).toBe(false);
     // The same bytes as the read without accept: one frame, no declaration.
     expect(accepted.bytes.equals(plain.bytes)).toBe(true);
     const { header, rest } = splitHeader(accepted.bytes);
@@ -419,6 +509,35 @@ describe("locked and failed reads with accept", () => {
     });
     expect(header).not.toHaveProperty("body");
     expect(rest.length).toBe(0);
+  });
+
+  it("answers a lone surrogate exactly as the read without accept does", async () => {
+    // No mock: a stored HTML note whose projection really is not well-formed.
+    for (const name of ["surrogate", "surrogateLarge"]) {
+      const markdown = projectionOf(name);
+      expect(markdown, name).toContain("\uD83D");
+      // Encoding replaces a lone surrogate, so the round trip differs.
+      expect(Buffer.from(markdown, "utf8").toString("utf8"), name).not.toBe(markdown);
+    }
+    expect(Buffer.byteLength(projectionOf("surrogate"))).toBeLessThan(PROJECTION_MARKDOWN_BYTES);
+    expect(Buffer.byteLength(projectionOf("surrogateLarge"))).toBeGreaterThan(
+      PROJECTION_MARKDOWN_BYTES,
+    );
+    const { socketPath } = await daemon();
+    for (const [name, status] of [
+      ["surrogate", "ok"],
+      ["surrogateLarge", "oversize"],
+    ] as const) {
+      const accepted = await exchange(socketPath, getFrame(name, noteId(name), WIRE_BODY_BYTES));
+      const plain = await exchange(socketPath, getFrame(name, noteId(name)));
+      expect(accepted.closed, name).toBe(false);
+      // Byte for byte the single-frame reply: one frame, no declaration.
+      expect(accepted.bytes.equals(plain.bytes), name).toBe(true);
+      const { header, rest } = splitHeader(accepted.bytes);
+      expect(header, name).toMatchObject({ result: { contentStatus: status } });
+      expect(header, name).not.toHaveProperty("body");
+      expect(rest.length, name).toBe(0);
+    }
   });
 
   it("closes with nothing sent, rather than a body, for Markdown the single-frame path would refuse", async () => {
@@ -443,23 +562,26 @@ describe("a peer that goes away mid-body", () => {
     socket.write(getFrame("gone", noteId("small"), WIRE_BODY_BYTES));
     const chunk = await firstChunk;
     expect(chunk.length).toBeLessThan(4 + 300 + WIRE_BODY_BYTES);
+    // Mid-body, the accepted read holds the one process-wide slot.
+    expect(slotHeld(budget)).toBe(true);
     socket.destroy();
 
-    // The daemon serves the next connection, the shared body slot is free,
-    // and shutdown does not wait on anything the abandoned exchange held.
+    // The daemon serves the next connection, the shared body slot comes free
+    // well before any deadline, and shutdown does not wait on anything the
+    // abandoned exchange held.
     serializerOverride.value = undefined;
     const next = await exchange(started.socketPath, getFrame("next", noteId("small")));
     expect(splitHeader(next.bytes).header).toMatchObject({ result: { contentStatus: "ok" } });
-    const probe = budget.tryAcquire(1);
-    expect(probe.kind).toBe("acquired");
-    if (probe.kind === "acquired") probe.release();
+    await expectSlotReleased(budget);
     const shutdownStarted = Date.now();
     await started.handle.shutdown();
     expect(Date.now() - shutdownStarted).toBeLessThan(1_000);
   });
 
   it("closes a connection whose peer stops reading mid-body within the body deadline", async () => {
-    const started = await daemon({ bodyReceiveTimeoutMs: 300 });
+    const budget = createLargeBodyBudget();
+    const { records, auditLogger } = auditCapture();
+    const started = await daemon({ bodyReceiveTimeoutMs: 300, bodyBudget: budget, auditLogger });
     serializerOverride.value = "s".repeat(WIRE_BODY_BYTES);
     const socket = await connect(started.socketPath);
     let received = 0;
@@ -476,6 +598,19 @@ describe("a peer that goes away mid-body", () => {
     const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
     socket.write(getFrame("stall", noteId("small"), WIRE_BODY_BYTES));
     await firstChunk;
+    // While the stalled body holds the slot, another accepted read is refused
+    // busy in one frame, before any projection is computed for it.
+    expect(slotHeld(budget)).toBe(true);
+    const contentReadsBefore = started.contentReads.length;
+    const refused = await exchange(
+      started.socketPath,
+      getFrame("second", noteId("small"), WIRE_BODY_BYTES),
+    );
+    expect(splitHeader(refused.bytes)).toEqual({
+      header: { id: "second", ok: false, error: { code: "busy", message: "Service busy" } },
+      rest: Buffer.alloc(0),
+    });
+    expect(started.contentReads.length).toBe(contentReadsBefore);
     // Well past the deadline, read again: whatever the kernel held arrives,
     // then the close the daemon issued when the deadline expired.
     await delay(1_000);
@@ -487,6 +622,21 @@ describe("a peer that goes away mid-body", () => {
     expect(outcome).toBe("closed");
     // Fewer bytes than header plus body: the body was cut off, not completed.
     expect(received).toBeLessThan(4 + WIRE_BODY_BYTES);
+    await expectSlotReleased(budget);
+    // The expiry is audited like the receive side's: method and outcome, the
+    // deadline as the latency, and nothing of the note, its size or the ids.
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.request.timeout",
+        outcome: "timeout",
+        method: "notes.get",
+        latencyMs: 300,
+      }),
+    );
+    const audited = JSON.stringify(records);
+    for (const absent of ["stall", "second", noteId("small"), "ssss", String(WIRE_BODY_BYTES)]) {
+      expect(audited, absent).not.toContain(absent);
+    }
   });
 });
 
@@ -531,12 +681,40 @@ describe("the MCP client against the real daemon", () => {
     expect(bodied.envelope.result).toEqual(single.envelope.result);
   });
 
-  it("returns locked for a locked note without reading it", async () => {
-    const started = await daemon();
+  it("returns locked for a locked note, even when the slot hands back its body", async () => {
+    const started = await daemon({ readLockedContent: true });
     const c = await protocol2Client(started.socketPath);
     const result = await c.getNote(noteId("locked"));
+    expect(started.contentReads).toContain(noteId("locked"));
     expect(result).toMatchObject({ ok: true, envelope: { result: { contentStatus: "locked" } } });
-    expect(started.contentReads).not.toContain(noteId("locked"));
+    expect(result.ok && result.envelope.result).not.toHaveProperty("markdown");
+  });
+
+  it("returns a note whose projection holds a lone surrogate, once protocol 2 is known", async () => {
+    const { socketPath } = await daemon();
+    const single = await new NookdSocketClient({ socketPath }).getNote(noteId("surrogate"));
+    const accepted = await (await protocol2Client(socketPath)).getNote(noteId("surrogate"));
+    expect(accepted).toMatchObject({
+      ok: true,
+      envelope: { result: { contentStatus: "ok", markdown: projectionOf("surrogate") } },
+    });
+    expect(single.ok && accepted.ok).toBe(true);
+    if (!single.ok || !accepted.ok) return;
+    expect(accepted.envelope.result).toEqual(single.envelope.result);
+  });
+
+  it("returns busy, not a failure, while another large body holds the slot", async () => {
+    const budget = createLargeBodyBudget();
+    const { socketPath } = await daemon({ bodyBudget: budget });
+    const c = await protocol2Client(socketPath);
+    const held = budget.tryAcquire(1);
+    if (held.kind !== "acquired") throw new Error("slot unexpectedly held");
+    try {
+      await expect(c.getNote(noteId("small"))).resolves.toEqual({ ok: false, code: "busy" });
+    } finally {
+      held.release();
+    }
+    await expect(c.getNote(noteId("small"))).resolves.toMatchObject({ ok: true });
   });
 
   it("never returns a shorter string: an over-bound projection is oversize, a refused one an error", async () => {

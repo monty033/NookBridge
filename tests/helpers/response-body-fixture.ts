@@ -11,6 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
+import type { Logger } from "../../src/logging/logger.js";
 import type { LargeBodyBudget } from "../../src/service/large-body-budget.js";
 import {
   startNookdServer,
@@ -38,6 +39,12 @@ export const NOTE_HTML: Readonly<Record<string, string>> = Object.freeze({
   // A title-only note: its projection is the empty string.
   empty: "",
   locked: "<p>locked secret</p>",
+  // A raw lone surrogate in stored HTML. The native decoder refuses it, and
+  // the read-only fallback keeps it, so the projection is not well-formed
+  // UTF-16: a single frame carries it as a JSON escape, raw bytes cannot.
+  surrogate: "<p>before \uD83D after</p>",
+  // The same, over the single-frame projection bound and under the wire bound.
+  surrogateLarge: `<p>${"v".repeat(100_000)} \uD83D</p>`,
 });
 
 export type NoteName = keyof typeof NOTE_HTML;
@@ -66,8 +73,14 @@ export interface ResponseBodyRuntime {
 /**
  * The snapshot slot the way the live factory builds it: metadata first, the
  * body only for a note that is not locked.
+ *
+ * With `readLockedContent`, the slot instead ignores the lock and returns a
+ * locked note's body like any other, so a test can show that the daemon's own
+ * metadata check — not the slot — is what keeps that body off the wire.
  */
-export function responseBodyRuntime(): ResponseBodyRuntime {
+export function responseBodyRuntime(
+  options: { readonly readLockedContent?: boolean } = {},
+): ResponseBodyRuntime {
   const contentReads: string[] = [];
   const readContent = async (id: string): Promise<unknown> => {
     contentReads.push(id);
@@ -78,7 +91,9 @@ export function responseBodyRuntime(): ResponseBodyRuntime {
   const readNoteSnapshot = async (id: string): Promise<unknown> => {
     const metadata = metadataFor(id);
     if (metadata === undefined) return undefined;
-    if (metadata.locked === true) return { metadata, contentRefusal: "locked" };
+    if (metadata.locked === true && options.readLockedContent !== true) {
+      return { metadata, contentRefusal: "locked" };
+    }
     try {
       return { metadata, content: await readContent(id) };
     } catch {
@@ -102,11 +117,18 @@ export interface ResponseBodyDaemon {
 }
 
 export async function startResponseBodyDaemon(
-  options: { readonly bodyBudget?: LargeBodyBudget; readonly bodyReceiveTimeoutMs?: number } = {},
+  options: {
+    readonly bodyBudget?: LargeBodyBudget;
+    readonly bodyReceiveTimeoutMs?: number;
+    readonly auditLogger?: Logger;
+    readonly readLockedContent?: boolean;
+  } = {},
 ): Promise<ResponseBodyDaemon> {
   const directory = await mkdtemp(path.join("/tmp", "nbk-resp-"));
   const socketPath = path.join(directory, "nookd.sock");
-  const { runtime, contentReads } = responseBodyRuntime();
+  const { runtime, contentReads } = responseBodyRuntime(
+    options.readLockedContent === undefined ? {} : { readLockedContent: options.readLockedContent },
+  );
   const handle = await startNookdServer({
     socketPath,
     runtime,
@@ -125,6 +147,7 @@ export async function startResponseBodyDaemon(
         : { bodyReceiveTimeoutMs: options.bodyReceiveTimeoutMs }),
     },
     ...(options.bodyBudget === undefined ? {} : { bodyBudget: options.bodyBudget }),
+    ...(options.auditLogger === undefined ? {} : { auditLogger: options.auditLogger }),
   });
   return {
     socketPath,

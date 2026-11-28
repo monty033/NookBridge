@@ -31,6 +31,7 @@ import {
   type ServiceAbuseBounds,
 } from "./service-abuse-bounds.js";
 import { handleRpcRequest, type RpcHandlerRuntimeLike } from "./rpc-handler.js";
+import { fitsSingleFrameNoteProjection } from "./note-content-projection.js";
 import {
   createReadOnlyServicePolicy,
   narrowServicePolicy,
@@ -696,16 +697,27 @@ export async function startNookdServer(
    * bytes. The exchange runs under the same absolute deadline as a received
    * body, so a peer that stops reading cannot hold the connection and the
    * buffered body indefinitely. Any failure, including that deadline, destroys
-   * the connection; nothing about the exchange outlives it.
+   * the connection; nothing about the exchange outlives it. An expired
+   * deadline is audited as the receive side's is: method and outcome only.
    */
   async function writeHeaderAndBody(
     state: ConnectionState,
     header: Uint8Array,
     body: Buffer,
+    method: RpcMethod,
+    hasId: boolean,
   ): Promise<boolean> {
     let timer: ReturnType<typeof scheduleTimeout> | undefined;
     const expired = new Promise<false>((resolve) => {
       timer = scheduleTimeout(() => {
+        audit(
+          "rpc.request.timeout",
+          "timeout",
+          method,
+          hasId,
+          normalized.abuseBounds.bodyReceiveTimeoutMs,
+          state.peerCategory,
+        );
         destroyConnection(state);
         resolve(false);
       }, normalized.abuseBounds.bodyReceiveTimeoutMs);
@@ -725,6 +737,25 @@ export async function startNookdServer(
     if (state.processing || state.closed || state.closing) return;
     state.processing = true;
     const work = (async (): Promise<void> => {
+      // The response-body lease of the accepted read in flight, if any, and
+      // the runtime operation computing its projection. See the acquisition.
+      let responseLease: LargeBodyLease | undefined;
+      let responseRuntime: Promise<unknown> | undefined;
+      const releaseResponseLease = (): void => {
+        const lease = responseLease;
+        if (lease === undefined) return;
+        const runtime = responseRuntime;
+        responseLease = undefined;
+        responseRuntime = undefined;
+        // A projection the transport gave up on is still being built: the
+        // slot stays owned until the runtime operation building it settles.
+        if (runtime === undefined) lease.release();
+        else
+          runtime.then(
+            () => lease.release(),
+            () => lease.release(),
+          );
+      };
       try {
         if (!state.peerWaited) {
           state.peerWaited = true;
@@ -954,6 +985,35 @@ export async function startNookdServer(
             // the handler authorizes, so it never reaches the handler.
             handlerRequest = withoutAccept(request);
             acceptBodyBytes = Math.min(request.accept.bodyBytes, WIRE_BODY_BYTES);
+            // An accepted read is admitted through the same single process-
+            // wide slot as a received body, taken before the projection is
+            // computed. The lease covers that projection (a string of up to
+            // the offered bound) and the body buffer encoded from it. A
+            // single-frame answer hands it back once serialized; a declared
+            // body holds it until the body is written or the exchange ends:
+            // success, refusal, deadline, disconnect or throw. A client that stops
+            // reading therefore holds it until the send deadline expires, and
+            // every other large body or accepted read is refused busy until
+            // then. Like a received body's, it is also held until the runtime
+            // operation settles, however the transport ended.
+            let acquisition: ReturnType<LargeBodyBudget["tryAcquire"]>;
+            try {
+              acquisition = normalized.bodyBudget.tryAcquire(acceptBodyBytes);
+            } catch {
+              destroyConnection(state);
+              break;
+            }
+            if (acquisition.kind === "busy") {
+              await refuseRequest(
+                state,
+                request.id,
+                request.method,
+                "busy",
+                "rpc.protocol.rejected",
+              );
+              break;
+            }
+            responseLease = acquisition;
           } else {
             handlerRequest = request;
           }
@@ -987,6 +1047,7 @@ export async function startNookdServer(
               () => lease.release(),
             );
           }
+          if (responseLease !== undefined) responseRuntime = runtimeOp;
           registerRuntimeOp(state, runtimeOp);
           const responsePromise = runtimeOp
             .then((response) => ({
@@ -1069,6 +1130,8 @@ export async function startNookdServer(
                 : splitMarkdownBody(response, acceptBodyBytes);
             responseFrame = serializeDaemonRpcResponse(split?.header ?? response);
             responseBody = split?.body;
+            // The single-frame answers carry no body; hand back the slot now.
+            if (responseBody === undefined) releaseResponseLease();
           } catch {
             // In particular, do not attempt to serialize a second error when
             // the original response itself exceeded the published bound.
@@ -1081,7 +1144,14 @@ export async function startNookdServer(
           const wrote =
             responseBody === undefined
               ? await writeFrame(state, responseFrame)
-              : await writeHeaderAndBody(state, responseFrame, responseBody);
+              : await writeHeaderAndBody(
+                  state,
+                  responseFrame,
+                  responseBody,
+                  request.method,
+                  request.id.length > 0,
+                );
+          releaseResponseLease();
           if (!wrote) {
             destroyConnection(state);
             break;
@@ -1098,6 +1168,9 @@ export async function startNookdServer(
           );
         }
       } finally {
+        // Every other exit from an accepted read — refusal, timeout,
+        // disconnect, a throw — leaves the loop through here.
+        releaseResponseLease();
         state.processing = false;
         if (state.ended && !state.closed) destroyConnection(state);
         else if (!state.closed && !state.closing) armIdleTimer(state);
@@ -1159,22 +1232,39 @@ function withoutAccept(request: RpcAcceptRequest): RpcRequest {
  * result without content (`locked`, `oversize`, `unavailable`, an error), and
  * an empty note, because a declared body is at least one byte.
  *
- * The checks repeat what the single-frame serializer applies to inline
- * Markdown, so content it would refuse is not delivered by the other route; a
- * failure throws and the caller closes the connection with nothing sent.
+ * Control characters are refused exactly as the single-frame serializer
+ * refuses inline Markdown: a failure throws and the caller closes the
+ * connection with nothing sent, as it does for the same note without `accept`.
+ *
+ * A lone surrogate is different. Raw bytes cannot carry one (encoding would
+ * replace it), but the single frame does, as a JSON `\uDXXX` escape, and the
+ * client accepts it. Such Markdown therefore goes back in one frame under the
+ * single-frame bound — inline when the read without `accept` would deliver
+ * it, `oversize` when that read would refuse it — so offering `accept` never
+ * turns a note that reads today into a failure.
  */
 function splitMarkdownBody(
   response: RpcAnyResponseEnvelope,
   bound: number,
-): { readonly header: RpcAnyResponseEnvelope; readonly body: Buffer } | undefined {
+): { readonly header: RpcAnyResponseEnvelope; readonly body?: Buffer } | undefined {
   if (!response.ok || response.result.kind !== "note") return undefined;
   const result = response.result;
   if (result.contentStatus !== "ok") return undefined;
   const markdown = result.markdown;
   if (typeof markdown !== "string") throw new Error("note result carries no markdown");
   if (markdown.length === 0) return undefined;
-  if (!isWellFormedUtf16(markdown) || hasDisallowedMarkdownControl(markdown)) {
+  if (hasDisallowedMarkdownControl(markdown)) {
     throw new Error("note markdown is not deliverable");
+  }
+  if (!isWellFormedUtf16(markdown)) {
+    if (fitsSingleFrameNoteProjection(response.id, result.note, markdown)) return undefined;
+    return {
+      header: {
+        id: response.id,
+        ok: true,
+        result: { kind: "note", note: result.note, contentStatus: "oversize" },
+      },
+    };
   }
   const body = Buffer.from(markdown, "utf8");
   if (body.length !== result.markdownBytes || body.length > bound) {

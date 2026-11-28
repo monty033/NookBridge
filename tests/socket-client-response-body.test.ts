@@ -343,8 +343,11 @@ describe("a body that does not verify fails categorically", () => {
       },
     ],
     [
-      // The count says one byte fewer than the daemon digested and sends: the
-      // client reads exactly the count, and that prefix fails the digest.
+      // The count says one byte fewer than the daemon digested and sends. The
+      // extra byte arrives in a chunk read while the body is still incomplete,
+      // so the overflow check refuses it before any digest is computed. (Were
+      // the count's last byte to end a chunk exactly, the prefix would fail
+      // the digest instead; either way the read fails.)
       "a byte count one short of the body sent",
       (connection, request) =>
         connection.send(

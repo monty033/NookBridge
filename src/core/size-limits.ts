@@ -65,18 +65,23 @@ export const RPC_FRAME_BYTES = 65_536;
  * frame every client of it has to accept — the MCP client bounds its own
  * response frame from this value.
  *
- * This is the read budget: it bounds the JSON a caller can pull out in one
- * reply, and therefore also bounds the projection a note is turned into.
+ * This is the single-frame read budget: it bounds the JSON a caller can pull
+ * out in one reply frame. It bounds a note's projection only through
+ * `PROJECTION_MARKDOWN_BYTES`, and only for a read without `accept`; a read
+ * that carries `accept` is bounded by `WIRE_BODY_BYTES` instead (see there),
+ * and only its header has to fit this frame.
  */
 export const RPC_RESPONSE_BYTES = 65_536;
 
 /**
- * Largest Markdown projection produced for a note read.
+ * Largest Markdown projection produced for a note read without `accept` — the
+ * projection a single-frame reply carries inline.
  *
- * `RPC_RESPONSE_BYTES` currently does two jobs: it bounds a single-frame
- * response and it bounds the projection carried by that response. This entry
- * names the second job so body-framed reads can size projections independently
- * without changing the single-frame response bound.
+ * It names the second job `RPC_RESPONSE_BYTES` used to do alone, so that a
+ * body-framed read can size its projection independently: a read with
+ * `accept` is bounded by `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead, and
+ * this value does not apply to it — except to Markdown a declared body cannot
+ * carry (a lone surrogate), which goes back in one frame under this bound.
  */
 export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
@@ -225,8 +230,14 @@ export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
  * writable row's projection and escaping have room, and no test establishes
  * that every stored shape projects within it. Nothing depends on the allowance
  * holding — a body over it is refused, never truncated — but do not read it as
- * a proven bound. Today the projection is refused earlier and by a different
- * entry (`PROJECTION_MARKDOWN_BYTES`), so this bound only governs the wire.
+ * a proven bound.
+ *
+ * It governs both directions. A request body is refused above it. A note read
+ * that carries `accept` has its projection bounded by
+ * `min(accept.bodyBytes, WIRE_BODY_BYTES)` — refused `oversize` above that,
+ * never truncated — and the Markdown then travels as a declared response body
+ * of at most this many bytes. A read without `accept` is still bounded by
+ * `PROJECTION_MARKDOWN_BYTES`.
  */
 export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
 
@@ -238,6 +249,8 @@ export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
  *
  * The daemon exposes this as the default `bodyReceiveTimeoutMs` service abuse
  * bound and enforces it from body admission until all declared bytes arrive.
+ * The same deadline bounds sending a declared response body: from the header
+ * write until the last body byte has been handed to the socket.
  */
 export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 
