@@ -1,6 +1,7 @@
 /**
  * Issue #327, the return trip, client side: the MCP socket client offers
- * `accept` on a note read only to a daemon known to speak protocol 2, reads
+ * `accept` only to repeat a note read whose single-frame result was
+ * `oversize`, and only to a daemon known to speak protocol 2. It reads
  * the declared body after the header, and verifies its length, SHA-256 and
  * UTF-8 before returning the Markdown exactly as a single-frame read does.
  *
@@ -215,6 +216,19 @@ describe("client fallback", () => {
     expect(daemon.connections.some(hasAccept)).toBe(false);
   });
 
+  it("sends a protocol-1 daemon exactly one note read, without accept, and returns its oversize", async () => {
+    const daemon = fakeDaemon(protocol1);
+    const result = await client(daemon.connect).getNote("note-1");
+    expect(result).toMatchObject({ ok: true, envelope: { result: OVERSIZE } });
+    // The only other requests are the probe's, neither of which reads a note.
+    const reads = daemon.connections.filter(
+      (connection) => connection.request.method === "notes.get",
+    );
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.writes).toHaveLength(1);
+    expect(daemon.connections.some(hasAccept)).toBe(false);
+  });
+
   it("returns the oversize already received when the probe fails outright", async () => {
     const daemon = fakeDaemon((connection, request) => {
       if (request.method === "notes.get") connection.send(frame(ok(request.id, OVERSIZE)));
@@ -271,15 +285,22 @@ describe("reading a declared body", () => {
     });
   });
 
-  it("offers accept on the first and only connection once protocol 2 is kept", async () => {
+  it("once protocol 2 is kept, sends a read without accept first and repeats only an oversize one with it", async () => {
     const daemon = fakeDaemon(protocol2(sendsBody));
     const c = client(daemon.connect);
     await c.getNote("note-1");
     const before = daemon.connections.length;
     const result = await c.getNote({ path: "Inbox/Big" });
     const later = daemon.connections.slice(before);
-    expect(later).toHaveLength(1);
-    expect(later[0]?.request).toMatchObject({
+    // No probe: the kept answer decides. One read without the offer, then one with it.
+    expect(later).toHaveLength(2);
+    expect(later[0]?.request).toEqual({
+      id: later[0]?.request.id,
+      method: "notes.get",
+      params: { path: "Inbox/Big" },
+    });
+    expect(later[0]?.request).not.toHaveProperty("accept");
+    expect(later[1]?.request).toMatchObject({
       method: "notes.get",
       params: { path: "Inbox/Big" },
       accept: { bodyBytes: WIRE_BODY_BYTES },
@@ -287,6 +308,64 @@ describe("reading a declared body", () => {
     expect(
       result.ok && result.envelope.result.kind === "note" && result.envelope.result.markdown,
     ).toBe(MARKDOWN);
+  });
+
+  it("sends a small read to a daemon known to speak protocol 2 as one frame, without accept", async () => {
+    const small = { ...OVERSIZE, contentStatus: "ok", markdown: "hi", markdownBytes: 2 };
+    let large = true;
+    const daemon = fakeDaemon((connection, request) => {
+      if (request.method === "notes.get" && request.accept === undefined && !large) {
+        connection.send(frame(ok(request.id, small)));
+      } else {
+        protocol2(sendsBody)(connection, request);
+      }
+    });
+    const c = client(daemon.connect);
+    await c.getNote("note-1");
+    large = false;
+    const before = daemon.connections.length;
+    const result = await c.getNote("note-2");
+    expect(result).toMatchObject({ ok: true, envelope: { result: small } });
+    const later = daemon.connections.slice(before);
+    expect(later).toHaveLength(1);
+    expect(later.some(hasAccept)).toBe(false);
+  });
+
+  it("answers overlapping small reads on one protocol-2 client, none of them busy", async () => {
+    // A daemon with one body slot: an accepted read holds it for its delay,
+    // and an accepted read that arrives meanwhile is answered busy.
+    const small = { ...OVERSIZE, contentStatus: "ok", markdown: "hi", markdownBytes: 2 };
+    let large = true;
+    let slotHeld = false;
+    const daemon = fakeDaemon((connection, request) => {
+      if (request.method !== "notes.get" || large) {
+        protocol2(sendsBody)(connection, request);
+      } else if (request.accept === undefined) {
+        globalThis.setTimeout(() => connection.send(frame(ok(request.id, small))), 50);
+      } else if (slotHeld) {
+        connection.send(
+          frame({ id: request.id, ok: false, error: { code: "busy", message: "Service busy" } }),
+        );
+      } else {
+        slotHeld = true;
+        globalThis.setTimeout(() => {
+          slotHeld = false;
+          connection.send(frame(ok(request.id, small)));
+        }, 50);
+      }
+    });
+    const c = client(daemon.connect);
+    await c.getNote("note-1");
+    large = false;
+    const results = await Promise.all(
+      Array.from({ length: 4 }, (_unused, index) => c.getNote(`note-${index + 2}`)),
+    );
+    expect(results.map((result) => (result.ok ? "ok" : result.code))).toEqual([
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+    ]);
   });
 
   it("reassembles a body split anywhere, including inside a multi-byte character", async () => {

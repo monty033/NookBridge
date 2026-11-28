@@ -981,10 +981,26 @@ export async function startNookdServer(
               break;
             }
           } else if (request.accept !== undefined) {
+            // Refuse before the lease, as a request body is: a method the
+            // allowlist does not name can never be admitted, so it must not
+            // hold the single slot for a read bound to fail.
+            if (!policyNamesMethod(normalized.policy, request.method)) {
+              await refuseRequest(
+                state,
+                request.id,
+                request.method,
+                "permission_denied",
+                "rpc.protocol.rejected",
+              );
+              break;
+            }
             // The offer bounds the projection; it is not part of the request
             // the handler authorizes, so it never reaches the handler.
             handlerRequest = withoutAccept(request);
             acceptBodyBytes = Math.min(request.accept.bodyBytes, WIRE_BODY_BYTES);
+            // The MCP client offers `accept` only to repeat a read whose
+            // single-frame result was `oversize`, so this is a genuinely large
+            // read; small reads never reach the slot and never contend for it.
             // An accepted read is admitted through the same single process-
             // wide slot as a received body, taken before the projection is
             // computed. The lease covers that projection (a string of up to
@@ -1232,16 +1248,21 @@ function withoutAccept(request: RpcAcceptRequest): RpcRequest {
  * result without content (`locked`, `oversize`, `unavailable`, an error), and
  * an empty note, because a declared body is at least one byte.
  *
- * Control characters are refused exactly as the single-frame serializer
- * refuses inline Markdown: a failure throws and the caller closes the
- * connection with nothing sent, as it does for the same note without `accept`.
+ * Markdown the body path cannot deliver as the single frame would goes back
+ * under the single-frame bound instead — as the read without `accept` would
+ * answer it — so offering `accept` never changes the answer for such a note:
  *
- * A lone surrogate is different. Raw bytes cannot carry one (encoding would
- * replace it), but the single frame does, as a JSON `\uDXXX` escape, and the
- * client accepts it. Such Markdown therefore goes back in one frame under the
- * single-frame bound — inline when the read without `accept` would deliver
- * it, `oversize` when that read would refuse it — so offering `accept` never
- * turns a note that reads today into a failure.
+ *   - A lone surrogate: raw bytes cannot carry one (encoding would replace
+ *     it), but the single frame does, as a JSON `\uDXXX` escape, and the
+ *     client accepts it.
+ *   - A disallowed control character: the single-frame serializer refuses it
+ *     inline, and the body path must not deliver what that path refuses.
+ *
+ * Under the single-frame bound the result goes as one frame unchanged — the
+ * surrogate inline, the control character refused by the serializer, so the
+ * connection closes with nothing sent exactly as it does without `accept`.
+ * Over it, the answer is `oversize`, as it is without `accept`. The body path
+ * therefore never refuses anything the inline path would answer.
  */
 function splitMarkdownBody(
   response: RpcAnyResponseEnvelope,
@@ -1253,10 +1274,7 @@ function splitMarkdownBody(
   const markdown = result.markdown;
   if (typeof markdown !== "string") throw new Error("note result carries no markdown");
   if (markdown.length === 0) return undefined;
-  if (hasDisallowedMarkdownControl(markdown)) {
-    throw new Error("note markdown is not deliverable");
-  }
-  if (!isWellFormedUtf16(markdown)) {
+  if (hasDisallowedMarkdownControl(markdown) || !isWellFormedUtf16(markdown)) {
     if (fitsSingleFrameNoteProjection(response.id, result.note, markdown)) return undefined;
     return {
       header: {

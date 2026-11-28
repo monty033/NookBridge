@@ -19,7 +19,10 @@ import {
   type NookdServerRuntime,
 } from "../../src/service/nookd-server.js";
 import { DEFAULT_SERVICE_ABUSE_BOUNDS } from "../../src/service/service-abuse-bounds.js";
-import { createReadOnlyServicePolicy } from "../../src/service/service-policy.js";
+import {
+  createReadOnlyServicePolicy,
+  type ServicePolicy,
+} from "../../src/service/service-policy.js";
 
 export const REVISION = "rev_0123456789abcdef0123456789abcdef";
 
@@ -77,9 +80,12 @@ export interface ResponseBodyRuntime {
  * With `readLockedContent`, the slot instead ignores the lock and returns a
  * locked note's body like any other, so a test can show that the daemon's own
  * metadata check — not the slot — is what keeps that body off the wire.
+ *
+ * With `readDelayMs`, every snapshot read waits that long first, so a test can
+ * hold several reads in flight at once.
  */
 export function responseBodyRuntime(
-  options: { readonly readLockedContent?: boolean } = {},
+  options: { readonly readLockedContent?: boolean; readonly readDelayMs?: number } = {},
 ): ResponseBodyRuntime {
   const contentReads: string[] = [];
   const readContent = async (id: string): Promise<unknown> => {
@@ -89,6 +95,10 @@ export function responseBodyRuntime(
     return { type: "html", data: NOTE_HTML[name] };
   };
   const readNoteSnapshot = async (id: string): Promise<unknown> => {
+    if (options.readDelayMs !== undefined) {
+      const delayMs = options.readDelayMs;
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, delayMs));
+    }
     const metadata = metadataFor(id);
     if (metadata === undefined) return undefined;
     if (metadata.locked === true && options.readLockedContent !== true) {
@@ -122,17 +132,22 @@ export async function startResponseBodyDaemon(
     readonly bodyReceiveTimeoutMs?: number;
     readonly auditLogger?: Logger;
     readonly readLockedContent?: boolean;
+    readonly readDelayMs?: number;
+    readonly policy?: ServicePolicy;
   } = {},
 ): Promise<ResponseBodyDaemon> {
   const directory = await mkdtemp(path.join("/tmp", "nbk-resp-"));
   const socketPath = path.join(directory, "nookd.sock");
-  const { runtime, contentReads } = responseBodyRuntime(
-    options.readLockedContent === undefined ? {} : { readLockedContent: options.readLockedContent },
-  );
+  const { runtime, contentReads } = responseBodyRuntime({
+    ...(options.readLockedContent === undefined
+      ? {}
+      : { readLockedContent: options.readLockedContent }),
+    ...(options.readDelayMs === undefined ? {} : { readDelayMs: options.readDelayMs }),
+  });
   const handle = await startNookdServer({
     socketPath,
     runtime,
-    policy: createReadOnlyServicePolicy(),
+    policy: options.policy ?? createReadOnlyServicePolicy(),
     installSignalHandlers: false,
     resolvePeer: async () => ({
       uid: process.getuid?.() ?? 0,

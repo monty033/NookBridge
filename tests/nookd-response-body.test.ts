@@ -30,6 +30,7 @@ import {
   parseRpcFrame,
 } from "../src/service/rpc-protocol.js";
 import type { ServiceAuditRecord } from "../src/service/service-audit.js";
+import { createCustomServicePolicy } from "../src/service/service-policy.js";
 import {
   NOTE_HTML,
   REVISION,
@@ -540,15 +541,89 @@ describe("locked and failed reads with accept", () => {
     }
   });
 
-  it("closes with nothing sent, rather than a body, for Markdown the single-frame path would refuse", async () => {
+  it("answers Markdown the single-frame path refuses exactly as the read without accept does", async () => {
     const { socketPath } = await daemon();
-    serializerOverride.value = `${"a".repeat(PROJECTION_MARKDOWN_BYTES)}\u0000tail`;
+    // Under the single-frame bound the inline path refuses the control
+    // character: both reads close with nothing sent. Over it, the inline path
+    // answers `oversize`, so the accepted read must too, never a body.
+    const underBound = "a\u0000tail";
+    const overBound = `${"a".repeat(PROJECTION_MARKDOWN_BYTES)}\u0000tail`;
+    expect(Buffer.byteLength(overBound)).toBeGreaterThan(PROJECTION_MARKDOWN_BYTES);
+    for (const [markdown, expected] of [
+      [underBound, "closed"],
+      [overBound, "oversize"],
+    ] as const) {
+      serializerOverride.value = markdown;
+      const accepted = await exchange(
+        socketPath,
+        getFrame("ctl", noteId("small"), WIRE_BODY_BYTES),
+      );
+      const plain = await exchange(socketPath, getFrame("ctl", noteId("small")));
+      expect(accepted.closed, expected).toBe(plain.closed);
+      expect(accepted.bytes.equals(plain.bytes), expected).toBe(true);
+      if (expected === "closed") {
+        expect(accepted.closed).toBe(true);
+        expect(accepted.bytes.length).toBe(0);
+      } else {
+        expect(accepted.closed).toBe(false);
+        const { header, rest } = splitHeader(accepted.bytes);
+        expect(header).toMatchObject({ result: { contentStatus: "oversize" } });
+        expect(header).not.toHaveProperty("body");
+        expect(rest.length).toBe(0);
+      }
+    }
+  });
+});
+
+describe("policy before the slot", () => {
+  it("refuses an accepted read the policy does not name without taking the slot", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    const { records, auditLogger } = auditCapture();
+    const started = await daemon({
+      bodyBudget: { tryAcquire },
+      auditLogger,
+      policy: createCustomServicePolicy(["notes.search"]),
+    });
     const { bytes, closed } = await exchange(
-      socketPath,
-      getFrame("ctl", noteId("small"), WIRE_BODY_BYTES),
+      started.socketPath,
+      getFrame("denied", noteId("large"), WIRE_BODY_BYTES),
     );
     expect(closed).toBe(true);
-    expect(bytes.length).toBe(0);
+    expect(splitHeader(bytes)).toEqual({
+      header: {
+        id: "denied",
+        ok: false,
+        error: { code: "permission_denied", message: "Permission denied" },
+      },
+      rest: Buffer.alloc(0),
+    });
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(started.contentReads).toEqual([]);
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: "rpc.protocol.rejected",
+        outcome: "permission_denied",
+        method: "notes.get",
+      }),
+    );
+    expect(records.filter((record) => record.event === "rpc.request.dispatched")).toEqual([]);
+    // The read without accept is refused the same way, by the handler.
+    const plain = await exchange(started.socketPath, getFrame("denied", noteId("large")));
+    expect(splitHeader(plain.bytes).header).toEqual(splitHeader(bytes).header);
+  });
+
+  it("still takes the slot for an accepted read the policy names", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    const started = await daemon({ bodyBudget: { tryAcquire } });
+    const { bytes } = await exchange(
+      started.socketPath,
+      getFrame("named", noteId("large"), WIRE_BODY_BYTES),
+    );
+    expect(splitHeader(bytes).header).toHaveProperty("body.field", "markdown");
+    expect(tryAcquire.mock.calls).toEqual([[WIRE_BODY_BYTES]]);
+    await expectSlotReleased(inner);
   });
 });
 
@@ -672,13 +747,13 @@ describe("the MCP client against the real daemon", () => {
     },
   );
 
-  it("returns a small note identically whether it came in one frame or as a body", async () => {
+  it("returns a small note identically from a fresh client and one that knows protocol 2", async () => {
     const { socketPath } = await daemon();
     const single = await new NookdSocketClient({ socketPath }).getNote(noteId("small"));
-    const bodied = await (await protocol2Client(socketPath)).getNote(noteId("small"));
-    expect(single.ok && bodied.ok).toBe(true);
-    if (!single.ok || !bodied.ok) return;
-    expect(bodied.envelope.result).toEqual(single.envelope.result);
+    const known = await (await protocol2Client(socketPath)).getNote(noteId("small"));
+    expect(single.ok && known.ok).toBe(true);
+    if (!single.ok || !known.ok) return;
+    expect(known.envelope.result).toEqual(single.envelope.result);
   });
 
   it("returns locked for a locked note, even when the slot hands back its body", async () => {
@@ -703,18 +778,60 @@ describe("the MCP client against the real daemon", () => {
     expect(accepted.envelope.result).toEqual(single.envelope.result);
   });
 
-  it("returns busy, not a failure, while another large body holds the slot", async () => {
-    const budget = createLargeBodyBudget();
-    const { socketPath } = await daemon({ bodyBudget: budget });
+  it("answers overlapping small reads on one protocol-2 client, none of them busy", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    // Long enough that all four reads are in the handler at once.
+    const { socketPath } = await daemon({ bodyBudget: { tryAcquire }, readDelayMs: 200 });
     const c = await protocol2Client(socketPath);
-    const held = budget.tryAcquire(1);
+    tryAcquire.mockClear();
+    const results = await Promise.all(Array.from({ length: 4 }, () => c.getNote(noteId("small"))));
+    expect(results.map((result) => (result.ok ? "ok" : result.code))).toEqual([
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+    ]);
+    // A small read never reaches the slot, so there is nothing to contend for.
+    expect(tryAcquire).not.toHaveBeenCalled();
+  });
+
+  it("takes the slot only for a large read, and answers busy while another holds it", async () => {
+    const inner = createLargeBodyBudget();
+    const tryAcquire = vi.fn((bytes: number) => inner.tryAcquire(bytes));
+    const { socketPath } = await daemon({ bodyBudget: { tryAcquire } });
+    const c = await protocol2Client(socketPath);
+    // The large read in `protocol2Client` was the one that took it.
+    expect(tryAcquire.mock.calls).toEqual([[WIRE_BODY_BYTES]]);
+    tryAcquire.mockClear();
+    await expect(c.getNote(noteId("small"))).resolves.toMatchObject({ ok: true });
+    expect(tryAcquire).not.toHaveBeenCalled();
+
+    const held = inner.tryAcquire(1);
     if (held.kind !== "acquired") throw new Error("slot unexpectedly held");
     try {
-      await expect(c.getNote(noteId("small"))).resolves.toEqual({ ok: false, code: "busy" });
+      // A small read is untouched by the held slot; a large one is busy.
+      await expect(c.getNote(noteId("small"))).resolves.toMatchObject({
+        ok: true,
+        envelope: { result: { contentStatus: "ok" } },
+      });
+      await expect(c.getNote(noteId("large"))).resolves.toEqual({ ok: false, code: "busy" });
+      const refused = await exchange(
+        socketPath,
+        getFrame("held", noteId("small"), WIRE_BODY_BYTES),
+      );
+      expect(splitHeader(refused.bytes).header).toEqual({
+        id: "held",
+        ok: false,
+        error: { code: "busy", message: "Service busy" },
+      });
     } finally {
       held.release();
     }
-    await expect(c.getNote(noteId("small"))).resolves.toMatchObject({ ok: true });
+    await expect(c.getNote(noteId("large"))).resolves.toMatchObject({
+      ok: true,
+      envelope: { result: { contentStatus: "ok", markdown: projectionOf("large") } },
+    });
   });
 
   it("never returns a shorter string: an over-bound projection is oversize, a refused one an error", async () => {
@@ -726,7 +843,18 @@ describe("the MCP client against the real daemon", () => {
     expect(over.envelope.result.contentStatus).toBe("oversize");
     expect(over.envelope.result).not.toHaveProperty("markdown");
 
+    // A control character over the single-frame bound is `oversize` on both
+    // reads, so the client sees `oversize`, never a body.
     serializerOverride.value = `${"w".repeat(PROJECTION_MARKDOWN_BYTES)}\u0000tail`;
+    const control = await c.getNote(noteId("small"));
+    expect(control).toMatchObject({
+      ok: true,
+      envelope: { result: { contentStatus: "oversize" } },
+    });
+    expect(control.ok && control.envelope.result).not.toHaveProperty("markdown");
+
+    // Under it, the inline path refuses the note: an error, never a string.
+    serializerOverride.value = "w\u0000tail";
     await expect(c.getNote(noteId("small"))).resolves.toEqual({
       ok: false,
       code: "service_unavailable",

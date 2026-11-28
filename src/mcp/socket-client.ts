@@ -22,12 +22,12 @@
  *     the raw body is bounded by `WIRE_BODY_BYTES` and is written
  *     only after the daemon's `body_continue`.
  *   - Responses are bounded by the same Stage 5 frame budget. The one
- *     exception is a note read sent to a daemon known to speak protocol
- *     2: it offers `accept`, and the Markdown may then follow the header
- *     as a declared raw body of at most `WIRE_BODY_BYTES`, verified by
- *     length, SHA-256 and strict UTF-8 before it is returned. A read
- *     whose single-frame result is `oversize` is what first asks the
- *     daemon which protocol it speaks; see `#readNote`.
+ *     exception is a note read whose single-frame result is `oversize`
+ *     from a daemon that speaks protocol 2: it is repeated once with
+ *     `accept`, and the Markdown may then follow the header as a
+ *     declared raw body of at most `WIRE_BODY_BYTES`, verified by
+ *     length, SHA-256 and strict UTF-8 before it is returned. Every
+ *     read goes as one frame first; see `#readNote`.
  *   - Any connect / read / write / timeout failure is normalized
  *     to a categorical `service_unavailable` outcome. The
  *     underlying errno, syscall name, and socket path never
@@ -246,8 +246,9 @@ type SocketParams =
 /**
  * How one request crosses the wire, decided before any connection opens.
  * `acceptFrame` is the same note read offering to take its Markdown as a
- * response body; it exists only for `notes.get` and is sent only to a daemon
- * known to speak protocol 2.
+ * response body; it exists only for `notes.get` and is sent only to repeat a
+ * read whose single-frame result was `oversize`, to a daemon known to speak
+ * protocol 2.
  */
 type RequestPlan =
   | { readonly kind: "frame"; readonly frame: Uint8Array; readonly acceptFrame?: Uint8Array }
@@ -409,12 +410,17 @@ export class NookdSocketClient {
   }
 
   /**
-   * A note read. A daemon already known to speak protocol 2 is offered the
-   * Markdown as a response body at once. Otherwise the read goes exactly as it
-   * did before this path existed, and only a result one frame could not carry
-   * (`oversize`) asks the daemon what it speaks — the same rule the write path
-   * follows. A protocol-2 answer repeats the read with the offer; any other
-   * answer, or a probe that fails, returns the `oversize` already received.
+   * A note read. It always goes first exactly as it did before the response
+   * body existed: one frame, no `accept`. Only a result one frame could not
+   * carry (`oversize`) asks what the daemon speaks — the kept answer, or a
+   * probe, the same rule the write path follows — and a protocol-2 answer
+   * repeats the read once with `accept` at the wire bound. Any other answer,
+   * or a probe that fails, returns the `oversize` already received.
+   *
+   * `accept` is never offered up front, even to a daemon known to speak
+   * protocol 2: the daemon admits an accepted read through its one
+   * process-wide body slot, so offering it on every read would turn
+   * overlapping small reads into `busy`.
    */
   async #readNote(
     id: string,
@@ -423,9 +429,6 @@ export class NookdSocketClient {
     acceptFrame: Uint8Array,
     deadline: RequestDeadline,
   ): Promise<NookdSocketResult> {
-    if ((await this.#keptProtocol(deadline)) === 2) {
-      return this.#exchange(id, method, acceptFrame, deadline, undefined, WIRE_BODY_BYTES);
-    }
     const single = await this.#exchange(id, method, frame, deadline);
     if (!isOversizeNoteResult(single)) return single;
     let protocol: NookdProtocolVersion | undefined;
@@ -436,17 +439,6 @@ export class NookdSocketClient {
     }
     if (protocol !== 2) return single;
     return this.#exchange(id, method, acceptFrame, deadline, undefined, WIRE_BODY_BYTES);
-  }
-
-  /** The kept or in-flight protocol answer, without starting a probe. */
-  async #keptProtocol(deadline: RequestDeadline): Promise<NookdProtocolVersion | undefined> {
-    const pending = this.#protocol;
-    if (pending === undefined) return undefined;
-    try {
-      return await Promise.race([pending, deadline.expired]);
-    } catch {
-      return undefined;
-    }
   }
 
   /**
