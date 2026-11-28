@@ -48,22 +48,29 @@ The intended content limit is Notesnook's, not this project's: NookBridge must
 not withhold note content that Notesnook itself accepts. That limit is not in
 force yet, and the bounds below are staging values rather than policy.
 
-A read is bounded in three places. A stored content row over
+A read is bounded in several places. A stored content row over
 `STORED_CONTENT_READ_BYTES` (262,144 bytes) is refused before any projection
-runs, and the caller currently sees `unavailable` rather than `oversize` — that
-is the binding limit on most notes. A single-frame read is then bounded by the
-response budget, and a protocol-2 caller may offer to accept a response body
-(`accept: { bodyBytes }`), which raises that read's bound to the smaller of its
-offer and `WIRE_BODY_BYTES` (524,288 bytes). A projection a declared body cannot
-carry — text that is not well-formed UTF-16, or a disallowed control character —
-falls back to the single-frame bound. Below all of these sit the document
-decoder bounds (`PROJECTION_HTML_BYTES`, `NATIVE_DOCUMENT_BYTES` and the
-`DOCUMENT_*` limits), which refuse content that cannot be decoded at all.
+runs, and the caller sees `unavailable` rather than `oversize`; for a
+body-framed read of a large note that threshold binds before the response
+budget. A read without `accept` is bounded by the response budget (65,536 bytes
+less the envelope allowance and the note's charged metadata). A protocol-2
+caller may offer to accept a response body (`accept: { bodyBytes }`), which
+raises that read's bound to the smaller of its offer and `WIRE_BODY_BYTES`
+(524,288 bytes).
 
-These bounds exist because decoding, projection and encoding run on the daemon's
-main thread, where work at Notesnook's own limit would take the daemon down
-rather than fail one request. Issue #337 moves that work into a document worker
-and removes them.
+Text a declared body cannot carry is not delivered at all. Markdown that is not
+well-formed UTF-16, or that holds a disallowed control character, falls back to
+the single-frame bound; there the serializer refuses it and the connection
+closes with nothing sent, exactly as before this framing existed.
+
+The document decoder bounds (`PROJECTION_HTML_BYTES`, `NATIVE_DOCUMENT_BYTES`
+and the `DOCUMENT_*` limits) bound how much the native decoder will attempt.
+Content beyond them is not refused: it takes the read-only Markdown fallback,
+whose own token and depth caps then decide whether any Markdown is produced.
+
+These bounds are staging values rather than policy. They exist because decoding,
+projection and encoding run on the daemon's main thread; issue #337 moves that
+work into a document worker and replaces them with Notesnook's own limits.
 
 The conditions do not change with the bound. A Vault-locked note still never has
 its content read, content over the applicable bound is still withheld rather

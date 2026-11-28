@@ -9,7 +9,9 @@ release entries describe the supported boundary at the time of the release.
 
 - Protocol-2 response bodies for note reads. A daemon that advertises protocol 2
   can return note Markdown as a declared body when the caller offers to accept
-  one, so a read that previously answered `oversize` now returns the whole note.
+  one, so a read that answered `oversize` only because the Markdown did not fit
+  one frame now returns the whole note, provided the stored row is under the
+  read threshold and the text can be carried as a body.
   A read still goes out as a single frame first and is retried with `accept` only
   when it does not fit, so concurrent reads never contend for the body slot and
   callers that do not negotiate see byte-identical results. The content ceiling
