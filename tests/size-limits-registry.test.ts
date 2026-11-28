@@ -180,8 +180,9 @@ describe("size limit registry", () => {
     // Wire bodies retain the deliberate 2x projection/escape allowance over
     // the current admission row; this is a relationship, not a second value.
     expect(SIZE_LIMITS.WIRE_BODY_BYTES).toBe(2 * SIZE_LIMITS.ADMISSION_ROW_BYTES);
-    // This equality is deliberate and temporary: the registry now names the
-    // projection job separately before the body-framing slice rewires its use.
+    // This equality is permanent by definition: a read without `accept` is
+    // bounded by the frame it has to fit, so the projection bound is that
+    // frame. A body read is what moves content past it.
     expect(SIZE_LIMITS.PROJECTION_MARKDOWN_BYTES).toBe(SIZE_LIMITS.RPC_RESPONSE_BYTES);
     // What the native codec produces, the read side accepts.
     expect(SIZE_LIMITS.NATIVE_DOCUMENT_BYTES).toBeLessThanOrEqual(
@@ -196,9 +197,10 @@ describe("size limit registry", () => {
     );
     // The daemon store retains at least one maximum-size record.
     expect(SIZE_LIMITS.UNDO_TOTAL_BYTES).toBeGreaterThan(SIZE_LIMITS.UNDO_RECORD_BYTES);
-    // Deliberately not asserted: that a response can carry a maximum-size
-    // stored row. It cannot, which is why a large note is refused or paged
-    // rather than returned whole.
+    // Deliberately not asserted: that a single-frame response can carry a
+    // maximum-size stored row. It cannot, which is why a large note is refused
+    // `oversize` there rather than returned whole; a protocol-2 body read up to
+    // `WIRE_BODY_BYTES` is what returns it in one piece.
   });
 
   it("defines named byte caps by import, not by literal", () => {

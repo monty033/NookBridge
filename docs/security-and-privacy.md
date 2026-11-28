@@ -57,7 +57,10 @@ bytes less the envelope allowance and the note's charged metadata). A
 protocol-2 caller may offer to accept a response body (`accept: { bodyBytes }`),
 which raises that read's content bound to the smaller of its offer and
 `WIRE_BODY_BYTES` (524,288 bytes). That is twice the stored-row threshold, so a
-body read of a large note still hits the threshold first.
+body read of a large note normally hits the threshold first — but the 2× is a
+budget choice, not a derived invariant, and no test establishes that every
+stored shape projects within it: Markdown escaping can roughly double a
+text-dense row, so a note under the threshold can still answer `oversize`.
 
 Text a declared body cannot carry goes back to the single-frame answer rather
 than being sent as a body. A lone surrogate is delivered inline as a JSON
