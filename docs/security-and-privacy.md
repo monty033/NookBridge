@@ -45,20 +45,30 @@ from every caller.
 The content bound is the response budget (`maxResponseBytes`, 65,536 bytes) less a fixed 1,024-byte envelope allowance, the echoed request id, and the note's charged metadata (id, title, revision and notebook id), measured as exact JSON-encoded UTF-8 size; text dense in control characters costs up to six bytes per character.
 
 The intended content limit is Notesnook's, not this project's: NookBridge must
-not withhold note content that Notesnook itself accepts. The bounds above are
-staging values, not policy. A single-frame read is bounded by the response
-budget, and a protocol-2 caller may offer to accept a response body
+not withhold note content that Notesnook itself accepts. That limit is not in
+force yet, and the bounds below are staging values rather than policy.
+
+A read is bounded in three places. A stored content row over
+`STORED_CONTENT_READ_BYTES` (262,144 bytes) is refused before any projection
+runs, and the caller currently sees `unavailable` rather than `oversize` — that
+is the binding limit on most notes. A single-frame read is then bounded by the
+response budget, and a protocol-2 caller may offer to accept a response body
 (`accept: { bodyBytes }`), which raises that read's bound to the smaller of its
-offer and `WIRE_BODY_BYTES` (524,288 bytes) — eight times the default, and still
-below what Notesnook stores. Both numbers exist only because the projection runs
-on the daemon's main thread, where a note at Notesnook's own limit would take the
-daemon down; they are removed, and the bound becomes Notesnook's limits with
-nothing of this project's underneath, once the document worker owns that work.
+offer and `WIRE_BODY_BYTES` (524,288 bytes). A projection a declared body cannot
+carry — text that is not well-formed UTF-16, or a disallowed control character —
+falls back to the single-frame bound. Below all of these sit the document
+decoder bounds (`PROJECTION_HTML_BYTES`, `NATIVE_DOCUMENT_BYTES` and the
+`DOCUMENT_*` limits), which refuse content that cannot be decoded at all.
+
+These bounds exist because decoding, projection and encoding run on the daemon's
+main thread, where work at Notesnook's own limit would take the daemon down
+rather than fail one request. Issue #337 moves that work into a document worker
+and removes them.
 
 The conditions do not change with the bound. A Vault-locked note still never has
-its content read, content over the applicable bound is still withheld with
-`oversize` rather than truncated, and the projection is computed in full before
-any byte is sent, so a caller receives the whole note or an ordinary error.
+its content read, content over the applicable bound is still withheld rather
+than truncated, and the projection is computed in full before any byte is sent,
+so a caller receives the whole note or an ordinary error.
 
 Discovery is filtered separately from content reads. Production discovery —
 `notesnook_search_notes`, notebook listing, and operator `browse`/`search` —

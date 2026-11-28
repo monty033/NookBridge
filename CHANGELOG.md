@@ -13,9 +13,10 @@ release entries describe the supported boundary at the time of the release.
   A read still goes out as a single frame first and is retried with `accept` only
   when it does not fit, so concurrent reads never contend for the body slot and
   callers that do not negotiate see byte-identical results. The content ceiling
-  this project wants is Notesnook's own; the current wire bound is a staging
-  value that exists only because projection still runs on the daemon's main
-  thread.
+  this project wants is Notesnook's own; today's bounds — the stored-row read
+  threshold, the response budget and the wire body bound — are staging values
+  that come from decoding, projection and encoding running on the daemon's main
+  thread, and issue #337 removes them.
 - Optional `operatorAccess` service-configuration block. It maps groups or users
   to the capability families `discover`, `read`, `write`, `conflict` and
   `admin`, is deny-by-default and has no deny entries, and is evaluated by the
