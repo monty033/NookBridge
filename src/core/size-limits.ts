@@ -10,16 +10,17 @@
  * they are named below when they matter for note size.
  *
  * Most entries are independent conservative numbers, not consequences of one
- * another. Four are deliberately derived, and the derivation is the point:
- * `PROJECTION_MARKDOWN_BYTES` and `ADMISSION_ROW_BYTES` each name a job a
- * neighbour is currently doing, so the job can move without moving the bound
- * that happens to share its value; `WIRE_BODY_BYTES` is a multiple of
- * `ADMISSION_ROW_BYTES` so wire sizing can never outrun admission;
- * `PROJECTION_HTML_BYTES` follows `STORED_CONTENT_READ_BYTES` because both
- * measure the same stored string, so the fallback's cap cannot bind before the
- * read threshold. Every entry says which it is. One entry,
- * `BODY_RECEIVE_TIMEOUT_MS`, is a deadline rather than a byte cap, and lives
- * here because it bounds the same exchange.
+ * another. Four are derived, in two different ways. `PROJECTION_MARKDOWN_BYTES`
+ * is defined as `RPC_RESPONSE_BYTES`, permanently: a read without `accept` is
+ * bounded by the frame it has to fit, so the two are the same number by
+ * definition. `ADMISSION_ROW_BYTES` names a job a neighbour currently does, so
+ * that job can move without moving the bound that happens to share its value;
+ * `WIRE_BODY_BYTES` is a multiple of `ADMISSION_ROW_BYTES` so wire sizing can
+ * never outrun admission; `PROJECTION_HTML_BYTES` follows
+ * `STORED_CONTENT_READ_BYTES` because both measure the same stored string, so
+ * the fallback's cap cannot bind before the read threshold. Derived entries say
+ * which derivation applies. One entry, `BODY_RECEIVE_TIMEOUT_MS`, is a deadline
+ * rather than a byte cap, and lives here because it bounds the same exchange.
  *
  * Rules for this file:
  *

@@ -42,11 +42,11 @@ const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const bufferByteLength = Buffer.byteLength;
 
 /**
- * Bounded Markdown content size for `notes.get`.
- *
- * Named in the registry rather than aliased to the response bound here: the two
- * share a value today, and a body-framed read has to be able to raise this one
- * without moving the single-frame response bound.
+ * Bounded Markdown content size for `notes.get` when the read carries no
+ * `accept`. It is the single-frame response bound, so the two are equal by
+ * definition. A body-framed read does not raise this value: it uses the bound
+ * it negotiated (`bodyBound ?? MAX_PROJECTION_MARKDOWN_BYTES`), and only text a
+ * declared body cannot carry comes back under this one.
  */
 const MAX_PROJECTION_MARKDOWN_BYTES = PROJECTION_MARKDOWN_BYTES;
 

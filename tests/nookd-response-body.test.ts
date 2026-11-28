@@ -5,10 +5,10 @@
  *
  * Everything here runs against the real daemon over a real socket. The one
  * seam is the strict Markdown serializer, mocked to delegate to the real one
- * unless a test sets an exact output: no stored note can project to more than
- * `WIRE_BODY_BYTES` (the HTML input is bounded at half of it, and escaping at
- * most doubles it), so the wire bound itself can only be reached that way.
- * The bound check, header, body and client all stay real.
+ * unless a test sets an exact output. The wire bound is a budget choice rather
+ * than a proven ceiling on projection — no test establishes that every stored
+ * shape projects within `WIRE_BODY_BYTES` — so exercising the exact bound is
+ * what the seam is for. The bound check, header, body and client all stay real.
  */
 
 import { Buffer } from "node:buffer";
