@@ -42,11 +42,12 @@ const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const bufferByteLength = Buffer.byteLength;
 
 /**
- * Bounded Markdown content size for `notes.get`.
- *
- * Named in the registry rather than aliased to the response bound here: the two
- * share a value today, and a body-framed read has to be able to raise this one
- * without moving the single-frame response bound.
+ * Bounded Markdown content size for `notes.get` when the read carries no
+ * `accept`. It is the single-frame response bound, so the two are equal by
+ * definition. A body-framed read that can send Markdown as a declared body
+ * does not raise this value: it uses the bound it negotiated. Text a declared
+ * body cannot carry is measured here, so the answer matches the read without
+ * `accept`.
  */
 const MAX_PROJECTION_MARKDOWN_BYTES = PROJECTION_MARKDOWN_BYTES;
 
@@ -120,7 +121,23 @@ export interface ClassifyNoteContentInput {
   readonly noteId: string;
   readonly note: Record<string, unknown>;
   readonly requestId: string;
+  /**
+   * Present only for a read that offered to take its Markdown as a declared
+   * response body: when the Markdown can travel as one, the projection is
+   * bounded by this value instead of `PROJECTION_MARKDOWN_BYTES` and is charged
+   * the declaration, not the whole Markdown, in the header preflight. Markdown
+   * a body cannot carry keeps `PROJECTION_MARKDOWN_BYTES` and the inline
+   * charge, so the answer matches the read without `accept`. The daemon passes
+   * `min(accept.bodyBytes, WIRE_BODY_BYTES)`; it is never raised here.
+   */
+  readonly bodyMarkdownBytes?: number;
 }
+
+/**
+ * The bytes a body-framed header carries in place of the Markdown: the field
+ * name and a hex SHA-256. Charged so the preflight still covers the header.
+ */
+const BODY_DECLARATION_CHARGE: readonly string[] = ["markdown", "0".repeat(64)];
 
 function readOwnBooleanField(record: Record<string, unknown>, key: string): boolean | undefined {
   try {
@@ -162,6 +179,70 @@ function countPreserved(
       for (const item of block.items) countPreserved(item.blocks ?? [], acc);
     }
   }
+}
+
+/** The response-owned strings a note result charges besides its Markdown. */
+function chargedNoteFields(requestId: string, note: object): string[] {
+  const record = note as Record<string, unknown>;
+  const charged: string[] = [requestId];
+  for (const key of ["id", "title", "revision", "notebookId"] as const) {
+    const value = record[key];
+    if (typeof value === "string") charged.push(value);
+  }
+  return charged;
+}
+
+/**
+ * Would this Markdown be delivered by a read without `accept`: within
+ * `PROJECTION_MARKDOWN_BYTES` and the single frame's preflight. The daemon
+ * uses it for Markdown a declared body cannot carry, so that a read with
+ * `accept` answers exactly what the same read without it would.
+ */
+export function fitsSingleFrameNoteProjection(
+  requestId: string,
+  note: object,
+  markdown: string,
+): boolean {
+  if (bufferByteLength(markdown, "utf8") > MAX_PROJECTION_MARKDOWN_BYTES) return false;
+  const charged = chargedNoteFields(requestId, note);
+  charged.push(markdown);
+  return fitsResponsePreflight(charged);
+}
+
+/**
+ * Can this Markdown travel as a declared body? Raw bytes cannot carry a lone
+ * surrogate (encoding would replace it), and the body path must not deliver a
+ * control character the inline serializer refuses. Both therefore go back to
+ * the single-frame bound, and the daemon's split uses this same predicate so
+ * the projection and the framing agree on which bound applies.
+ */
+export function canCarryMarkdownAsBody(markdown: string): boolean {
+  return isWellFormedUtf16(markdown) && !hasDisallowedMarkdownControl(markdown);
+}
+
+/** A lone surrogate would be replaced on encoding rather than carried. */
+function isWellFormedUtf16(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The serializer's rule for inline Markdown: tab, LF and CR only. */
+function hasDisallowedMarkdownControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function readOnlyMarkdownFallback(envelope: unknown): string {
@@ -241,15 +322,20 @@ export function classifyNoteContentProjection(
         : nothing),
     } as const;
     const oversize = { ...result, outcome: "oversize", ...nothing } as const;
-    if (markdownBytes > MAX_PROJECTION_MARKDOWN_BYTES) return oversize;
+    // The whole projection exists before this point, so a refusal here is
+    // categorical: nothing is truncated to fit either bound.
+    const bodyBound = input.bodyMarkdownBytes;
+    // Markdown a declared body cannot carry is measured against the bound the
+    // same read without `accept` would get, not against the offer: otherwise a
+    // small offer alone would turn an inline answer into `oversize`.
+    const carriesBody = bodyBound !== undefined && canCarryMarkdownAsBody(markdown);
+    if (markdownBytes > (carriesBody ? (bodyBound as number) : MAX_PROJECTION_MARKDOWN_BYTES))
+      return oversize;
     // Mirror the serializer's preflight over every response-owned string field
     // it will charge, so the census classifies a note the same way a read does.
-    const charged: string[] = [input.requestId];
-    for (const key of ["id", "title", "revision", "notebookId"] as const) {
-      const value = input.note[key];
-      if (typeof value === "string") charged.push(value);
-    }
-    charged.push(markdown);
+    const charged = chargedNoteFields(input.requestId, input.note);
+    if (carriesBody) charged.push(...BODY_DECLARATION_CHARGE);
+    else charged.push(markdown);
     if (!fitsResponsePreflight(charged)) return oversize;
     return { ...result, markdown, markdownBytes };
   } catch {

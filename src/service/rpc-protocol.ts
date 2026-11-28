@@ -162,8 +162,23 @@ export interface RpcBodyDeclaration {
   readonly sha256: string;
 }
 
+/**
+ * A protocol-2 reader's offer to take note content as a declared response
+ * body of at most `bodyBytes` raw bytes. For Markdown that can travel as a
+ * body, the daemon bounds the projection by the smaller of this and
+ * `WIRE_BODY_BYTES`; Markdown a body cannot carry stays on the single-frame
+ * bound. It is an offer, not a request for a body, and a result that carries no
+ * content is still one frame.
+ */
+export interface RpcBodyAccept {
+  readonly bodyBytes: number;
+}
+
 export interface RpcFrameParserOptions {
-  /** Opt in to protocol-2 body declarations; the default remains protocol 1. */
+  /**
+   * Opt in to protocol-2 body declarations and `accept` offers; the default
+   * remains protocol 1.
+   */
   readonly allowBody?: boolean;
 }
 
@@ -610,6 +625,8 @@ export type RpcRequest = (
 ) & {
   /** The legacy request contract never carries a separate body declaration. */
   readonly body?: undefined;
+  /** Nor an offer to take content as a response body. */
+  readonly accept?: undefined;
 };
 
 type RpcBodyDeclarationFor<Field extends RpcBodyField> = Omit<RpcBodyDeclaration, "field"> & {
@@ -641,7 +658,17 @@ export type RpcBodyRequest =
       readonly body: RpcBodyDeclarationFor<"markdown">;
     });
 
-export type RpcFrameRequest = RpcRequest | RpcBodyRequest;
+/**
+ * A protocol-2 note read that offers to take its Markdown as a response body.
+ * Only `notes.get` reads note content on the daemon socket, so it is the only
+ * method that may carry `accept`; it never also carries `body`.
+ */
+export type RpcAcceptRequest = RpcNotesGetRequest & {
+  readonly body?: undefined;
+  readonly accept: RpcBodyAccept;
+};
+
+export type RpcFrameRequest = RpcRequest | RpcBodyRequest | RpcAcceptRequest;
 
 /**
  * The closed success-result shape for `notes.search`.  Notes are
@@ -1651,13 +1678,17 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
   }
   const root = parsed as Record<string, JsonValue>;
 
-  // Protocol 1 keeps its exact three-key root. Protocol 2 adds only `body`,
-  // and only for a parser explicitly constructed to accept that framing.
+  // Protocol 1 keeps its exact three-key root. Protocol 2 adds one of `body`
+  // or `accept`, never both, and only for a parser explicitly constructed to
+  // accept that framing.
   const topKeys = objectKeys(root);
   const hasBody = reflectApply(objectHasOwnProperty, root, ["body"]);
+  const hasAccept = reflectApply(objectHasOwnProperty, root, ["accept"]);
   const validRoot = hasBody
     ? allowBody && keysAreExactly(topKeys, ["id", "method", "params", "body"])
-    : keysAreExactly(topKeys, ["id", "method", "params"]);
+    : hasAccept
+      ? allowBody && keysAreExactly(topKeys, ["id", "method", "params", "accept"])
+      : keysAreExactly(topKeys, ["id", "method", "params"]);
   if (!validRoot) {
     throw rpcProtocolError("rpc protocol: request root has unexpected fields");
   }
@@ -1705,6 +1736,7 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
   }
 
   const body = hasBody ? parseRequestBodyDeclaration(root.body, method) : undefined;
+  const accept = hasAccept ? parseRequestBodyAccept(root.accept, method) : undefined;
 
   const params = root.params;
   if (params === null || typeof params !== "object" || arrayIsArray(params)) {
@@ -2412,11 +2444,13 @@ function parseRpcFrameInternal(input: Uint8Array, allowBody: boolean): RpcFrameR
     method: RpcMethod;
     params: Record<string, unknown>;
     body?: RpcBodyDeclaration;
+    accept?: RpcBodyAccept;
   };
   requestTarget.id = id;
   requestTarget.method = method;
   requestTarget.params = paramsObj;
   if (body !== undefined) requestTarget.body = body;
+  if (accept !== undefined) requestTarget.accept = accept;
   objectFreeze(requestTarget);
   return requestTarget as unknown as RpcFrameRequest;
 }
@@ -4562,6 +4596,37 @@ function parseRequestBodyDeclaration(
   clean.field = field;
   clean.bytes = bytes;
   clean.sha256 = sha256;
+  return objectFreeze(clean);
+}
+
+/**
+ * Parse the closed `accept` offer. Only `notes.get` reads note content, so any
+ * other method carrying it is malformed. `bodyBytes` may exceed
+ * `WIRE_BODY_BYTES`: the daemon bounds by the smaller of the two, so an offer
+ * above the wire bound is not a refusal, only a larger offer than is used.
+ */
+function parseRequestBodyAccept(value: JsonValue | undefined, method: RpcMethod): RpcBodyAccept {
+  if (method !== "notes.get") {
+    throw rpcProtocolError("rpc protocol: request method does not accept a response body");
+  }
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) {
+    throw rpcProtocolError("rpc protocol: request accept is invalid");
+  }
+  const record = value as Record<string, JsonValue>;
+  const keys = validateClosedObject(
+    record,
+    ["bodyBytes"],
+    "rpc protocol: request accept has unexpected fields",
+  );
+  if (keys.length !== 1 || keys[0] !== "bodyBytes") {
+    throw rpcProtocolError("rpc protocol: request accept has unexpected fields");
+  }
+  const bodyBytes = record.bodyBytes;
+  if (typeof bodyBytes !== "number" || !Number.isSafeInteger(bodyBytes) || bodyBytes < 1) {
+    throw rpcProtocolError("rpc protocol: request accept bodyBytes is invalid");
+  }
+  const clean = objectCreate(null) as { bodyBytes: number };
+  clean.bodyBytes = bodyBytes;
   return objectFreeze(clean);
 }
 

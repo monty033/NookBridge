@@ -10,13 +10,17 @@
  * they are named below when they matter for note size.
  *
  * Most entries are independent conservative numbers, not consequences of one
- * another. Three are deliberately derived, and the derivation is the point:
- * `PROJECTION_MARKDOWN_BYTES` and `ADMISSION_ROW_BYTES` each name a job a
- * neighbour is currently doing, so the job can move without moving the bound
- * that happens to share its value; `WIRE_BODY_BYTES` is a multiple of
- * `ADMISSION_ROW_BYTES` so wire sizing can never outrun admission. Every entry
- * says which it is. One entry, `BODY_RECEIVE_TIMEOUT_MS`, is a deadline rather
- * than a byte cap, and lives here because it bounds the same exchange.
+ * another. Four are derived, in two different ways. `PROJECTION_MARKDOWN_BYTES`
+ * is defined as `RPC_RESPONSE_BYTES`, permanently: a read without `accept` is
+ * bounded by the frame it has to fit, so the two are the same number by
+ * definition. `ADMISSION_ROW_BYTES` names a job a neighbour currently does, so
+ * that job can move without moving the bound that happens to share its value;
+ * `WIRE_BODY_BYTES` is a multiple of `ADMISSION_ROW_BYTES` so wire sizing can
+ * never outrun admission; `PROJECTION_HTML_BYTES` follows
+ * `STORED_CONTENT_READ_BYTES` because both measure the same stored string, so
+ * the fallback's cap cannot bind before the read threshold. Derived entries say
+ * which derivation applies. One entry, `BODY_RECEIVE_TIMEOUT_MS`, is a deadline
+ * rather than a byte cap, and lives here because it bounds the same exchange.
  *
  * Rules for this file:
  *
@@ -65,18 +69,28 @@ export const RPC_FRAME_BYTES = 65_536;
  * frame every client of it has to accept — the MCP client bounds its own
  * response frame from this value.
  *
- * This is the read budget: it bounds the JSON a caller can pull out in one
- * reply, and therefore also bounds the projection a note is turned into.
+ * This is the single-frame read budget: it bounds the JSON a caller can pull
+ * out in one reply frame. A note's projection is bounded through
+ * `PROJECTION_MARKDOWN_BYTES`, which is this value. A read that carries
+ * `accept` may send Markdown it can carry as a declared body under
+ * `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead, with only its header in
+ * this frame; Markdown a body cannot carry is still bounded and answered by
+ * this frame, exactly as the read without `accept` is.
  */
 export const RPC_RESPONSE_BYTES = 65_536;
 
 /**
- * Largest Markdown projection produced for a note read.
+ * Largest Markdown projection produced for a note read without `accept` — the
+ * projection a single-frame reply carries inline.
  *
- * `RPC_RESPONSE_BYTES` currently does two jobs: it bounds a single-frame
- * response and it bounds the projection carried by that response. This entry
- * names the second job so body-framed reads can size projections independently
- * without changing the single-frame response bound.
+ * Derived, and equal to `RPC_RESPONSE_BYTES` by definition: a read that carries
+ * no `accept` is bounded by the frame it has to fit. It is not a value that
+ * could drift from the frame, and a body-framed read does not raise it — that
+ * read is bounded by `min(accept.bodyBytes, WIRE_BODY_BYTES)` instead. This
+ * value still applies to Markdown a declared body cannot carry: a lone
+ * surrogate, or a disallowed control character. Both go back to the bound the
+ * same read without `accept` would get, answered inline or refused by the
+ * serializer exactly as that read is.
  */
 export const PROJECTION_MARKDOWN_BYTES = RPC_RESPONSE_BYTES;
 
@@ -221,12 +235,19 @@ export const ADMISSION_ROW_BYTES = STORED_CONTENT_READ_BYTES;
 /**
  * Largest declared raw body carried alongside an RPC header frame.
  *
- * The 2x is a budget choice, not a derived invariant: it is chosen so that a
- * writable row's projection and escaping have room, and no test establishes
- * that every stored shape projects within it. Nothing depends on the allowance
- * holding — a body over it is refused, never truncated — but do not read it as
- * a proven bound. Today the projection is refused earlier and by a different
- * entry (`PROJECTION_MARKDOWN_BYTES`), so this bound only governs the wire.
+ * Derived from `ADMISSION_ROW_BYTES`, though the factor is a budget choice
+ * rather than a derived invariant: the multiple keeps wire sizing from
+ * outrunning what admission accepts, and the 2 is chosen so a writable row's
+ * projection and escaping have room. No test establishes that every stored
+ * shape projects within it, so do not read the allowance as a proven bound.
+ * Nothing depends on it holding — a body over it is refused, never truncated.
+ *
+ * It governs both directions. A request body is refused above it. For a note
+ * read that carries `accept`, Markdown the body path can carry is bounded by
+ * `min(accept.bodyBytes, WIRE_BODY_BYTES)` — refused `oversize` above that,
+ * never truncated — and then travels as a declared response body of at most
+ * this many bytes. Markdown a body cannot carry, and every read without
+ * `accept`, is bounded by `PROJECTION_MARKDOWN_BYTES`.
  */
 export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
 
@@ -238,6 +259,8 @@ export const WIRE_BODY_BYTES = 2 * ADMISSION_ROW_BYTES;
  *
  * The daemon exposes this as the default `bodyReceiveTimeoutMs` service abuse
  * bound and enforces it from body admission until all declared bytes arrive.
+ * The same deadline bounds sending a declared response body: from the header
+ * write until the last body byte has been handed to the socket.
  */
 export const BODY_RECEIVE_TIMEOUT_MS = 30_000;
 
@@ -320,8 +343,13 @@ export const DOCUMENT_REFERENCE_LABEL_BYTES = 256;
  * Its input is any stored HTML the read path may meet, not only the HTML the
  * strict decoder rejected: the discovery and write-runner paths project
  * stored content directly, and only the read path reaches it as a fallback.
+ *
+ * Derived from `STORED_CONTENT_READ_BYTES` rather than repeating the literal:
+ * both measure the same stored `data` string, so equal values mean this cap
+ * cannot bind before the read threshold. As an independent literal it would
+ * start refusing HTML that passes the threshold the moment that threshold rises.
  */
-export const PROJECTION_HTML_BYTES = 262_144;
+export const PROJECTION_HTML_BYTES = STORED_CONTENT_READ_BYTES;
 
 // ---------------------------------------------------------------------------
 // Operator CLI and journals.

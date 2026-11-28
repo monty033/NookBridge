@@ -21,7 +21,13 @@
  *     protocol-2 body path only when the daemon has advertised it;
  *     the raw body is bounded by `WIRE_BODY_BYTES` and is written
  *     only after the daemon's `body_continue`.
- *   - Responses are bounded by the same Stage 5 frame budget.
+ *   - Responses are bounded by the same Stage 5 frame budget. The one
+ *     exception is a note read whose single-frame result is `oversize`
+ *     from a daemon that speaks protocol 2: it is repeated once with
+ *     `accept`, and the Markdown may then follow the header as a
+ *     declared raw body of at most `WIRE_BODY_BYTES`, verified by
+ *     length, SHA-256 and strict UTF-8 before it is returned. Every
+ *     read goes as one frame first; see `#readNote`.
  *   - Any connect / read / write / timeout failure is normalized
  *     to a categorical `service_unavailable` outcome. The
  *     underlying errno, syscall name, and socket path never
@@ -34,6 +40,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute, resolve } from "node:path";
+import { TextDecoder } from "node:util";
 
 import {
   STAGE5_RPC_LIMITS,
@@ -114,9 +121,10 @@ export type NookdProtocolVersion = 1 | 2;
  * back to `service_unavailable` so the agent never sees a raw
  * upstream category.
  *
- * `busy` only reaches this function from a body-path header reply.
- * Every single-frame reply is decoded without it — on any client,
- * negotiated or not — so a stray `busy` there is `service_unavailable`.
+ * `busy` only reaches this function from a body-path header reply: the reply
+ * to a request body's header, or to a note read that carried `accept`. Every
+ * other single-frame reply is decoded without it — on any client, negotiated
+ * or not — so a stray `busy` there is `service_unavailable`.
  */
 function mapRpcErrorCodeToSocketFailure(code: RpcErrorCode): NookdSocketFailure {
   switch (code) {
@@ -235,9 +243,15 @@ type SocketParams =
   | Record<string, never>
   | { readonly id: string };
 
-/** How one request crosses the wire, decided before any connection opens. */
+/**
+ * How one request crosses the wire, decided before any connection opens.
+ * `acceptFrame` is the same note read offering to take its Markdown as a
+ * response body; it exists only for `notes.get` and is sent only to repeat a
+ * read whose single-frame result was `oversize`, to a daemon known to speak
+ * protocol 2.
+ */
 type RequestPlan =
-  | { readonly kind: "frame"; readonly frame: Uint8Array }
+  | { readonly kind: "frame"; readonly frame: Uint8Array; readonly acceptFrame?: Uint8Array }
   | { readonly kind: "body"; readonly header: Uint8Array; readonly body: Uint8Array }
   | { readonly kind: "refused"; readonly code: "invalid_request" | "too_large" };
 
@@ -377,7 +391,10 @@ export class NookdSocketClient {
     const id = suppliedId ?? generateRequestId();
     const plan = planRequest(id, method, params);
     if (plan.kind === "refused") return { ok: false, code: plan.code };
-    if (plan.kind === "frame") return this.#exchange(id, method, plan.frame, deadline);
+    if (plan.kind === "frame") {
+      if (plan.acceptFrame === undefined) return this.#exchange(id, method, plan.frame, deadline);
+      return this.#readNote(id, method, plan.frame, plan.acceptFrame, deadline);
+    }
     let protocol: NookdProtocolVersion | undefined;
     try {
       // A probe another call started runs under that call's deadline; this
@@ -390,6 +407,38 @@ export class NookdSocketClient {
     // An old daemon cannot take the body; refuse here rather than connect and guess.
     if (protocol < 2) return { ok: false, code: "too_large" };
     return this.#exchange(id, method, plan.header, deadline, plan.body);
+  }
+
+  /**
+   * A note read. It always goes first exactly as it did before the response
+   * body existed: one frame, no `accept`. Only a result one frame could not
+   * carry (`oversize`) asks what the daemon speaks — the kept answer, or a
+   * probe, the same rule the write path follows — and a protocol-2 answer
+   * repeats the read once with `accept` at the wire bound. Any other answer,
+   * or a probe that fails, returns the `oversize` already received.
+   *
+   * `accept` is never offered up front, even to a daemon known to speak
+   * protocol 2: the daemon admits an accepted read through its one
+   * process-wide body slot, so offering it on every read would turn
+   * overlapping small reads into `busy`.
+   */
+  async #readNote(
+    id: string,
+    method: SocketMethod,
+    frame: Uint8Array,
+    acceptFrame: Uint8Array,
+    deadline: RequestDeadline,
+  ): Promise<NookdSocketResult> {
+    const single = await this.#exchange(id, method, frame, deadline);
+    if (!isOversizeNoteResult(single)) return single;
+    let protocol: NookdProtocolVersion | undefined;
+    try {
+      protocol = await Promise.race([this.#negotiatedProtocol(deadline), deadline.expired]);
+    } catch {
+      return single;
+    }
+    if (protocol !== 2) return single;
+    return this.#exchange(id, method, acceptFrame, deadline, undefined, WIRE_BODY_BYTES);
   }
 
   /**
@@ -428,6 +477,7 @@ export class NookdSocketClient {
     frame: Uint8Array,
     deadline: RequestDeadline,
     body?: Uint8Array,
+    acceptBodyBytes?: number,
   ): Promise<NookdSocketResult> {
     if (deadline.signal.aborted) return { ok: false, code: "service_unavailable" };
     let socket: Socket | undefined;
@@ -475,6 +525,15 @@ export class NookdSocketClient {
           resultContentBytes: WIRE_BODY_BYTES,
         });
         if (response === undefined) return { ok: false, code: "service_unavailable" };
+        return mapResponseEnvelope(response, id);
+      }
+      if (acceptBodyBytes !== undefined) {
+        // Any failure to read, verify or decode the declared body throws, and
+        // is reported below as `service_unavailable`: never a shorter string.
+        const response = await Promise.race([
+          readResponseWithBody(socket, deadline.signal, method, acceptBodyBytes),
+          deadline.expired,
+        ]);
         return mapResponseEnvelope(response, id);
       }
       const response = decodeResponseFrame(
@@ -553,7 +612,15 @@ function planRequest(id: string, method: SocketMethod, params: SocketParams): Re
   const bodyBytes = located === undefined ? 0 : Buffer.byteLength(located.value, "utf8");
   if (bodyBytes <= STAGE5_RPC_LIMITS.maxContentBytes) {
     try {
-      return { kind: "frame", frame: frameRequestEnvelope(id, method, cleanParams) };
+      const frame = frameRequestEnvelope(id, method, cleanParams);
+      if (method !== "notes.get") return { kind: "frame", frame };
+      const accept = Object.create(null) as Record<string, unknown>;
+      accept.bodyBytes = WIRE_BODY_BYTES;
+      return {
+        kind: "frame",
+        frame,
+        acceptFrame: frameRequestEnvelope(id, method, cleanParams, undefined, accept),
+      };
     } catch {
       // Defensive: unreachable for a request the grammar accepted (above).
       return { kind: "refused", code: "too_large" };
@@ -755,20 +822,23 @@ function projectRequestParams(
 }
 
 /**
- * Frame `{ id, method, params }` — plus `body` for a body-path header —
- * behind its four-byte length prefix, refusing a frame over the bound.
+ * Frame `{ id, method, params }` — plus `body` for a body-path header, or
+ * `accept` for a note read offering a response body — behind its four-byte
+ * length prefix, refusing a frame over the bound.
  */
 function frameRequestEnvelope(
   id: string,
   method: SocketMethod,
   cleanParams: Record<string, unknown>,
   body?: Record<string, unknown>,
+  accept?: Record<string, unknown>,
 ): Uint8Array {
   const envelope = Object.create(null) as Record<string, unknown>;
   envelope.id = id;
   envelope.method = method;
   envelope.params = cleanParams;
   if (body !== undefined) envelope.body = body;
+  if (accept !== undefined) envelope.accept = accept;
   const payload = JSON.stringify(envelope);
   const payloadBytes = Buffer.from(payload, "utf8");
   if (payloadBytes.byteLength + FRAME_PREFIX_BYTES > MAX_FRAME_BYTES_ON_WIRE) {
@@ -1139,6 +1209,226 @@ async function readFramedResponse(socket: Socket, signal: AbortSignal): Promise<
     socket.once("close", onClose);
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/** A note result header that declares its Markdown as raw bytes to follow. */
+interface DeclaredMarkdownBody {
+  readonly id: string;
+  readonly note: Readonly<Record<string, unknown>>;
+  readonly bytes: number;
+  readonly sha256: string;
+}
+
+/**
+ * Read the reply to a note read that offered a response body: one header
+ * frame, then — only when that header declares a body — exactly the declared
+ * raw bytes. A header without a body is decoded as an ordinary single-frame
+ * reply. A close before the last byte, a digest that does not match, or bytes
+ * that are not strict UTF-8 all reject: the caller never sees part of a body.
+ *
+ * Bytes beyond the declared length are rejected only when they arrive in a
+ * chunk read while the body is still incomplete — the one that ends the header
+ * or the one that carries the body's last byte. Once the body is complete this
+ * reader settles and stops listening, so a byte that arrives in a later chunk
+ * is never read at all. That is harmless: the body was already verified
+ * against its declared length and digest, nothing after it can extend or
+ * alter it, and the caller destroys the socket as soon as the exchange
+ * settles.
+ */
+async function readResponseWithBody(
+  socket: Socket,
+  signal: AbortSignal,
+  method: SocketMethod,
+  maxBodyBytes: number,
+): Promise<RpcAnyResponseEnvelope> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("timeout"));
+      return;
+    }
+    let header = Buffer.alloc(0);
+    let declared: DeclaredMarkdownBody | undefined;
+    let body: Buffer | undefined;
+    let received = 0;
+    let settled = false;
+    const finish = (cb: () => void): void => {
+      if (settled) return;
+      settled = true;
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      signal.removeEventListener("abort", onAbort);
+      cb();
+    };
+    const fail = (message: string): void => finish(() => reject(new Error(message)));
+    const settleBody = (): void => {
+      try {
+        const envelope = assembleMarkdownBody(declared as DeclaredMarkdownBody, body as Buffer);
+        finish(() => resolve(envelope));
+      } catch {
+        fail("invalid response body");
+      }
+    };
+    const onData = (chunk: Buffer): void => {
+      if (body !== undefined) {
+        if (chunk.length > body.length - received) {
+          fail("bytes beyond the declared body");
+          return;
+        }
+        chunk.copy(body, received);
+        received += chunk.length;
+        if (received === body.length) settleBody();
+        return;
+      }
+      if (header.length + chunk.length > MAX_RESPONSE_FRAME_BYTES + maxBodyBytes) {
+        fail("response too large");
+        return;
+      }
+      header = Buffer.concat([header, chunk]);
+      if (header.length < FRAME_PREFIX_BYTES) return;
+      const length = header.readUInt32BE(0);
+      if (length === 0 || length > MAX_RESPONSE_FRAME_BYTES - FRAME_PREFIX_BYTES) {
+        fail("invalid frame length");
+        return;
+      }
+      const frameLength = FRAME_PREFIX_BYTES + length;
+      if (header.length < frameLength) return;
+      const rest = header.subarray(frameLength);
+      let decoded: RpcAnyResponseEnvelope | DeclaredMarkdownBody;
+      try {
+        decoded = decodeAcceptedHeader(header.subarray(0, frameLength), method, maxBodyBytes);
+      } catch {
+        fail("invalid response");
+        return;
+      }
+      if ("ok" in decoded) {
+        if (rest.length !== 0) fail("bytes beyond the response frame");
+        else finish(() => resolve(decoded));
+        return;
+      }
+      declared = decoded;
+      if (rest.length > decoded.bytes) {
+        fail("bytes beyond the declared body");
+        return;
+      }
+      body = Buffer.alloc(decoded.bytes);
+      rest.copy(body, 0);
+      received = rest.length;
+      if (received === body.length) settleBody();
+    };
+    const onError = (error: Error): void => {
+      finish(() => reject(error));
+    };
+    const onClose = (): void => {
+      fail("socket closed before the response was complete");
+    };
+    const onAbort = (): void => {
+      fail("timeout");
+    };
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Decode the header frame of an accepted note read: either a declaration of
+ * the Markdown body to follow, or an ordinary single-frame reply (`locked`,
+ * `oversize`, `unavailable`, an empty note, an error).
+ */
+function decodeAcceptedHeader(
+  frame: Uint8Array,
+  method: SocketMethod,
+  maxBodyBytes: number,
+): RpcAnyResponseEnvelope | DeclaredMarkdownBody {
+  const value = JSON.parse(
+    Buffer.from(frame.subarray(FRAME_PREFIX_BYTES)).toString("utf8"),
+  ) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid response");
+  }
+  const candidate = value as Record<string, unknown>;
+  // `busy`: the daemon admits an accepted read through its one body slot.
+  if (!Object.hasOwn(candidate, "body")) {
+    return decodeResponseEnvelope(candidate, { method, allowBusy: true });
+  }
+  const result = candidate.result;
+  const declaration = candidate.body;
+  if (
+    !hasExactOwnKeys(candidate, ["id", "ok", "result", "body"]) ||
+    typeof candidate.id !== "string" ||
+    candidate.ok !== true ||
+    typeof result !== "object" ||
+    result === null ||
+    Array.isArray(result) ||
+    typeof declaration !== "object" ||
+    declaration === null ||
+    Array.isArray(declaration)
+  ) {
+    throw new Error("invalid response");
+  }
+  const resultRecord = result as Record<string, unknown>;
+  const declarationRecord = declaration as Record<string, unknown>;
+  const bytes = resultRecord.markdownBytes;
+  if (
+    !hasExactOwnKeys(resultRecord, ["kind", "note", "contentStatus", "markdownBytes"]) ||
+    resultRecord.kind !== "note" ||
+    resultRecord.contentStatus !== "ok" ||
+    typeof bytes !== "number" ||
+    !Number.isSafeInteger(bytes) ||
+    bytes < 1 ||
+    bytes > maxBodyBytes ||
+    !hasExactOwnKeys(declarationRecord, ["field", "bytes", "sha256"]) ||
+    declarationRecord.field !== "markdown" ||
+    declarationRecord.bytes !== bytes ||
+    typeof declarationRecord.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(declarationRecord.sha256)
+  ) {
+    throw new Error("invalid response");
+  }
+  return {
+    id: candidate.id,
+    note: decodeNote(resultRecord.note),
+    bytes,
+    sha256: declarationRecord.sha256,
+  };
+}
+
+/**
+ * The verified body as the result a single-frame read returns: the same keys,
+ * the same Markdown, the same byte count, so no caller can tell the routes
+ * apart. Throws unless the bytes are exactly the declared ones.
+ */
+function assembleMarkdownBody(
+  declared: DeclaredMarkdownBody,
+  body: Buffer,
+): RpcAnyResponseEnvelope {
+  if (body.length !== declared.bytes) throw new Error("body length mismatch");
+  if (createHash("sha256").update(body).digest("hex") !== declared.sha256) {
+    throw new Error("body digest mismatch");
+  }
+  const markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body);
+  return Object.freeze({
+    id: declared.id,
+    ok: true,
+    result: Object.freeze({
+      kind: "note",
+      note: declared.note,
+      contentStatus: "ok",
+      markdown,
+      markdownBytes: declared.bytes,
+    }),
+  }) as unknown as RpcAnyResponseEnvelope;
+}
+
+/** A successful note read whose content did not fit the bound it was read under. */
+function isOversizeNoteResult(result: NookdSocketResult): boolean {
+  return (
+    result.ok &&
+    result.envelope.result.kind === "note" &&
+    result.envelope.result.contentStatus === "oversize"
+  );
 }
 
 function destroyQuietly(socket: Socket): void {
